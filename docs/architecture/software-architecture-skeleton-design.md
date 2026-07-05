@@ -96,7 +96,7 @@ E:\JEAMMWARE260705\
     └── CMakeLists.txt
 ```
 
-**命名约定**：根命名空间 `jmw::`，子命名空间按层（`jmw::ui` / `jmw::workflow` / ... / `jmw::crosscut` / `jmw::sdk`）；库目标 `fw_<layer>` / `mod_<name>` / `jmw_sdk` / `jeammware`。
+**命名约定**：根命名空间 `Scanner::`，子命名空间按层（`Scanner::ui` / `Scanner::workflow` / ... / `Scanner::crosscut` / `Scanner::sdk`）；库目标 `fw_<layer>` / `mod_<name>` / `jmw_sdk` / `jeammware`。
 
 ---
 
@@ -109,7 +109,7 @@ E:\JEAMMWARE260705\
 
 ### 3.1 framework/common（跨层共享类型）
 ```cpp
-namespace jmw {
+namespace Scanner {
 enum class QualityFlag { Normal, Degraded, Warning, Fault };
 struct Frame { std::shared_ptr<cv::Mat> leftGray, rightGray; uint64_t frameId=0, timestamp=0; double temperature=25.0; };
 struct FrameResult { uint64_t frameId=0; /* 迁入算子后细化 */ };
@@ -123,7 +123,7 @@ struct FrameResult { uint64_t frameId=0; /* 迁入算子后细化 */ };
 - **AlgorithmRegistry**（ADR 7.1）：概念性模板注册表，**具体集成时按算子定**。
 
 ```cpp
-namespace jmw::algorithm {
+namespace Scanner::algorithm {
 // operator_convention.h —— 文档化约定（非基类）：
 //   算子 = 纯函数/独立类型；提供 Execute/Destroy/Warmup；返回自带 Result(success/qualityFlag/message)。
 //   不强制继承。具体形态在 modules/09_operatorlib 集成时按算子定。
@@ -135,7 +135,7 @@ template<typename T> class AlgorithmRegistry { /* 占位，集成时定 */ };
 
 ### 3.3 framework/workflow（编排，07-02 §3.1/6.1）
 ```cpp
-namespace jmw::workflow {
+namespace Scanner::workflow {
 enum class WorkflowStatus { Idle, Running, Paused, Stopped, Faulted };
 class IWorkflow { public: virtual ~IWorkflow()=default; virtual void execute()=0; virtual void stop()=0; virtual void pause()=0; virtual void resume()=0; virtual WorkflowStatus getStatus() const=0; };
 class WorkflowContext { /* 统一入口；ADR 7.7 窄角色接口(IScanContext/ICalibContext/...) 待实现 — 见头文件预留注释 */ };
@@ -289,7 +289,7 @@ ctest --test-dir E:\JEAMMWARE260705\build -C Release --output-on-failure
 
 | # | 决策 | 状态 |
 |---|------|------|
-| D1 | 命名空间 `jmw::` | 待确认 |
+| D1 | 命名空间 `Scanner::`（子命名空间小写：`Scanner::ui`/`Scanner::workflow`/...） | ✅ 已定 |
 | D2 | framework 层库类型 INTERFACE（fw_common STATIC） | 默认 |
 | D3 | UI 框架 Qt 5.15.2（BUILD_UI=OFF 本次） | 默认 |
 | D4 | 算子迁入时机 = 骨架后单独一步 | 默认 |
