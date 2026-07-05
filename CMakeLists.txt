@@ -49,6 +49,53 @@ if(BUILD_TESTS)
     enable_testing()
 endif()
 
+# === 算子依赖（算子迁入启用）===
+find_package(OpenCV 4.13 REQUIRED COMPONENTS
+    core imgproc calib3d cudaimgproc cudaarithm cudafilters flann)
+find_package(Eigen3 3.4 REQUIRED)
+
+# Ceres（global_optim/GBA 用；精简配置，免 SuiteSparse，用 Eigen 稀疏）
+option(BUILD_GLOBAL_OPTIM "Build global optimization (GBA + Ceres)" ON)
+if(BUILD_GLOBAL_OPTIM)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(BUILD_DOCUMENTATION OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(PROVIDE_UNINSTALL_TARGET OFF CACHE BOOL "" FORCE)
+    set(GFLAGS OFF CACHE BOOL "" FORCE)
+    set(MINIGLOG ON CACHE BOOL "" FORCE)
+    set(SUITESPARSE OFF CACHE BOOL "" FORCE)
+    set(CXSPARSE OFF CACHE BOOL "" FORCE)
+    set(ACCELERATESPARSE OFF CACHE BOOL "" FORCE)
+    set(EIGENSPARSE ON CACHE BOOL "" FORCE)
+    set(LAPACK OFF CACHE BOOL "" FORCE)
+    set(SCHUR_SPECIALIZATIONS OFF CACHE BOOL "" FORCE)
+    set(USE_CUDA OFF CACHE BOOL "" FORCE)  # Ceres 自带 CUDA 与项目动态 cudart 冲突
+    FetchContent_Declare(ceres
+        URL https://github.com/ceres-solver/ceres-solver/archive/refs/tags/2.2.0.tar.gz)
+    FetchContent_MakeAvailable(ceres)
+endif()
+
+# ----------------------------------------------------------------------------
+# CRT 部署：System32 的 MSVCP140.dll 可能是旧版(会崩溃)，把 VS redist 新版
+# CRT DLL 复制到 exe 旁(exe 目录 DLL 搜索最优先)，保证 OpenCV 等正常初始化。
+# ----------------------------------------------------------------------------
+set(JMW_MSVC_REDIST_CRT_DIR
+    "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT"
+    CACHE PATH "VS2022 MSVC redist CRT DLL dir (含 msvcp140/vcruntime140)")
+function(jmw_deploy_crt target)
+    if(NOT EXISTS "${JMW_MSVC_REDIST_CRT_DIR}/msvcp140.dll")
+        message(WARNING "jmw_deploy_crt: redist CRT 目录未找到: ${JMW_MSVC_REDIST_CRT_DIR} (跳过)")
+        return()
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${JMW_MSVC_REDIST_CRT_DIR}/msvcp140.dll"
+            "${JMW_MSVC_REDIST_CRT_DIR}/vcruntime140.dll"
+            "${JMW_MSVC_REDIST_CRT_DIR}/vcruntime140_1.dll"
+            "$<TARGET_FILE_DIR:${target}>"
+        COMMENT "部署 VS2022 CRT DLL 到 ${target} 目录")
+endfunction()
+
 add_subdirectory(framework)
 add_subdirectory(modules)
 add_subdirectory(sdk)
