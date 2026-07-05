@@ -51,7 +51,7 @@ struct MaskExtractCUDA::Impl {
 
 #ifndef NDEBUG
     // 线程安全约束（仅 Debug 模式，§2.2）
-    std::atomic<bool> inProcess_{false};  ///< extract() 执行中标记
+    std::atomic<bool> inProcess_{false};  ///< Execute() 执行中标记
 #endif
 
     explicit Impl(const MaskExtractParams& params);

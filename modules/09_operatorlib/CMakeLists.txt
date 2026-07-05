@@ -72,8 +72,12 @@ endif()
 target_compile_definitions(mod_operatorlib PRIVATE LM_ENABLE_TIMING=1)
 
 # calibration/scanning 源文件体量大，MSVC 需 /bigobj
+# 注意：CUDA 源（.cu，如 pose_optimize_cuda_impl.cu 的 Eigen bdcSvd 重模板实例化）
+# 必须经 -Xcompiler 把 /bigobj 传给宿主编译器，否则报 C1128（节数超限）
 if(MSVC)
-    target_compile_options(mod_operatorlib PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+    target_compile_options(mod_operatorlib PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/bigobj>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
 endif()
 
 # === Ceres（GBA）===

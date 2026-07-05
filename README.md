@@ -13,4 +13,7 @@ cmake --build build --config Release
 上层架构依据：`E:\3DSCANNER260622\docs\plans\2026-07-05-交付级框架整体设计-design.md`（01.4）。
 
 ## 环境
-继承 `E:\3DSCANNER260622`（C++20/MSVC v144/CUDA 12.6/OpenCV 4.13/Eigen 3.4.1）。
+继承 `E:\3DSCANNER260622`（C++17/MSVC v144/CUDA 12.6/OpenCV 4.13/Eigen 3.4.1）。
+
+## 模块现状
+骨架阶段：framework 层契约桩 + 9 个业务模块空桩。已迁入实现：`modules/09_operatorlib`（全部算子，`mod_operatorlib`）、`modules/03_rendering`（display 渲染组件，`mod_rendering`，OSG + CUDA-GL）。详见 `AGENTS.md` / `工程目录地图.md`。

@@ -297,6 +297,7 @@ TEST_F(UndistortPointsTest, ProcessWithDistortionMatchesOpenCV) {
     cv::undistortPoints(h_points, h_opencv,
                         distParams.cameraMatrix, distParams.distCoeffs,
                         distParams.R, distParams.P);
+    h_opencv = h_opencv.reshape(2, 1);
 
     cv::Mat h_cuda;
     result.d_rectifiedPoints->download(h_cuda);

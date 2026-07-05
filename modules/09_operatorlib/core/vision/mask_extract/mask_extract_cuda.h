@@ -111,7 +111,7 @@ struct MaskExtractResult {
 /**
  * @brief 激光掩膜提取算子（CUDA 实现�? *
  * 使用 pImpl 模式隔离 CUDA 类型，公开头文件不含任�?CUDA 依赖�? * 
- * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 extract() �?setParams()
+ * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 Execute() �?setParams()
  * - 单线程流水线中应在帧间隙调用 setParams()
  * - 多实例并发场景各实例独立持有参数无需加锁
  * - Debug 模式下维�?inProcess_ 原子变量进行断言检�? * - Release 模式下并发调用为未定义行为（数据竞争�? */

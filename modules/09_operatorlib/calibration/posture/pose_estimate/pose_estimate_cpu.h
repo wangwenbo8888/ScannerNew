@@ -230,7 +230,7 @@ struct PoseEstimateCPUResult {
 
 /**
  * @brief 设备姿态CPU算子（CPU 实现�? *
- * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 estimate() �?setParams()
+ * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 Execute() �?setParams()
  * - 多实例并发场景各实例独立持有参数无需加锁
  * - Debug 模式下维�?inProcess_ 原子变量进行断言检�? * - Release 模式下并发调用为未定义行为（数据竞争�? */
 // ===== 算子规范 §4 状态模型 =====

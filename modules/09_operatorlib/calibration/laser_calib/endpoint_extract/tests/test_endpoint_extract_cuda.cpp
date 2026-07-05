@@ -32,8 +32,9 @@ protected:
         cv::Mat h_fids(1, static_cast<int>(fids.size()), CV_32SC1,
                         const_cast<int*>(fids.data()));
 
-        cv::cuda::GpuMat d_pts(h_pts);
-        cv::cuda::GpuMat d_fids(h_fids);
+        cv::cuda::GpuMat d_pts, d_fids;
+        if (!h_pts.empty()) d_pts.upload(h_pts);
+        if (!h_fids.empty()) d_fids.upload(h_fids);
 
         return extractor_->Execute(d_pts, d_fids);
     }

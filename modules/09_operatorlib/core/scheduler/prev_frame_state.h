@@ -22,11 +22,11 @@ struct AtomicFrameState {
     uint64_t frameId = 0;
 
     static std::shared_ptr<AtomicFrameState> load(
-        const std::atomic<std::shared_ptr<AtomicFrameState>>& src) {
+        const std::shared_ptr<AtomicFrameState>& src) {
         return std::atomic_load(&src);
     }
 
-    static void store(std::atomic<std::shared_ptr<AtomicFrameState>>& dst,
+    static void store(std::shared_ptr<AtomicFrameState>& dst,
                       std::shared_ptr<AtomicFrameState> state) {
         std::atomic_store(&dst, std::move(state));
     }

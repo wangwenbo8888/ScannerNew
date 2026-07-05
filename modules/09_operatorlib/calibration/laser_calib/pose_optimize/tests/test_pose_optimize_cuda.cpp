@@ -38,8 +38,9 @@ protected:
         cv::Mat h_lids(1, static_cast<int>(lineIds.size()), CV_32SC1,
                         const_cast<int*>(lineIds.data()));
 
-        cv::cuda::GpuMat d_pts(h_pts);
-        cv::cuda::GpuMat d_lids(h_lids);
+        cv::cuda::GpuMat d_pts, d_lids;
+        if (!h_pts.empty()) d_pts.upload(h_pts);
+        if (!h_lids.empty()) d_lids.upload(h_lids);
 
         return poser_->Execute(d_pts, d_lids, K, R, initialT);
     }

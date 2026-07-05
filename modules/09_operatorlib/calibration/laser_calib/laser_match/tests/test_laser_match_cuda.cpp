@@ -39,10 +39,10 @@ protected:
         cv::Mat h_right_fids(1, static_cast<int>(right_fids.size()), CV_32SC1, const_cast<int*>(right_fids.data()));
 
         cv::cuda::GpuMat d_left, d_left_fids, d_right, d_right_fids;
-        d_left.upload(h_left);
-        d_left_fids.upload(h_left_fids);
-        d_right.upload(h_right);
-        d_right_fids.upload(h_right_fids);
+        if (!h_left.empty()) d_left.upload(h_left);
+        if (!h_left_fids.empty()) d_left_fids.upload(h_left_fids);
+        if (!h_right.empty()) d_right.upload(h_right);
+        if (!h_right_fids.empty()) d_right_fids.upload(h_right_fids);
 
         auto result = matcher_->Execute(d_left, d_left_fids, d_right, d_right_fids, stream_);
         stream_.waitForCompletion();

@@ -47,9 +47,10 @@ protected:
         cv::Mat h_fids(1, static_cast<int>(fids.size()), CV_32SC1,
                        const_cast<int*>(fids.data()));
 
-        cv::cuda::GpuMat d_left(h_left);
-        cv::cuda::GpuMat d_right(h_right);
-        cv::cuda::GpuMat d_fids(h_fids);
+        cv::cuda::GpuMat d_left, d_right, d_fids;
+        if (!h_left.empty()) d_left.upload(h_left);
+        if (!h_right.empty()) d_right.upload(h_right);
+        if (!h_fids.empty()) d_fids.upload(h_fids);
 
         return recon_->Execute(d_left, d_right, d_fids, Q);
     }

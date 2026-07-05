@@ -187,7 +187,7 @@ struct IntrinsicCompensateCPUResult {
 /**
  * @brief 相机内参温度补偿�?CPU 算子
  *
- * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 compute() �?setParams()
+ * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 Execute() �?setParams()
  * - 多实例并发场景各实例独立持有参数无需加锁
  */
 class SCANNER_API IntrinsicCompensateCPU {

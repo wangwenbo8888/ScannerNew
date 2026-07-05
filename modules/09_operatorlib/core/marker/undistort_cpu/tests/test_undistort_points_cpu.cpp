@@ -265,6 +265,8 @@ TEST_F(MarkerUndistortCPUTest, MatchOpenCVReference) {
     cv::Mat dst1, dst2;
     cv::undistortPoints(toMat(pts1), dst1, buildK1(), buildD1(), R1, P1);
     cv::undistortPoints(toMat(pts2), dst2, buildK2(), buildD2(), R2, P2);
+    dst1 = dst1.reshape(2, 1);
+    dst2 = dst2.reshape(2, 1);
 
     auto result = op.Execute(pts1, pts2);
     ASSERT_TRUE(result.success);
@@ -426,6 +428,8 @@ TEST_F(StereoUndistortPrecisionTest, WithRotationAndDistortion) {
     cv::Mat dst1,dst2;
     cv::undistortPoints(toMat(pts1),dst1,K1,D1,R1,P1);
     cv::undistortPoints(toMat(pts2),dst2,K2,D2,R2,P2);
+    dst1 = dst1.reshape(2, 1);
+    dst2 = dst2.reshape(2, 1);
 
     auto result = op.Execute(pts1,pts2);
     ASSERT_TRUE(result.success);

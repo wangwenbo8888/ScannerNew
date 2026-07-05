@@ -24,7 +24,7 @@
 | 工具链 | VS 2022 / MSVC v144 (14.44) | `C:\Program Files\Microsoft Visual Studio\2022\Community\` | ✅ 必须 |
 | 工具链 | CMake ≥ 3.24 | `C:\Program Files\CMake\` | ✅ 必须 |
 | 工具链 | Ninja（可选） | `C:\devlibs\ninja\` | 可选 |
-| 语言 | **C++20**（`/std:c++20`） | — | ✅ 必须 |
+| 语言 | **C++17**（`/std:c++17`） | — | ✅ 必须 |
 | GPU | CUDA 12.6 + cuDNN 9.21 | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\` | ⚠️ 可选（骨架桩不用） |
 | GPU | 架构 sm_75;86;87 | — | 配置就绪 |
 | 视觉 | OpenCV 4.13(+CUDA+Contrib) | `C:\opencv-cuda-4.13.0\`（OpenCV_DIR） | ⚠️ 可选（算子迁入后用） |
@@ -203,7 +203,7 @@ class Stage { };
 ```cmake
 cmake_minimum_required(VERSION 3.24)
 project(JEAMMWARE VERSION 0.1.0 LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(MSVC)

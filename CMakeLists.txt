@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(JEAMMWARE VERSION 0.1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -15,6 +15,9 @@ option(BUILD_TESTS "Build tests" ON)
 option(BUILD_UI "Build Qt UI layer (deferred)" OFF)
 
 if(BUILD_CUDA)
+    set(CMAKE_CUDA_COMPILER "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin/nvcc.exe"
+        CACHE FILEPATH "nvcc (pin to v12.6, 避免与并存 v12.4 串味)")
+    set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_DEPENDENCIES_USE_COMPILER OFF)
     enable_language(CUDA)
     set(CMAKE_CUDA_ARCHITECTURES "75;86;87" CACHE STRING "sm_75/86/87" FORCE)
@@ -25,25 +28,31 @@ if(BUILD_CUDA)
 endif()
 
 # 第三方路径（CACHE，骨架桩不强制 find；算子迁入后启用）
+# OpenCV 有两套：Release 预装包（C:/opencv-cuda-4.13.0，/MD CRT）与 Debug 自建包
+# （C:/opencv-cuda-4.13.0-debug，/MDd CRT + debug_build_guard 符号，与工程 Debug 匹配，
+#   避免 Debug↔Release CRT 混用堆破坏）。默认指向 Release；Debug 构建目录用
+#   -DOpenCV_DIR=C:/opencv-cuda-4.13.0-debug/x64/vc17/lib 覆盖。
 set(OpenCV_DIR "C:/opencv-cuda-4.13.0" CACHE PATH "OpenCV")
 set(Eigen3_DIR "C:/devlibs/eigen-3.4.1-install/share/eigen3/cmake" CACHE PATH "Eigen3")
+
+set(JMW_GH_MIRROR "" CACHE STRING "GitHub 镜像前缀（空=直连 github.com；本机被封时设 https://ghfast.top/）")
 
 include(FetchContent)
 
 find_package(spdlog 1.15 QUIET)
 if(NOT spdlog_FOUND)
-    FetchContent_Declare(spdlog URL https://github.com/gabime/spdlog/archive/refs/tags/v1.15.1.tar.gz)
+    FetchContent_Declare(spdlog URL ${JMW_GH_MIRROR}https://github.com/gabime/spdlog/archive/refs/tags/v1.15.1.tar.gz)
     FetchContent_MakeAvailable(spdlog)
 endif()
 
 find_package(nlohmann_json 3.11.3 QUIET)
 if(NOT nlohmann_json_FOUND)
-    FetchContent_Declare(nlohmann_json URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+    FetchContent_Declare(nlohmann_json URL ${JMW_GH_MIRROR}https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
     FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
 if(BUILD_TESTS)
-    FetchContent_Declare(googletest URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz)
+    FetchContent_Declare(googletest URL ${JMW_GH_MIRROR}https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
     enable_testing()
@@ -71,7 +80,7 @@ if(BUILD_GLOBAL_OPTIM)
     set(SCHUR_SPECIALIZATIONS OFF CACHE BOOL "" FORCE)
     set(USE_CUDA OFF CACHE BOOL "" FORCE)  # Ceres 自带 CUDA 与项目动态 cudart 冲突
     FetchContent_Declare(ceres
-        URL https://github.com/ceres-solver/ceres-solver/archive/refs/tags/2.2.0.tar.gz)
+        URL ${JMW_GH_MIRROR}https://github.com/ceres-solver/ceres-solver/archive/refs/tags/2.2.0.tar.gz)
     FetchContent_MakeAvailable(ceres)
 endif()
 

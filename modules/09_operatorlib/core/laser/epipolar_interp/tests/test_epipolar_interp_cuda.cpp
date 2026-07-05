@@ -35,8 +35,8 @@ protected:
         cv::Mat h_fids(1, static_cast<int>(line_ids.size()), CV_32SC1, const_cast<int*>(line_ids.data()));
 
         cv::cuda::GpuMat d_points, d_fids;
-        d_points.upload(h_points);
-        d_fids.upload(h_fids);
+        if (!h_points.empty()) d_points.upload(h_points);
+        if (!h_fids.empty()) d_fids.upload(h_fids);
 
         auto result = interp_->Execute(d_points, d_fids, stream_);
         stream_.waitForCompletion();

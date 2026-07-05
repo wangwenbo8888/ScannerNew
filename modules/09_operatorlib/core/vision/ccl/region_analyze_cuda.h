@@ -161,7 +161,7 @@ struct RegionAnalysisResult {
  * 使用 pImpl 模式隔离 CUDA 类型，公开头文件不含任何 CUDA 依赖。
  *
  * 线程安全约束：
- * - 非线程安全：不同线程不得同时调用 analyze() 或 setParams()
+ * - 非线程安全：不同线程不得同时调用 Execute() 或 setParams()
  * - 单线程流水线中应在帧间隙调用 setParams()
  * - 多实例并发场景各实例独立持有参数无需加锁
  * - Debug 模式下维护 inProcess_ 原子变量进行断言检查

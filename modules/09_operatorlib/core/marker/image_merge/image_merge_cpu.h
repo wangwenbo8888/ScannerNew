@@ -82,7 +82,7 @@ struct ImageMergeCPUResult {
 
 /**
  * @brief 标记点图像合并算子（CPU 实现�? *
- * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 merge() �?setParams()
+ * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 Execute() �?setParams()
  * - 单线程流水线中应在帧间隙调用 setParams()
  * - 多实例并发场景各实例独立持有参数无需加锁
  * - Debug 模式下维�?inProcess_ 原子变量进行断言检�? * - Release 模式下并发调用为未定义行为（数据竞争�? */
@@ -118,7 +118,7 @@ public:
      * @param rows 大图行数
      * @param cols 大图列数
      *
-     * 预分配内部缓冲区，首�?merge() 无冷启动延迟�?     */
+     * 预分配内部缓冲区，首�?Execute() 无冷启动延迟�?     */
     void Warmup(int rows, int cols);
 
     /**
@@ -130,7 +130,7 @@ public:
     * @brief 动态更新参�? 
     * @param params 新参数
     *
-     * @warning 不得与 merge() 并发调用
+     * @warning 不得与 Execute() 并发调用
      */
     void SetParams(const ImageMergeCPUParams& params);
 

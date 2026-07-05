@@ -120,7 +120,7 @@ struct LaserExtrinsicCompensateCPUResult {
  * @brief 激光器虚拟相机外参温度补偿�?CPU 算子
  *
  * 对虚拟相机→左相�?�?虚拟相机→右相机 两组外参�? * 分别调用 ExtrinsicCompensateCPU 进行温度补偿计算�? *
- * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 compute() �?setParams()
+ * 线程安全约束�? * - 非线程安全：不同线程不得同时调用 Execute() �?setParams()
  * - 多实例并发场景各实例独立持有参数无需加锁
  */
 class SCANNER_API LaserExtrinsicCompensateCPU {
