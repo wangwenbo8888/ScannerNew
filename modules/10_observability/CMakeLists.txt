@@ -1,0 +1,3 @@
+add_library(mod_observability STATIC observability.cpp)
+target_link_libraries(mod_observability PUBLIC fw_crosscut)
+target_include_directories(mod_observability PUBLIC ${CMAKE_SOURCE_DIR})
