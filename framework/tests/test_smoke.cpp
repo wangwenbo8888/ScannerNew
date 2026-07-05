@@ -73,6 +73,15 @@ TEST(Service, IServiceIsAbstract) {
 
 TEST(Ui, IViewIsAbstract) {
     EXPECT_TRUE(std::is_abstract_v<Scanner::ui::IView>);
+    EXPECT_TRUE(std::is_abstract_v<Scanner::ui::IUIController>);
+}
+
+TEST(Crosscut, InterfacesAreAbstract) {
+    EXPECT_TRUE(std::is_abstract_v<Scanner::crosscut::IAuth>);
+    EXPECT_TRUE(std::is_abstract_v<Scanner::crosscut::ILogger>);
+    EXPECT_TRUE(std::is_abstract_v<Scanner::crosscut::IPerfMonitor>);
+    EXPECT_TRUE(std::is_abstract_v<Scanner::crosscut::ICrashHandler>);
+    EXPECT_TRUE(std::is_abstract_v<Scanner::crosscut::IConfig>);
 }
 
 TEST(Sdk, IScannerSDKIsAbstract) {
