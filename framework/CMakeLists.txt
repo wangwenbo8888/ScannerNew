@@ -7,3 +7,7 @@ add_subdirectory(data)
 add_subdirectory(hal)
 add_subdirectory(infra)
 add_subdirectory(crosscut)
+
+if(BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

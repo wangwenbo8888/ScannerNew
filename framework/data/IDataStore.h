@@ -6,8 +6,10 @@ public:
     virtual ~IFrameSink() = default;
     virtual void onFrame(const Frame&) = 0;
 };
-class IDeviceStateSink { public: virtual ~IDeviceStateSink() = default; };
-class IDataStore { public: virtual ~IDataStore() = default; };
+class IDeviceStateSink { public: virtual ~IDeviceStateSink() = 0; };
+inline IDeviceStateSink::~IDeviceStateSink() = default;
+class IDataStore { public: virtual ~IDataStore() = 0; };
+inline IDataStore::~IDataStore() = default;
 class DataContext {};
 class WorkflowArtifactStore {};  // ADR 7.10
 // ADR 7.6 预留：FusionStateHandle（有状态融合接缝的不透明句柄）待实现
