@@ -1,7 +1,7 @@
 // laser_calib_cli.cpp — 模块2 激光标定 CLI（Task 6.2 分阶段实现）
 //
-// 当前进度: 6.2-a (4-1 mask_extract + 4-2 region_analyze + 4-3 laser_label + 主循环骨架)
-//   后续: 6.2-b (4-4~4-6) / 6.2-c (4-7~4-8 + host 累积) / 6.2-d (4-9~4-11) / 6.2-e (5-3 + 4-13)
+// 当前进度: 6.2-b (4-1 mask + 4-2 ccl + 4-3 label + 4-4 steger + 4-5 undistort + 4-6 epipolar)
+//   后续: 6.2-c (4-7~4-8 + host 累积) / 6.2-d (4-9~4-11) / 6.2-e (5-3 + 4-13)
 //
 // 设计依据: docs/plans/2026-07-18-factory-calib-impl.md Task 6.2 Step 0
 // 算子签名以 Step 0.1 速查表为准；原 Step 1 伪代码禁止照抄。
@@ -11,6 +11,9 @@
 #include "mask_extract_cuda.h"
 #include "region_analyze_cuda.h"
 #include "laser_label_cuda.h"
+#include "steger_extract_cuda.h"
+#include "undistort_points_cuda.h"
+#include "epipolar_interp_cuda.h"
 
 #include <opencv2/core/cuda.hpp>
 #include <spdlog/spdlog.h>
@@ -31,7 +34,7 @@ int main(int argc, char** argv) {
     std::string inDir = argv[1];
     std::string outPath = argc >= 3 ? argv[2] : "laser_calib.json";
 
-    spdlog::info("=== laser_calib (build 6.2-a) ===");
+    spdlog::info("=== laser_calib (build 6.2-b) ===");
 
     // ------------------------------------------------------------------
     // 1. 加载输入 + 一致性校验
@@ -79,6 +82,45 @@ int main(int argc, char** argv) {
     LaserLabelerCUDA labelL(labelParams);
     LaserLabelerCUDA labelR(labelParams);
     spdlog::info("4-3 LaserLabelerCUDA x2 (L/R) constructed");
+
+    // ----- 4-4 Steger -----
+    // 参数: sigma/threshold 用默认; deviceId 从 cfg
+    StegerParams stegerParams;
+    stegerParams.deviceId = cfg.deviceId;
+    StegerExtractorCUDA stegerL(stegerParams);
+    StegerExtractorCUDA stegerR(stegerParams);
+    spdlog::info("4-4 StegerExtractorCUDA x2 (L/R) constructed");
+
+    // ----- 4-5 UndistortPoints -----
+    // 参数 K/D/R/P 来自 handoff（模块1 输出的内参 + 立体矫正）。
+    // L 路: K=K_L, D=D_L, R=R1, P=P1
+    // R 路: K=K_R, D=D_R, R=R2, P=P2
+    UndistortPointsParams undistL;
+    undistL.cameraMatrix = h.cameraMatrixL;
+    undistL.distCoeffs   = h.distCoeffsL;
+    undistL.R            = h.R1;
+    undistL.P            = h.P1;
+    undistL.deviceId     = cfg.deviceId;
+    undistL.validate();
+    UndistortPointsParams undistR;
+    undistR.cameraMatrix = h.cameraMatrixR;
+    undistR.distCoeffs   = h.distCoeffsR;
+    undistR.R            = h.R2;
+    undistR.P            = h.P2;
+    undistR.deviceId     = cfg.deviceId;
+    undistR.validate();
+    UndistortPointsCuda undistLOp(undistL);
+    UndistortPointsCuda undistROp(undistR);
+    spdlog::info("4-5 UndistortPointsCuda x2 (L/R) constructed (R1/P1, R2/P2 from handoff)");
+
+    // ----- 4-6 EpipolarInterp -----
+    // lineIdCheck=true 标定模式（按 line_id 同线插值；扫描模式才用 false）
+    EpipolarInterpParams epipolarParams;
+    epipolarParams.deviceId   = cfg.deviceId;
+    epipolarParams.lineIdCheck = true;
+    EpipolarInterpCuda epipolarL(epipolarParams);
+    EpipolarInterpCuda epipolarR(epipolarParams);
+    spdlog::info("4-6 EpipolarInterpCuda x2 (L/R) constructed (lineIdCheck=true)");
 
     // ------------------------------------------------------------------
     // 3. 主循环: pose × tube, 跑 4-1 ~ 4-3
@@ -137,9 +179,74 @@ int main(int argc, char** argv) {
                 continue;
             }
 
+            // ----- 4-4 steger (L + R) -----
+            // Execute(d_gray, d_mask CV_32SC1, stream, GroupMode::ByLabel)
+            //   输入: d_grayImage (from 4-1) + d_labeledMask (from 4-3, 重编号)
+            //   输出: d_centerPoints (CV_32FC2), d_line_ids (CV_32SC1)
+            if (!maskResL.d_grayImage || !maskResR.d_grayImage
+                || !labelResL.d_labeledMask || !labelResR.d_labeledMask) {
+                spdlog::warn("pose {} tube {}: 4-4 input null, skip", pi, ti);
+                ++framesSkip;
+                continue;
+            }
+            auto stegerResL = stegerL.Execute(*maskResL.d_grayImage,
+                                              *labelResL.d_labeledMask,
+                                              stream, GroupMode::ByLabel);
+            auto stegerResR = stegerR.Execute(*maskResR.d_grayImage,
+                                              *labelResR.d_labeledMask,
+                                              stream, GroupMode::ByLabel);
+            if (!stegerResL.success || !stegerResR.success) {
+                spdlog::warn("pose {} tube {}: 4-4 steger failed (L={}, R={}), skip",
+                             pi, ti, stegerResL.success, stegerResR.success);
+                ++framesSkip;
+                continue;
+            }
+
+            // ----- 4-5 undistort (L + R) -----
+            // Execute(d_points, d_line_ids, stream)
+            //   输入: d_centerPoints + d_line_ids (from 4-4)
+            //   输出: d_rectifiedPoints + d_line_ids
+            if (!stegerResL.d_centerPoints || !stegerResR.d_centerPoints
+                || !stegerResL.d_line_ids    || !stegerResR.d_line_ids) {
+                spdlog::warn("pose {} tube {}: 4-5 input null, skip", pi, ti);
+                ++framesSkip;
+                continue;
+            }
+            auto undistResL = undistLOp.Execute(*stegerResL.d_centerPoints,
+                                                *stegerResL.d_line_ids, stream);
+            auto undistResR = undistROp.Execute(*stegerResR.d_centerPoints,
+                                                *stegerResR.d_line_ids, stream);
+            if (!undistResL.success || !undistResR.success) {
+                spdlog::warn("pose {} tube {}: 4-5 undistort failed (L={}, R={}), skip",
+                             pi, ti, undistResL.success, undistResR.success);
+                ++framesSkip;
+                continue;
+            }
+
+            // ----- 4-6 epipolar_interp (L + R) -----
+            // Execute(d_points, d_line_ids, stream)
+            //   输入: d_rectifiedPoints + d_line_ids (from 4-5)
+            //   输出: d_interpPoints + d_interp_line_ids
+            if (!undistResL.d_rectifiedPoints || !undistResR.d_rectifiedPoints
+                || !undistResL.d_line_ids      || !undistResR.d_line_ids) {
+                spdlog::warn("pose {} tube {}: 4-6 input null, skip", pi, ti);
+                ++framesSkip;
+                continue;
+            }
+            auto epipolarResL = epipolarL.Execute(*undistResL.d_rectifiedPoints,
+                                                  *undistResL.d_line_ids, stream);
+            auto epipolarResR = epipolarR.Execute(*undistResR.d_rectifiedPoints,
+                                                  *undistResR.d_line_ids, stream);
+            if (!epipolarResL.success || !epipolarResR.success) {
+                spdlog::warn("pose {} tube {}: 4-6 epipolar failed (L={}, R={}), skip",
+                             pi, ti, epipolarResL.success, epipolarResR.success);
+                ++framesSkip;
+                continue;
+            }
+
             ++framesOk;
-            spdlog::info("pose {} tube {}: OK (L ccl={}, R ccl={})",
-                         pi, ti, cclResL.componentCount, cclResR.componentCount);
+            spdlog::info("pose {} tube {}: OK (L interp={}, R interp={})",
+                         pi, ti, epipolarResL.interpCount, epipolarResR.interpCount);
         }
     }
 
@@ -148,16 +255,19 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------
     // 4. 资源销毁 (算子规范要求析构前显式 Destroy)
     // ------------------------------------------------------------------
-    maskL.Destroy(); maskR.Destroy();
-    cclL.Destroy();  cclR.Destroy();
-    labelL.Destroy(); labelR.Destroy();
+    maskL.Destroy();    maskR.Destroy();
+    cclL.Destroy();     cclR.Destroy();
+    labelL.Destroy();   labelR.Destroy();
+    stegerL.Destroy();  stegerR.Destroy();
+    undistLOp.Destroy(); undistROp.Destroy();
+    epipolarL.Destroy(); epipolarR.Destroy();
 
     // ------------------------------------------------------------------
-    // 5. 6.2-a 占位输出 (后续 6.2-e 替换为真实 laser_calib.json)
+    // 5. 6.2-b 占位输出 (后续 6.2-e 替换为真实 laser_calib.json)
     // ------------------------------------------------------------------
     nlohmann::json j;
     j["schema"]  = "factory_calib.laser_calib.v1";
-    j["build"]   = "6.2-a-partial";
+    j["build"]   = "6.2-b-partial";
     j["posesProcessed"] = input->poseFrames.size();
     j["framesOk"]       = framesOk;
     j["framesSkipped"]  = framesSkip;
@@ -165,6 +275,6 @@ int main(int argc, char** argv) {
         spdlog::error("cannot write output: {}", outPath);
         return 1;
     }
-    spdlog::info("laser_calib (6.2-a partial) -> {}", outPath);
+    spdlog::info("laser_calib (6.2-b partial) -> {}", outPath);
     return 0;
 }
