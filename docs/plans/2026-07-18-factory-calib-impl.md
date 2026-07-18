@@ -1689,9 +1689,176 @@ git commit -m "feat(factory_calib/m2): calib_io 读 config/handoff/姿态目录 
 **Files:**
 - Modify: `factory_calib/module2_laser/laser_calib_cli.cpp`
 
+**Step 0: 实施设计（2026-07-18 前置核对，执行前必读）**
+
+> **本 Step 是经验 #5（"算子签名必须读头验证，不能信计划草稿"）在 Task 6.2 的具体化。** 已读完 13 算子对外头 + 主工程 `plane_map_temp_table.cpp:255-337` + `common/calib_types.h` + `virtual_pixel_gen.h`，确认原 Step 1 伪代码（line 1696 起）有多处错误，**禁止照抄**。
+
+**0.1 算子签名速查（仅列主重载，均存在无 stream 的兼容重载）**
+
+| # | 算子类 | Execute 主签名 | Result 关键 GPU 字段 |
+|---|---|---|---|
+| 4-1 | `MaskExtractCUDA` | `(const cv::Mat& gray, Stream&)` | `d_grayImage`, `d_cleanedMask` (CV_8UC1) |
+| 4-2 | `RegionAnalyzerCUDA` | `(shared_ptr<GpuMat>& d_mask, Stream&)` | `d_labeledMask` (CV_32SC1), `components` |
+| 4-3 | `LaserLabelerCUDA` | `(const GpuMat& d_inputMask, Stream&)` | `d_labeledMask` (重编号 CV_32SC1) |
+| 4-4 | `StegerExtractorCUDA` | **`(d_gray, d_mask, Stream&, GroupMode)`**（ByLabel 走此重载）| `d_centerPoints` (CV_32FC2), `d_line_ids` (CV_32SC1) |
+| 4-5 | `UndistortPointsCuda` | `(d_points, d_line_ids, Stream&)` | `d_rectifiedPoints`, `d_line_ids` |
+| 4-6 | `EpipolarInterpCuda` | `(d_points, d_line_ids, Stream&)` | `d_interpPoints`, `d_interp_line_ids` |
+| 4-7 | `LaserMatchCuda` | `(d_left_pts, d_left_ids, d_right_pts, d_right_ids, Stream&)` | `d_matched_left/right/line_ids` |
+| 4-8 | `LaserReconstructCuda` | `(d_matched_left, d_matched_right, d_matched_line_ids, **const cv::Mat& Q**, Stream&)` | `d_points3d` (CV_32FC3), `d_valid_line_ids` |
+| 4-9 | `EndpointExtractCuda` | `(d_points3d, d_line_ids, Stream&)` | `d_endpoints`, `d_endpoint_ids`, `d_line_ids` |
+| 4-10 | `VirtualCameraPoseCuda` | `(d_endpoints, d_line_ids, **Matx33d& stereoK, Matx33d& stereoR**, Stream&)` | `virtualK/R/T` (host Matx/Vec) |
+| 4-11 | `PoseOptimizeCuda` | `(d_points, d_line_ids, virtualK, virtualR, **Vec3d& initialT**, Stream&)` | `virtualK/R/T`, `initialT`, `lineCurves` |
+| 4-13 | `PlaneMapTempTable` | **`Execute()` 无参**（参数全在 SetParams/构造期）| `table[]` |
+| 5-3 | `LaserExtrinsicCompensateCPU` | `(const CameraExtrinsics& v2l, const CameraExtrinsics& v2r)` | `leftResult`, `rightResult` |
+
+**4-12 (PlaneMapCuda) 不独立调用** — 已含于 4-13 内部（见决定 5）。`VirtualPixelGenerator` 也由 4-13 内部调用，CLI 不显式调。
+
+**0.2 数据流（host/device 边界 + L/R 两路）**
+
+```
+每帧 (pose, tube):
+  L 路: 4-1L(gray_L)─► d_grayL, d_cleanedMaskL ─► 4-2 ─► d_labeledMaskL ─► 4-3 ─► d_labeledMaskL'
+        ─► 4-4(d_grayL, d_labeledMaskL', ByLabel) ─► d_centerPtsL, d_lineIdsL
+        ─► 4-5(d_centerPtsL, d_lineIdsL; K=K_L, D=D_L, R=R1, P=P1) ─► d_rectPtsL
+        ─► 4-6(d_rectPtsL, d_lineIdsL; lineIdCheck=true) ─► d_interpPtsL, d_interpIdsL
+  R 路: 同上，参数用 K_R/D_R/R2/P2  ─► d_interpPtsR, d_interpIdsR
+  合并: 4-7(d_interpPtsL, d_interpIdsL, d_interpPtsR, d_interpIdsR)
+          ─► d_matched_left, d_matched_right, d_matched_line_ids
+        4-8(..., Q=handoff.Q) ─► d_points3d, d_valid_line_ids
+        【download 到 host 累积】
+
+循环末: 统一 upload → d_all_points3d, d_all_line_ids
+  4-9  ─► d_endpoints, d_endpoint_ids, d_line_ids
+  4-10(stereoK=handoff.P1 的左上 3×3, stereoR=handoff.R) ─► virtualK/R/T
+  4-11(d_all_points3d, d_all_line_ids, virtualK, virtualR, initialT=4-10.virtualT) ─► optimized virtualK/R/T
+  5-3(virtual→L, virtual→R=合成) ─► LaserExtrinsicCompensateCPUResult
+  4-13(SetParams 一次, Execute() 无参, 内部含 4-12 + virtual_pixel_gen) ─► PlaneMapTempTableResult
+  写 laser_calib.json
+```
+
+**0.3 五个设计决定**
+
+**决定 1 — 多帧累积用 host 端 vector**（不用 GPU vconcat）
+
+```cpp
+std::vector<cv::Vec3f> host_points3d;
+std::vector<int>       host_line_ids;
+// 每帧 4-8 完成后:
+cv::Mat h_pts, h_ids;
+reconRes.d_points3d->download(h_pts);
+reconRes.d_valid_line_ids->download(h_ids);
+host_points3d.insert(host_points3d.end(), h_pts.begin<cv::Vec3f>(), h_pts.end<cv::Vec3f>());
+host_line_ids.insert(host_line_ids.end(), h_ids.begin<int>(), h_ids.end<int>());
+// 循环结束统一 upload:
+cv::Mat d3d(1, (int)host_points3d.size(), CV_32FC3, host_points3d.data());
+cv::Mat lids(1, (int)host_line_ids.size(), CV_32SC1, host_line_ids.data());
+cv::cuda::GpuMat d_all_pts3d, d_all_lids;
+d_all_pts3d.upload(d3d); d_all_lids.upload(lids);
+```
+
+理由：GPU vconcat 涉及多 stream 同步 + 临时缓冲，远比 host 累积复杂；每帧 ~1k-10k 点，100 帧也只是百万级 Vec3f，host 累积无性能问题。
+
+**决定 2 — stereoK / stereoR 用 StereoCalibration 自带 helper**
+
+`common/calib_types.h:82-100` 已提供 `stereoK()`（=P 左上 3×3）/ `stereoR()`（=R）：
+
+```cpp
+calib::StereoCalibration sc;
+sc.P = handoff.P1;   // P1/P2 内参部分一致，stereoRectify 保证
+sc.R = handoff.R;
+cv::Matx33d stereoK = sc.stereoK();
+cv::Matx33d stereoR = sc.stereoR();
+```
+
+避免手写 `P.at<double>(i,j)` 易错。
+
+**决定 3 — virtual→R 外参合成**（4-10 只输出 virtual→L）
+
+模块1 给 R_stereo (left←right) + T_stereo；4-10/4-11 输出 virtual→L。链式复合：
+
+```
+R_v2r = R_stereo · R_v2l
+T_v2r = R_stereo · T_v2l + T_stereo
+```
+
+```cpp
+cv::Vec3d T_stereo;
+for (int i=0;i<3;++i) T_stereo(i) = handoff.T.at<double>(i);
+cv::Matx33d R_v2r = stereoR * poseRes.virtualR;
+cv::Vec3d   T_v2r = stereoR * poseRes.virtualT + T_stereo;
+// 填 CameraExtrinsics:
+calib::CameraExtrinsics v2l, v2r;
+for (int i=0;i<9;++i) v2l.R[i] = poseRes.virtualR.val[i];
+for (int i=0;i<3;++i) v2l.T[i] = poseRes.virtualT.val[i];
+v2l.referenceTemp = cfg.referenceTemp;
+for (int i=0;i<9;++i) v2r.R[i] = R_v2r.val[i];
+for (int i=0;i<3;++i) v2r.T[i] = T_v2r.val[i];
+v2r.referenceTemp = cfg.referenceTemp;
+```
+
+**决定 4 — 4-11 initialT 直接用 4-10 的 virtualT**
+
+`PoseOptimizeResult.initialT` 字段语义是"输入初值"，无需另算：
+
+```cpp
+auto poseRes = poseOpt.Execute(d_all_pts3d, d_all_lids,
+                               vcpRes.virtualK, vcpRes.virtualR,
+                               vcpRes.virtualT, stream);
+```
+
+**决定 5 — 只调 4-13，跳过独立 4-12**
+
+实测 `plane_map_temp_table.cpp:255-337` Execute() 内部已：
+1. 构造 `PlaneMapCuda planeMap(pmParams)`
+2. 构造 `VirtualPixelGenerator pixelGen(vpgParams)`，调 `pixelGen.Execute(virtualK, imageSize, lineIds)` → `d_virtual_pixels`
+3. 按温度循环：补偿 K/T → stereoRectify → `planeMap.Execute(d_virtual_pixels, virtualK, virtualR, virtualTc, calib)`
+
+CLI 直接：
+
+```cpp
+calib::PlaneMapTempTableParams pmtt;
+pmtt.cameraMatrixL = handoff.cameraMatrixL; pmtt.distCoeffsL = handoff.distCoeffsL;
+pmtt.cameraMatrixR = handoff.cameraMatrixR; pmtt.distCoeffsR = handoff.distCoeffsR;
+pmtt.imageSize = handoff.imageSize;
+pmtt.R = handoff.R; pmtt.T = handoff.T;
+pmtt.virtualK = poseRes.virtualK; pmtt.virtualR = poseRes.virtualR; pmtt.virtualT = poseRes.virtualT;
+pmtt.lineIds = cfg.lineIds;     // 若空，由 poseRes.lineCurves 反推
+pmtt.referenceTemp = cfg.referenceTemp; pmtt.cte = cfg.cte;
+pmtt.tempStep = cfg.tempStep; pmtt.tempRangeMin = cfg.tempRangeMin; pmtt.tempRangeMax = cfg.tempRangeMax;
+pmtt.alpha = cfg.rectifyAlpha; pmtt.flags = cfg.rectifyFlags;
+pmtt.deviceId = cfg.deviceId; pmtt.gridStep = cfg.gridStep;
+pmtt.depthMin = cfg.depthMin; pmtt.depthMax = cfg.depthMax;
+pmtt.depthSamples = cfg.depthSamples; pmtt.epipolarStep = cfg.epipolarStep;
+calib::PlaneMapTempTable pmttOp(pmtt);
+auto planeTable = pmttOp.Execute();
+```
+
+**0.4 编译策略 — 边填边编译，5 个提交组**
+
+`cmake --build build_fc2_rel --config Release --target laser_calib`
+
+| 提交组 | 范围 | 验证点 |
+|---|---|---|
+| 6.2-a | 4-1L/R + 4-2 + 4-3（mask→CCL→label）| 编译过；空数据不崩 |
+| 6.2-b | 4-4 + 4-5 + 4-6（steger→undistort→epipolar）| 编译过 |
+| 6.2-c | 4-7 + 4-8 + host 累积（match→reconstruct）| 编译过；单 pose 跑通累积 |
+| 6.2-d | 4-9 + 4-10 + 4-11（endpoint→vcp→pose_optimize）| 编译过 |
+| 6.2-e | 5-3 + 4-13 + 写 JSON | 完整跑通（精度由 6.3 e2e 验） |
+
+**0.5 与原 Step 1 伪代码的差异（禁止照抄清单）**
+
+- "4-4 steger (ByLabel, lineIdCheck)" → steger **无** `lineIdCheck`（那是 epipolar 的）；ByLabel 是 `GroupMode` 枚举，走 steger 第 3 重载
+- 独立调 `PlaneMapCuda` → 已含于 4-13 内部，CLI 不再独立调
+- `PlaneMapTempTable.Execute(args...)` → 实际 `Execute()` 无参
+- 缺失 `VirtualPixelGenerator` 前置 → 由 4-13 内部处理
+- 缺失多帧 d_points3d 累积 → 按决定 1 实现
+- steger → undistort 衔接走 **GPU**（d_centerPoints），不能用 host `centerPoints`
+
+---
+
 **Step 1: 写 main（驱动激光链 4-1~4-13）**
 
-> 结构：外层 pose×tube 循环跑 4-1~4-8 累积 d_points3d；循环结束后 4-9~4-13 一次性执行；最后写 laser_calib.json。各算子的 Params 从 handoff + config 填充。
+> ⚠ **本 Step 后面的伪代码（line 1696 起）是计划草稿，存在多处错误，禁止照抄。** 按 Step 0 的速查表 + 数据流 + 5 个决定填实。原伪代码仅保留作"流程意图参考"。
 
 ```cpp
 #include "calib_io.h"
