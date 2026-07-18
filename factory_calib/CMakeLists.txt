@@ -17,7 +17,7 @@ option(FC_BUILD_TESTS  "Build tests" ON)
 # 第三方路径（默认同主工程；可被 -D 覆盖）
 set(OpenCV_DIR "C:/opencv-cuda-4.13.0" CACHE PATH "OpenCV")
 set(Eigen3_DIR "C:/devlibs/eigen-3.4.1-install/share/eigen3/cmake" CACHE PATH "Eigen3")
-set(JMW_GH_MIRROR "" CACHE STRING "GitHub 镜像前缀")
+set(JMW_GH_MIRROR "" CACHE STRING "GitHub 镜像前缀（空=直连 github.com；本机被封时设 https://ghfast.top/）")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(factory_calib_common)

@@ -1,7 +1,7 @@
 # 复刻自主工程根 CMakeLists.txt:91-106
 set(FC_MSVC_REDIST_CRT_DIR
     "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT"
-    CACHE PATH "VS2022 MSVC redist CRT DLL dir")
+    CACHE PATH "VS2022 MSVC redist CRT DLL dir (含 msvcp140/vcruntime140)")
 function(fc_deploy_crt target)
     if(NOT EXISTS "${FC_MSVC_REDIST_CRT_DIR}/msvcp140.dll")
         message(WARNING "fc_deploy_crt: redist CRT 目录未找到: ${FC_MSVC_REDIST_CRT_DIR} (跳过)")
