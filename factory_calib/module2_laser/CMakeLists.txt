@@ -41,9 +41,20 @@ if(M2_SOURCES)
     endif()
 endif()
 
+# === fc2_io: calib_io (读 config/handoff/姿态目录, 写 laser_calib.json) ===
+# Note: calib_io.cpp 用 cv::imread 需 imgcodecs。${OpenCV_LIBS} 在 Release 下
+# 自带 imgcodecs; Debug 自定义构建无 imgcodecs (经验 #3), 故 fc2_io 仅 Release 可构建。
+add_library(fc2_io STATIC calib_io.cpp calib_io.h)
+target_include_directories(fc2_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(fc2_io PUBLIC
+    fc2_ops ${OpenCV_LIBS} nlohmann_json::nlohmann_json spdlog::spdlog)
+if(MSVC)
+    target_compile_options(fc2_io PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+endif()
+
 add_executable(laser_calib laser_calib_cli.cpp)
 if(TARGET fc2_ops)
-    target_link_libraries(laser_calib PRIVATE fc2_ops)
+    target_link_libraries(laser_calib PRIVATE fc2_ops fc2_io)
 endif()
 fc_deploy_crt(laser_calib)
 
