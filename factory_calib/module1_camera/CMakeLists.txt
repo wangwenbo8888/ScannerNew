@@ -1,7 +1,7 @@
 # module1_camera: 相机标定（纯 CPU）
 # 复刻 modules/09_operatorlib/CMakeLists.txt 的 glob + include 策略，但只 CPU
 
-find_package(OpenCV 4.13 REQUIRED COMPONENTS core imgproc calib3d flann)
+find_package(OpenCV 4.13 REQUIRED COMPONENTS core imgproc imgcodecs calib3d flann)
 find_package(Eigen3 3.4 REQUIRED)
 
 # === 收集算子源 ===
