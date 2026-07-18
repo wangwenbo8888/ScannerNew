@@ -14,7 +14,7 @@
 
 ## 进度日志（执行中维护）
 
-### ✅ 已完成（Phase 0-5，模块1 完整 + 模块2 算子回归）
+### ✅ 已完成（Phase 0-7，全部 Task 完成）
 
 分支 `feat/factory-calib`。模块1（`module1_camera/camera_calib.exe`，纯 CPU）**Release 8/8 测试全绿**：
 - Task 0.1-0.3：顶层 + 两模块 CMake（模块1 CPU / 模块2 CUDA 占位）
@@ -27,9 +27,35 @@
 - Task 5.2：拷贝 15 个激光链算子（72 文件 / 18798 行，commit `b4b4847`）；`fc2_ops.lib` 编译通过；**nvcc 实测 v12.4.99**（pin v12.6 仍因无 FORCE 被覆盖，但能编译 + 测试绿，按经验 #4 接受）
 - Task 5.3：16 个 test_*.cpp（mask_extract 有 2 个）**Debug 全绿，无需任何 include/路径修复**
 
-### ⏭ 待办（Phase 6-7，模块2 I/O + CLI + 集成 + 文档）
+模块2 I/O + CLI + 集成 + 文档（Phase 6-7）：
+- Task 6.1：`calib_io.h/.cpp`（`LaserCalibConfig` + `CameraCalibHandoff` + `loadLaserInput` + `validateHandoffConsistency`），`fc2_io` lib，Release 构建（Debug 缺 imgcodecs 跳过，经验 #3 实测修订）（commit `8e203de`）
+- **Task 6.2 Step 0 实施小节**（commit `7466719`）：13 算子签名速查表 + 数据流图 + 5 设计决定 + 5 提交组编译策略 + 禁止照抄清单（原 Step 1 伪代码 6 处错误）
+- Task 6.2 五个提交组（commit `2c2e835`/`801ab2d`/`9541ba3`/`fea411f`/`aa45210`）：
+  - 6.2-a: 4-1 mask + 4-2 ccl + 4-3 label + 主循环 + imgcodecs 探测修订
+  - 6.2-b: 4-4 steger + 4-5 undistort + 4-6 epipolar
+  - 6.2-c: 4-7 match + 4-8 reconstruct + host 累积（决定 1）
+  - 6.2-d: 4-9 endpoint + 4-10 vcp + 4-11 pose_optimize（决定 2/4）
+  - 6.2-e: 5-3 laser_extrinsic + 4-13 plane_map_temp_table（决定 3/5）+ 真实 JSON
+- Task 6.3：e2e 冒烟测试（合成全黑图 + 最小 handoff，2 case：SmokeDoesNotCrash + MissingHandoffGracefulExit）（commit `ee3dd6d`）
+- Task 7.1：handoff schema 测试 7 case（含 PrefersIntrinsicNodeOverExtrinsic 关键路径校验）（commit `688fc17`）
+- Task 7.2：README 补全（前置依赖 + 构建 + 输入输出 + 运行 + 5 已知限制 + 测试覆盖矩阵）（commit `855939f`）
+- Task 7.3：双模块 Release 全量回归（build_fc1_rel 8/8 + build_fc2_rel 18/18 = **26/26 全绿**，528s 含 plane_map_temp_table 515s）
 
-从 **Task 6.1**（`calib_io` 读 config + 加载模块1 交接文件）开始。
+### 🎯 验证清单状态（计划末尾的"全程对照"）
+
+- [x] 模块1 6 算子自测绿（Task 1.3）
+- [x] chessboard 5 测试绿（Task 2.3）
+- [x] 模块1 e2e 绿 + 内参误差 < 2%（Task 3.4，实测 0.171px）
+- [x] 模块1 Debug + Release 双绿（Task 4.1）
+- [x] 模块2 15 算子自测绿（Task 5.3，Debug 16/16）
+- [x] 模块2 e2e 或冒烟绿（Task 6.3，2 case 冒烟绿）
+- [x] 交接 schema 测试绿（Task 7.1，7 case）
+- [x] 双模块全量 Release 绿（Task 7.3，**26/26**）
+- [x] README 完整（Task 7.2）
+- [x] 全程未引用 `../../framework/`、`../../modules/`（自包含边界）
+- [ ] 双模块全量 Debug 绿（**不可达**：经验 #3，Debug OpenCV 缺 imgcodecs；模块1/2 CLI Release-only，算子自测 Debug 仍可跑）
+
+### ⏭ 待办（无；Task 7.4 工程地图/AGENTS 收录为可选，未做）
 
 ### 🔑 执行中获取的关键经验（Phase 5-7 必读）
 
