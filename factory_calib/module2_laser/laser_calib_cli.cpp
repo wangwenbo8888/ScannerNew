@@ -1,7 +1,7 @@
 // laser_calib_cli.cpp — 模块2 激光标定 CLI（Task 6.2 分阶段实现）
 //
-// 当前进度: 6.2-b (4-1 mask + 4-2 ccl + 4-3 label + 4-4 steger + 4-5 undistort + 4-6 epipolar)
-//   后续: 6.2-c (4-7~4-8 + host 累积) / 6.2-d (4-9~4-11) / 6.2-e (5-3 + 4-13)
+// 当前进度: 6.2-c (4-1~4-8 完成 + host 端 3D 点累积)
+//   后续: 6.2-d (4-9~4-11) / 6.2-e (5-3 + 4-13)
 //
 // 设计依据: docs/plans/2026-07-18-factory-calib-impl.md Task 6.2 Step 0
 // 算子签名以 Step 0.1 速查表为准；原 Step 1 伪代码禁止照抄。
@@ -14,6 +14,8 @@
 #include "steger_extract_cuda.h"
 #include "undistort_points_cuda.h"
 #include "epipolar_interp_cuda.h"
+#include "laser_match_cuda.h"
+#include "laser_reconstruct_cuda.h"
 
 #include <opencv2/core/cuda.hpp>
 #include <spdlog/spdlog.h>
@@ -34,7 +36,7 @@ int main(int argc, char** argv) {
     std::string inDir = argv[1];
     std::string outPath = argc >= 3 ? argv[2] : "laser_calib.json";
 
-    spdlog::info("=== laser_calib (build 6.2-b) ===");
+    spdlog::info("=== laser_calib (build 6.2-c) ===");
 
     // ------------------------------------------------------------------
     // 1. 加载输入 + 一致性校验
@@ -122,10 +124,31 @@ int main(int argc, char** argv) {
     EpipolarInterpCuda epipolarR(epipolarParams);
     spdlog::info("4-6 EpipolarInterpCuda x2 (L/R) constructed (lineIdCheck=true)");
 
+    // ----- 4-7 LaserMatch -----
+    // 单实例（吃 L+R 两路）。
+    LaserMatchParams matchParams;
+    matchParams.deviceId = cfg.deviceId;
+    LaserMatchCuda matchOp(matchParams);
+    spdlog::info("4-7 LaserMatchCuda constructed (single instance, L+R input)");
+
+    // ----- 4-8 LaserReconstruct -----
+    // 单实例，Q 矩阵按调用传入（头文件设计如此，避免跨调用累积）。
+    LaserReconstructParams reconParams;
+    reconParams.minDepth = cfg.depthMin;
+    reconParams.maxDepth = cfg.depthMax;
+    reconParams.deviceId  = cfg.deviceId;
+    LaserReconstructCuda reconOp(reconParams);
+    spdlog::info("4-8 LaserReconstructCuda constructed (Q per-call from handoff.Q)");
+
     // ------------------------------------------------------------------
-    // 3. 主循环: pose × tube, 跑 4-1 ~ 4-3
-    //    6.2-a 只跑到 label, 后续 4-4+ 留给 6.2-b/c/d/e
+    // 3. 主循环: pose × tube, 跑 4-1 ~ 4-8 + host 累积
+    //    6.2-c: 跑到 reconstruct 并累积 d_points3d 到 host vector
+    //    6.2-d/e: 循环结束后用累积结果跑 4-9~4-13
+    //    累积策略 (Step 0 决定 1): host 端 vector, 循环末尾统一 upload
     // ------------------------------------------------------------------
+    std::vector<cv::Vec3f> host_points3d;
+    std::vector<int>       host_line_ids;
+
     size_t framesOk = 0;
     size_t framesSkip = 0;
 
@@ -244,13 +267,90 @@ int main(int argc, char** argv) {
                 continue;
             }
 
+            // ----- 4-7 laser_match -----
+            // Execute(d_left_pts, d_left_ids, d_right_pts, d_right_ids, stream)
+            //   输入: L 路和 R 路的 d_interpPoints + d_interp_line_ids (from 4-6)
+            //   输出: d_matched_left, d_matched_right, d_matched_line_ids
+            if (!epipolarResL.d_interpPoints || !epipolarResR.d_interpPoints
+                || !epipolarResL.d_interp_line_ids || !epipolarResR.d_interp_line_ids) {
+                spdlog::warn("pose {} tube {}: 4-7 input null, skip", pi, ti);
+                ++framesSkip;
+                continue;
+            }
+            auto matchRes = matchOp.Execute(*epipolarResL.d_interpPoints,
+                                            *epipolarResL.d_interp_line_ids,
+                                            *epipolarResR.d_interpPoints,
+                                            *epipolarResR.d_interp_line_ids,
+                                            stream);
+            if (!matchRes.success) {
+                spdlog::warn("pose {} tube {}: 4-7 match failed ({}), skip",
+                             pi, ti, matchRes.message);
+                ++framesSkip;
+                continue;
+            }
+
+            // ----- 4-8 laser_reconstruct -----
+            // Execute(d_matched_left, d_matched_right, d_matched_line_ids, Q, stream)
+            //   Q = handoff.Q (模块1 输出)
+            //   输出: d_points3d (CV_32FC3), d_valid_line_ids (CV_32SC1)
+            if (!matchRes.d_matched_left || !matchRes.d_matched_right
+                || !matchRes.d_matched_line_ids) {
+                spdlog::warn("pose {} tube {}: 4-8 input null, skip", pi, ti);
+                ++framesSkip;
+                continue;
+            }
+            auto reconRes = reconOp.Execute(*matchRes.d_matched_left,
+                                            *matchRes.d_matched_right,
+                                            *matchRes.d_matched_line_ids,
+                                            h.Q, stream);
+            if (!reconRes.success) {
+                spdlog::warn("pose {} tube {}: 4-8 reconstruct failed ({}), skip",
+                             pi, ti, reconRes.message);
+                ++framesSkip;
+                continue;
+            }
+
+            // ----- host 累积 (决定 1) -----
+            if (reconRes.d_points3d && reconRes.d_valid_line_ids
+                && !reconRes.d_points3d->empty()
+                && !reconRes.d_valid_line_ids->empty()) {
+                cv::Mat h_pts, h_ids;
+                reconRes.d_points3d->download(h_pts);
+                reconRes.d_valid_line_ids->download(h_ids);
+                h_pts = h_pts.reshape(3, 1);   // 强制 1×N CV_32FC3
+                h_ids = h_ids.reshape(1, 1);   // 强制 1×N CV_32SC1
+                host_points3d.insert(host_points3d.end(),
+                                     h_pts.begin<cv::Vec3f>(),
+                                     h_pts.end<cv::Vec3f>());
+                host_line_ids.insert(host_line_ids.end(),
+                                     h_ids.begin<int>(),
+                                     h_ids.end<int>());
+            }
+
             ++framesOk;
-            spdlog::info("pose {} tube {}: OK (L interp={}, R interp={})",
-                         pi, ti, epipolarResL.interpCount, epipolarResR.interpCount);
+            spdlog::info("pose {} tube {}: OK (matched={}, reconstructed={}, total_accum={})",
+                         pi, ti, matchRes.matchCount, reconRes.validCount,
+                         host_points3d.size());
         }
     }
 
     spdlog::info("loop done: {} ok, {} skipped", framesOk, framesSkip);
+
+    // ------------------------------------------------------------------
+    // 3b. 循环结束: 统一 upload 累积的 3D 点（决定 1 后半）
+    //     d_all_pts3d, d_all_lids 在 6.2-d 被喂给 4-9/4-11
+    // ------------------------------------------------------------------
+    cv::cuda::GpuMat d_all_pts3d, d_all_lids;
+    if (!host_points3d.empty()) {
+        cv::Mat d3d(1, (int)host_points3d.size(), CV_32FC3, host_points3d.data());
+        cv::Mat lids(1, (int)host_line_ids.size(), CV_32SC1, host_line_ids.data());
+        d_all_pts3d.upload(d3d);
+        d_all_lids.upload(lids);
+        spdlog::info("accumulated {} 3D points / {} line ids → uploaded",
+                     host_points3d.size(), host_line_ids.size());
+    } else {
+        spdlog::warn("no 3D points accumulated; downstream (4-9+) will be skipped");
+    }
 
     // ------------------------------------------------------------------
     // 4. 资源销毁 (算子规范要求析构前显式 Destroy)
@@ -261,20 +361,23 @@ int main(int argc, char** argv) {
     stegerL.Destroy();  stegerR.Destroy();
     undistLOp.Destroy(); undistROp.Destroy();
     epipolarL.Destroy(); epipolarR.Destroy();
+    matchOp.Destroy();
+    reconOp.Destroy();
 
     // ------------------------------------------------------------------
-    // 5. 6.2-b 占位输出 (后续 6.2-e 替换为真实 laser_calib.json)
+    // 5. 6.2-c 占位输出 (后续 6.2-e 替换为真实 laser_calib.json)
     // ------------------------------------------------------------------
     nlohmann::json j;
     j["schema"]  = "factory_calib.laser_calib.v1";
-    j["build"]   = "6.2-b-partial";
+    j["build"]   = "6.2-c-partial";
     j["posesProcessed"] = input->poseFrames.size();
     j["framesOk"]       = framesOk;
     j["framesSkipped"]  = framesSkip;
+    j["accumulatedPoints3D"] = host_points3d.size();
     if (!writeJson(outPath, j)) {
         spdlog::error("cannot write output: {}", outPath);
         return 1;
     }
-    spdlog::info("laser_calib (6.2-b partial) -> {}", outPath);
+    spdlog::info("laser_calib (6.2-c partial) -> {}", outPath);
     return 0;
 }
