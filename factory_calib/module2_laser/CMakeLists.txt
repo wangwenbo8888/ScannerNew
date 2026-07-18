@@ -42,21 +42,39 @@ if(M2_SOURCES)
 endif()
 
 # === fc2_io: calib_io (读 config/handoff/姿态目录, 写 laser_calib.json) ===
-# Note: calib_io.cpp 用 cv::imread 需 imgcodecs。${OpenCV_LIBS} 在 Release 下
-# 自带 imgcodecs; Debug 自定义构建无 imgcodecs (经验 #3), 故 fc2_io 仅 Release 可构建。
-add_library(fc2_io STATIC calib_io.cpp calib_io.h)
-target_include_directories(fc2_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(fc2_io PUBLIC
-    fc2_ops ${OpenCV_LIBS} nlohmann_json::nlohmann_json spdlog::spdlog)
-if(MSVC)
-    target_compile_options(fc2_io PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+# 经验 #3 实测修订: find_package REQUIRED 没列 imgcodecs → ${OpenCV_LIBS} 不带它。
+# Release OpenCV 装在 ${OpenCV_DIR} 下有 opencv_imgcodecs4130.lib; Debug 无。
+# → 探测 imgcodecs 存在才构建 fc2_io/laser_calib (Debug 自动跳过, 不影响算子自测)
+set(FC2_IMGCODECS_LIB "")
+if(EXISTS "${OpenCV_DIR}/x64/vc17/lib/opencv_imgcodecs4130.lib")
+    set(FC2_IMGCODECS_LIB "${OpenCV_DIR}/x64/vc17/lib/opencv_imgcodecs4130.lib")
+elseif(EXISTS "${OpenCV_DIR}/lib/opencv_imgcodecs4130.lib")
+    set(FC2_IMGCODECS_LIB "${OpenCV_DIR}/lib/opencv_imgcodecs4130.lib")
 endif()
 
-add_executable(laser_calib laser_calib_cli.cpp)
-if(TARGET fc2_ops)
+if(TARGET fc2_ops AND FC2_IMGCODECS_LIB)
+    add_library(fc2_io STATIC calib_io.cpp calib_io.h)
+    target_include_directories(fc2_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(fc2_io PUBLIC
+        fc2_ops ${OpenCV_LIBS} ${FC2_IMGCODECS_LIB}
+        nlohmann_json::nlohmann_json spdlog::spdlog)
+    if(MSVC)
+        target_compile_options(fc2_io PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+    endif()
+
+    add_executable(laser_calib laser_calib_cli.cpp)
     target_link_libraries(laser_calib PRIVATE fc2_ops fc2_io)
+    if(MSVC)
+        target_compile_options(laser_calib PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+    endif()
+    fc_deploy_crt(laser_calib)
+    message(STATUS "fc2_io + laser_calib: ENABLED (imgcodecs at ${FC2_IMGCODECS_LIB})")
+else()
+    message(WARNING
+        "fc2_io + laser_calib: SKIPPED (imgcodecs not found; "
+        "Debug OpenCPV limitation per 经验 #3). "
+        "Algorithm self-tests (fc2_ops + tests) remain available.")
 endif()
-fc_deploy_crt(laser_calib)
 
 if(FC_BUILD_TESTS)
     foreach(t ${M2_TESTS})
