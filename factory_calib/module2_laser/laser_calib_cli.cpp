@@ -1,7 +1,7 @@
-// laser_calib_cli.cpp — 模块2 激光标定 CLI（Task 6.2 分阶段实现）
+// laser_calib_cli.cpp — 模块2 激光标定 CLI（Task 6.2 完整实现）
 //
-// 当前进度: 6.2-d (4-1~4-11 完成; 4-9 endpoint + 4-10 vcp + 4-11 pose_optimize)
-//   后续: 6.2-e (5-3 laser_extrinsic_compensate + 4-13 plane_map_temp_table + 写 JSON)
+// 当前进度: 6.2-e (5-3 laser_extrinsic_compensate + 4-13 plane_map_temp_table + 写真实 JSON)
+//   Task 6.2 全部 13 算子 + 2 温度表算子串通
 //
 // 设计依据: docs/plans/2026-07-18-factory-calib-impl.md Task 6.2 Step 0
 // 算子签名以 Step 0.1 速查表为准；原 Step 1 伪代码禁止照抄。
@@ -19,6 +19,9 @@
 #include "endpoint_extract_cuda.h"
 #include "virtual_camera_pose_cuda.h"
 #include "pose_optimize_cuda.h"
+#include "laser_extrinsic_compensate_cpu.h"
+#include "plane_map_cuda.h"        // LineMapStats 完整定义, plane_map_temp_table.h 仅前向声明
+#include "plane_map_temp_table.h"
 
 #include <opencv2/core/cuda.hpp>
 #include <spdlog/spdlog.h>
@@ -39,7 +42,7 @@ int main(int argc, char** argv) {
     std::string inDir = argv[1];
     std::string outPath = argc >= 3 ? argv[2] : "laser_calib.json";
 
-    spdlog::info("=== laser_calib (build 6.2-d) ===");
+    spdlog::info("=== laser_calib (build 6.2-e final) ===");
 
     // ------------------------------------------------------------------
     // 1. 加载输入 + 一致性校验
@@ -169,6 +172,16 @@ int main(int argc, char** argv) {
     cv::Matx33d stereoK = sc.stereoK();
     cv::Matx33d stereoR = sc.stereoR();
     spdlog::info("stereoK from handoff.P1, stereoR from handoff.R (Step 0 决定 2)");
+
+    // ----- 5-3 LaserExtrinsicCompensate (CPU, 单实例) -----
+    // 参数仅温度字段; virtual→L/R 外参按调用传入
+    LaserExtrinsicCompensateCPUParams lecpParams;
+    lecpParams.cte          = cfg.cte;
+    lecpParams.tempStep     = cfg.tempStep;
+    lecpParams.tempRangeMin = cfg.tempRangeMin;
+    lecpParams.tempRangeMax = cfg.tempRangeMax;
+    LaserExtrinsicCompensateCPU lecompOp(lecpParams);
+    spdlog::info("5-3 LaserExtrinsicCompensateCPU constructed");
 
     // ------------------------------------------------------------------
     // 3. 主循环: pose × tube, 跑 4-1 ~ 4-8 + host 累积
@@ -443,6 +456,84 @@ int main(int argc, char** argv) {
     }
 
     // ------------------------------------------------------------------
+    // 3d. 5-3 + 4-13 (4-11 成功后执行; 都依赖 finalVirtualK/R/T)
+    // ------------------------------------------------------------------
+    LaserExtrinsicCompensateCPUResult laserExtrinTable;
+    PlaneMapTempTableResult           planeTable;
+    bool haveLaserExtrin = false;
+    bool havePlaneTable  = false;
+
+    if (!haveVirtualPose) {
+        spdlog::warn("no virtual pose from 4-11; skip 5-3 and 4-13");
+    } else {
+        // ----- 5-3 laser_extrinsic_compensate -----
+        // 决定 3: virtual→R 通过链式复合
+        //   R_v2r = R_stereo · R_v2l
+        //   T_v2r = R_stereo · T_v2l + T_stereo
+        cv::Vec3d T_stereo;
+        for (int i = 0; i < 3; ++i) T_stereo(i) = h.T.at<double>(i);
+        cv::Matx33d R_v2r = stereoR * finalVirtualR;
+        cv::Vec3d   T_v2r = stereoR * finalVirtualT + T_stereo;
+
+        calib::CameraExtrinsics v2l, v2r;
+        for (int i = 0; i < 9; ++i) v2l.R[i] = finalVirtualR.val[i];
+        for (int i = 0; i < 3; ++i) v2l.T[i] = finalVirtualT[i];
+        v2l.referenceTemp = cfg.referenceTemp;
+        for (int i = 0; i < 9; ++i) v2r.R[i] = R_v2r.val[i];
+        for (int i = 0; i < 3; ++i) v2r.T[i] = T_v2r[i];
+        v2r.referenceTemp = cfg.referenceTemp;
+
+        spdlog::info("5-3 v2l T=({:.2f},{:.2f},{:.2f})  v2r T=({:.2f},{:.2f},{:.2f})",
+                     v2l.T[0], v2l.T[1], v2l.T[2],
+                     v2r.T[0], v2r.T[1], v2r.T[2]);
+
+        laserExtrinTable = lecompOp.Execute(v2l, v2r);
+        if (!laserExtrinTable.success) {
+            spdlog::error("5-3 laser_extrinsic_compensate failed: {}",
+                          laserExtrinTable.message);
+        } else {
+            haveLaserExtrin = true;
+            spdlog::info("5-3 OK: virtual→L/R temp tables ({} entries each)",
+                         laserExtrinTable.leftResult.table.size());
+        }
+
+        // ----- 4-13 plane_map_temp_table -----
+        // 决定 5: 内部已含 4-12 + virtual_pixel_gen; Execute() 无参, 参数全在构造期填
+        PlaneMapTempTableParams pmtt;
+        pmtt.cameraMatrixL = h.cameraMatrixL; pmtt.distCoeffsL = h.distCoeffsL;
+        pmtt.cameraMatrixR = h.cameraMatrixR; pmtt.distCoeffsR = h.distCoeffsR;
+        pmtt.imageSize = h.imageSize;
+        pmtt.R = h.R; pmtt.T = h.T;
+        pmtt.virtualK = finalVirtualK;
+        pmtt.virtualR = finalVirtualR;
+        pmtt.virtualT = finalVirtualT;
+        pmtt.lineIds       = cfg.lineIds;
+        pmtt.referenceTemp = cfg.referenceTemp;
+        pmtt.cte           = cfg.cte;
+        pmtt.tempStep      = cfg.tempStep;
+        pmtt.tempRangeMin  = cfg.tempRangeMin;
+        pmtt.tempRangeMax  = cfg.tempRangeMax;
+        pmtt.alpha         = cfg.rectifyAlpha;
+        pmtt.flags         = cfg.rectifyFlags;
+        pmtt.deviceId      = cfg.deviceId;
+        pmtt.gridStep      = cfg.gridStep;
+        pmtt.depthMin      = cfg.depthMin;
+        pmtt.depthMax      = cfg.depthMax;
+        pmtt.depthSamples  = cfg.depthSamples;
+        pmtt.epipolarStep  = cfg.epipolarStep;
+
+        PlaneMapTempTable pmttOp(pmtt);
+        planeTable = pmttOp.Execute();
+        if (!planeTable.success) {
+            spdlog::error("4-13 plane_map_temp_table failed: {}", planeTable.message);
+        } else {
+            havePlaneTable = true;
+            spdlog::info("4-13 OK: {} temp entries", planeTable.table.size());
+        }
+        pmttOp.Destroy();
+    }
+
+    // ------------------------------------------------------------------
     // 4. 资源销毁 (算子规范要求析构前显式 Destroy)
     // ------------------------------------------------------------------
     maskL.Destroy();    maskR.Destroy();
@@ -456,18 +547,22 @@ int main(int argc, char** argv) {
     endpointOp.Destroy();
     vcpOp.Destroy();
     poseOptOp.Destroy();
+    lecompOp.Destroy();
 
     // ------------------------------------------------------------------
-    // 5. 6.2-d 占位输出 (后续 6.2-e 替换为真实 laser_calib.json)
+    // 5. 写 laser_calib.json（6.2-e 完整版）
     // ------------------------------------------------------------------
     nlohmann::json j;
     j["schema"]  = "factory_calib.laser_calib.v1";
-    j["build"]   = "6.2-d-partial";
-    j["posesProcessed"] = input->poseFrames.size();
-    j["framesOk"]       = framesOk;
-    j["framesSkipped"]  = framesSkip;
+    j["build"]   = "6.2-e";
+    j["posesProcessed"]    = input->poseFrames.size();
+    j["framesOk"]          = framesOk;
+    j["framesSkipped"]     = framesSkip;
     j["accumulatedPoints3D"] = host_points3d.size();
-    j["haveVirtualPose"] = haveVirtualPose;
+    j["haveVirtualPose"]   = haveVirtualPose;
+    j["haveLaserExtrin"]   = haveLaserExtrin;
+    j["havePlaneTable"]    = havePlaneTable;
+
     if (haveVirtualPose) {
         auto matxToArray = [](const cv::Matx33d& m) {
             return std::vector<double>{m(0,0),m(0,1),m(0,2),
@@ -480,10 +575,24 @@ int main(int argc, char** argv) {
                                             finalVirtualT[1],
                                             finalVirtualT[2]};
     }
+    if (haveLaserExtrin) {
+        j["laserExtrinsicTempTable"] = laserExtrinTable.toJson();
+    }
+    if (havePlaneTable) {
+        j["planeMapTempTable"] = planeTable.toJson();
+    }
+
     if (!writeJson(outPath, j)) {
         spdlog::error("cannot write output: {}", outPath);
         return 1;
     }
-    spdlog::info("laser_calib (6.2-d partial) -> {}", outPath);
-    return 0;
+
+    int exitCode = 0;
+    if (!haveVirtualPose || !haveLaserExtrin || !havePlaneTable) {
+        spdlog::warn("pipeline incomplete: virtualPose={} laserExtrin={} planeTable={}",
+                     haveVirtualPose, haveLaserExtrin, havePlaneTable);
+        exitCode = 1;  // 部分完成, 但精度/质量不足; 不写半成品被约定为退出 1
+    }
+    spdlog::info("laser_calib (6.2-e) -> {} (exit={})", outPath, exitCode);
+    return exitCode;
 }
