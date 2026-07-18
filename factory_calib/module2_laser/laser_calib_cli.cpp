@@ -1,7 +1,7 @@
 // laser_calib_cli.cpp — 模块2 激光标定 CLI（Task 6.2 分阶段实现）
 //
-// 当前进度: 6.2-c (4-1~4-8 完成 + host 端 3D 点累积)
-//   后续: 6.2-d (4-9~4-11) / 6.2-e (5-3 + 4-13)
+// 当前进度: 6.2-d (4-1~4-11 完成; 4-9 endpoint + 4-10 vcp + 4-11 pose_optimize)
+//   后续: 6.2-e (5-3 laser_extrinsic_compensate + 4-13 plane_map_temp_table + 写 JSON)
 //
 // 设计依据: docs/plans/2026-07-18-factory-calib-impl.md Task 6.2 Step 0
 // 算子签名以 Step 0.1 速查表为准；原 Step 1 伪代码禁止照抄。
@@ -16,6 +16,9 @@
 #include "epipolar_interp_cuda.h"
 #include "laser_match_cuda.h"
 #include "laser_reconstruct_cuda.h"
+#include "endpoint_extract_cuda.h"
+#include "virtual_camera_pose_cuda.h"
+#include "pose_optimize_cuda.h"
 
 #include <opencv2/core/cuda.hpp>
 #include <spdlog/spdlog.h>
@@ -36,7 +39,7 @@ int main(int argc, char** argv) {
     std::string inDir = argv[1];
     std::string outPath = argc >= 3 ? argv[2] : "laser_calib.json";
 
-    spdlog::info("=== laser_calib (build 6.2-c) ===");
+    spdlog::info("=== laser_calib (build 6.2-d) ===");
 
     // ------------------------------------------------------------------
     // 1. 加载输入 + 一致性校验
@@ -139,6 +142,33 @@ int main(int argc, char** argv) {
     reconParams.deviceId  = cfg.deviceId;
     LaserReconstructCuda reconOp(reconParams);
     spdlog::info("4-8 LaserReconstructCuda constructed (Q per-call from handoff.Q)");
+
+    // ----- 4-9 EndpointExtract -----
+    EndpointExtractParams epParams;
+    epParams.deviceId = cfg.deviceId;
+    EndpointExtractCuda endpointOp(epParams);
+    spdlog::info("4-9 EndpointExtractCuda constructed");
+
+    // ----- 4-10 VirtualCameraPose -----
+    VirtualCameraPoseParams vcpParams;
+    vcpParams.deviceId = cfg.deviceId;
+    VirtualCameraPoseCuda vcpOp(vcpParams);
+    spdlog::info("4-10 VirtualCameraPoseCuda constructed");
+
+    // ----- 4-11 PoseOptimize -----
+    PoseOptimizeParams poParams;
+    poParams.deviceId = cfg.deviceId;
+    PoseOptimizeCuda poseOptOp(poParams);
+    spdlog::info("4-11 PoseOptimizeCuda constructed");
+
+    // stereoK / stereoR 用 StereoCalibration helper (Step 0 决定 2):
+    // stereoK = P1 左上 3×3; stereoR = R (left<-right)
+    calib::StereoCalibration sc;
+    sc.P = h.P1;  // P1/P2 内参部分一致, stereoRectify 保证
+    sc.R = h.R;
+    cv::Matx33d stereoK = sc.stereoK();
+    cv::Matx33d stereoR = sc.stereoR();
+    spdlog::info("stereoK from handoff.P1, stereoR from handoff.R (Step 0 决定 2)");
 
     // ------------------------------------------------------------------
     // 3. 主循环: pose × tube, 跑 4-1 ~ 4-8 + host 累积
@@ -353,6 +383,66 @@ int main(int argc, char** argv) {
     }
 
     // ------------------------------------------------------------------
+    // 3c. 4-9 / 4-10 / 4-11 一次性执行（无 pose×tube 循环）
+    //     暂存 finalVirtualK/R/T 供 6.2-e 的 5-3 / 4-13 使用
+    // ------------------------------------------------------------------
+    cv::Matx33d finalVirtualK = cv::Matx33d::eye();
+    cv::Matx33d finalVirtualR = cv::Matx33d::eye();
+    cv::Vec3d   finalVirtualT(0, 0, 0);
+    bool haveVirtualPose = false;
+
+    if (host_points3d.empty()) {
+        spdlog::error("no accumulated 3D points; skip 4-9~4-13");
+    } else {
+        // ----- 4-9 endpoint_extract -----
+        // Execute(d_points3d, d_line_ids, stream) → d_endpoints, d_endpoint_ids, d_line_ids
+        auto endpointRes = endpointOp.Execute(d_all_pts3d, d_all_lids, stream);
+        if (!endpointRes.success) {
+            spdlog::error("4-9 endpoint_extract failed: {}", endpointRes.message);
+        } else {
+            spdlog::info("4-9 OK: {} endpoints, {} lines",
+                         endpointRes.numEndpoints, endpointRes.numLines);
+
+            // ----- 4-10 virtual_camera_pose -----
+            // Execute(d_endpoints, d_line_ids, Matx33d& stereoK, Matx33d& stereoR, stream)
+            if (!endpointRes.d_endpoints || !endpointRes.d_line_ids) {
+                spdlog::error("4-10 input null (endpoint d_endpoints/d_line_ids)");
+            } else {
+                auto vcpRes = vcpOp.Execute(*endpointRes.d_endpoints,
+                                            *endpointRes.d_line_ids,
+                                            stereoK, stereoR, stream);
+                if (!vcpRes.success) {
+                    spdlog::error("4-10 virtual_camera_pose failed: {}", vcpRes.message);
+                } else {
+                    spdlog::info("4-10 OK: virtualT=({:.3f},{:.3f},{:.3f}), "
+                                 "{} lines, fit_err={:.4f}",
+                                 vcpRes.virtualT[0], vcpRes.virtualT[1], vcpRes.virtualT[2],
+                                 vcpRes.numLines, vcpRes.avgLineFittingError);
+
+                    // ----- 4-11 pose_optimize -----
+                    // 决定 4: initialT 直接用 vcpRes.virtualT
+                    auto poseRes = poseOptOp.Execute(d_all_pts3d, d_all_lids,
+                                                     vcpRes.virtualK, vcpRes.virtualR,
+                                                     vcpRes.virtualT, stream);
+                    if (!poseRes.success) {
+                        spdlog::error("4-11 pose_optimize failed: {}", poseRes.message);
+                    } else {
+                        spdlog::info("4-11 OK: totalReprojErr={:.4f} "
+                                     "(initial={:.4f}), {} line curves",
+                                     poseRes.totalReprojectionError,
+                                     poseRes.initialReprojectionError,
+                                     poseRes.lineCurves.size());
+                        finalVirtualK = poseRes.virtualK;
+                        finalVirtualR = poseRes.virtualR;
+                        finalVirtualT = poseRes.virtualT;
+                        haveVirtualPose = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 4. 资源销毁 (算子规范要求析构前显式 Destroy)
     // ------------------------------------------------------------------
     maskL.Destroy();    maskR.Destroy();
@@ -363,21 +453,37 @@ int main(int argc, char** argv) {
     epipolarL.Destroy(); epipolarR.Destroy();
     matchOp.Destroy();
     reconOp.Destroy();
+    endpointOp.Destroy();
+    vcpOp.Destroy();
+    poseOptOp.Destroy();
 
     // ------------------------------------------------------------------
-    // 5. 6.2-c 占位输出 (后续 6.2-e 替换为真实 laser_calib.json)
+    // 5. 6.2-d 占位输出 (后续 6.2-e 替换为真实 laser_calib.json)
     // ------------------------------------------------------------------
     nlohmann::json j;
     j["schema"]  = "factory_calib.laser_calib.v1";
-    j["build"]   = "6.2-c-partial";
+    j["build"]   = "6.2-d-partial";
     j["posesProcessed"] = input->poseFrames.size();
     j["framesOk"]       = framesOk;
     j["framesSkipped"]  = framesSkip;
     j["accumulatedPoints3D"] = host_points3d.size();
+    j["haveVirtualPose"] = haveVirtualPose;
+    if (haveVirtualPose) {
+        auto matxToArray = [](const cv::Matx33d& m) {
+            return std::vector<double>{m(0,0),m(0,1),m(0,2),
+                                       m(1,0),m(1,1),m(1,2),
+                                       m(2,0),m(2,1),m(2,2)};
+        };
+        j["virtualK"] = matxToArray(finalVirtualK);
+        j["virtualR"] = matxToArray(finalVirtualR);
+        j["virtualT"] = std::vector<double>{finalVirtualT[0],
+                                            finalVirtualT[1],
+                                            finalVirtualT[2]};
+    }
     if (!writeJson(outPath, j)) {
         spdlog::error("cannot write output: {}", outPath);
         return 1;
     }
-    spdlog::info("laser_calib (6.2-c partial) -> {}", outPath);
+    spdlog::info("laser_calib (6.2-d partial) -> {}", outPath);
     return 0;
 }
