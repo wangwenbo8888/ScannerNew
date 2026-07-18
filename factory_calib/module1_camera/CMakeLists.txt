@@ -41,12 +41,17 @@ if(M1_SOURCES)
     endif()
 endif()
 
+# === 模块1 自有非算子源（chessboard_corner） ===
+add_library(fc1_chess STATIC chessboard_corner.cpp chessboard_corner.h)
+target_include_directories(fc1_chess PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(fc1_chess PUBLIC ${OpenCV_LIBS} spdlog::spdlog)
+
 # === camera_calib.exe ===
 add_executable(camera_calib camera_calib_cli.cpp)
 if(TARGET fc1_ops)
     target_link_libraries(camera_calib PRIVATE fc1_ops)
 endif()
-target_link_libraries(camera_calib PRIVATE ${OpenCV_LIBS} nlohmann_json::nlohmann_json spdlog::spdlog)
+target_link_libraries(camera_calib PRIVATE fc1_chess ${OpenCV_LIBS} nlohmann_json::nlohmann_json spdlog::spdlog)
 fc_deploy_crt(camera_calib)
 
 # === 测试 ===
@@ -54,7 +59,7 @@ if(FC_BUILD_TESTS)
     foreach(t ${M1_TESTS})
         get_filename_component(tname ${t} NAME_WE)
         add_executable(${tname} ${t})
-        target_link_libraries(${tname} PRIVATE fc1_ops GTest::gtest_main)
+        target_link_libraries(${tname} PRIVATE fc1_ops fc1_chess GTest::gtest_main)
         target_include_directories(${tname} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}                         # chessboard_corner.h
             ${CMAKE_CURRENT_SOURCE_DIR}/operators ${M1_INC_DIRS})
