@@ -14,24 +14,29 @@
 
 ## 进度日志（执行中维护）
 
-### ✅ 已完成（Phase 0-4，模块1 完整交付）
+### ✅ 已完成（Phase 0-5，模块1 完整 + 模块2 算子回归）
 
-分支 `feat/factory-calib`，HEAD `14d7a51`，13 commits。模块1（`module1_camera/camera_calib.exe`，纯 CPU）**Release 8/8 测试全绿**：
+分支 `feat/factory-calib`。模块1（`module1_camera/camera_calib.exe`，纯 CPU）**Release 8/8 测试全绿**：
 - Task 0.1-0.3：顶层 + 两模块 CMake（模块1 CPU / 模块2 CUDA 占位）
 - Task 1.1-1.3：拷贝 6 相机/温度算子 + 6/6 自测一次过
 - Task 2.1-2.3：`extractChessboardCorners` + `normalizeLRCornerOrder` TDD（7 单测）
 - Task 3.1-3.4：`calib_io`（读+写）+ `camera_calib_cli` 完整驱动 + e2e（合成棋盘 reproj **0.171px**，fx 恢复误差 <1）
 
-### ⏭ 待办（Phase 5-7，模块2 CUDA + 集成 + 文档，另开会话执行）
+模块2（`module2_laser/`，CUDA）**Debug 16/16 算子自测一次过**（56s，build_fc2 dir，debug OpenCV）：
+- Task 5.1：拷贝 `core/common` 11 个公共头（commit `a6ade08`）
+- Task 5.2：拷贝 15 个激光链算子（72 文件 / 18798 行，commit `b4b4847`）；`fc2_ops.lib` 编译通过；**nvcc 实测 v12.4.99**（pin v12.6 仍因无 FORCE 被覆盖，但能编译 + 测试绿，按经验 #4 接受）
+- Task 5.3：16 个 test_*.cpp（mask_extract 有 2 个）**Debug 全绿，无需任何 include/路径修复**
 
-从 **Task 5.1**（controller 直接拷贝 core/common 到 module2）开始。
+### ⏭ 待办（Phase 6-7，模块2 I/O + CLI + 集成 + 文档）
+
+从 **Task 6.1**（`calib_io` 读 config + 加载模块1 交接文件）开始。
 
 ### 🔑 执行中获取的关键经验（Phase 5-7 必读）
 
 1. **GitHub 被封** → 所有 configure 命令必须带 `-DJMW_GH_MIRROR=https://ghfast.top/`（FetchContent 否则超时）。
 2. **OpenCV Debug/Release CRT 匹配**：Release 用 `C:/opencv-cuda-4.13.0`（/MD），Debug 用 `C:/opencv-cuda-4.13.0-debug/x64/vc17/lib`（/MDd）。
-3. **Debug OpenCV 缺 imgcodecs**（自定义 debug 构建没带该组件，Release 有）。模块1/2 的 `calib_io.cpp` 用 `cv::imread` 需 imgcodecs → **Debug 构建会失败**。工厂工具交付物是 **Release**，Debug 限制记入 README。模块2 还需 debug OpenCV 的 cuda 组件（cudaimgproc 等），可能同样缺失 → 模块2 默认只验 Release。
-4. **nvcc pin 串味（Task 0.3 暴露，Task 5.2 必验）**：顶层 CMake 的 `set(CMAKE_CUDA_COMPILER "...v12.6..." CACHE FILEPATH ...)` **无 FORCE**，Task 0.3 配置时实际选了 **v12.4.99**（`Check for working CUDA compiler: .../v12.4/bin/nvcc.exe`）。Task 5.2 编译 .cu 时**必须验证实际调用的 nvcc 版本**：若仍是 v12.4 且能编译通过 + 测试绿，可接受（父工程同款代码 42/42 绿）；若失败，给 `set(CMAKE_CUDA_COMPILER ...)` 加 `FORCE` 或检查 PATH/CUDACXX 环境变量。
+3. **Debug OpenCV 缺 imgcodecs**（自定义 debug 构建没带该组件，Release 有），**但 CUDA 组件齐全**（cudaarithm/cudafilters/cudaimgproc 都有）。模块1/2 的 `calib_io.cpp` 用 `cv::imread` 需 imgcodecs → **calib_io 的 Debug 构建会失败**（Task 6.1 起需注意）。模块2 算子自测（Task 5.3）不用 imgcodecs → **Debug 全绿**（实测 16/16，无需切 Release）。工厂工具交付物是 **Release**，Debug 限制记入 README。
+4. **nvcc pin 串味（Task 0.3 + 5.2 实测确认）**：顶层 CMake 的 `set(CMAKE_CUDA_COMPILER "...v12.6..." CACHE FILEPATH ...)` **无 FORCE**，实际选了 **v12.4.99**（`Check for working CUDA compiler: .../v12.4/bin/nvcc.exe`）。Task 5.2 实测：v12.4.99 + 模块2 全部 .cu 编译通过 + 16/16 测试绿 → **按本经验接受 v12.4**，无需加 FORCE（与父工程同款代码 42/42 绿一致）。后续若新增 .cu 编译失败再考虑 FORCE。
 5. **算子签名必须读头验证，不能信计划草稿**：Task 3.3 发现 `ExtrinsicCalibCpuParams` **没有** `cameraMatrixL/distCoeffsL/cameraMatrixR/distCoeffsR` 字段（计划草稿臆测了），改用 `Execute(KL,DL,KR,DR)` 重载在调用点传 K/D。Task 6.2 激光链 13 算子同样要逐个读头确认构造/Execute 签名。
 6. **`findChessboardCornersSB` 角点顺序 call-history 依赖**（Task 2.2 实测）：同一图在不同调用历史下返回相反起始角。→ 任何测试/代码**不能假设 `corners[0]` 是左上**；用 `min(x+y)` 找左上。`normalizeLRCornerOrder` 只处理全局翻转（TL↔BR），不处理 transpose；完整规范化 + 极线校验延后（设计 §7 风险#2）。
 7. **e2e 合成棋盘必须用 `projectPoints` 显式 K_gt 合成**（Task 3.4 实测）：任意透视四边形的多个单应矩阵不共享单一 K，违反 Zhang 正交性约束，reproj 卡在 ~1.0px。改用 `cv::projectPoints`（已知 K_gt/D=0/多姿态 rvec/tvec）生成 dstQuad → warpPerspective，reproj 降到 0.171px。模块2 若需合成数据，同样要保证多帧标定约束自洽。
