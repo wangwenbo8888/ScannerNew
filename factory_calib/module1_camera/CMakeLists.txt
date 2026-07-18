@@ -6,13 +6,14 @@ find_package(Eigen3 3.4 REQUIRED)
 
 # === 收集算子源 ===
 file(GLOB_RECURSE M1_OP_CPP "${CMAKE_CURRENT_SOURCE_DIR}/operators/*.cpp")
+file(GLOB_RECURSE M1_TESTS_CPP "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 file(GLOB_RECURSE M1_OP_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/operators/*.h")
 set(M1_SOURCES "")
 set(M1_TESTS "")
-foreach(f ${M1_OP_CPP})
-    if(f MATCHES "/tests/test_[^/]*\\.cpp$")
+foreach(f ${M1_OP_CPP} ${M1_TESTS_CPP})
+    if(f MATCHES "tests[\\\\/]test_[^/\\\\]*\\.cpp$")
         list(APPEND M1_TESTS ${f})
-    elseif(f MATCHES "/tests/")
+    elseif(f MATCHES "tests[\\\\/]")
         # 跳过 tests 目录内非 test_ 文件
     else()
         list(APPEND M1_SOURCES ${f})
@@ -55,6 +56,7 @@ if(FC_BUILD_TESTS)
         add_executable(${tname} ${t})
         target_link_libraries(${tname} PRIVATE fc1_ops GTest::gtest_main)
         target_include_directories(${tname} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}                         # chessboard_corner.h
             ${CMAKE_CURRENT_SOURCE_DIR}/operators ${M1_INC_DIRS})
         target_compile_definitions(${tname} PRIVATE WITH_CUDA_TESTS=0)
         if(MSVC)
