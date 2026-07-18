@@ -3,6 +3,9 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
 
+#include <algorithm>
+#include <cmath>
+
 #include "chessboard_corner.h"
 
 using namespace fc;
@@ -54,7 +57,14 @@ TEST(ChessboardCorner, SubpixBetterThanPixel) {
     p.patternSize = cv::Size(squaresX - 1, squaresY - 1);
     ChessboardCornerResult r;
     ASSERT_TRUE(extractChessboardCorners(gray, p, r));
-    // 第一个角点应在 (margin, margin)
-    EXPECT_NEAR(r.corners[0].x, margin, 0.5);
-    EXPECT_NEAR(r.corners[0].y, margin, 0.5);
+    // OpenCV cornerSubPix 用像素中心约定：cv::Rect 整数坐标绘制的棋盘，其 4 格交汇
+    // 内角点的亚像素坐标为 (margin + squarePx - 0.5, ...)（相对板外角 margin 的 -0.5 偏移）。
+    const float expectedX = static_cast<float>(margin + squarePx) - 0.5f;
+    const float expectedY = static_cast<float>(margin + squarePx) - 0.5f;
+    // SB 的起始角不保证左上先出 → 在集合里找 min(x+y) 的点（即左上内角点）
+    auto best = std::min_element(r.corners.begin(), r.corners.end(),
+        [](const cv::Point2f& a, const cv::Point2f& b) { return (a.x + a.y) < (b.x + b.y); });
+    ASSERT_NE(best, r.corners.end());
+    EXPECT_NEAR(best->x, expectedX, 0.5);
+    EXPECT_NEAR(best->y, expectedY, 0.5);
 }
