@@ -46,12 +46,14 @@ add_library(fc1_chess STATIC chessboard_corner.cpp chessboard_corner.h)
 target_include_directories(fc1_chess PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fc1_chess PUBLIC ${OpenCV_LIBS} spdlog::spdlog)
 
+# === 模块1 I/O（calib_io 读 config/温度/图像 + 写交接 json） ===
+add_library(fc1_io STATIC calib_io.cpp calib_io.h)
+target_include_directories(fc1_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(fc1_io PUBLIC fc1_ops ${OpenCV_LIBS} nlohmann_json::nlohmann_json spdlog::spdlog)
+
 # === camera_calib.exe ===
 add_executable(camera_calib camera_calib_cli.cpp)
-if(TARGET fc1_ops)
-    target_link_libraries(camera_calib PRIVATE fc1_ops)
-endif()
-target_link_libraries(camera_calib PRIVATE fc1_chess ${OpenCV_LIBS} nlohmann_json::nlohmann_json spdlog::spdlog)
+target_link_libraries(camera_calib PRIVATE fc1_ops fc1_chess fc1_io ${OpenCV_LIBS} nlohmann_json::nlohmann_json spdlog::spdlog)
 fc_deploy_crt(camera_calib)
 
 # === 测试 ===
