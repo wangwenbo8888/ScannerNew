@@ -68,3 +68,56 @@ TEST(ChessboardCorner, SubpixBetterThanPixel) {
     EXPECT_NEAR(best->x, expectedX, 0.5);
     EXPECT_NEAR(best->y, expectedY, 0.5);
 }
+
+// ---- normalizeLRCornerOrder 单测（确定性，不依赖 SB）----
+
+namespace {
+// 构造一个已知走向的角点集：网格 cols×rows，从 (x0,y0) 起，步长 step
+ChessboardCornerResult makeGridResult(int cols, int rows, float x0, float y0,
+                                      float stepX, float stepY) {
+    ChessboardCornerResult r;
+    r.found = true;
+    for (int row = 0; row < rows; ++row)
+        for (int col = 0; col < cols; ++col)
+            r.corners.emplace_back(x0 + col * stepX, y0 + row * stepY);
+    return r;
+}
+} // namespace
+
+TEST(NormalizeLRCornerOrder, SameDirectionNoChange) {
+    // L 和 R 同向（都从左上往右下扫描）
+    auto L = makeGridResult(4, 3, 10.f, 10.f, 5.f, 5.f);
+    auto R = makeGridResult(4, 3, 20.f, 10.f, 5.f, 5.f);  // 基线偏移，同向
+    auto R0 = R.corners[0];   // 记录原第一个
+    EXPECT_TRUE(normalizeLRCornerOrder(L, R));
+    // 同向 → 不应翻转，R[0] 不变
+    EXPECT_EQ(R.corners[0].x, R0.x);
+    EXPECT_EQ(R.corners[0].y, R0.y);
+}
+
+TEST(NormalizeLRCornerOrder, OppositeDirectionGetsReversed) {
+    // L 从左上往右下，R 从右下往左上（逆序）
+    auto L = makeGridResult(4, 3, 10.f, 10.f, 5.f, 5.f);
+    auto R = makeGridResult(4, 3, 20.f, 10.f, 5.f, 5.f);
+    std::reverse(R.corners.begin(), R.corners.end());   // 造一个反向 R
+    auto Rlast_before = R.corners[0];   // 反向后第一个 = 原最后那个
+    EXPECT_TRUE(normalizeLRCornerOrder(L, R));
+    // 反向 → 应被翻转回来：现在 R[0] 应接近原 L[0] 方向（右上角那个的对面）
+    // 校验：翻转后 R[0] 是 R 里 min(x+y) 的点（左上）
+    auto best = std::min_element(R.corners.begin(), R.corners.end(),
+        [](const cv::Point2f& a, const cv::Point2f& b){ return (a.x+a.y)<(b.x+b.y); });
+    EXPECT_NEAR(R.corners[0].x, best->x, 1e-6);
+    EXPECT_NEAR(R.corners[0].y, best->y, 1e-6);
+}
+
+TEST(NormalizeLRCornerOrder, RejectsSizeMismatch) {
+    auto L = makeGridResult(4, 3, 10.f, 10.f, 5.f, 5.f);
+    auto R = makeGridResult(3, 3, 20.f, 10.f, 5.f, 5.f);  // 不同大小
+    EXPECT_FALSE(normalizeLRCornerOrder(L, R));
+}
+
+TEST(NormalizeLRCornerOrder, RejectsNotFound) {
+    auto L = makeGridResult(4, 3, 10.f, 10.f, 5.f, 5.f);
+    ChessboardCornerResult R;  // found=false 默认
+    EXPECT_FALSE(normalizeLRCornerOrder(L, R));
+}
