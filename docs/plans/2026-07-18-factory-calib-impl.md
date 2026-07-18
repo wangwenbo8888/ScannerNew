@@ -12,6 +12,63 @@
 
 ---
 
+## 进度日志（执行中维护）
+
+### ✅ 已完成（Phase 0-7，全部 Task 完成）
+
+分支 `feat/factory-calib`。模块1（`module1_camera/camera_calib.exe`，纯 CPU）**Release 8/8 测试全绿**：
+- Task 0.1-0.3：顶层 + 两模块 CMake（模块1 CPU / 模块2 CUDA 占位）
+- Task 1.1-1.3：拷贝 6 相机/温度算子 + 6/6 自测一次过
+- Task 2.1-2.3：`extractChessboardCorners` + `normalizeLRCornerOrder` TDD（7 单测）
+- Task 3.1-3.4：`calib_io`（读+写）+ `camera_calib_cli` 完整驱动 + e2e（合成棋盘 reproj **0.171px**，fx 恢复误差 <1）
+
+模块2（`module2_laser/`，CUDA）**Debug 16/16 算子自测一次过**（56s，build_fc2 dir，debug OpenCV）：
+- Task 5.1：拷贝 `core/common` 11 个公共头（commit `a6ade08`）
+- Task 5.2：拷贝 15 个激光链算子（72 文件 / 18798 行，commit `b4b4847`）；`fc2_ops.lib` 编译通过；**nvcc 实测 v12.4.99**（pin v12.6 仍因无 FORCE 被覆盖，但能编译 + 测试绿，按经验 #4 接受）
+- Task 5.3：16 个 test_*.cpp（mask_extract 有 2 个）**Debug 全绿，无需任何 include/路径修复**
+
+模块2 I/O + CLI + 集成 + 文档（Phase 6-7）：
+- Task 6.1：`calib_io.h/.cpp`（`LaserCalibConfig` + `CameraCalibHandoff` + `loadLaserInput` + `validateHandoffConsistency`），`fc2_io` lib，Release 构建（Debug 缺 imgcodecs 跳过，经验 #3 实测修订）（commit `8e203de`）
+- **Task 6.2 Step 0 实施小节**（commit `7466719`）：13 算子签名速查表 + 数据流图 + 5 设计决定 + 5 提交组编译策略 + 禁止照抄清单（原 Step 1 伪代码 6 处错误）
+- Task 6.2 五个提交组（commit `2c2e835`/`801ab2d`/`9541ba3`/`fea411f`/`aa45210`）：
+  - 6.2-a: 4-1 mask + 4-2 ccl + 4-3 label + 主循环 + imgcodecs 探测修订
+  - 6.2-b: 4-4 steger + 4-5 undistort + 4-6 epipolar
+  - 6.2-c: 4-7 match + 4-8 reconstruct + host 累积（决定 1）
+  - 6.2-d: 4-9 endpoint + 4-10 vcp + 4-11 pose_optimize（决定 2/4）
+  - 6.2-e: 5-3 laser_extrinsic + 4-13 plane_map_temp_table（决定 3/5）+ 真实 JSON
+- Task 6.3：e2e 冒烟测试（合成全黑图 + 最小 handoff，2 case：SmokeDoesNotCrash + MissingHandoffGracefulExit）（commit `ee3dd6d`）
+- Task 7.1：handoff schema 测试 7 case（含 PrefersIntrinsicNodeOverExtrinsic 关键路径校验）（commit `688fc17`）
+- Task 7.2：README 补全（前置依赖 + 构建 + 输入输出 + 运行 + 5 已知限制 + 测试覆盖矩阵）（commit `855939f`）
+- Task 7.3：双模块 Release 全量回归（build_fc1_rel 8/8 + build_fc2_rel 18/18 = **26/26 全绿**，528s 含 plane_map_temp_table 515s）
+
+### 🎯 验证清单状态（计划末尾的"全程对照"）
+
+- [x] 模块1 6 算子自测绿（Task 1.3）
+- [x] chessboard 5 测试绿（Task 2.3）
+- [x] 模块1 e2e 绿 + 内参误差 < 2%（Task 3.4，实测 0.171px）
+- [x] 模块1 Debug + Release 双绿（Task 4.1）
+- [x] 模块2 15 算子自测绿（Task 5.3，Debug 16/16）
+- [x] 模块2 e2e 或冒烟绿（Task 6.3，2 case 冒烟绿）
+- [x] 交接 schema 测试绿（Task 7.1，7 case）
+- [x] 双模块全量 Release 绿（Task 7.3，**26/26**）
+- [x] README 完整（Task 7.2）
+- [x] 全程未引用 `../../framework/`、`../../modules/`（自包含边界）
+- [ ] 双模块全量 Debug 绿（**不可达**：经验 #3，Debug OpenCV 缺 imgcodecs；模块1/2 CLI Release-only，算子自测 Debug 仍可跑）
+
+### ⏭ 待办（无；Task 7.4 工程地图/AGENTS 收录为可选，未做）
+
+### 🔑 执行中获取的关键经验（Phase 5-7 必读）
+
+1. **GitHub 被封** → 所有 configure 命令必须带 `-DJMW_GH_MIRROR=https://ghfast.top/`（FetchContent 否则超时）。
+2. **OpenCV Debug/Release CRT 匹配**：Release 用 `C:/opencv-cuda-4.13.0`（/MD），Debug 用 `C:/opencv-cuda-4.13.0-debug/x64/vc17/lib`（/MDd）。
+3. **Debug OpenCV 缺 imgcodecs**（自定义 debug 构建没带该组件，Release 有），**但 CUDA 组件齐全**（cudaarithm/cudafilters/cudaimgproc 都有）。模块1/2 的 `calib_io.cpp` 用 `cv::imread` 需 imgcodecs → **calib_io 的 Debug 构建会失败**（Task 6.1 起需注意）。模块2 算子自测（Task 5.3）不用 imgcodecs → **Debug 全绿**（实测 16/16，无需切 Release）。工厂工具交付物是 **Release**，Debug 限制记入 README。
+4. **nvcc pin 串味（Task 0.3 + 5.2 实测确认）**：顶层 CMake 的 `set(CMAKE_CUDA_COMPILER "...v12.6..." CACHE FILEPATH ...)` **无 FORCE**，实际选了 **v12.4.99**（`Check for working CUDA compiler: .../v12.4/bin/nvcc.exe`）。Task 5.2 实测：v12.4.99 + 模块2 全部 .cu 编译通过 + 16/16 测试绿 → **按本经验接受 v12.4**，无需加 FORCE（与父工程同款代码 42/42 绿一致）。后续若新增 .cu 编译失败再考虑 FORCE。
+5. **算子签名必须读头验证，不能信计划草稿**：Task 3.3 发现 `ExtrinsicCalibCpuParams` **没有** `cameraMatrixL/distCoeffsL/cameraMatrixR/distCoeffsR` 字段（计划草稿臆测了），改用 `Execute(KL,DL,KR,DR)` 重载在调用点传 K/D。Task 6.2 激光链 13 算子同样要逐个读头确认构造/Execute 签名。
+6. **`findChessboardCornersSB` 角点顺序 call-history 依赖**（Task 2.2 实测）：同一图在不同调用历史下返回相反起始角。→ 任何测试/代码**不能假设 `corners[0]` 是左上**；用 `min(x+y)` 找左上。`normalizeLRCornerOrder` 只处理全局翻转（TL↔BR），不处理 transpose；完整规范化 + 极线校验延后（设计 §7 风险#2）。
+7. **e2e 合成棋盘必须用 `projectPoints` 显式 K_gt 合成**（Task 3.4 实测）：任意透视四边形的多个单应矩阵不共享单一 K，违反 Zhang 正交性约束，reproj 卡在 ~1.0px。改用 `cv::projectPoints`（已知 K_gt/D=0/多姿态 rvec/tvec）生成 dstQuad → warpPerspective，reproj 降到 0.171px。模块2 若需合成数据，同样要保证多帧标定约束自洽。
+
+---
+
 ## 全局约定（每个任务都要遵守）
 
 - **工作目录**: 所有相对路径以工程根 `E:\JEAMMWARE260705\` 为基准。
@@ -1658,9 +1715,176 @@ git commit -m "feat(factory_calib/m2): calib_io 读 config/handoff/姿态目录 
 **Files:**
 - Modify: `factory_calib/module2_laser/laser_calib_cli.cpp`
 
+**Step 0: 实施设计（2026-07-18 前置核对，执行前必读）**
+
+> **本 Step 是经验 #5（"算子签名必须读头验证，不能信计划草稿"）在 Task 6.2 的具体化。** 已读完 13 算子对外头 + 主工程 `plane_map_temp_table.cpp:255-337` + `common/calib_types.h` + `virtual_pixel_gen.h`，确认原 Step 1 伪代码（line 1696 起）有多处错误，**禁止照抄**。
+
+**0.1 算子签名速查（仅列主重载，均存在无 stream 的兼容重载）**
+
+| # | 算子类 | Execute 主签名 | Result 关键 GPU 字段 |
+|---|---|---|---|
+| 4-1 | `MaskExtractCUDA` | `(const cv::Mat& gray, Stream&)` | `d_grayImage`, `d_cleanedMask` (CV_8UC1) |
+| 4-2 | `RegionAnalyzerCUDA` | `(shared_ptr<GpuMat>& d_mask, Stream&)` | `d_labeledMask` (CV_32SC1), `components` |
+| 4-3 | `LaserLabelerCUDA` | `(const GpuMat& d_inputMask, Stream&)` | `d_labeledMask` (重编号 CV_32SC1) |
+| 4-4 | `StegerExtractorCUDA` | **`(d_gray, d_mask, Stream&, GroupMode)`**（ByLabel 走此重载）| `d_centerPoints` (CV_32FC2), `d_line_ids` (CV_32SC1) |
+| 4-5 | `UndistortPointsCuda` | `(d_points, d_line_ids, Stream&)` | `d_rectifiedPoints`, `d_line_ids` |
+| 4-6 | `EpipolarInterpCuda` | `(d_points, d_line_ids, Stream&)` | `d_interpPoints`, `d_interp_line_ids` |
+| 4-7 | `LaserMatchCuda` | `(d_left_pts, d_left_ids, d_right_pts, d_right_ids, Stream&)` | `d_matched_left/right/line_ids` |
+| 4-8 | `LaserReconstructCuda` | `(d_matched_left, d_matched_right, d_matched_line_ids, **const cv::Mat& Q**, Stream&)` | `d_points3d` (CV_32FC3), `d_valid_line_ids` |
+| 4-9 | `EndpointExtractCuda` | `(d_points3d, d_line_ids, Stream&)` | `d_endpoints`, `d_endpoint_ids`, `d_line_ids` |
+| 4-10 | `VirtualCameraPoseCuda` | `(d_endpoints, d_line_ids, **Matx33d& stereoK, Matx33d& stereoR**, Stream&)` | `virtualK/R/T` (host Matx/Vec) |
+| 4-11 | `PoseOptimizeCuda` | `(d_points, d_line_ids, virtualK, virtualR, **Vec3d& initialT**, Stream&)` | `virtualK/R/T`, `initialT`, `lineCurves` |
+| 4-13 | `PlaneMapTempTable` | **`Execute()` 无参**（参数全在 SetParams/构造期）| `table[]` |
+| 5-3 | `LaserExtrinsicCompensateCPU` | `(const CameraExtrinsics& v2l, const CameraExtrinsics& v2r)` | `leftResult`, `rightResult` |
+
+**4-12 (PlaneMapCuda) 不独立调用** — 已含于 4-13 内部（见决定 5）。`VirtualPixelGenerator` 也由 4-13 内部调用，CLI 不显式调。
+
+**0.2 数据流（host/device 边界 + L/R 两路）**
+
+```
+每帧 (pose, tube):
+  L 路: 4-1L(gray_L)─► d_grayL, d_cleanedMaskL ─► 4-2 ─► d_labeledMaskL ─► 4-3 ─► d_labeledMaskL'
+        ─► 4-4(d_grayL, d_labeledMaskL', ByLabel) ─► d_centerPtsL, d_lineIdsL
+        ─► 4-5(d_centerPtsL, d_lineIdsL; K=K_L, D=D_L, R=R1, P=P1) ─► d_rectPtsL
+        ─► 4-6(d_rectPtsL, d_lineIdsL; lineIdCheck=true) ─► d_interpPtsL, d_interpIdsL
+  R 路: 同上，参数用 K_R/D_R/R2/P2  ─► d_interpPtsR, d_interpIdsR
+  合并: 4-7(d_interpPtsL, d_interpIdsL, d_interpPtsR, d_interpIdsR)
+          ─► d_matched_left, d_matched_right, d_matched_line_ids
+        4-8(..., Q=handoff.Q) ─► d_points3d, d_valid_line_ids
+        【download 到 host 累积】
+
+循环末: 统一 upload → d_all_points3d, d_all_line_ids
+  4-9  ─► d_endpoints, d_endpoint_ids, d_line_ids
+  4-10(stereoK=handoff.P1 的左上 3×3, stereoR=handoff.R) ─► virtualK/R/T
+  4-11(d_all_points3d, d_all_line_ids, virtualK, virtualR, initialT=4-10.virtualT) ─► optimized virtualK/R/T
+  5-3(virtual→L, virtual→R=合成) ─► LaserExtrinsicCompensateCPUResult
+  4-13(SetParams 一次, Execute() 无参, 内部含 4-12 + virtual_pixel_gen) ─► PlaneMapTempTableResult
+  写 laser_calib.json
+```
+
+**0.3 五个设计决定**
+
+**决定 1 — 多帧累积用 host 端 vector**（不用 GPU vconcat）
+
+```cpp
+std::vector<cv::Vec3f> host_points3d;
+std::vector<int>       host_line_ids;
+// 每帧 4-8 完成后:
+cv::Mat h_pts, h_ids;
+reconRes.d_points3d->download(h_pts);
+reconRes.d_valid_line_ids->download(h_ids);
+host_points3d.insert(host_points3d.end(), h_pts.begin<cv::Vec3f>(), h_pts.end<cv::Vec3f>());
+host_line_ids.insert(host_line_ids.end(), h_ids.begin<int>(), h_ids.end<int>());
+// 循环结束统一 upload:
+cv::Mat d3d(1, (int)host_points3d.size(), CV_32FC3, host_points3d.data());
+cv::Mat lids(1, (int)host_line_ids.size(), CV_32SC1, host_line_ids.data());
+cv::cuda::GpuMat d_all_pts3d, d_all_lids;
+d_all_pts3d.upload(d3d); d_all_lids.upload(lids);
+```
+
+理由：GPU vconcat 涉及多 stream 同步 + 临时缓冲，远比 host 累积复杂；每帧 ~1k-10k 点，100 帧也只是百万级 Vec3f，host 累积无性能问题。
+
+**决定 2 — stereoK / stereoR 用 StereoCalibration 自带 helper**
+
+`common/calib_types.h:82-100` 已提供 `stereoK()`（=P 左上 3×3）/ `stereoR()`（=R）：
+
+```cpp
+calib::StereoCalibration sc;
+sc.P = handoff.P1;   // P1/P2 内参部分一致，stereoRectify 保证
+sc.R = handoff.R;
+cv::Matx33d stereoK = sc.stereoK();
+cv::Matx33d stereoR = sc.stereoR();
+```
+
+避免手写 `P.at<double>(i,j)` 易错。
+
+**决定 3 — virtual→R 外参合成**（4-10 只输出 virtual→L）
+
+模块1 给 R_stereo (left←right) + T_stereo；4-10/4-11 输出 virtual→L。链式复合：
+
+```
+R_v2r = R_stereo · R_v2l
+T_v2r = R_stereo · T_v2l + T_stereo
+```
+
+```cpp
+cv::Vec3d T_stereo;
+for (int i=0;i<3;++i) T_stereo(i) = handoff.T.at<double>(i);
+cv::Matx33d R_v2r = stereoR * poseRes.virtualR;
+cv::Vec3d   T_v2r = stereoR * poseRes.virtualT + T_stereo;
+// 填 CameraExtrinsics:
+calib::CameraExtrinsics v2l, v2r;
+for (int i=0;i<9;++i) v2l.R[i] = poseRes.virtualR.val[i];
+for (int i=0;i<3;++i) v2l.T[i] = poseRes.virtualT.val[i];
+v2l.referenceTemp = cfg.referenceTemp;
+for (int i=0;i<9;++i) v2r.R[i] = R_v2r.val[i];
+for (int i=0;i<3;++i) v2r.T[i] = T_v2r.val[i];
+v2r.referenceTemp = cfg.referenceTemp;
+```
+
+**决定 4 — 4-11 initialT 直接用 4-10 的 virtualT**
+
+`PoseOptimizeResult.initialT` 字段语义是"输入初值"，无需另算：
+
+```cpp
+auto poseRes = poseOpt.Execute(d_all_pts3d, d_all_lids,
+                               vcpRes.virtualK, vcpRes.virtualR,
+                               vcpRes.virtualT, stream);
+```
+
+**决定 5 — 只调 4-13，跳过独立 4-12**
+
+实测 `plane_map_temp_table.cpp:255-337` Execute() 内部已：
+1. 构造 `PlaneMapCuda planeMap(pmParams)`
+2. 构造 `VirtualPixelGenerator pixelGen(vpgParams)`，调 `pixelGen.Execute(virtualK, imageSize, lineIds)` → `d_virtual_pixels`
+3. 按温度循环：补偿 K/T → stereoRectify → `planeMap.Execute(d_virtual_pixels, virtualK, virtualR, virtualTc, calib)`
+
+CLI 直接：
+
+```cpp
+calib::PlaneMapTempTableParams pmtt;
+pmtt.cameraMatrixL = handoff.cameraMatrixL; pmtt.distCoeffsL = handoff.distCoeffsL;
+pmtt.cameraMatrixR = handoff.cameraMatrixR; pmtt.distCoeffsR = handoff.distCoeffsR;
+pmtt.imageSize = handoff.imageSize;
+pmtt.R = handoff.R; pmtt.T = handoff.T;
+pmtt.virtualK = poseRes.virtualK; pmtt.virtualR = poseRes.virtualR; pmtt.virtualT = poseRes.virtualT;
+pmtt.lineIds = cfg.lineIds;     // 若空，由 poseRes.lineCurves 反推
+pmtt.referenceTemp = cfg.referenceTemp; pmtt.cte = cfg.cte;
+pmtt.tempStep = cfg.tempStep; pmtt.tempRangeMin = cfg.tempRangeMin; pmtt.tempRangeMax = cfg.tempRangeMax;
+pmtt.alpha = cfg.rectifyAlpha; pmtt.flags = cfg.rectifyFlags;
+pmtt.deviceId = cfg.deviceId; pmtt.gridStep = cfg.gridStep;
+pmtt.depthMin = cfg.depthMin; pmtt.depthMax = cfg.depthMax;
+pmtt.depthSamples = cfg.depthSamples; pmtt.epipolarStep = cfg.epipolarStep;
+calib::PlaneMapTempTable pmttOp(pmtt);
+auto planeTable = pmttOp.Execute();
+```
+
+**0.4 编译策略 — 边填边编译，5 个提交组**
+
+`cmake --build build_fc2_rel --config Release --target laser_calib`
+
+| 提交组 | 范围 | 验证点 |
+|---|---|---|
+| 6.2-a | 4-1L/R + 4-2 + 4-3（mask→CCL→label）| 编译过；空数据不崩 |
+| 6.2-b | 4-4 + 4-5 + 4-6（steger→undistort→epipolar）| 编译过 |
+| 6.2-c | 4-7 + 4-8 + host 累积（match→reconstruct）| 编译过；单 pose 跑通累积 |
+| 6.2-d | 4-9 + 4-10 + 4-11（endpoint→vcp→pose_optimize）| 编译过 |
+| 6.2-e | 5-3 + 4-13 + 写 JSON | 完整跑通（精度由 6.3 e2e 验） |
+
+**0.5 与原 Step 1 伪代码的差异（禁止照抄清单）**
+
+- "4-4 steger (ByLabel, lineIdCheck)" → steger **无** `lineIdCheck`（那是 epipolar 的）；ByLabel 是 `GroupMode` 枚举，走 steger 第 3 重载
+- 独立调 `PlaneMapCuda` → 已含于 4-13 内部，CLI 不再独立调
+- `PlaneMapTempTable.Execute(args...)` → 实际 `Execute()` 无参
+- 缺失 `VirtualPixelGenerator` 前置 → 由 4-13 内部处理
+- 缺失多帧 d_points3d 累积 → 按决定 1 实现
+- steger → undistort 衔接走 **GPU**（d_centerPoints），不能用 host `centerPoints`
+
+---
+
 **Step 1: 写 main（驱动激光链 4-1~4-13）**
 
-> 结构：外层 pose×tube 循环跑 4-1~4-8 累积 d_points3d；循环结束后 4-9~4-13 一次性执行；最后写 laser_calib.json。各算子的 Params 从 handoff + config 填充。
+> ⚠ **本 Step 后面的伪代码（line 1696 起）是计划草稿，存在多处错误，禁止照抄。** 按 Step 0 的速查表 + 数据流 + 5 个决定填实。原伪代码仅保留作"流程意图参考"。
 
 ```cpp
 #include "calib_io.h"
