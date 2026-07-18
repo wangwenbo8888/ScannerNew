@@ -13,7 +13,7 @@ cmake --build build --config Debug
 $env:PATH = 'C:\opencv-cuda-4.13.0-debug\x64\vc17\bin;' + $env:PATH   # Debug OpenCV 运行期
 ctest --test-dir build -C Debug --output-on-failure
 ```
-**Release（需另建独立目录，不与 Debug 串味）**：
+**Release（独立目录 `build-rel/`，实测 42/42 绿；勿在 `build/` 跑，会报 `MSB8013`）**：
 ```powershell
 cmake -S . -B build-rel -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES=Release
 cmake --build build-rel --config Release
@@ -27,4 +27,4 @@ ctest --test-dir build-rel -C Release --output-on-failure
 - 命名空间：framework 层 `Scanner::`（+ 子空间 algorithm/crosscut/data/hal/infra/service/ui/workflow）；迁移算子（`modules/09_operatorlib`，原 3DSCANNER）保留 `calib::`
 
 ## 现状
-骨架阶段：framework 层契约桩 + 9 个业务模块空桩。**已迁入实现**：`09_operatorlib`（core/calibration/scanning 全部算子，单库 `mod_operatorlib`，Debug ctest 42/42 绿）、`03_rendering`（display 渲染组件：scanner_viewer / laser_cloud_renderer / marker_cloud_renderer + point_expand_kernel，并入 `mod_rendering`，依赖 OSG + CUDA-GL interop）。算子规范见 `算子规范.md`，逐算子说明见 `docs/算子说明文档/`，目录地图见 `工程目录地图.md`，**开发计划与进程跟踪见 `开发计划与进程跟踪.md`**。其余各层实现待后续（见设计稿 §8）。
+骨架阶段：framework 层契约桩 + 9 个业务模块空桩。**已迁入实现**：`09_operatorlib`（core/calibration/scanning 全部算子，单库 `mod_operatorlib`，Debug+Release ctest 均 42/42 绿）、`03_rendering`（display 渲染组件：scanner_viewer / laser_cloud_renderer / marker_cloud_renderer + point_expand_kernel，并入 `mod_rendering`，依赖 OSG + CUDA-GL interop）。算子规范见 `算子规范.md`，逐算子说明见 `docs/算子说明文档/`，目录地图见 `工程目录地图.md`，**开发计划与进程跟踪见 `开发计划与进程跟踪.md`**。其余各层实现待后续（见设计稿 §8）。
