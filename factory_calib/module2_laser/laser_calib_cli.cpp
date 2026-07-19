@@ -29,6 +29,8 @@
 
 #include <iostream>
 #include <string>
+#include <set>
+#include <exception>
 
 using namespace fc;
 using namespace calib;
@@ -43,6 +45,10 @@ int main(int argc, char** argv) {
     std::string outPath = argc >= 3 ? argv[2] : "laser_calib.json";
 
     spdlog::info("=== laser_calib (build 6.2-e final) ===");
+
+    // review C1/I3 防御: main 顶层 try/catch 把算子可能抛的 std::invalid_argument
+    // 等异常转成 spdlog::error + exit 1, 避免进程崩溃 (Windows 退出码 0xC0000005)
+    try {
 
     // ------------------------------------------------------------------
     // 1. 加载输入 + 一致性校验
@@ -402,6 +408,7 @@ int main(int argc, char** argv) {
     cv::Matx33d finalVirtualK = cv::Matx33d::eye();
     cv::Matx33d finalVirtualR = cv::Matx33d::eye();
     cv::Vec3d   finalVirtualT(0, 0, 0);
+    std::vector<calib::LaserLineCurve> finalLineCurves;  // 4-11 输出, 用于反推 lineIds
     bool haveVirtualPose = false;
 
     if (host_points3d.empty()) {
@@ -448,6 +455,7 @@ int main(int argc, char** argv) {
                         finalVirtualK = poseRes.virtualK;
                         finalVirtualR = poseRes.virtualR;
                         finalVirtualT = poseRes.virtualT;
+                        finalLineCurves = poseRes.lineCurves;  // 4-13 反推 lineIds 用
                         haveVirtualPose = true;
                     }
                 }
@@ -507,30 +515,56 @@ int main(int argc, char** argv) {
         pmtt.virtualK = finalVirtualK;
         pmtt.virtualR = finalVirtualR;
         pmtt.virtualT = finalVirtualT;
-        pmtt.lineIds       = cfg.lineIds;
-        pmtt.referenceTemp = cfg.referenceTemp;
-        pmtt.cte           = cfg.cte;
-        pmtt.tempStep      = cfg.tempStep;
-        pmtt.tempRangeMin  = cfg.tempRangeMin;
-        pmtt.tempRangeMax  = cfg.tempRangeMax;
-        pmtt.alpha         = cfg.rectifyAlpha;
-        pmtt.flags         = cfg.rectifyFlags;
-        pmtt.deviceId      = cfg.deviceId;
-        pmtt.gridStep      = cfg.gridStep;
-        pmtt.depthMin      = cfg.depthMin;
-        pmtt.depthMax      = cfg.depthMax;
-        pmtt.depthSamples  = cfg.depthSamples;
-        pmtt.epipolarStep  = cfg.epipolarStep;
 
-        PlaneMapTempTable pmttOp(pmtt);
-        planeTable = pmttOp.Execute();
-        if (!planeTable.success) {
-            spdlog::error("4-13 plane_map_temp_table failed: {}", planeTable.message);
-        } else {
-            havePlaneTable = true;
-            spdlog::info("4-13 OK: {} temp entries", planeTable.table.size());
+        // lineIds 来源优先级 (review C1):
+        //   1. cfg.lineIds (config.json 显式)
+        //   2. 从 4-11 finalLineCurves 反推 (运行期实际出现的线号)
+        //   3. 都没有 → 跳过 4-13 (避免 PlaneMapTempTable 构造抛异常崩溃)
+        std::vector<int> effectiveLineIds = cfg.lineIds;
+        if (effectiveLineIds.empty()) {
+            std::set<int> seen;
+            for (const auto& lc : finalLineCurves) seen.insert(lc.lineId);
+            effectiveLineIds.assign(seen.begin(), seen.end());
+            if (!effectiveLineIds.empty()) {
+                spdlog::info("4-13 lineIds inferred from pose_optimize: {} lines",
+                             effectiveLineIds.size());
+            }
         }
-        pmttOp.Destroy();
+        if (effectiveLineIds.empty()) {
+            spdlog::error("4-13 lineIds empty: config 不提供且 4-11 无 lineCurves, "
+                          "跳过 plane_map_temp_table");
+        } else {
+            pmtt.lineIds = effectiveLineIds;
+            pmtt.referenceTemp = cfg.referenceTemp;
+            pmtt.cte           = cfg.cte;
+            pmtt.tempStep      = cfg.tempStep;
+            pmtt.tempRangeMin  = cfg.tempRangeMin;
+            pmtt.tempRangeMax  = cfg.tempRangeMax;
+            pmtt.alpha         = cfg.rectifyAlpha;
+            pmtt.flags         = cfg.rectifyFlags;
+            pmtt.deviceId      = cfg.deviceId;
+            pmtt.gridStep      = cfg.gridStep;
+            pmtt.depthMin      = cfg.depthMin;
+            pmtt.depthMax      = cfg.depthMax;
+            pmtt.depthSamples  = cfg.depthSamples;
+            pmtt.epipolarStep  = cfg.epipolarStep;
+
+            // review C1 防御: 算子构造/执行可能抛 std::invalid_argument 等
+            try {
+                PlaneMapTempTable pmttOp(pmtt);
+                planeTable = pmttOp.Execute();
+                if (!planeTable.success) {
+                    spdlog::error("4-13 plane_map_temp_table failed: {}",
+                                  planeTable.message);
+                } else {
+                    havePlaneTable = true;
+                    spdlog::info("4-13 OK: {} temp entries", planeTable.table.size());
+                }
+                pmttOp.Destroy();
+            } catch (const std::exception& e) {
+                spdlog::error("4-13 plane_map_temp_table exception: {}", e.what());
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -582,17 +616,30 @@ int main(int argc, char** argv) {
         j["planeMapTempTable"] = planeTable.toJson();
     }
 
+    // review I1: 加 status 字段 (ok|partial) 让下游消费方可识别; 不再依赖文件存在性
+    int exitCode = 0;
+    std::string exitStatus = "ok";
+    if (!haveVirtualPose || !haveLaserExtrin || !havePlaneTable) {
+        spdlog::warn("pipeline incomplete: virtualPose={} laserExtrin={} planeTable={}",
+                     haveVirtualPose, haveLaserExtrin, havePlaneTable);
+        exitCode = 1;
+        exitStatus = "partial";
+    }
+    j["status"] = exitStatus;
+
     if (!writeJson(outPath, j)) {
         spdlog::error("cannot write output: {}", outPath);
         return 1;
     }
-
-    int exitCode = 0;
-    if (!haveVirtualPose || !haveLaserExtrin || !havePlaneTable) {
-        spdlog::warn("pipeline incomplete: virtualPose={} laserExtrin={} planeTable={}",
-                     haveVirtualPose, haveLaserExtrin, havePlaneTable);
-        exitCode = 1;  // 部分完成, 但精度/质量不足; 不写半成品被约定为退出 1
-    }
-    spdlog::info("laser_calib (6.2-e) -> {} (exit={})", outPath, exitCode);
+    spdlog::info("laser_calib (6.2-e) -> {} (status={}, exit={})",
+                 outPath, exitStatus, exitCode);
     return exitCode;
+
+    } catch (const std::exception& e) {
+        spdlog::error("laser_calib unhandled exception: {}", e.what());
+        return 1;
+    } catch (...) {
+        spdlog::error("laser_calib unknown exception");
+        return 1;
+    }
 }

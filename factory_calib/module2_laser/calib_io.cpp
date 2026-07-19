@@ -161,8 +161,13 @@ std::optional<CameraCalibHandoff> loadCameraCalibHandoff(const std::string& path
         return std::nullopt;
     }
 
-    if (h.imageSize == cv::Size()) {
-        spdlog::warn("handoff imageSize unset, will infer from images later");
+    // review I3: imageSize 缺失会让 4-13 (PlaneMapTempTable) 构造抛异常 → 崩溃
+    // (plane_map_temp_table.cpp:58-59 校验 imageSize 必须正数). 改 warn→reject.
+    if (h.imageSize.width <= 0 || h.imageSize.height <= 0) {
+        spdlog::error("handoff missing/invalid imageSize ({}x{}); "
+                      "required by 4-13 plane_map_temp_table",
+                      h.imageSize.width, h.imageSize.height);
+        return std::nullopt;
     }
 
     return h;
@@ -196,6 +201,14 @@ bool validateHandoffConsistency(const LaserCalibConfig& cfg,
     if (!near(cfg.tempStep, h.tempStep)) {
         why = "tempStep mismatch: config=" + std::to_string(cfg.tempStep)
               + " handoff=" + std::to_string(h.tempStep);
+        return false;
+    }
+    // review I2: referenceTemp 锚定所有温度补偿表, 必须一致 (默认值偏差 2.5°C 会引入
+    // ~5.9e-5 系统误差). 默认 LaserCalibConfig.referenceTemp=25.0 vs handoff=22.5 常见.
+    if (!near(cfg.referenceTemp, h.referenceTemp)) {
+        why = "referenceTemp mismatch: config=" + std::to_string(cfg.referenceTemp)
+              + " handoff=" + std::to_string(h.referenceTemp)
+              + " (锚定所有温度补偿表, 必须一致)";
         return false;
     }
     return true;

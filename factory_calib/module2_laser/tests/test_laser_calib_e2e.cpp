@@ -108,7 +108,28 @@ std::string makeConfigJson() {
                       {"depthMax", 500.0f},
                       {"depthSamples", 10},
                       {"epipolarStep", 1.0f}};
-    j["lineIds"] = std::vector<int>{0, 1};
+    j["lineIds"] = std::vector<int>{0, 1};  // 显式提供, 避免依赖反推
+    j["temperature"] = {{"cte", 23.6e-6},
+                        {"referenceTemp", 22.5},
+                        {"tempRangeMin", -10.0},
+                        {"tempRangeMax", 10.0},
+                        {"tempStep", 0.2}};
+    j["rectify"] = {{"alpha", 0.0}, {"flags", 1}};
+    return j.dump(2);
+}
+
+// review I5: lineIds 缺省 (config 不提供, 全黑图也无 4-11 lineCurves)
+// 期望: 进入 4-13 时 effectiveLineIds 仍空 → 跳过 4-13 (而非崩溃)
+//       输出 JSON status=partial, 不抛异常
+std::string makeConfigJsonNoLineIds() {
+    json j;
+    j["deviceId"] = 0;
+    j["plane_map"] = {{"gridStep", 1.0f},
+                      {"depthMin", 50.0f},
+                      {"depthMax", 500.0f},
+                      {"depthSamples", 10},
+                      {"epipolarStep", 1.0f}};
+    // 故意不提供 lineIds
     j["temperature"] = {{"cte", 23.6e-6},
                         {"referenceTemp", 22.5},
                         {"tempRangeMin", -10.0},
@@ -197,4 +218,79 @@ TEST(LaserCalibE2E, MissingHandoffGracefulExit) {
 
     EXPECT_EQ(rc, 1);              // loadLaserInput 失败 → return 1
     EXPECT_FALSE(fs::exists(outJson)); // 不应该写输出
+}
+
+// ============================================================================
+// TEST 3: review C1/I5 防回归 — lineIds 缺省 + 全黑图, 不应崩溃
+//   之前 bug: lineIds 空 → PlaneMapTempTable 构造抛 invalid_argument → terminate
+//   修复后期望: effectiveLineIds 空 → 跳过 4-13 → status=partial, exit=1, 不崩
+// ============================================================================
+TEST(LaserCalibE2E, LineIdsEmptyDoesNotCrash) {
+    const char* exe = std::getenv("LASER_CALIB_EXE");
+    ASSERT_NE(exe, nullptr) << "LASER_CALIB_EXE env must be set";
+    ASSERT_TRUE(fs::exists(exe)) << "exe not found: " << exe;
+
+    fs::path root = fs::temp_directory_path() / "laser_smoke_no_lineids";
+    fs::remove_all(root);
+    fs::create_directories(root);
+
+    writeFile(root / "config.json",       makeConfigJsonNoLineIds());  // 不提供 lineIds
+    writeFile(root / "camera_calib.json", makeHandoffJson());
+
+    fs::path pose = root / "pose_00";
+    fs::create_directories(pose);
+    writeBlackPng(pose / "L_tube0.png");
+    writeBlackPng(pose / "R_tube0.png");
+
+    fs::path outJson = root / "out.json";
+    std::string cmd = std::string(exe) + " " + root.string() + " " + outJson.string();
+    SCOPED_TRACE("cmd: " + cmd);
+
+    int rc = std::system(cmd.c_str());
+
+    // 关键断言: 不崩溃 (rc 0 或 1, 而非 0xC0000005 等)
+    EXPECT_GE(rc, 0);
+    EXPECT_LE(rc, 1);
+
+    // 输出文件存在 + status=partial (全黑图无 4-11 lineCurves → 跳过 4-13)
+    EXPECT_TRUE(fs::exists(outJson));
+    if (fs::exists(outJson)) {
+        std::ifstream ifs(outJson);
+        ASSERT_TRUE(ifs.is_open());
+        json j;
+        ifs >> j;
+        EXPECT_EQ(j.value("schema", ""), "factory_calib.laser_calib.v1");
+        EXPECT_EQ(j.value("status", ""), "partial");  // review I1: status 字段
+        EXPECT_FALSE(j.value("havePlaneTable", true));
+    }
+}
+
+// ============================================================================
+// TEST 4: review I3 防回归 — imageSize 缺失, loadCameraCalibHandoff 应拒绝
+// ============================================================================
+TEST(LaserCalibE2E, RejectsHandoffWithoutImageSize) {
+    const char* exe = std::getenv("LASER_CALIB_EXE");
+    ASSERT_NE(exe, nullptr);
+
+    fs::path root = fs::temp_directory_path() / "laser_smoke_no_imagesize";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    writeFile(root / "config.json", makeConfigJson());
+
+    // handoff 故意删 imageSize
+    json hj = json::parse(makeHandoffJson());
+    hj.erase("imageSize");
+    writeFile(root / "camera_calib.json", hj.dump(2));
+
+    fs::path pose = root / "pose_00";
+    fs::create_directories(pose);
+    writeBlackPng(pose / "L_tube0.png");
+    writeBlackPng(pose / "R_tube0.png");
+
+    fs::path outJson = root / "out.json";
+    std::string cmd = std::string(exe) + " " + root.string() + " " + outJson.string();
+    int rc = std::system(cmd.c_str());
+
+    EXPECT_EQ(rc, 1);  // loadCameraCalibHandoff 返回 nullopt
+    EXPECT_FALSE(fs::exists(outJson));
 }
