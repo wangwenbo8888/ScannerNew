@@ -24,6 +24,7 @@ ctest --test-dir build-rel -C Release --output-on-failure
 - `framework/` = 层契约（9 库：fw_common[STATIC] + fw_ui/workflow/service/algorithm/data/hal/infra/crosscut[INTERFACE]）
 - `modules/` = 11 业务模块（01-11）；其中 **`09_operatorlib`（全部算子，库 `mod_operatorlib`，命名空间 `calib::`）** 与 **`03_rendering`（display 渲染组件，库 `mod_rendering`）** 已迁入实现，其余 9 个为空桩
 - `sdk/` = 接入端 B ｜ `app/` = exe 入口
+- `factory_calib/` = 厂家标定工程（独立子工程，自包含；模块1 相机 CPU + 模块2 激光 CUDA）｜ ⚠ **产线交付物，AI 访问受限，详见 `factory_calib/AGENTS.md`**
 - 命名空间：framework 层 `Scanner::`（+ 子空间 algorithm/crosscut/data/hal/infra/service/ui/workflow）；迁移算子（`modules/09_operatorlib`，原 3DSCANNER）保留 `calib::`
 
 ## 现状
