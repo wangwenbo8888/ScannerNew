@@ -8,3 +8,6 @@ compile_commands.json
 *.tmp
 *.log
 build-debug-*.DONE
+
+# 测试导出的点云样本（projector_joint_calib 的 DumpSampleData/TruncatedLines 生成，可随时重生成）
+projector_calib_*.asc
