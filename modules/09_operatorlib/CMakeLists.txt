@@ -80,9 +80,10 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
 endif()
 
-# === Ceres（GBA）===
+# === Ceres（GBA + projector_joint_calib 可选后端）===
 if(BUILD_GLOBAL_OPTIM)
     target_link_libraries(mod_operatorlib PUBLIC ceres)
+    target_compile_definitions(mod_operatorlib PUBLIC BUILD_CERES=1)
 endif()
 
 # === gba_dataset_runner exe（GBA 离线工具，含 main）===
