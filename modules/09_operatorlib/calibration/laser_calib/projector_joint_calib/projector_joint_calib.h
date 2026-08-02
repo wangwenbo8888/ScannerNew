@@ -117,7 +117,7 @@ struct ProjectorJointCalibResult {
     double improvementRatio  = 1.0;
     int    poseCount         = 0;
     int    totalPointCount   = 0;
-    double jacobianConditionNumber = 0.0;  // JᵀJ 条件数（姿态退化检测，>1e6 警示 t_z 不可信）
+    double jacobianConditionNumber = 0.0;  // JᵀJ 条件数（姿态退化检测，>1e10 警示 t_z 不可信）
     std::vector<cv::Vec3d> denoisedPoints;  // 诊断：Step 1.5 曲线降噪后的点（左相机系）
 
     ProjectorJointCalibResult() = default;
