@@ -8,9 +8,10 @@
 #include "common/scanner_api.h"
 #include "common/version.h"
 
+namespace cv { namespace cuda { class GpuMat; class Stream; } }
+
 namespace calib {
 
-namespace cv { namespace cuda { class GpuMat; class Stream; } }
 struct WarmupConfig;
 
 struct FrameFilterParams {

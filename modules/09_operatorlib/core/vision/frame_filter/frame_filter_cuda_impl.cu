@@ -2,7 +2,9 @@
 #include "common/calib_logging.h"
 #include <opencv2/cudaarithm.hpp>  // cv::cuda::countNonZero
 
-namespace calib {
+using namespace calib;
+
+CALIB_DEFINE_LOG_TAG(FF, FrameFilterCUDA);  // 标签名待全局统一编号
 
 FrameFilterResult FrameFilterCUDA::Impl::Execute(const cv::cuda::GpuMat& d_cleanedMask,
                                                   cv::cuda::Stream& stream) {
@@ -41,5 +43,3 @@ FrameFilterResult FrameFilterCUDA::Impl::Execute(const cv::cuda::GpuMat& d_clean
                     count, maskRatio, result.isMarkerFrame, params_.maskRatioThreshold);
     return result;
 }
-
-} // namespace calib
