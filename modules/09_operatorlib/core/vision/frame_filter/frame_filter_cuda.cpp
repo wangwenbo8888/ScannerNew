@@ -25,7 +25,7 @@ FrameFilterCUDA::~FrameFilterCUDA() = default;
 
 FrameFilterResult FrameFilterCUDA::Execute(const std::shared_ptr<cv::cuda::GpuMat>& d_cleanedMask,
                                            cv::cuda::Stream& stream) {
-    if (!d_cleanedMask || d_cleanedMask->empty()) {
+    if (!d_cleanedMask) {  // nullptr 检查（空 GpuMat 由 Impl 层统一处理，避免重复）
         FrameFilterResult r;
         r.success = true;
         r.message = "empty input, treated as non-marker";
@@ -42,21 +42,23 @@ FrameFilterResult FrameFilterCUDA::Execute(const cv::cuda::GpuMat& d_cleanedMask
     return pImpl_->Execute(d_cleanedMask, stream);
 }
 
+// [算子规范 §1.6 豁免] 无 stream 重载仅供测试/调试；defaultStream 为 thread_local，每线程独立，
+// 无跨实例/跨线程共享，不构成可变共享状态（与 mask_extract 一致）
 FrameFilterResult FrameFilterCUDA::Execute(const std::shared_ptr<cv::cuda::GpuMat>& d_cleanedMask) {
-    cv::cuda::Stream stream;
-    return Execute(d_cleanedMask, stream);
+    static thread_local cv::cuda::Stream defaultStream;
+    return Execute(d_cleanedMask, defaultStream);
 }
 
 FrameFilterResult FrameFilterCUDA::Execute(const cv::cuda::GpuMat& d_cleanedMask) {
-    cv::cuda::Stream stream;
-    return Execute(d_cleanedMask, stream);
+    static thread_local cv::cuda::Stream defaultStream;
+    return Execute(d_cleanedMask, defaultStream);
 }
 
 void FrameFilterCUDA::Destroy() {}
 
 void FrameFilterCUDA::Warmup(int rows, int cols) { pImpl_->Warmup(rows, cols); }
 void FrameFilterCUDA::Warmup(const calib::WarmupConfig& config) {
-    Warmup(config.maxPointCount > 0 ? config.maxPointCount : 10000, 10000);
+    Warmup(config.rows, config.cols);
 }
 void FrameFilterCUDA::SetParams(const FrameFilterParams& params) { pImpl_->SetParams(params); }
 const FrameFilterParams& FrameFilterCUDA::GetParams() const { return pImpl_->GetParams(); }
