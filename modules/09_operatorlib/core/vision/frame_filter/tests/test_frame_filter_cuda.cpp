@@ -56,3 +56,21 @@ TEST(FrameFilterCUDA, WrongTypeFails) {
     auto r = ff.Execute(d_mask);
     EXPECT_FALSE(r.success);
 }
+
+// 空输入 → success=true, isMarkerFrame=false（空掩膜=无标记点特征=非标记点帧）
+TEST(FrameFilterCUDA, EmptyInputNonMarker) {
+    cv::cuda::GpuMat d_empty;  // 空 GpuMat
+    FrameFilterCUDA ff;
+    auto r = ff.Execute(d_empty);
+    EXPECT_TRUE(r.success);
+    EXPECT_FALSE(r.isMarkerFrame);
+}
+
+// nullptr shared_ptr → success=true, isMarkerFrame=false（同 EmptyInputNonMarker，覆盖 shared_ptr 重载）
+TEST(FrameFilterCUDA, NullSharedPtrNonMarker) {
+    std::shared_ptr<cv::cuda::GpuMat> d_null;  // nullptr
+    FrameFilterCUDA ff;
+    auto r = ff.Execute(d_null);
+    EXPECT_TRUE(r.success);
+    EXPECT_FALSE(r.isMarkerFrame);
+}
