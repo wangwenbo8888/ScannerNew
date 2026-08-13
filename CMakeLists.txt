@@ -105,6 +105,9 @@ function(jmw_deploy_crt target)
         COMMENT "部署 VS2022 CRT DLL 到 ${target} 目录")
 endfunction()
 
+# base/ 共享内核（Phase 1 新增；framework/* 转发壳引用 "base/*.h"，需项目根在全局 include 路径）
+include_directories(${CMAKE_SOURCE_DIR})
+add_subdirectory(base)
 add_subdirectory(framework)
 add_subdirectory(modules)
 add_subdirectory(app)
