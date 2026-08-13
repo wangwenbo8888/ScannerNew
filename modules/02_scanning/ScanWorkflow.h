@@ -18,7 +18,7 @@
 #include "Pipeline.h"
 #include "WorkflowContext.h"
 #include "IFrameSink.h"
-#include "common/types.h"
+#include "base/types.h"
 #include <opencv2/core.hpp>
 #include <memory>
 #include <atomic>

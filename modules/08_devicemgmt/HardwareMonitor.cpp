@@ -4,7 +4,7 @@
 
 #include "HardwareMonitor.h"
 #include "DeviceStateCache.h"
-#include "infra/EventBus.h"
+#include "base/EventBus.h"
 #include "IMCU.h"
 #include "IScannerCamera.h"
 #include <spdlog/spdlog.h>

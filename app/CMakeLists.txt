@@ -94,10 +94,7 @@ target_include_directories(scan_demo PRIVATE
 )
 
 target_link_libraries(scan_demo PRIVATE
-    fw_common
-    fw_data
-    fw_infra
-    fw_workflow
+    base
     mod_devicemgmt
     mod_operatorlib
     mod_fileio

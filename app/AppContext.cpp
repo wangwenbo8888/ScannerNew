@@ -11,7 +11,7 @@
 #include "ParameterManager.h"
 #include "FaultHandler.h"
 #include "SessionService.h"
-#include "infra/EventBus.h"
+#include "base/EventBus.h"
 #include "modules/08_devicemgmt/CameraControl.h"
 #include "modules/08_devicemgmt/MCUDriver.h"
 #include "modules/08_devicemgmt/HardwareMonitor.h"

@@ -19,10 +19,7 @@ target_include_directories(mod_devicemgmt
 
 target_link_libraries(mod_devicemgmt
     PUBLIC
-        fw_hal
-        fw_data
-        fw_infra
-        fw_common
+        base
         ${OpenCV_LIBS}
         spdlog::spdlog
     PRIVATE

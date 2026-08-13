@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // HardwareMonitor.h — 硬件状态监控（HAL 层）
 //
@@ -6,7 +6,7 @@
 // 纯读取，不做业务判断（如温度阈值）。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <atomic>
 #include <thread>
 #include <functional>

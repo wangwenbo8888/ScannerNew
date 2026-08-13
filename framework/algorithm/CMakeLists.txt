@@ -1,2 +1,0 @@
-add_library(fw_algorithm INTERFACE)
-target_link_libraries(fw_algorithm INTERFACE fw_common)
