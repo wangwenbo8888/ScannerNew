@@ -4,7 +4,7 @@
 #include "ScanWorkflow.h"
 #include "CalibrationWorkflow.h"
 #include "modules/08_devicemgmt/HardwareMonitor.h"
-#include "service/StateMachine.h"
+#include "StateMachine.h"
 
 #include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>

@@ -1,10 +1,10 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // StateMachine.h — 系统状态机实现（Service 层）
 // ============================================================================
 
-#include "service/IState.h"
-#include "infra/EventBus.h"
+#include "IState.h"
+#include "base/EventBus.h"
 #include <atomic>
 #include <mutex>
 #include <functional>

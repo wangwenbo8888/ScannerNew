@@ -5,7 +5,7 @@
 // 扫描仪全局状态机：管理设备就绪→标定→扫描→后处理的状态流转。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <string>
 
 namespace Scanner::service {

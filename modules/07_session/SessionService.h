@@ -5,7 +5,7 @@
 // 启/停/暂停/恢复扫描会话、覆盖率统计、断电续扫元数据。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <mutex>
 #include <string>
 #include <atomic>

@@ -8,7 +8,7 @@
 #include "ScanWorkflow.h"
 #include "FrameBuffer.h"
 #include "PointCloudBuffer.h"
-#include "service/SessionService.h"
+#include "SessionService.h"
 
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
