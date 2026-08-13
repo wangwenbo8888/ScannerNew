@@ -16,7 +16,7 @@
 
 #include "IWorkflow.h"
 #include "Pipeline.h"
-#include "workflow/WorkflowContext.h"
+#include "WorkflowContext.h"
 #include "IFrameSink.h"
 #include "common/types.h"
 #include <opencv2/core.hpp>

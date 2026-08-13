@@ -20,6 +20,8 @@ set(APP_SOURCES
     AppContext.h
     MainWindow.cpp
     MainWindow.h
+    WorkflowContext.cpp
+    WorkflowContext.h
 )
 
 # === 模块文件（物理在 modules/ 下，编译进 scan_demo）===
@@ -35,9 +37,19 @@ set(MOD_CALIBRATION
 )
 
 set(MOD_SCANNING
-    ${CMAKE_SOURCE_DIR}/modules/02_scanning/ScannerWindow.cpp
-    ${CMAKE_SOURCE_DIR}/modules/02_scanning/ScannerWindow.h
-    ${CMAKE_SOURCE_DIR}/modules/02_scanning/ScannerWindow.ui
+    ${CMAKE_CURRENT_SOURCE_DIR}/ScannerWindow.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ScannerWindow.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/ScannerWindow.ui
+)
+
+# === 工作流（Phase 5：自 fw_workflow 接管编译归属；物理仍 in modules）===
+set(MOD_WORKFLOWS
+    ${CMAKE_SOURCE_DIR}/modules/02_scanning/ScanWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/02_scanning/ScanWorkflow.h
+    ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibrationWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibrationWorkflow.h
+    ${CMAKE_SOURCE_DIR}/modules/04_postprocessing/PostProcessWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/04_postprocessing/PostProcessWorkflow.h
 )
 
 set(MOD_RENDERING
@@ -64,6 +76,7 @@ add_executable(scan_demo
     ${APP_SOURCES}
     ${MOD_CALIBRATION}
     ${MOD_SCANNING}
+    ${MOD_WORKFLOWS}
     ${MOD_RENDERING}
     ${MOD_FILEIO}
     ${GENERATED_QRC_CPP}

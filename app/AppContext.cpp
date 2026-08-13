@@ -15,7 +15,7 @@
 #include "modules/08_devicemgmt/CameraControl.h"
 #include "modules/08_devicemgmt/MCUDriver.h"
 #include "modules/08_devicemgmt/HardwareMonitor.h"
-#include "workflow/WorkflowContext.h"
+#include "WorkflowContext.h"
 #include "ScanWorkflow.h"
 #include "CalibrationWorkflow.h"
 #include "PostProcessWorkflow.h"

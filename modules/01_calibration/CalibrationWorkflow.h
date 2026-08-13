@@ -6,7 +6,7 @@
 // ============================================================================
 
 #include "IWorkflow.h"
-#include "workflow/WorkflowContext.h"
+#include "WorkflowContext.h"
 #include <memory>
 #include <atomic>
 #include <thread>
