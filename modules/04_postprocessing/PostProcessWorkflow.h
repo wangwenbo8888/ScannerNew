@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // PostProcessWorkflow.h — 后处理工作流（离线 batch）
 //
 // 全局标记点优化→重融合→法线→封装→补洞→光顺→边界优化→出STL
 // ============================================================================
 
-#include "workflow/IWorkflow.h"
+#include "IWorkflow.h"
 #include "workflow/WorkflowContext.h"
 #include <memory>
 #include <atomic>

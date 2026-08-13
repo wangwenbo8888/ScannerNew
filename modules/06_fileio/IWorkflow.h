@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // IWorkflow.h — 工作流接口（Workflow 层）
 //
@@ -6,7 +6,7 @@
 // 生命周期由 Service（会话/状态机）编排。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <string>
 
 namespace Scanner::workflow {

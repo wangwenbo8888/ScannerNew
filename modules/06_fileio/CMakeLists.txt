@@ -4,6 +4,7 @@ add_library(mod_fileio STATIC
     FrameBuffer.cpp
     PointCloudBuffer.cpp
     DeviceStateCache.cpp
+    Pipeline.cpp
 )
 target_include_directories(mod_fileio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(mod_fileio PUBLIC base spdlog::spdlog ${OpenCV_LIBS})

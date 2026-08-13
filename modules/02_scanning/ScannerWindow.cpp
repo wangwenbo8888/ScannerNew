@@ -1,6 +1,6 @@
-#include "ScannerWindow.h"
+﻿#include "ScannerWindow.h"
 #include "AppContext.h"
-#include "workflow/IWorkflow.h"
+#include "IWorkflow.h"
 #include "ScanWorkflow.h"
 #include "CalibrationWorkflow.h"
 #include "modules/08_devicemgmt/HardwareMonitor.h"

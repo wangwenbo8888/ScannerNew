@@ -14,8 +14,8 @@
 //   Stage3: steger→undistort→epipolar_interp→laser_match→laser_reconstruct
 // ============================================================================
 
-#include "workflow/IWorkflow.h"
-#include "workflow/Pipeline.h"
+#include "IWorkflow.h"
+#include "Pipeline.h"
 #include "workflow/WorkflowContext.h"
 #include "IFrameSink.h"
 #include "common/types.h"

@@ -6,7 +6,7 @@
 // Stage 间通过 RingBuffer 通信，支持背压。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include "RingBuffer.h"
 #include <string>
 #include <vector>

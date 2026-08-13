@@ -1,5 +1,5 @@
+# Phase 2b：IWorkflow/Pipeline(Stage) 已迁 modules/06；此处留 WorkflowContext + 3 模块工作流（待 Phase 5 迁 app）
 add_library(fw_workflow STATIC
-    Pipeline.cpp
     WorkflowContext.cpp
     # Module-specific workflows (physically in module dirs)
     ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibrationWorkflow.cpp
@@ -18,6 +18,7 @@ target_link_libraries(fw_workflow PUBLIC
     fw_service
     fw_infra
     fw_hal
+    mod_fileio
     spdlog::spdlog
     ${OpenCV_LIBS}
 )
