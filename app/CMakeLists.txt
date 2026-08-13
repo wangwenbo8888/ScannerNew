@@ -100,6 +100,7 @@ target_link_libraries(scan_demo PRIVATE
     ${OSG_ROOT}/lib/osgViewer.lib
     ${OSG_ROOT}/lib/osgGA.lib
     ${OSG_ROOT}/lib/osgUtil.lib
+    ${OSG_ROOT}/lib/osgText.lib
     ${OSG_ROOT}/lib/OpenThreads.lib
     Eigen3::Eigen
     ${OpenCV_LIBS}
