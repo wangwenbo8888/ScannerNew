@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // IScannerCamera.h — 双目相机接口（HAL 层）
 //
 // 扫描仪相机的抽象接口。实现由平台特定驱动提供（Win/Jetson）。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <opencv2/core.hpp>
 #include <functional>
 

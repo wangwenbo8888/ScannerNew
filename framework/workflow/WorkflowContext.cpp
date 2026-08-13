@@ -6,8 +6,8 @@
 #include "ParameterManager.h"
 #include "service/SessionService.h"
 #include "infra/EventBus.h"
-#include "hal/IScannerCamera.h"
-#include "hal/IMCU.h"
+#include "IScannerCamera.h"
+#include "IMCU.h"
 #include <chrono>
 
 namespace Scanner::workflow {

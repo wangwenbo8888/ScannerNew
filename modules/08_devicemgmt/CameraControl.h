@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // CameraControl.h — 大恒 Galaxy SDK 相机采集封装
 //
@@ -9,7 +9,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include "hal/IScannerCamera.h"
+#include "IScannerCamera.h"
 #include "GalaxyIncludes.h"
 
 #include <mutex>

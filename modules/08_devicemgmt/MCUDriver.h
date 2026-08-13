@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // MCUDriver.h — 下位机 MCU 串口驱动（HAL 层实现）
 //
@@ -9,7 +9,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include "hal/IMCU.h"
+#include "IMCU.h"
 
 #include <atomic>
 #include <mutex>

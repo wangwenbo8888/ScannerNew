@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // IMCU.h — 下位机 MCU 接口（HAL 层）
 //
 // 控制节点：同步触发、按键、温度、急停硬线。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <functional>
 
 namespace Scanner::hal {

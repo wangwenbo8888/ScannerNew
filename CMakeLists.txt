@@ -108,6 +108,7 @@ endfunction()
 # base/ 共享内核（Phase 1 新增；framework/* 转发壳引用 "base/*.h"，需项目根在全局 include 路径）
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/modules/06_fileio)
+include_directories(${CMAKE_SOURCE_DIR}/modules/08_devicemgmt)
 add_subdirectory(base)
 add_subdirectory(framework)
 add_subdirectory(modules)
