@@ -1,9 +1,9 @@
-// ============================================================================
+﻿// ============================================================================
 // HardwareMonitor.cpp — 硬件状态监控实现
 // ============================================================================
 
 #include "HardwareMonitor.h"
-#include "data/DeviceStateCache.h"
+#include "DeviceStateCache.h"
 #include "infra/EventBus.h"
 #include "hal/IMCU.h"
 #include "hal/IScannerCamera.h"

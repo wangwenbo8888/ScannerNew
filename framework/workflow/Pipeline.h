@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // Pipeline.h — 多阶段流水线（Workflow 层）
 //
@@ -7,7 +7,7 @@
 // ============================================================================
 
 #include "common/types.h"
-#include "data/RingBuffer.h"
+#include "RingBuffer.h"
 #include <string>
 #include <vector>
 #include <thread>

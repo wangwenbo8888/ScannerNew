@@ -1,9 +1,9 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // IPointCloudSink.h — 点云 Sink（Data 层拥有）
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <opencv2/core.hpp>
 #include <vector>
 

@@ -1,11 +1,11 @@
-// ============================================================================
+﻿// ============================================================================
 // AppContext.cpp — 应用层装配实现
 // ============================================================================
 
 #include "AppContext.h"
-#include "data/FrameBuffer.h"
-#include "data/PointCloudBuffer.h"
-#include "data/DeviceStateCache.h"
+#include "FrameBuffer.h"
+#include "PointCloudBuffer.h"
+#include "DeviceStateCache.h"
 #include "data/CalibStore.h"
 #include "service/StateMachine.h"
 #include "service/ParameterManager.h"

@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // ScanWorkflow.cpp — 扫描工作流实现（CPU 标记点链 + 体素融合）
 //
 // 管线: Capture → Preprocess(阈值掩码) → Marker(CCL→Zernike→Ellipse→Match→Reconstruct)
@@ -6,8 +6,8 @@
 // ============================================================================
 
 #include "ScanWorkflow.h"
-#include "data/FrameBuffer.h"
-#include "data/PointCloudBuffer.h"
+#include "FrameBuffer.h"
+#include "PointCloudBuffer.h"
 #include "service/SessionService.h"
 
 #include <opencv2/imgproc.hpp>

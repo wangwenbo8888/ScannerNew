@@ -1,5 +1,5 @@
-#include "OSGWidget.h"
-#include "data/PointCloudBuffer.h"
+﻿#include "OSGWidget.h"
+#include "PointCloudBuffer.h"
 #include "file_io.h"
 
 #include <osg/Geode>

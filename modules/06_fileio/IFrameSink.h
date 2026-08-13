@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // IFrameSink.h — 帧数据 Sink（Data 层拥有，注入 HAL）
 //
 // 依赖倒置：HAL 产出帧数据推给 Sink，不反向依赖 Data 实现。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <opencv2/core.hpp>
 
 namespace Scanner::data {

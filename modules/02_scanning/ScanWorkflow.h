@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // ScanWorkflow.h — 扫描工作流（双模式：纯标记点 / 标记点+激光）
 //
@@ -17,7 +17,7 @@
 #include "workflow/IWorkflow.h"
 #include "workflow/Pipeline.h"
 #include "workflow/WorkflowContext.h"
-#include "data/IFrameSink.h"
+#include "IFrameSink.h"
 #include "common/types.h"
 #include <opencv2/core.hpp>
 #include <memory>

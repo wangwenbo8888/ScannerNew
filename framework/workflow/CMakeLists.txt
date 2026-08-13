@@ -23,6 +23,4 @@ target_link_libraries(fw_workflow PUBLIC
 )
 target_link_libraries(fw_workflow PRIVATE mod_operatorlib)
 
-if(BUILD_TESTS)
-    add_subdirectory(tests)
-endif()
+# workflow/tests 已删（Phase 2，dead 测试）

@@ -1,9 +1,9 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // IDeviceStateSink.h — 设备状态 Sink（Data 层拥有，注入 HAL）
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 
 namespace Scanner::data {
 

@@ -82,6 +82,7 @@ target_link_libraries(scan_demo PRIVATE
     fw_workflow
     mod_devicemgmt
     mod_operatorlib
+    mod_fileio
     Qt5::Widgets
     Qt5::OpenGL
     Qt5::Svg

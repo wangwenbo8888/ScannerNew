@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // ScannerWindow.h — 扫描仪控制窗口（基于 LEADSCANSeries.ui）
 //
@@ -12,7 +12,7 @@
 #include "ui_ScannerWindow.h"
 
 #include "modules/08_devicemgmt/CameraControl.h"
-#include "data/FrameBuffer.h"
+#include "FrameBuffer.h"
 
 class AppContext;
 
