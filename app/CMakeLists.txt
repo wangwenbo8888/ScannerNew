@@ -6,8 +6,12 @@ set(CMAKE_AUTORCC OFF)
 list(APPEND CMAKE_PREFIX_PATH "C:/devlibs/Qt-5.15.2-msvc2019_64/5.15.2/msvc2019_64")
 find_package(Qt5 5.15 COMPONENTS Core Gui Widgets OpenGL Svg SerialPort)
 
-# scan_demo 仅在 Qt5 Svg/SerialPort 齐备时构建（B2：库+测试基线不依赖 app；装齐后回归）
-if(Qt5_FOUND AND Qt5Svg_FOUND AND Qt5SerialPort_FOUND)
+# OSG（路径见 环境配置汇总.md §10，直接 lib 路径，非 imported target）
+set(OSG_ROOT "C:/devlibs/osg-install" CACHE PATH "OSG 安装目录")
+
+# scan_demo 仅在 Qt5 Svg/SerialPort 齐备 + stubs/ 源码存在时构建
+# （stubs/LEADSCANSeries.h 等当前缺失→源码不完整→跳过保构建绿；Qt 已装，stubs 补齐后自动启用）
+if(Qt5_FOUND AND Qt5Svg_FOUND AND Qt5SerialPort_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/stubs/LEADSCANSeries.h")
 
 # === app 核心文件 ===
 set(APP_SOURCES
@@ -73,6 +77,7 @@ target_include_directories(scan_demo PRIVATE
     ${CMAKE_SOURCE_DIR}/modules/03_rendering
     ${CMAKE_SOURCE_DIR}/modules/06_fileio
     ${CMAKE_SOURCE_DIR}/modules/04_postprocessing
+    ${OSG_ROOT}/include
 )
 
 target_link_libraries(scan_demo PRIVATE
@@ -90,8 +95,13 @@ target_link_libraries(scan_demo PRIVATE
     Qt5::OpenGL
     Qt5::Svg
     Qt5::SerialPort
-    OSG::osg
-    Eigen::Eigen
+    ${OSG_ROOT}/lib/osg.lib
+    ${OSG_ROOT}/lib/osgDB.lib
+    ${OSG_ROOT}/lib/osgViewer.lib
+    ${OSG_ROOT}/lib/osgGA.lib
+    ${OSG_ROOT}/lib/osgUtil.lib
+    ${OSG_ROOT}/lib/OpenThreads.lib
+    Eigen3::Eigen
     ${OpenCV_LIBS}
 )
 
@@ -109,5 +119,5 @@ add_custom_command(TARGET scan_demo POST_BUILD
 )
 
 else()
-    message(STATUS "app/scan_demo 跳过：Qt5 Svg/SerialPort 未装（库+测试基线不受影响；装齐后回归）")
+    message(STATUS "app/scan_demo 跳过：缺 Qt5 Svg/SerialPort 或 stubs/ 源码（库+测试基线不受影响）")
 endif()
