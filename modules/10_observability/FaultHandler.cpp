@@ -1,6 +1,6 @@
 ﻿#include "FaultHandler.h"
 #include "StateMachine.h"
-#include "infra/EventBus.h"
+#include "base/EventBus.h"
 #include <spdlog/spdlog.h>
 
 namespace Scanner::service {

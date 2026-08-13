@@ -9,7 +9,7 @@
 #include "CalibStore.h"
 #include "StateMachine.h"
 #include "ParameterManager.h"
-#include "service/FaultHandler.h"
+#include "FaultHandler.h"
 #include "SessionService.h"
 #include "infra/EventBus.h"
 #include "modules/08_devicemgmt/CameraControl.h"

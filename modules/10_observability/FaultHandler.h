@@ -5,7 +5,7 @@
 // 订阅 EventBus 故障事件 → 主动响应 → 状态机转 Error → 发布指示灯控制
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <functional>
 
 namespace Scanner::infra { class EventBus; }
