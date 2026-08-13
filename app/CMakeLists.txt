@@ -83,6 +83,7 @@ target_link_libraries(scan_demo PRIVATE
     mod_devicemgmt
     mod_operatorlib
     mod_fileio
+    mod_calibration
     Qt5::Widgets
     Qt5::OpenGL
     Qt5::Svg

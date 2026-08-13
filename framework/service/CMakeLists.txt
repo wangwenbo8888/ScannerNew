@@ -1,6 +1,5 @@
 add_library(fw_service STATIC
     StateMachine.cpp
-    ParameterManager.cpp
     FaultHandler.cpp
     SessionService.cpp
 )

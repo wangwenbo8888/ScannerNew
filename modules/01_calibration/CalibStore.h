@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ============================================================================
 // CalibStore.h — 标定参数存储（DataStore）
 //
@@ -6,7 +6,7 @@
 // JSON 格式存储，供 CalibrationWorkflow 写入、ScanWorkflow 读取。
 // ============================================================================
 
-#include "common/types.h"
+#include "base/types.h"
 #include <opencv2/core.hpp>
 #include <string>
 #include <mutex>

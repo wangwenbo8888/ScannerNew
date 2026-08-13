@@ -3,7 +3,7 @@
 #include "PointCloudBuffer.h"
 #include "DeviceStateCache.h"
 #include "service/StateMachine.h"
-#include "service/ParameterManager.h"
+#include "ParameterManager.h"
 #include "service/SessionService.h"
 #include "infra/EventBus.h"
 #include "hal/IScannerCamera.h"
