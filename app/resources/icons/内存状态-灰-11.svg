@@ -1,0 +1,9 @@
+<svg viewBox="0 0 11 11" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="11.000000" height="11.000000" fill="none">
+	<rect id="svg" width="11.000000" height="11.000000" x="0.000000" y="0.000000" />
+	<ellipse id="34845" rx="4.125000" ry="1.375000" cx="5.5" cy="2.29168701" stroke="rgb(0,0,0)" stroke-opacity="0.300000012" stroke-linecap="round" stroke-linejoin="round" stroke-width="0.916667" />
+	<path id="34846" d="M1.375 2.29169L1.375 8.70835C1.375 8.99873 1.65078 9.28164 2.1628 9.51656C2.67483 9.75147 3.39683 9.92633 4.22531 10.0161C5.05378 10.1058 5.94622 10.1058 6.77469 10.0161C7.60317 9.92633 8.32517 9.75147 8.8372 9.51656C9.34922 9.28164 9.625 8.99873 9.625 8.70835L9.625 2.29169" fill-rule="nonzero" stroke="rgb(0,0,0)" stroke-opacity="0.300000012" stroke-linecap="round" stroke-linejoin="round" stroke-width="0.916667" />
+	<path id="34847" d="M1.375 5.5C1.375 5.79037 1.65078 6.07329 2.1628 6.3082C2.67483 6.54312 3.39683 6.71797 4.22531 6.8077C5.05378 6.89743 5.94622 6.89743 6.77469 6.8077C7.60317 6.71797 8.32517 6.54312 8.8372 6.3082C9.34922 6.07329 9.625 5.79037 9.625 5.5" fill-rule="nonzero" stroke="rgb(0,0,0)" stroke-opacity="0.300000012" stroke-linecap="round" stroke-linejoin="round" stroke-width="0.916667" />
+	<rect id="ellipse.[object SVGAnimatedString]" width="8.250000" height="3.000000" x="1.000000" y="0.000000" />
+	<rect id="path.[object SVGAnimatedString]" width="8.250000" height="8.000000" x="1.000000" y="2.000000" />
+	<rect id="path.[object SVGAnimatedString]" width="8.250000" height="1.000000" x="1.000000" y="5.000000" />
+</svg>

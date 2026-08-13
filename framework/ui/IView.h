@@ -1,7 +1,25 @@
 #pragma once
+// ============================================================================
+// IView.h — 视图接口（UI 层）
+// ============================================================================
+
+#include "common/types.h"
+
 namespace Scanner::ui {
-class IView { public: virtual ~IView() = default; virtual void render() = 0; };
-// ADR 7.8 预留：IPointCloudReadView（UI 跨层直读 Data 的只读窄接口）待实现
-class IUIController { public: virtual ~IUIController() = 0; };
-inline IUIController::~IUIController() = default;
-}
+
+class IView {
+public:
+    virtual ~IView() = default;
+
+    /// 渲染视图
+    virtual Result render() = 0;
+
+    /// 显示/隐藏
+    virtual Result show() = 0;
+    virtual Result hide() = 0;
+
+    /// 是否可见
+    virtual bool isVisible() const = 0;
+};
+
+} // namespace Scanner::ui

@@ -1,0 +1,1718 @@
+#include "OSGWidget.h"
+#include "data/PointCloudBuffer.h"
+#include "file_io.h"
+
+#include <osg/Geode>
+#include <osg/Geometry>
+#include <osg/Point>
+#include <osg/Material>
+#include <osg/LightModel>
+#include <osgDB/ReadFile>
+#include <osg/LineWidth>
+#include <osg/BlendFunc>
+#include <osgText/Text>
+#include <osg/ComputeBoundsVisitor>
+
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <QApplication>
+#include <QMessageBox>
+#include <QImage>
+#include <QPainter>
+#include <QFont>
+
+#include <algorithm>
+#include <limits>
+#include <cmath>
+#include <cstdio>
+#include <Eigen/Dense>
+
+#include <osgUtil/CullVisitor>
+#include <osgUtil/Optimizer>
+
+
+
+OSGWidget::OSGWidget(QWidget *parent)
+    : QOpenGLWidget(parent)
+    , m_timer(new QTimer(this))
+    , m_streamTimer(new QTimer(this))
+    , m_lastMouseX(0)
+    , m_lastMouseY(0)
+    , m_firstMouse(true)
+    , m_pcaSum(0, 0, 0)
+    , m_pcaSumXX(0), m_pcaSumXY(0), m_pcaSumXZ(0)
+    , m_pcaSumYY(0), m_pcaSumYZ(0), m_pcaSumZZ(0)
+    , m_pcaCount(0), m_pcaTicks(0)
+{
+    m_root = new osg::Group();
+    m_root->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+
+    connect(m_timer, &QTimer::timeout, this, [this]() { update(); });
+    m_timer->start(16);
+
+    connect(m_streamTimer, &QTimer::timeout, this, &OSGWidget::streamNextBatch);
+}
+
+OSGWidget::~OSGWidget()
+{
+    m_timer->stop();
+    m_streamTimer->stop();
+    if (m_streamFile.is_open())
+        m_streamFile.close();
+}
+
+void OSGWidget::setSceneData(osg::Node *node)
+{
+    m_root->removeChildren(0, m_root->getNumChildren());
+    if (node)
+        m_root->addChild(node);
+}
+
+void OSGWidget::setCenterOverlayVisible(bool visible)
+{
+    m_centerOverlayVisible = visible;
+    if (!m_centerOverlayCamera.valid()) return;
+
+    if (visible) {
+        m_centerOverlayCamera->setNodeMask(0xffffffff);
+        // 确保 camera 在 sceneRoot 中
+        osg::Group* sceneRoot = m_viewer.valid() ? m_viewer->getSceneData()->asGroup() : nullptr;
+        if (sceneRoot && m_centerOverlayCamera->getNumParents() == 0)
+            sceneRoot->addChild(m_centerOverlayCamera.get());
+    } else {
+        m_centerOverlayCamera->setNodeMask(0);
+        // 从场景图中彻底移除
+        while (m_centerOverlayCamera->getNumParents() > 0)
+            m_centerOverlayCamera->getParent(0)->removeChild(m_centerOverlayCamera.get());
+    }
+    printf("  setCenterOverlayVisible(%d): parents=%d\n",
+           visible ? 1 : 0, m_centerOverlayCamera->getNumParents());
+}
+
+void OSGWidget::clearScene()
+{
+    m_root->removeChildren(0, m_root->getNumChildren());
+    m_viewLocked = false;  // 解除视图锁定
+    m_streamTimer->stop();
+    if (m_streamFile.is_open())
+        m_streamFile.close();
+    m_streamLoaded = 0;
+    m_streamDone = true;
+    m_streamBBoxValid = false;
+    m_highlights.clear();
+    m_deleteHistory.clear();
+    m_selectedPolylines.clear();
+}
+
+void OSGWidget::setCameraManipulator(osgGA::CameraManipulator *manipulator)
+{
+    if (m_viewer.valid())
+        m_viewer->setCameraManipulator(manipulator);
+}
+
+void OSGWidget::home()
+{
+    if (m_viewer.valid() && m_viewer->getCameraManipulator())
+        m_viewer->getCameraManipulator()->home(0);
+}
+
+void OSGWidget::createAxesIndicator()
+{
+    m_axesCamera = new osg::Camera();
+    m_axesCamera->setRenderOrder(osg::Camera::POST_RENDER);
+    m_axesCamera->setClearMask(GL_DEPTH_BUFFER_BIT);
+    m_axesCamera->setReferenceFrame(osg::Transform::ABSOLUTE_RF);
+    m_axesCamera->setViewMatrix(osg::Matrix::identity());
+    m_axesCamera->setAllowEventFocus(false);
+    m_axesCamera->setGraphicsContext(m_gw.get());
+
+    int s = devicePixelRatio();
+    int axesSize = 200;
+    int margin = 10;
+    m_axesCamera->setViewport(margin, margin, axesSize * s, axesSize * s);
+    m_axesCamera->setProjectionMatrixAsOrtho(-2.5f, 2.5f, -2.5f, 2.5f, -2.5f, 2.5f);
+
+    m_axesGroup = new osg::Group();
+    m_axesGroup->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+    m_axesCamera->addChild(m_axesGroup.get());
+
+    float shaftLen = 1.2f;
+    float coneR = 0.1f;
+    float coneH = 0.3f;
+
+    auto makeAxis = [&](const osg::Vec3& dir, const osg::Vec4& color, const osg::Vec3& conePos)
+    {
+        osg::ref_ptr<osg::Geode> geode = new osg::Geode();
+
+        osg::ref_ptr<osg::Geometry> line = new osg::Geometry();
+        osg::ref_ptr<osg::Vec3Array> verts = new osg::Vec3Array();
+        verts->push_back(osg::Vec3(0, 0, 0));
+        verts->push_back(dir * shaftLen);
+        line->setVertexArray(verts);
+        line->addPrimitiveSet(new osg::DrawArrays(GL_LINES, 0, 2));
+
+        osg::ref_ptr<osg::Vec4Array> lc = new osg::Vec4Array();
+        lc->push_back(color);
+        line->setColorArray(lc, osg::Array::BIND_OVERALL);
+        line->getOrCreateStateSet()->setAttribute(new osg::LineWidth(3.0f));
+        geode->addDrawable(line);
+
+        m_axesGroup->addChild(geode);
+
+        // Build cone tip as triangle fan: tip at conePos + dir*coneH, base at conePos
+        osg::ref_ptr<osg::Geometry> coneGeom = new osg::Geometry();
+        osg::ref_ptr<osg::Vec3Array> cv = new osg::Vec3Array();
+        osg::Vec3 tip = conePos + dir * coneH;
+        cv->push_back(tip);
+        int segs = 16;
+        for (int i = 0; i <= segs; ++i) {
+            float a = (float)i / segs * 2.0f * osg::PI;
+            osg::Vec3 sideDir(dir.y() * cos(a) + dir.z() * sin(a),
+                              dir.z() * cos(a) + dir.x() * sin(a),
+                              dir.x() * cos(a) + dir.y() * sin(a));
+            // Project sideDir onto the plane perpendicular to dir
+            sideDir = sideDir - dir * (sideDir * dir);
+            float len = sideDir.length();
+            if (len > 1e-6f) sideDir *= coneR / len; else sideDir = osg::Vec3(0, 0, 0);
+            cv->push_back(conePos + sideDir);
+        }
+        coneGeom->setVertexArray(cv);
+        coneGeom->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLE_FAN, 0, segs + 2));
+        osg::ref_ptr<osg::Vec4Array> cc = new osg::Vec4Array();
+        cc->push_back(color);
+        coneGeom->setColorArray(cc, osg::Array::BIND_OVERALL);
+        osg::ref_ptr<osg::Geode> coneGeode = new osg::Geode();
+        coneGeode->addDrawable(coneGeom);
+        m_axesGroup->addChild(coneGeode);
+    };
+
+    // X: red cone at (shaftLen, 0, 0), pointing +X
+    makeAxis(osg::Vec3(1, 0, 0), osg::Vec4(1, 0, 0, 1), osg::Vec3(shaftLen, 0, 0));
+    // Y: green cone at (0, shaftLen, 0), pointing +Y
+    makeAxis(osg::Vec3(0, 1, 0), osg::Vec4(0, 1, 0, 1), osg::Vec3(0, shaftLen, 0));
+    // Z: blue cone at (0, 0, shaftLen), pointing +Z
+    makeAxis(osg::Vec3(0, 0, 1), osg::Vec4(0, 0, 1, 1), osg::Vec3(0, 0, shaftLen));
+
+    // Axis labels
+    auto makeLabel = [&](const osg::Vec3& pos, const std::string& text, const osg::Vec4& color)
+    {
+        osg::ref_ptr<osgText::Text> label = new osgText::Text();
+        label->setText(text);
+        label->setCharacterSize(0.25f);
+        label->setColor(color);
+        label->setPosition(pos);
+        label->setAlignment(osgText::Text::CENTER_CENTER);
+        label->setAxisAlignment(osgText::Text::SCREEN);
+        osg::ref_ptr<osg::Geode> labelGeode = new osg::Geode();
+        labelGeode->addDrawable(label);
+        m_axesGroup->addChild(labelGeode);
+    };
+    makeLabel(osg::Vec3(shaftLen + coneH + 0.2f, -0.2f, 0), "X", osg::Vec4(1, 1, 1, 1));
+    makeLabel(osg::Vec3(-0.2f, shaftLen + coneH + 0.2f, 0), "Y", osg::Vec4(1, 1, 1, 1));
+    makeLabel(osg::Vec3(-0.2f, 0, shaftLen + coneH + 0.2f), "Z", osg::Vec4(1, 1, 1, 1));
+
+    osg::ref_ptr<osg::Geode> originGeode = new osg::Geode();
+    osg::ref_ptr<osg::Sphere> sphere = new osg::Sphere(osg::Vec3(0, 0, 0), 0.03f);
+    osg::ref_ptr<osg::ShapeDrawable> sphereDraw = new osg::ShapeDrawable(sphere);
+    sphereDraw->setColor(osg::Vec4(0.2f, 0.2f, 0.2f, 1));
+    originGeode->addDrawable(sphereDraw);
+    m_axesGroup->addChild(originGeode);
+
+    // Add axes camera to the scene root (which already contains m_root)
+    osg::Group* sceneRoot = m_viewer->getSceneData()->asGroup();
+    if (sceneRoot)
+        sceneRoot->addChild(m_axesCamera.get());
+}
+
+void OSGWidget::updateAxesView()
+{
+    if (!m_axesCamera.valid() || !m_viewer.valid())
+        return;
+
+    osg::Matrix vm = m_viewer->getCamera()->getViewMatrix();
+    vm.setTrans(0, 0, 0);
+    m_axesCamera->setViewMatrix(vm);
+}
+
+void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points)
+{
+    if (points.empty()) return;
+
+    // LeadScan 风格：Vec4Array(float 颜色) + VBO + DYNAMIC
+    osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
+    osg::ref_ptr<osg::Vec4Array> c = new osg::Vec4Array();
+    v->reserve(points.size());
+    c->reserve(points.size());
+
+    for (size_t i = 0; i < points.size(); ++i) {
+        v->push_back(points[i]);
+        c->push_back(osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));  // LeadScan 蓝
+    }
+
+    osg::ref_ptr<osg::Geometry> geom = new osg::Geometry();
+    geom->setUseVertexBufferObjects(true);
+    geom->setUseDisplayList(false);
+    geom->setDataVariance(osg::Object::DYNAMIC);
+
+    geom->setVertexArray(v.get());
+    geom->setColorArray(c.get());
+    geom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+    geom->addPrimitiveSet(new osg::DrawArrays(osg::PrimitiveSet::POINTS, 0, v->size()));
+
+    osg::ref_ptr<osg::Geode> geode = new osg::Geode();
+    geode->addDrawable(geom.get());
+
+    // Point size 3.0 (LeadScan 风格)
+    osg::ref_ptr<osg::StateSet> ss = geode->getOrCreateStateSet();
+    osg::ref_ptr<osg::Point> pointSize = new osg::Point;
+    pointSize->setSize(3.0f);
+    ss->setAttribute(pointSize);
+
+    m_root->addChild(geode.get());
+
+    // 相机定位到数据，并保留 manipulator 供旋转/缩放操作
+    osg::BoundingSphere bs = m_root->getBound();
+    if (bs.valid() && bs.radius() > 0 && m_viewer.valid()) {
+        double r = bs.radius();
+        osg::Vec3d ctr(bs.center());
+        osg::Vec3d eye(ctr.x(), ctr.y() - r * 3.0, ctr.z() + r * 0.5);
+        osg::Vec3d up(0, 0, 1);
+
+        double zNear = r * 0.1;
+        double zFar = r * 100.0;
+        const osg::GraphicsContext::Traits* traits = m_gw->getTraits();
+        double aspect = static_cast<double>(traits->width) / static_cast<double>(traits->height);
+        m_viewer->getCamera()->setProjectionMatrixAsPerspective(30.0, aspect, zNear, zFar);
+        m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
+
+        m_viewLocked = false;
+        osg::ref_ptr<osgGA::TrackballManipulator> manip = new osgGA::TrackballManipulator;
+        manip->setAllowThrow(false);
+        manip->setHomePosition(eye, ctr, up, false);
+        m_viewer->setCameraManipulator(manip);
+        manip->home(0);
+    }
+}
+
+void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points,
+                                const std::vector<osg::Vec4ub>& colors)
+{
+    if (points.empty()) return;
+
+    osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
+    osg::ref_ptr<osg::Vec4Array> c = new osg::Vec4Array();
+    v->reserve(points.size());
+    c->reserve(points.size());
+    for (size_t i = 0; i < points.size(); ++i) {
+        v->push_back(points[i]);
+        if (i < colors.size())
+            c->push_back(osg::Vec4(colors[i].r()/255.0f, colors[i].g()/255.0f,
+                                    colors[i].b()/255.0f, colors[i].a()/255.0f));
+        else
+            c->push_back(osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));
+    }
+
+    osg::ref_ptr<osg::Geometry> geom = new osg::Geometry();
+    geom->setUseVertexBufferObjects(true);
+    geom->setUseDisplayList(false);
+    geom->setDataVariance(osg::Object::DYNAMIC);
+    geom->setVertexArray(v.get());
+    geom->setColorArray(c.get());
+    geom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+    geom->addPrimitiveSet(new osg::DrawArrays(osg::PrimitiveSet::POINTS, 0, v->size()));
+
+    osg::ref_ptr<osg::Geode> geode = new osg::Geode();
+    geode->addDrawable(geom.get());
+    osg::ref_ptr<osg::StateSet> ss = geode->getOrCreateStateSet();
+    osg::ref_ptr<osg::Point> pointSize = new osg::Point;
+    pointSize->setSize(3.0f);
+    ss->setAttribute(pointSize);
+    m_root->addChild(geode.get());
+}
+
+// ============================================================================
+// ============================================================================
+void OSGWidget::loadFromPointCloudBuffer(Scanner::data::PointCloudBuffer* pcb) {
+    if (!pcb) return;
+
+    uint64_t version = 0;
+    std::vector<cv::Point3f> points;
+    std::vector<cv::Vec3b> colors;
+    pcb->getSnapshot(version, points, colors);
+
+    if (points.empty()) return;
+
+    clearScene();
+
+    std::vector<osg::Vec3> osgPoints;
+    osgPoints.reserve(points.size());
+    for (const auto& p : points)
+        osgPoints.emplace_back(p.x, p.y, p.z);
+
+    if (!colors.empty()) {
+        std::vector<osg::Vec4ub> osgColors;
+        osgColors.reserve(colors.size());
+        for (const auto& c : colors)
+            osgColors.emplace_back(c[0], c[1], c[2], 255);
+        loadPointCloud(osgPoints, osgColors);
+    } else {
+        loadPointCloud(osgPoints);
+    }
+}
+
+bool OSGWidget::loadTestData(int numPoints)
+{
+    clearScene();
+
+    double vol = 200.0 * 100.0 * 50.0;
+    double step = std::cbrt(vol / numPoints * 1.2);
+    int nx = int(200.0 / step);
+    int ny = int(100.0 / step);
+    int nz = int(50.0 / step);
+    int estimate = int(nx * ny * nz * 0.85);
+
+    osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
+    osg::ref_ptr<osg::Vec4ubArray> c = new osg::Vec4ubArray();
+    v->reserve(estimate);
+    c->reserve(estimate);
+
+    int written = 0;
+    for (int iz = 0; iz < nz; ++iz)
+    {
+        float z = (iz + 0.5f) * step;
+        if (z < 0.0f || z > 50.0f) continue;
+
+        for (int iy = 0; iy < ny; ++iy)
+        {
+            float y = -50.0f + (iy + 0.5f) * step;
+            if (y < -50.0f || y > 50.0f) continue;
+
+            for (int ix = 0; ix < nx; ++ix)
+            {
+                float x = -100.0f + (ix + 0.5f) * step;
+                if (x < -100.0f || x > 100.0f) continue;
+
+                if (y > 25.0f && z > 35.0f) continue;
+
+                float hx1 = x - 50.0f, hy1 = y - 25.0f;
+                float hx2 = x + 50.0f, hy2 = y - 25.0f;
+                float hx3 = x - 50.0f, hy3 = y + 25.0f;
+                float hx4 = x + 50.0f, hy4 = y + 25.0f;
+                float d1 = hx1 * hx1 + hy1 * hy1;
+                float d2 = hx2 * hx2 + hy2 * hy2;
+                float d3 = hx3 * hx3 + hy3 * hy3;
+                float d4 = hx4 * hx4 + hy4 * hy4;
+                if (d1 < 49.0f || d2 < 49.0f || d3 < 49.0f || d4 < 49.0f) continue;
+
+                v->push_back(osg::Vec3(x, y, z));
+
+                float minD = std::min({ d1, d2, d3, d4 });
+                osg::Vec4ub color;
+                if (minD < 81.0f)
+                    color.set(220, 60, 60, 255);
+                else if (y > 20.0f && z > 30.0f)
+                    color.set(60, 120, 220, 255);
+                else if (z < 5.0f)
+                    color.set(140, 180, 140, 255);
+                else
+                    color.set(180, 180, 190, 255);
+                c->push_back(color);
+
+                ++written;
+            }
+        }
+    }
+
+    if (v->empty()) return false;
+
+    osg::ref_ptr<osg::Geometry> geom = new osg::Geometry();
+    geom->setVertexArray(v.get());
+    geom->setColorArray(c.get());
+    geom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+    geom->addPrimitiveSet(new osg::DrawArrays(GL_POINTS, 0, v->size()));
+
+    osg::ref_ptr<osg::Geode> geode = new osg::Geode();
+    geode->addDrawable(geom.get());
+    geode->getOrCreateStateSet()->setAttribute(new osg::Point(1.0f));
+
+    m_root->addChild(geode.get());
+
+    osg::ComputeBoundsVisitor cbv;
+    geode->accept(cbv);
+    osg::BoundingBox bb = cbv.getBoundingBox();
+    double diag = (bb._max - bb._min).length();
+    double znear = diag * 0.001;
+    double zfar = diag * 10.0;
+
+    if (m_viewer.valid())
+    {
+        osg::Camera* cam = m_viewer->getCamera();
+        cam->setProjectionMatrixAsPerspective(45.0,
+            static_cast<double>(width() * devicePixelRatio()) /
+            static_cast<double>(height() * devicePixelRatio()), znear, zfar);
+        m_userProjection = cam->getProjectionMatrix();
+        if (m_viewer->getCameraManipulator())
+            m_viewer->getCameraManipulator()->home(0);
+    }
+
+    return true;
+}
+
+bool OSGWidget::loadTestDataFromPLY(const std::string& filepath, int numPoints)
+{
+    clearScene();
+    m_streamTimer->stop();
+    if (m_streamFile.is_open())
+        m_streamFile.close();
+    m_streamLoaded = 0;
+    m_streamDone = false;
+
+    m_streamFile.open(filepath, std::ios::binary);
+    if (!m_streamFile.is_open())
+        return false;
+
+    std::string line;
+    int vertexCount = 0;
+    bool binaryFormat = false;
+    bool headerEnd = false;
+
+    while (std::getline(m_streamFile, line))
+    {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        if (line == "end_header") { headerEnd = true; break; }
+        if (line.compare(0, 14, "element vertex") == 0)
+            vertexCount = std::stoi(line.substr(15));
+        if (line.find("binary_little_endian") != std::string::npos)
+            binaryFormat = true;
+    }
+    if (!headerEnd || vertexCount <= 0 || !binaryFormat)
+    {
+        m_streamFile.close();
+        return false;
+    }
+
+    m_streamTotal = (numPoints > 0 && numPoints < vertexCount) ? numPoints : vertexCount;
+    m_streamPath = filepath;
+    m_streamBatch = 50000;
+
+    m_streamTimer->start(8);
+
+    return true;
+}
+
+void OSGWidget::updateStreamCameraView()
+{
+    if (!m_viewer.valid() || !m_viewer->getCameraManipulator())
+        return;
+
+    float diag = 1.0f;
+    if (m_streamBBoxValid)
+        diag = (m_streamBBoxMax - m_streamBBoxMin).length();
+    if (diag < 1.0f) diag = 1.0f;
+
+    double aspect = static_cast<double>(width() * devicePixelRatio()) /
+                    static_cast<double>(height() * devicePixelRatio());
+    double znear = diag * 0.001;
+    double zfar = diag * 10.0;
+    m_viewer->getCamera()->setProjectionMatrixAsPerspective(45.0, aspect, znear, zfar);
+    m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
+
+    // Let OSG compute the ideal view (rotation & center) from the scene's bounding sphere
+    m_viewer->getCameraManipulator()->home(0);
+
+    // Override distance: workpiece fills ~85% of viewport height
+    // formula: distance = (diag/2) / tan(0.85 * vfov * 0.5)
+    //   = diag / (2 * tan(19.125°)) = diag * 1.44
+    osgGA::TrackballManipulator* tb =
+        dynamic_cast<osgGA::TrackballManipulator*>(m_viewer->getCameraManipulator());
+    if (tb)
+    {
+        tb->setDistance(diag * 1.44);
+    }
+}
+
+void OSGWidget::adjustViewToMaxProjection()
+{
+    if (m_pcaCount < 10 || !m_viewer.valid() || !m_viewer->getCameraManipulator())
+        return;
+
+    double n = static_cast<double>(m_pcaCount);
+    osg::Vec3 mean = m_pcaSum / static_cast<float>(n);
+
+    double cxx = m_pcaSumXX / n - mean.x() * mean.x();
+    double cxy = m_pcaSumXY / n - mean.x() * mean.y();
+    double cxz = m_pcaSumXZ / n - mean.x() * mean.z();
+    double cyy = m_pcaSumYY / n - mean.y() * mean.y();
+    double cyz = m_pcaSumYZ / n - mean.y() * mean.z();
+    double czz = m_pcaSumZZ / n - mean.z() * mean.z();
+
+    Eigen::Matrix3d cov;
+    cov << cxx, cxy, cxz,
+           cxy, cyy, cyz,
+           cxz, cyz, czz;
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+    Eigen::Vector3d ev = solver.eigenvectors().col(0);
+    osg::Vec3 normal(ev(0), ev(1), ev(2));
+    normal.normalize();
+
+    osgGA::TrackballManipulator* tb =
+        dynamic_cast<osgGA::TrackballManipulator*>(m_viewer->getCameraManipulator());
+    if (tb)
+    {
+        osg::Quat rot;
+        rot.makeRotate(osg::Vec3(0, 0, -1), normal);
+        tb->setRotation(rot);
+    }
+}
+
+void OSGWidget::streamNextBatch()
+{
+    if (m_streamDone || !m_streamFile.is_open())
+    {
+        m_streamTimer->stop();
+        return;
+    }
+
+    int remaining = m_streamTotal - m_streamLoaded;
+    int batch = std::min(m_streamBatch, remaining);
+
+    if (batch <= 0)
+    {
+        m_streamFile.close();
+        m_streamDone = true;
+        m_streamTimer->stop();
+        return;
+    }
+
+    osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
+    osg::ref_ptr<osg::Vec4ubArray> c = new osg::Vec4ubArray();
+    v->reserve(batch);
+    c->reserve(batch);
+
+    osg::Vec3 batchMin(1e30f, 1e30f, 1e30f);
+    osg::Vec3 batchMax(-1e30f, -1e30f, -1e30f);
+    int batchCount = 0;
+
+    for (int i = 0; i < batch; ++i)
+    {
+        float x, y, z;
+        m_streamFile.read(reinterpret_cast<char*>(&x), 4);
+        m_streamFile.read(reinterpret_cast<char*>(&y), 4);
+        m_streamFile.read(reinterpret_cast<char*>(&z), 4);
+        unsigned char r = static_cast<unsigned char>(m_streamFile.get());
+        unsigned char g = static_cast<unsigned char>(m_streamFile.get());
+        unsigned char b = static_cast<unsigned char>(m_streamFile.get());
+
+        if (m_streamFile.good() && std::isfinite(x) && std::isfinite(y) && std::isfinite(z)
+            && std::fabs(x) < 1e5f && std::fabs(y) < 1e5f && std::fabs(z) < 1e5f)
+        {
+            v->push_back(osg::Vec3(x, y, z));
+            c->push_back(osg::Vec4ub(135, 206, 250, 255));  // light blue
+            if (x < batchMin.x()) batchMin.x() = x;
+            if (y < batchMin.y()) batchMin.y() = y;
+            if (z < batchMin.z()) batchMin.z() = z;
+            if (x > batchMax.x()) batchMax.x() = x;
+            if (y > batchMax.y()) batchMax.y() = y;
+            if (z > batchMax.z()) batchMax.z() = z;
+            batchCount++;
+
+            m_pcaSum.x() += x;
+            m_pcaSum.y() += y;
+            m_pcaSum.z() += z;
+            m_pcaSumXX += x * x;
+            m_pcaSumXY += x * y;
+            m_pcaSumXZ += x * z;
+            m_pcaSumYY += y * y;
+            m_pcaSumYZ += y * z;
+            m_pcaSumZZ += z * z;
+            m_pcaCount++;
+        }
+    }
+
+    if (v->empty())
+    {
+        m_streamFile.close();
+        m_streamDone = true;
+        m_streamTimer->stop();
+        return;
+    }
+
+    osg::ref_ptr<osg::Geometry> geom = new osg::Geometry();
+    geom->setVertexArray(v.get());
+    geom->setColorArray(c.get());
+    geom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+    geom->addPrimitiveSet(new osg::DrawArrays(GL_POINTS, 0, v->size()));
+
+    osg::ref_ptr<osg::Geode> geode = new osg::Geode();
+    geode->addDrawable(geom.get());
+    geode->getOrCreateStateSet()->setAttribute(new osg::Point(1.0f));
+
+    m_root->addChild(geode.get());
+
+    m_streamLoaded += batch;
+
+
+
+    if (m_streamBBoxValid)
+    {
+        if (batchMin.x() < m_streamBBoxMin.x()) m_streamBBoxMin.x() = batchMin.x();
+        if (batchMin.y() < m_streamBBoxMin.y()) m_streamBBoxMin.y() = batchMin.y();
+        if (batchMin.z() < m_streamBBoxMin.z()) m_streamBBoxMin.z() = batchMin.z();
+        if (batchMax.x() > m_streamBBoxMax.x()) m_streamBBoxMax.x() = batchMax.x();
+        if (batchMax.y() > m_streamBBoxMax.y()) m_streamBBoxMax.y() = batchMax.y();
+        if (batchMax.z() > m_streamBBoxMax.z()) m_streamBBoxMax.z() = batchMax.z();
+    }
+    else
+    {
+        m_streamBBoxMin = batchMin;
+        m_streamBBoxMax = batchMax;
+        m_streamBBoxValid = true;
+    }
+
+    updateStreamCameraView();
+
+    m_pcaTicks++;
+    //if (m_pcaTicks >= 25 || m_streamDone)
+    //{
+    //    adjustViewToMaxProjection();
+    //    m_pcaTicks = 0;
+    //    m_pcaCount = 0;
+    //    m_pcaSum.set(0, 0, 0);
+    //    m_pcaSumXX = m_pcaSumXY = m_pcaSumXZ = 0;
+    //    m_pcaSumYY = m_pcaSumYZ = m_pcaSumZZ = 0;
+    //}
+
+    emit streamProgress(m_streamLoaded, m_streamTotal);
+
+    if (m_streamLoaded >= m_streamTotal)
+    {
+        m_streamFile.close();
+        m_streamDone = true;
+        m_streamTimer->stop();
+    }
+}
+
+void OSGWidget::initializeGL()
+{
+    m_viewer = new osgViewer::Viewer();
+    m_viewer->setThreadingModel(osgViewer::Viewer::SingleThreaded);
+
+    int w = width() * devicePixelRatio();
+    int h = height() * devicePixelRatio();
+
+    osg::ref_ptr<osg::Camera> camera = new osg::Camera();
+    camera->setViewport(0, 0, w, h);
+    camera->setProjectionMatrixAsPerspective(45.0,
+        static_cast<double>(w) / static_cast<double>(h), 1.0, 10000.0);
+    m_userProjection = camera->getProjectionMatrix();
+    camera->setClearColor(osg::Vec4(0.412f, 0.412f, 0.412f, 1.0f));
+
+    m_gw = new osgViewer::GraphicsWindowEmbedded(0, 0, w, h);
+    camera->setGraphicsContext(m_gw.get());
+
+    m_viewer->setCamera(camera.get());
+
+    osg::ref_ptr<osg::Group> sceneRoot = new osg::Group();
+    sceneRoot->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+    sceneRoot->addChild(m_root.get());
+    m_viewer->setSceneData(sceneRoot.get());
+
+
+
+    osgGA::TrackballManipulator* manip = new osgGA::TrackballManipulator();
+    manip->setAllowThrow(false);
+    m_viewer->setCameraManipulator(manip);
+
+    createAxesIndicator();
+    // createCenterOverlay();  // 暂时禁用 center.png 背景叠加
+
+    // CullCallback captures the EXACT rendering matrices for hit-testing
+    m_hitTestCallback = new HitTestCullCallback(
+        &m_capturedMVP, &m_camProjAfterFrame, &m_camViewAfterFrame);
+    m_viewer->getCamera()->addCullCallback(m_hitTestCallback.get());
+}
+
+void OSGWidget::resizeGL(int w, int h)
+{
+    int s = devicePixelRatio();
+    qDebug("3D viewport size: %d x %d", w * s, h * s);
+    m_gw->resized(0, 0, w * s, h * s);
+    m_viewer->getCamera()->setViewport(0, 0, w * s, h * s);
+
+    // 保持当前投影的 fov/near/far，仅更新 aspect（避免旋转操作时 resize 重置视角）
+    {
+        double fov, aspect, zNear, zFar;
+        m_userProjection.getPerspective(fov, aspect, zNear, zFar);
+        aspect = static_cast<double>(w * s) / static_cast<double>(h * s);
+        m_viewer->getCamera()->setProjectionMatrixAsPerspective(fov, aspect, zNear, zFar);
+        m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
+    }
+
+    if (m_axesCamera.valid())
+    {
+        int axesSize = 200;
+        int margin = 10;
+        m_axesCamera->setViewport(margin, margin, axesSize * s, axesSize * s);
+        m_axesCamera->setProjectionMatrixAsOrtho(-2.5f, 2.5f, -2.5f, 2.5f, -2.5f, 2.5f);
+    }
+
+    // createCenterOverlay();
+}
+
+void OSGWidget::paintGL()
+{
+    if (!m_viewer.valid())
+        return;
+
+    if (m_gw.valid())
+        m_gw->makeCurrent();
+
+    // 恢复投影矩阵（OSG 内部可能在 frame() 中修改）
+    m_viewer->getCamera()->setProjectionMatrix(m_userProjection);
+
+    // 恢复锁定的视图矩阵
+    if (m_viewLocked)
+        m_viewer->getCamera()->setViewMatrix(m_userView);
+
+    updateAxesView();
+
+    m_viewer->frame();
+
+    // Capture matrices that OSG actually used for this frame
+    m_camViewAfterFrame = m_viewer->getCamera()->getViewMatrix();
+    m_camProjAfterFrame = m_viewer->getCamera()->getProjectionMatrix();
+}
+
+void OSGWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (m_lassoMode)
+        return;
+    if (!m_gw.valid()) return;
+    float x = event->pos().x();
+    float y = event->pos().y();
+
+    if (m_firstMouse)
+    {
+        m_lastMouseX = x;
+        m_lastMouseY = y;
+        m_firstMouse = false;
+    }
+
+    m_lastMouseX = x;
+    m_lastMouseY = y;
+
+    m_gw->getEventQueue()->mouseMotion(x, y);
+}
+
+void OSGWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (m_lassoMode)
+    {
+        if (event->button() == Qt::LeftButton)
+            addLassoPoint(event->pos().x(), event->pos().y());
+        else if (event->button() == Qt::RightButton)
+            closeLasso();
+        return;
+    }
+    if (!m_gw.valid()) return;
+    m_firstMouse = true;
+    unsigned int button = Qt::LeftButton;
+    if (event->button() == Qt::MidButton)     button = osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON;
+    else if (event->button() == Qt::RightButton) button = osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON;
+    else                                          button = osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON;
+
+    m_gw->getEventQueue()->mouseButtonPress(event->pos().x(), event->pos().y(), button);
+}
+
+void OSGWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (m_lassoMode)
+        return;
+    if (!m_gw.valid()) return;
+    unsigned int button = Qt::LeftButton;
+    if (event->button() == Qt::MidButton)     button = osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON;
+    else if (event->button() == Qt::RightButton) button = osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON;
+    else                                          button = osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON;
+
+    m_gw->getEventQueue()->mouseButtonRelease(event->pos().x(), event->pos().y(), button);
+}
+
+void OSGWidget::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    if (m_lassoMode)
+        return;
+    if (!m_gw.valid()) return;
+    m_gw->getEventQueue()->mouseDoubleButtonPress(event->pos().x(), event->pos().y(),
+        osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
+}
+
+void OSGWidget::wheelEvent(QWheelEvent *event)
+{
+    if (m_lassoMode)
+        return;
+    if (!m_gw.valid()) return;
+    int delta = event->angleDelta().y();
+    m_gw->getEventQueue()->mouseScroll(
+        delta > 0 ? osgGA::GUIEventAdapter::SCROLL_UP : osgGA::GUIEventAdapter::SCROLL_DOWN);
+}
+
+// ---- Lasso / Polyline selection ----
+
+void OSGWidget::enterLassoDeleteMode()
+{
+    m_lassoDeleteMode = true;
+    enterLassoMode();
+}
+
+void OSGWidget::enterLassoMode()
+{
+    clearHighlight();
+    m_lassoMode = true;
+    m_lassoPoints = new osg::Vec2Array();
+    m_selectedPolylines.clear();
+
+    m_lassoCamera = new osg::Camera();
+    m_lassoCamera->setRenderOrder(osg::Camera::POST_RENDER, 5);
+    m_lassoCamera->setClearMask(GL_DEPTH_BUFFER_BIT);
+    m_lassoCamera->setReferenceFrame(osg::Transform::ABSOLUTE_RF);
+    m_lassoCamera->setViewMatrix(osg::Matrix::identity());
+    m_lassoCamera->setAllowEventFocus(false);
+    m_lassoCamera->setGraphicsContext(m_gw.get());
+
+    int s = devicePixelRatio();
+    int vpw = width() * s;
+    int vph = height() * s;
+    m_lassoCamera->setViewport(0, 0, vpw, vph);
+    m_lassoCamera->setProjectionMatrixAsOrtho2D(-vpw * 0.5f, vpw * 0.5f, -vph * 0.5f, vph * 0.5f);
+    m_lassoCamera->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+
+    m_lassoVerts = new osg::Vec3Array();
+    m_lassoGeom = new osg::Geometry();
+    m_lassoGeom->setVertexArray(m_lassoVerts);
+
+    osg::ref_ptr<osg::Vec4Array> colors = new osg::Vec4Array();
+    colors->push_back(osg::Vec4(0.0f, 1.0f, 0.0f, 1.0f));
+    m_lassoGeom->setColorArray(colors, osg::Array::BIND_OVERALL);
+
+    m_lassoDrawArrays = new osg::DrawArrays(GL_LINE_STRIP, 0, 0);
+    m_lassoGeom->addPrimitiveSet(m_lassoDrawArrays);
+
+    osg::ref_ptr<osg::Geode> geode = new osg::Geode();
+    geode->addDrawable(m_lassoGeom);
+    geode->getOrCreateStateSet()->setAttribute(new osg::LineWidth(3.0f));
+    m_lassoCamera->addChild(geode);
+
+    osg::Group* sceneRoot = m_viewer->getSceneData()->asGroup();
+    if (sceneRoot)
+        sceneRoot->addChild(m_lassoCamera.get());
+}
+
+void OSGWidget::deleteSelectedPoints()
+{
+    if (m_highlights.empty())
+        return;
+
+    for (auto& entry : m_highlights)
+    {
+        pushDeleteUndo(entry.geom, entry.indices, entry.originalColors);
+
+        osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(
+            entry.geom->getColorArray());
+        if (!colors) continue;
+
+        for (unsigned int vi : entry.indices)
+        {
+            if (vi < colors->size())
+                (*colors)[vi] = osg::Vec4ub(0, 0, 0, 0);
+        }
+        colors->dirty();
+        entry.geom->setColorArray(colors);
+
+        osg::StateSet* ss = entry.geom->getOrCreateStateSet();
+        ss->setMode(GL_BLEND, osg::StateAttribute::ON);
+        osg::ref_ptr<osg::BlendFunc> bf = new osg::BlendFunc();
+        bf->setFunction(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        ss->setAttribute(bf);
+    }
+
+    clearHighlight();
+    m_selectedPolylines.clear();
+}
+
+void OSGWidget::exitLassoMode()
+{
+    m_lassoMode = false;
+    if (m_lassoPoints.valid())
+        m_lassoPoints->clear();
+
+    if (m_lassoCamera.valid())
+    {
+        osg::Group* sceneRoot = m_viewer->getSceneData()->asGroup();
+        if (sceneRoot)
+            sceneRoot->removeChild(m_lassoCamera.get());
+        m_lassoCamera = nullptr;
+    }
+    m_lassoGeom = nullptr;
+    m_lassoVerts = nullptr;
+    m_lassoDrawArrays = nullptr;
+}
+
+void OSGWidget::addLassoPoint(float mx, float my)
+{
+    int s = devicePixelRatio();
+    int vpw = width() * s;
+    int vph = height() * s;
+
+    float sx = mx * s - vpw * 0.5f;
+    float sy = vph * 0.5f - my * s;
+
+    m_lassoPoints->push_back(osg::Vec2(sx, sy));
+    updateLassoGeometry();
+
+    if (m_lassoPoints->size() > 2)
+    {
+        const osg::Vec2& first = m_lassoPoints->front();
+        float dx = sx - first.x();
+        float dy = sy - first.y();
+        if (dx * dx + dy * dy < 100.0f)
+        {
+            closeLasso();
+            return;
+        }
+    }
+}
+
+void OSGWidget::debugValidateProjection()
+{
+    if (!m_viewer.valid()) return;
+
+    osg::Matrix P = m_userProjection;
+    osg::Matrix V = m_viewer->getCamera()->getViewMatrix();
+    osg::Matrix iV = osg::Matrix::inverse(V);
+    osg::Matrix captured = m_capturedMVP;
+
+    int vpw = m_hitTestVpw > 0 ? m_hitTestVpw : (width() * devicePixelRatio());
+    int vph = m_hitTestVph > 0 ? m_hitTestVph : (height() * devicePixelRatio());
+
+    // Compare V with manipulator matrices
+    osgGA::TrackballManipulator* tb =
+        dynamic_cast<osgGA::TrackballManipulator*>(m_viewer->getCameraManipulator());
+    osg::Matrix manipMat, manipInv;
+    if (tb) { manipMat = tb->getMatrix(); manipInv = tb->getInverseMatrix(); }
+
+    double diffInv = 0, diffMat = 0;
+    for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) {
+        diffInv += fabs(V(r,c) - manipInv(r,c));
+        diffMat += fabs(V(r,c) - manipMat(r,c));
+    }
+
+    // Find a sample point
+    osg::Vec3 sample(0,0,0);
+    bool found = false;
+    for (unsigned int ci = 0; ci < m_root->getNumChildren() && !found; ++ci) {
+        osg::Geode* g = m_root->getChild(ci)->asGeode();
+        if (!g) continue;
+        for (unsigned int di = 0; di < g->getNumDrawables() && !found; ++di) {
+            osg::Geometry* geom = g->getDrawable(di)->asGeometry();
+            if (!geom) continue;
+            osg::Vec3Array* v = dynamic_cast<osg::Vec3Array*>(geom->getVertexArray());
+            if (v && !v->empty()) { sample = (*v)[0]; found = true; }
+        }
+    }
+
+    auto toScreen = [vpw, vph](const osg::Matrix& mvp, const osg::Vec3& w, float& sx, float& sy) -> bool {
+        osg::Vec4 clip = mvp * osg::Vec4(w.x(), w.y(), w.z(), 1.0);
+        if (fabs(clip.w()) < 1e-10) return false;
+        if (clip.w() < 0) { clip.x()=-clip.x(); clip.y()=-clip.y(); clip.z()=-clip.z(); clip.w()=-clip.w(); }
+        float ndx = clip.x()/clip.w(), ndy = clip.y()/clip.w();
+        if (ndx<-1||ndx>1||ndy<-1||ndy>1) return false;
+        sx = ndx*vpw*0.5f; sy = ndy*vph*0.5f;
+        return true;
+    };
+
+    float s1x, s1y, s2x, s2y, s3x, s3y;
+    bool ok1 = toScreen(P * V, sample, s1x, s1y);
+    bool ok2 = toScreen(P * iV, sample, s2x, s2y);
+    bool ok3 = toScreen(captured, sample, s3x, s3y);
+
+    auto matStr = [](const osg::Matrix& m) {
+        QString s;
+        for (int r = 0; r < 4; ++r)
+            s += QString("  [%1 %2 %3 %4]\n")
+                .arg(m(r,0),8,'f',3).arg(m(r,1),8,'f',3).arg(m(r,2),8,'f',3).arg(m(r,3),8,'f',3);
+        return s;
+    };
+
+    QString msg;
+    msg += "=== Projection Validation ===\n\n";
+    msg += QString("getViewMatrix() vs manip.getInverseMatrix() L1: %1\n").arg(diffInv,0,'f',4);
+    msg += QString("getViewMatrix() vs manip.getMatrix()        L1: %2\n").arg(diffMat,0,'f',4);
+    msg += (diffInv < diffMat) ? "→ getViewMatrix() IS the view matrix (world→eye)\n" : "→ getViewMatrix() IS the placement matrix (eye→world)\n";
+
+    if (found) {
+        msg += QString("\nSample point: (%1, %2, %3)\n").arg(sample.x(),0,'f',1).arg(sample.y(),0,'f',1).arg(sample.z(),0,'f',1);
+        msg += QString("P * V  (correct Proj*View):   ");
+        msg += ok1 ? QString("(%1, %2)\n").arg(s1x,0,'f',0).arg(s1y,0,'f',0) : "OFF SCREEN\n";
+        msg += QString("P * iV (wrong, for ref):      ");
+        msg += ok2 ? QString("(%1, %2)\n").arg(s2x,0,'f',0).arg(s2y,0,'f',0) : "OFF SCREEN\n";
+        msg += QString("captured MVP (mv*proj, wrong):");
+        msg += ok3 ? QString("(%1, %2)\n").arg(s3x,0,'f',0).arg(s3y,0,'f',0) : "OFF SCREEN\n";
+    }
+
+    // Compare raw vs after-frame matrices
+    osg::Matrix selV = m_hitTestView;
+    osg::Matrix selP = m_hitTestProj;
+    osg::Matrix afterV = m_camViewAfterFrame;
+    osg::Matrix afterP = m_camProjAfterFrame;
+    double dV = 0, dP = 0;
+    for (int r=0;r<4;++r) for(int c=0;c<4;++c) {
+        dV += fabs(selV(r,c)-afterV(r,c));
+        dP += fabs(selP(r,c)-afterP(r,c));
+    }
+    msg += QString("\n--- Selection vs frame-after matrices ---\n");
+    msg += QString("View diff: %1  Proj diff: %2\n").arg(dV,0,'f',4).arg(dP,0,'f',4);
+
+    msg += "\nSelection V (m_hitTestView):\n" + matStr(selV);
+    msg += "\nSelection P (m_hitTestProj):\n" + matStr(selP);
+    msg += "\nAfter-frame V:\n" + matStr(afterV);
+    msg += "\nAfter-frame P:\n" + matStr(afterP);
+
+    msg += "\n--- Raw camera matrices ---\n";
+    msg += "\nV matrix (getViewMatrix):\n" + matStr(V);
+    msg += "\niV matrix:\n" + matStr(iV);
+    msg += "\ncapturedMVP (V*P from cull):\n" + matStr(captured);
+
+    QMessageBox::information(this, "Projection Debug", msg);
+}
+
+void OSGWidget::closeLasso()
+{
+    if (!m_lassoPoints.valid() || m_lassoPoints->size() < 3)
+    {
+        exitLassoMode();
+        emit lassoCompleted();
+        return;
+    }
+
+    m_selectedPolylines.push_back(new osg::Vec2Array(*m_lassoPoints));
+
+    // Show the fully closed polygon FIRST
+    m_lassoVerts->clear();
+    for (unsigned int i = 0; i < m_lassoPoints->size(); ++i)
+    {
+        const osg::Vec2& pt = (*m_lassoPoints)[i];
+        m_lassoVerts->push_back(osg::Vec3(pt.x(), pt.y(), 0.0f));
+    }
+    m_lassoVerts->dirty();
+    m_lassoGeom->removePrimitiveSet(0, m_lassoGeom->getNumPrimitiveSets());
+    m_lassoDrawArrays = new osg::DrawArrays(GL_LINE_LOOP, 0, m_lassoVerts->size());
+    m_lassoGeom->addPrimitiveSet(m_lassoDrawArrays);
+    update();
+    QApplication::processEvents();
+
+    // Use the projection and view matrices captured by CullCallback during the last frame().
+    // computeRenderingMVP() transposes them to match OpenGL's column-major convention
+    // (P_GL * V_GL), which produces the correct clip.w = -z_eye.
+    m_hitTestView = m_camViewAfterFrame;
+    m_hitTestProj = m_camProjAfterFrame;
+
+
+    m_hitTestVpw = width() * devicePixelRatio();
+    m_hitTestVph = height() * devicePixelRatio();
+
+    if (m_lassoDeleteMode)
+    {
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this,
+            QStringLiteral("确认删除"),
+            QStringLiteral("确定要删除多段线圈定的区域内的点吗？"),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+
+        if (reply == QMessageBox::Yes)
+            deletePointsInPolyline();
+
+        m_lassoDeleteMode = false;
+        exitLassoMode();
+        emit lassoCompleted();
+    }
+    else
+    {
+        highlightSelectedPoints();
+        exitLassoMode();
+        update();
+        emit lassoCompleted();
+    }
+}
+
+void OSGWidget::updateLassoGeometry()
+{
+    if (!m_lassoVerts.valid() || !m_lassoGeom.valid())
+        return;
+
+    m_lassoVerts->clear();
+    for (unsigned int i = 0; i < m_lassoPoints->size(); ++i)
+    {
+        const osg::Vec2& pt = (*m_lassoPoints)[i];
+        m_lassoVerts->push_back(osg::Vec3(pt.x(), pt.y(), 0.0f));
+    }
+    m_lassoVerts->dirty();
+
+    m_lassoGeom->removePrimitiveSet(0, m_lassoGeom->getNumPrimitiveSets());
+    m_lassoDrawArrays = new osg::DrawArrays(GL_LINE_STRIP, 0, m_lassoVerts->size());
+    m_lassoGeom->addPrimitiveSet(m_lassoDrawArrays);
+}
+
+bool OSGWidget::isPointInPolygon2D(const osg::Vec2d& point, const osg::Vec2Array& polygon)
+{
+    bool inside = false;
+    int n = polygon.size();
+    for (int i = 0, j = n - 1; i < n; j = i++)
+    {
+        if (((polygon[i].y() > point.y()) != (polygon[j].y() > point.y())) &&
+            (point.x() < (polygon[j].x() - polygon[i].x()) * (point.y() - polygon[i].y())
+                / (polygon[j].y() - polygon[i].y()) + polygon[i].x()))
+        {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+void OSGWidget::highlightSelectedPoints()
+{
+    if (m_selectedPolylines.empty() || !m_viewer.valid())
+        return;
+
+    osg::Vec2Array* poly = m_selectedPolylines.back().get();
+    if (!poly || poly->size() < 3)
+        return;
+
+    osg::Matrix mvp = computeRenderingMVP(m_hitTestProj, m_hitTestView);
+    int vpw = m_hitTestVpw;
+    int vph = m_hitTestVph;
+
+    for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci)
+    {
+        osg::Geode* geode = m_root->getChild(ci)->asGeode();
+        if (!geode) continue;
+
+        for (unsigned int di = 0; di < geode->getNumDrawables(); ++di)
+        {
+            osg::Geometry* geom = geode->getDrawable(di)->asGeometry();
+            if (!geom) continue;
+
+            osg::Vec3Array* verts = dynamic_cast<osg::Vec3Array*>(geom->getVertexArray());
+            osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(geom->getColorArray());
+            if (!verts || !colors || verts->size() != colors->size())
+                continue;
+
+            bool alreadyHighlighted = false;
+            for (auto& h : m_highlights)
+            {
+                if (h.geom == geom) { alreadyHighlighted = true; break; }
+            }
+            if (alreadyHighlighted) continue;
+
+            HighlightEntry entry;
+            entry.geom = geom;
+
+            for (unsigned int vi = 0; vi < verts->size(); ++vi)
+            {
+                osg::Vec3 wp = (*verts)[vi];
+                osg::Vec4 clip = mvp * osg::Vec4(wp.x(), wp.y(), wp.z(), 1.0);
+                if (fabs(clip.w()) < 1e-10)
+                    continue;
+
+                if (clip.w() < 0.0f)
+                {
+                    clip.x() = -clip.x();
+                    clip.y() = -clip.y();
+                    clip.z() = -clip.z();
+                    clip.w() = -clip.w();
+                }
+
+                float ndx = clip.x() / clip.w();
+                float ndy = clip.y() / clip.w();
+                if (ndx < -1.0f || ndx > 1.0f || ndy < -1.0f || ndy > 1.0f)
+                    continue;
+
+                float sx = ndx * vpw * 0.5f;
+                float sy = ndy * vph * 0.5f;
+
+                if (isPointInPolygon2D(osg::Vec2d(sx, sy), *poly))
+                {
+                    entry.indices.push_back(vi);
+                    entry.originalColors.push_back((*colors)[vi]);
+                }
+            }
+
+            if (!entry.indices.empty())
+            {
+                osg::ref_ptr<osg::Vec4ubArray> newColors = new osg::Vec4ubArray(*colors);
+                for (unsigned int vi : entry.indices)
+                    (*newColors)[vi] = osg::Vec4ub(0, 0, 255, 255);
+                newColors->dirty();
+                geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
+                geom->dirtyDisplayList();
+                m_highlights.push_back(std::move(entry));
+            }
+        }
+    }
+}
+
+void OSGWidget::clearHighlight()
+{
+    for (auto& entry : m_highlights)
+    {
+        osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(
+            entry.geom->getColorArray());
+        if (!colors) continue;
+
+        for (size_t i = 0; i < entry.indices.size(); ++i)
+        {
+            unsigned int vi = entry.indices[i];
+            if (vi < colors->size())
+                (*colors)[vi] = entry.originalColors[i];
+        }
+        colors->dirty();
+        entry.geom->setColorArray(colors);
+    }
+    m_highlights.clear();
+}
+
+void OSGWidget::pushDeleteUndo(osg::Geometry* geom,
+    const std::vector<unsigned int>& indices,
+    const std::vector<osg::Vec4ub>& origColors)
+{
+    if (indices.empty()) return;
+    DeleteEntry entry;
+    entry.geom = geom;
+    entry.indices = indices;
+    entry.originalColors = origColors;
+    m_deleteHistory.push_back(std::move(entry));
+}
+
+void OSGWidget::undoDelete()
+{
+    if (m_deleteHistory.empty())
+        return;
+
+    const DeleteEntry& entry = m_deleteHistory.back();
+    osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(
+        entry.geom->getColorArray());
+    if (colors)
+    {
+        for (size_t i = 0; i < entry.indices.size(); ++i)
+        {
+            unsigned int vi = entry.indices[i];
+            if (vi < colors->size())
+                (*colors)[vi] = entry.originalColors[i];
+        }
+        colors->dirty();
+        entry.geom->setColorArray(colors);
+    }
+    m_deleteHistory.pop_back();
+}
+
+void OSGWidget::deletePointsInPolyline()
+{
+    if (!m_viewer.valid() || m_selectedPolylines.empty())
+        return;
+
+    osg::Vec2Array* poly = m_selectedPolylines.back().get();
+    if (!poly || poly->size() < 3)
+        return;
+
+    osg::Matrix mvp = computeRenderingMVP(m_hitTestProj, m_hitTestView);
+    int vpw = m_hitTestVpw;
+    int vph = m_hitTestVph;
+
+    for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci)
+    {
+        osg::Geode* geode = m_root->getChild(ci)->asGeode();
+        if (!geode) continue;
+
+        for (unsigned int di = 0; di < geode->getNumDrawables(); ++di)
+        {
+            osg::Geometry* geom = geode->getDrawable(di)->asGeometry();
+            if (!geom) continue;
+
+            osg::Vec3Array* verts = dynamic_cast<osg::Vec3Array*>(geom->getVertexArray());
+            osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(geom->getColorArray());
+            if (!verts || !colors || verts->size() != colors->size())
+                continue;
+
+            std::vector<unsigned int> delIndices;
+            std::vector<osg::Vec4ub> delOrigColors;
+
+            for (unsigned int vi = 0; vi < verts->size(); ++vi)
+            {
+                osg::Vec4 clip = mvp * osg::Vec4((*verts)[vi].x(), (*verts)[vi].y(), (*verts)[vi].z(), 1.0);
+                if (fabs(clip.w()) < 1e-10) continue;
+
+                if (clip.w() < 0.0f)
+                {
+                    clip.x() = -clip.x(); clip.y() = -clip.y();
+                    clip.z() = -clip.z(); clip.w() = -clip.w();
+                }
+
+                float ndx = clip.x() / clip.w();
+                float ndy = clip.y() / clip.w();
+                if (ndx < -1.0f || ndx > 1.0f || ndy < -1.0f || ndy > 1.0f)
+                    continue;
+
+                float sx = ndx * vpw * 0.5f;
+                float sy = ndy * vph * 0.5f;
+
+                if (isPointInPolygon2D(osg::Vec2d(sx, sy), *poly))
+                {
+                    delIndices.push_back(vi);
+                    delOrigColors.push_back((*colors)[vi]);
+                }
+            }
+
+            if (!delIndices.empty())
+            {
+                pushDeleteUndo(geom, delIndices, delOrigColors);
+                osg::ref_ptr<osg::Vec4ubArray> newColors = new osg::Vec4ubArray(*colors);
+                for (unsigned int vi : delIndices)
+                    (*newColors)[vi] = osg::Vec4ub(0, 0, 0, 0);
+                newColors->dirty();
+                geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
+                geom->dirtyDisplayList();
+                osg::StateSet* ss = geom->getOrCreateStateSet();
+                ss->setMode(GL_BLEND, osg::StateAttribute::ON);
+                osg::ref_ptr<osg::BlendFunc> bf = new osg::BlendFunc();
+                bf->setFunction(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                ss->setAttribute(bf);
+            }
+        }
+    }
+
+    update();
+    m_selectedPolylines.clear();
+}
+
+void OSGWidget::createCenterOverlay()
+{
+    if (!m_viewer.valid())
+        return;
+
+    if (m_centerOverlayCamera.valid())
+    {
+        osg::Group* sceneRoot = m_viewer->getSceneData()->asGroup();
+        if (sceneRoot)
+            sceneRoot->removeChild(m_centerOverlayCamera.get());
+        m_centerOverlayCamera = nullptr;
+    }
+
+    m_centerOverlayCamera = new osg::Camera();
+    m_centerOverlayCamera->setRenderOrder(osg::Camera::POST_RENDER);
+    m_centerOverlayCamera->setClearMask(GL_DEPTH_BUFFER_BIT);
+    m_centerOverlayCamera->setReferenceFrame(osg::Transform::ABSOLUTE_RF);
+    m_centerOverlayCamera->setViewMatrix(osg::Matrix::identity());
+    m_centerOverlayCamera->setAllowEventFocus(false);
+    m_centerOverlayCamera->setGraphicsContext(m_gw.get());
+
+    int s = devicePixelRatio();
+    int vpw = width() * s;
+    int vph = height() * s;
+    m_centerOverlayCamera->setViewport(0, 0, vpw, vph);
+    m_centerOverlayCamera->setProjectionMatrixAsOrtho2D(-vpw * 0.5f, vpw * 0.5f, -vph * 0.5f, vph * 0.5f);
+    m_centerOverlayCamera->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+
+    osg::ref_ptr<osg::Geode> geode = new osg::Geode();
+
+    // Load center.png as textured quad at viewport center
+    QImage qimg(QStringLiteral("E:/workfold/20260509intergrate/center.png"));
+    if (!qimg.isNull())
+    {
+        qimg = qimg.convertToFormat(QImage::Format_RGBA8888);
+        int imgW = qimg.width(), imgH = qimg.height();
+
+        unsigned char* data = new unsigned char[imgW * imgH * 4];
+        for (int y = 0; y < imgH; ++y)
+            memcpy(data + y * imgW * 4, qimg.constScanLine(imgH - 1 - y), imgW * 4);
+
+        osg::ref_ptr<osg::Image> osgImg = new osg::Image();
+        osgImg->setImage(imgW, imgH, 1, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE,
+            data, osg::Image::USE_NEW_DELETE);
+
+        osg::ref_ptr<osg::Texture2D> tex = new osg::Texture2D();
+        tex->setImage(osgImg);
+        tex->setFilter(osg::Texture2D::MIN_FILTER, osg::Texture2D::LINEAR);
+        tex->setFilter(osg::Texture2D::MAG_FILTER, osg::Texture2D::LINEAR);
+
+        osg::ref_ptr<osg::Geometry> tgeom = new osg::Geometry();
+        osg::ref_ptr<osg::Vec3Array> tverts = new osg::Vec3Array();
+        float imgW2 = vpw * 0.5f;
+        float imgH2 = vph * 0.5f;
+        tverts->push_back(osg::Vec3(-imgW2, -imgH2, 0.0f));
+        tverts->push_back(osg::Vec3( imgW2, -imgH2, 0.0f));
+        tverts->push_back(osg::Vec3( imgW2,  imgH2, 0.0f));
+        tverts->push_back(osg::Vec3(-imgW2,  imgH2, 0.0f));
+        tgeom->setVertexArray(tverts);
+        tgeom->addPrimitiveSet(new osg::DrawArrays(GL_QUADS, 0, 4));
+
+        osg::ref_ptr<osg::Vec2Array> ttc = new osg::Vec2Array();
+        ttc->push_back(osg::Vec2(0.0f, 0.0f));
+        ttc->push_back(osg::Vec2(1.0f, 0.0f));
+        ttc->push_back(osg::Vec2(1.0f, 1.0f));
+        ttc->push_back(osg::Vec2(0.0f, 1.0f));
+        tgeom->setTexCoordArray(0, ttc);
+
+        tgeom->getOrCreateStateSet()->setTextureAttributeAndModes(0, tex);
+        tgeom->getOrCreateStateSet()->setMode(GL_BLEND, osg::StateAttribute::ON);
+        tgeom->getOrCreateStateSet()->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
+
+        geode->addDrawable(tgeom);
+    }
+
+    geode->getOrCreateStateSet()->setMode(GL_BLEND, osg::StateAttribute::ON);
+    m_centerOverlayCamera->addChild(geode);
+    m_centerOverlayCamera->setNodeMask(m_centerOverlayVisible ? 0xffffffff : 0);
+
+    osg::Group* sceneRoot = m_viewer->getSceneData()->asGroup();
+    if (sceneRoot)
+        sceneRoot->addChild(m_centerOverlayCamera.get());
+}
+
+// ============================================================================
+// LeadScan 移植：带法线的动态点云（VBO + DYNAMIC）
+// ============================================================================
+void OSGWidget::loadPointCloudWithNormals(const std::vector<osg::Vec3>& points,
+                                          const std::vector<osg::Vec3>& normals,
+                                          const osg::Vec4& color)
+{
+    if (points.empty()) return;
+
+    // 首次创建
+    if (!m_cloudRoot) {
+        m_cloudRoot = new osg::Group;
+        m_cloudGeode = new osg::Geode;
+        m_cloudGeom = new osg::Geometry;
+        m_cloudGeom->setUseVertexBufferObjects(true);
+        m_cloudGeom->setUseDisplayList(false);
+        m_cloudGeom->setDataVariance(osg::Object::DYNAMIC);
+        m_cloudGeode->addDrawable(m_cloudGeom);
+        m_cloudRoot->addChild(m_cloudGeode);
+        m_root->addChild(m_cloudRoot);
+
+        // 点大小
+        osg::ref_ptr<osg::Point> pointSize = new osg::Point;
+        pointSize->setSize(3.0f);
+        m_cloudRoot->getOrCreateStateSet()->setAttribute(pointSize);
+
+        m_cloudCoords = new osg::Vec3Array;
+        m_cloudNormals = new osg::Vec3Array;
+        m_cloudColors = new osg::Vec4Array;
+    }
+
+    // 设置数据
+    m_cloudCoords->assign(points.begin(), points.end());
+    m_cloudColors->resize(points.size(), color);
+
+    m_cloudGeom->setVertexArray(m_cloudCoords);
+    m_cloudGeom->setColorArray(m_cloudColors);
+    m_cloudGeom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+
+    if (normals.size() == points.size()) {
+        m_cloudNormals->assign(normals.begin(), normals.end());
+        m_cloudGeom->setNormalArray(m_cloudNormals);
+        m_cloudGeom->setNormalBinding(osg::Geometry::BIND_PER_VERTEX);
+    }
+
+    m_cloudGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)points.size()));
+    m_cloudGeom->setInitialBound(osg::BoundingBox(
+        osg::Vec3(-100, -100, -100), osg::Vec3(100, 100, 100)));
+
+    // 自动相机
+    autoFitCamera();
+}
+
+// ============================================================================
+// LeadScan 移植：加载网格文件（STL/OBJ，带光照材质）
+// ============================================================================
+bool OSGWidget::loadMesh(const QString& filepath)
+{
+    QByteArray ba = filepath.toUtf8();
+    const char* cpath = ba.constData();
+
+    FILE* lf = fopen("E:/workfold/framework/build/mesh_debug.log", "a");
+    if (lf) fprintf(lf, "loadMesh: %s\n", cpath);
+
+    // 用 file_io 解析
+    file_io::MeshData mesh;
+    std::string spath(cpath);
+    if (!file_io::importMesh(spath, mesh) || mesh.vertices.empty()) {
+        if (lf) { fprintf(lf, "  importMesh failed\n"); fclose(lf); }
+        return false;
+    }
+
+    if (lf) { fprintf(lf, "  verts=%zu indices=%zu\n", mesh.vertices.size(), mesh.indices.size()); fclose(lf); }
+
+    osg::ref_ptr<osg::Vec3Array> verts = new osg::Vec3Array;
+    osg::ref_ptr<osg::Vec3Array> norms = new osg::Vec3Array;
+    verts->reserve(mesh.vertices.size());
+    norms->reserve(mesh.vertices.size());
+
+    if (!mesh.indices.empty()) {
+        // 平面法线：用 STL 原始面法线（参照 K2），无平滑
+        bool hasNormals = (mesh.normals.size() == mesh.vertices.size());
+        for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+            const auto& p0 = mesh.vertices[mesh.indices[i]];
+            const auto& p1 = mesh.vertices[mesh.indices[i+1]];
+            const auto& p2 = mesh.vertices[mesh.indices[i+2]];
+            verts->push_back(p0); verts->push_back(p1); verts->push_back(p2);
+            if (hasNormals) {
+                norms->push_back(mesh.normals[mesh.indices[i]]);
+                norms->push_back(mesh.normals[mesh.indices[i+1]]);
+                norms->push_back(mesh.normals[mesh.indices[i+2]]);
+            } else {
+                osg::Vec3 nm = (p1 - p0) ^ (p2 - p0); nm.normalize();
+                norms->push_back(nm); norms->push_back(nm); norms->push_back(nm);
+            }
+        }
+    } else {
+        for (const auto& p : mesh.vertices) verts->push_back(p);
+    }
+
+    if (verts->empty()) return false;
+
+    osg::ref_ptr<osg::Geometry> geom = new osg::Geometry;
+    geom->setUseVertexBufferObjects(true);
+    geom->setVertexArray(verts);
+    geom->setNormalArray(norms, osg::Array::BIND_PER_VERTEX);
+    geom->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, (int)verts->size()));
+
+    // 光照材质（参照 LEADSCAN K2 loadModel：GL_LIGHT1 + 双面光照 + LeadScan 蓝材质）
+    osg::ref_ptr<osg::StateSet> ss = geom->getOrCreateStateSet();
+    ss->setMode(GL_NORMALIZE, osg::StateAttribute::ON);
+    ss->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON);
+    ss->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
+    ss->setMode(GL_LIGHTING, osg::StateAttribute::ON);
+    ss->setMode(GL_LIGHT1, osg::StateAttribute::ON);
+    osg::ref_ptr<osg::LightModel> lm = new osg::LightModel;
+    lm->setTwoSided(true);
+    ss->setAttributeAndModes(lm);
+    osg::ref_ptr<osg::Material> mat = new osg::Material;
+    mat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));
+    mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));
+    mat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4(0.3f, 0.3f, 0.3f, 1.0f));
+    mat->setShininess(osg::Material::FRONT_AND_BACK, 100.0f);
+    ss->setAttributeAndModes(mat);
+
+    osg::ref_ptr<osg::Geode> geode = new osg::Geode;
+    geode->addDrawable(geom);
+    osgUtil::Optimizer optimizer;
+    optimizer.optimize(geom);
+    optimizer.reset();
+    m_root->addChild(geode);
+
+    // 相机定位并锁定视图
+    osg::BoundingSphere bs = m_root->getBound();
+    if (bs.valid() && bs.radius() > 0 && m_viewer.valid()) {
+        double r = bs.radius();
+        osg::Vec3d c(bs.center());
+        osg::Vec3d eye(c.x(), c.y() - r * 3.0, c.z() + r * 0.5);
+        osg::Vec3d up(0, 0, 1);
+
+        double zNear = r * 0.1;
+        double zFar = r * 100.0;
+        const osg::GraphicsContext::Traits* traits = m_gw->getTraits();
+        double aspect = static_cast<double>(traits->width) / static_cast<double>(traits->height);
+        m_viewer->getCamera()->setProjectionMatrixAsPerspective(30.0, aspect, zNear, zFar);
+        m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
+
+        m_viewLocked = false;
+        osg::ref_ptr<osgGA::TrackballManipulator> manip = new osgGA::TrackballManipulator;
+        manip->setAllowThrow(false);
+        manip->setHomePosition(eye, c, up, false);
+        m_viewer->setCameraManipulator(manip);
+        manip->home(0);
+    }
+
+    return true;
+}
+
+// ============================================================================
+// LeadScan 移植：加载标志点
+// ============================================================================
+void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
+                                 const osg::Vec4& color)
+{
+    if (markers.empty()) return;
+
+    if (!m_markerRoot) {
+        m_markerRoot = new osg::Group;
+        m_markerGeode = new osg::Geode;
+        m_markerGeom = new osg::Geometry;
+        m_markerGeom->setUseVertexBufferObjects(true);
+        m_markerGeom->setUseDisplayList(false);
+        m_markerGeom->setDataVariance(osg::Object::DYNAMIC);
+        m_markerGeode->addDrawable(m_markerGeom);
+        m_markerRoot->addChild(m_markerGeode);
+        m_root->addChild(m_markerRoot);
+
+        osg::ref_ptr<osg::Point> pointSize = new osg::Point;
+        pointSize->setSize(5.0f);  // 标志点更大
+        m_markerRoot->getOrCreateStateSet()->setAttribute(pointSize);
+
+        m_markerCoords = new osg::Vec3Array;
+        m_markerColors = new osg::Vec4Array;
+    }
+
+    m_markerCoords->assign(markers.begin(), markers.end());
+    m_markerColors->resize(markers.size(), color);
+    m_markerGeom->setVertexArray(m_markerCoords);
+    m_markerGeom->setColorArray(m_markerColors);
+    m_markerGeom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+    m_markerGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)markers.size()));
+}
+
+// ============================================================================
+// LeadScan 移植：自动相机定位
+// ============================================================================
+void OSGWidget::autoFitCamera()
+{
+    if (!m_viewer || !m_root) return;
+
+    osg::BoundingSphere bs = m_root->getBound();
+    if (!bs.valid() || bs.radius() <= 0) return;
+
+    // LeadScan 风格定位
+    double radius = bs.radius();
+    double viewDistance = radius;  // LeadScan 用 radius，不是 2.5*radius
+    osg::Vec3d up(0.0, 0.0, 1.0);
+    osg::Vec3d viewDirection(0.0, -1.0, 0.5);
+    viewDirection.normalize();
+    osg::Vec3d center = bs.center();
+    center.y() -= radius;  // LeadScan 风格 Y 偏移
+    osg::Vec3d eye = center + viewDirection * viewDistance;
+
+    // 更新投影 near/far
+    double zNear = radius * 0.01;
+    double zFar = radius * 100.0;
+    if (zNear < 0.001) zNear = 0.001;
+
+    const osg::GraphicsContext::Traits* traits = m_gw->getTraits();
+    double aspect = static_cast<double>(traits->width) / static_cast<double>(traits->height);
+    m_viewer->getCamera()->setProjectionMatrixAsPerspective(30.0, aspect, zNear, zFar);
+    m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
+
+    // 设置 manipulator
+    osgGA::CameraManipulator* manip = m_viewer->getCameraManipulator();
+    if (manip) {
+        manip->setNode(m_root.get());
+        manip->setHomePosition(eye, center, up);
+        manip->home(0.0);
+    }
+
+    // 直接设置相机
+    m_viewer->getCamera()->setViewMatrixAsLookAt(eye, center, up);
+    m_viewer->frame();
+    update();
+}

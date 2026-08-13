@@ -1,7 +1,8 @@
+# 11 product modules
 add_subdirectory(01_calibration)
 add_subdirectory(02_scanning)
 add_subdirectory(03_rendering)
-add_subdirectory(04_postprocess)
+add_subdirectory(04_postprocessing)
 add_subdirectory(05_editing)
 add_subdirectory(06_fileio)
 add_subdirectory(07_session)

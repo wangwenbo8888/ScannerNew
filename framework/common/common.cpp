@@ -1,1 +1,2 @@
-// fw_common 共享类型库：类型定义均在头文件，此文件仅提供 STATIC 库所需的翻译单元。
+#include "types.h"
+// Translation unit stub — ensures fw_common compiles as STATIC lib.

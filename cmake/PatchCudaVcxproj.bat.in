@@ -1,0 +1,12 @@
+@echo off
+:: PatchCudaVcxproj.bat — 移除 vcxproj 中 CUDA 编译选项里的 /MP /W4 /arch:SSE2
+:: 用法: patch_cuda.bat "path\to\mod_operatorlib.vcxproj"
+setlocal
+set "FILE=%~1"
+if not exist "%FILE%" (
+    echo File not found: %FILE%
+    exit /b 1
+)
+powershell -Command "(Get-Content '%FILE%') -replace ' /W4 /MP /arch:SSE2', '' | Set-Content '%FILE%' -NoNewline"
+echo Patched: removed /W4 /MP /arch:SSE2 from %FILE%
+endlocal

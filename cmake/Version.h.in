@@ -1,0 +1,8 @@
+#pragma once
+// ============================================================================
+// Version.h.in — 版本信息（CMake configure 生成）
+// ============================================================================
+#define FW_VERSION_MAJOR @ScannerFramework_VERSION_MAJOR@
+#define FW_VERSION_MINOR @ScannerFramework_VERSION_MINOR@
+#define FW_VERSION_PATCH @ScannerFramework_VERSION_PATCH@
+#define FW_VERSION_STRING "@ScannerFramework_VERSION@"

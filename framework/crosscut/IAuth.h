@@ -1,14 +1,31 @@
 #pragma once
+// ============================================================================
+// IAuth.h — 认证接口（Crosscut 层）
+// ============================================================================
+
+#include "common/types.h"
+#include <string>
+
 namespace Scanner::crosscut {
-// 用户权限/鉴权（G1：框架结构元素，实现在 fw_crosscut）
-class IAuth { public: virtual ~IAuth() = 0; };
-inline IAuth::~IAuth() = default;
-class ILogger { public: virtual ~ILogger() = 0; };
-inline ILogger::~ILogger() = default;
-class IPerfMonitor { public: virtual ~IPerfMonitor() = 0; };
-inline IPerfMonitor::~IPerfMonitor() = default;
-class ICrashHandler { public: virtual ~ICrashHandler() = 0; };
-inline ICrashHandler::~ICrashHandler() = default;
-class IConfig { public: virtual ~IConfig() = 0; };
-inline IConfig::~IConfig() = default;
-}
+
+class IAuth {
+public:
+    virtual ~IAuth() = default;
+
+    /// 登录
+    virtual Result login(const std::string& username, const std::string& password) = 0;
+
+    /// 登出
+    virtual Result logout() = 0;
+
+    /// 是否已认证
+    virtual bool isAuthenticated() const = 0;
+
+    /// 获取当前用户
+    virtual std::string getCurrentUser() const = 0;
+
+    /// 检查权限
+    virtual bool hasPermission(const std::string& permission) const = 0;
+};
+
+} // namespace Scanner::crosscut

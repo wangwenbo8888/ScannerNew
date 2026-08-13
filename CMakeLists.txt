@@ -107,5 +107,4 @@ endfunction()
 
 add_subdirectory(framework)
 add_subdirectory(modules)
-add_subdirectory(sdk)
 add_subdirectory(app)

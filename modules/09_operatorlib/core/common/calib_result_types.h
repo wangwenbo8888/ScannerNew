@@ -6,8 +6,6 @@
  * 共用的类型契约。本文件只定义类型与纯查询方法（lookup），不含任何
  * 生成逻辑；产物的生成归 calibration/，交付机制（磁盘文件 / 启动加载 /
  * 进程内指针）由应用层决定。
- *
- * 设计依据：docs/plans/2026-06-22-scanner-refactor-design.md §4.6
  */
 
 #pragma once

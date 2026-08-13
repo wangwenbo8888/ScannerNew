@@ -1,0 +1,220 @@
+<RCC>
+    <qresource prefix="icons">
+        <file>resources/icons/保存-黑-13.svg</file>
+        <file>resources/icons/保存-红-13.svg</file>
+        <file>resources/icons/保存-灰-13.svg</file>
+        <file>resources/icons/跟踪扫描-白-11.svg</file>
+        <file>resources/icons/跟踪扫描-黑-11.svg</file>
+        <file>resources/icons/跟踪扫描-灰-11.svg</file>
+        <file>resources/icons/检测分析-白-11.svg</file>
+        <file>resources/icons/检测分析-黑-11.svg</file>
+        <file>resources/icons/检测分析-灰-11.svg</file>
+        <file>resources/icons/上一步-黑-13.svg</file>
+        <file>resources/icons/上一步-红-13.svg</file>
+        <file>resources/icons/上一步-灰-13.svg</file>
+        <file>resources/icons/摄影测量-白-11.svg</file>
+        <file>resources/icons/摄影测量-红-11.svg</file>
+        <file>resources/icons/摄影测量-灰-11.svg</file>
+        <file>resources/icons/手持扫描-白-11.svg</file>
+        <file>resources/icons/手持扫描-黑-11.svg</file>
+        <file>resources/icons/手持扫描-灰-11.svg</file>
+        <file>resources/icons/下一步-黑-13.svg</file>
+        <file>resources/icons/下一步-红-13.svg</file>
+        <file>resources/icons/下一步-灰-13.svg</file>
+        <file>resources/icons/装饰图-黑-28.svg</file>
+        <file>resources/icons/装饰图-红-28.svg</file>
+        <file>resources/icons/装饰图-灰-28.svg</file>
+        <file>resources/icons/自动扫描-白-11.svg</file>
+        <file>resources/icons/自动扫描-黑-11.svg</file>
+        <file>resources/icons/自动扫描-灰-11.svg</file>
+        <file>resources/icons/标点扫描-黑-14.svg</file>
+        <file>resources/icons/标点扫描-红-14.svg</file>
+        <file>resources/icons/标点扫描-灰-14.svg</file>
+        <file>resources/icons/点云扫描-黑-14.svg</file>
+        <file>resources/icons/点云扫描-红-14.svg</file>
+        <file>resources/icons/点云扫描-灰-14.svg</file>
+        <file>resources/icons/切面扫描-黑-14.svg</file>
+        <file>resources/icons/切面扫描-红-14.svg</file>
+        <file>resources/icons/切面扫描-灰-14.svg</file>
+        <file>resources/icons/扫描面片-黑-14.svg</file>
+        <file>resources/icons/扫描面片-红-14.svg</file>
+        <file>resources/icons/扫描面片-灰-14.svg</file>
+        <file>resources/icons/文件管理-黑-14.svg</file>
+        <file>resources/icons/文件管理-红-14.svg</file>
+        <file>resources/icons/文件管理-灰-14.svg</file>
+        <file>resources/icons/项目管理-黑-14.svg</file>
+        <file>resources/icons/项目管理-红-14.svg</file>
+        <file>resources/icons/项目管理-灰-14.svg</file>
+        <file>resources/icons/校准设备-黑-14.svg</file>
+        <file>resources/icons/校准设备-红-14.svg</file>
+        <file>resources/icons/校准设备-灰-14.svg</file>
+        <file>resources/icons/正反扫描-黑-14.svg</file>
+        <file>resources/icons/正反扫描-红-14.svg</file>
+        <file>resources/icons/正反扫描-灰-14.svg</file>
+        <file>resources/icons/标记点列表-黑-11.svg</file>
+        <file>resources/icons/标记点列表-红-11.svg</file>
+        <file>resources/icons/标记点列表-灰-11.svg</file>
+        <file>resources/icons/参数面板-黑-11.svg</file>
+        <file>resources/icons/参数面板-红-11.svg</file>
+        <file>resources/icons/参数面板-灰-11.svg</file>
+        <file>resources/icons/点云列表-黑-11.svg</file>
+        <file>resources/icons/点云列表-红-11.svg</file>
+        <file>resources/icons/点云列表-灰-11.svg</file>
+        <file>resources/icons/点云数量-黑-11.svg</file>
+        <file>resources/icons/点云数量-红-11.svg</file>
+        <file>resources/icons/点云数量-灰-11.svg</file>
+        <file>resources/icons/内存-黑-11.svg</file>
+        <file>resources/icons/内存状态-红-11.svg</file>
+        <file>resources/icons/内存状态-灰-11.svg</file>
+        <file>resources/icons/温度-黑-11.svg</file>
+        <file>resources/icons/温度-灰-11.svg</file>
+        <file>resources/icons/温度状态-红-11.svg</file>
+        <file>resources/icons/信息面板-黑-11.svg</file>
+        <file>resources/icons/信息面板-红-11.svg</file>
+        <file>resources/icons/信息面板-灰-11.svg</file>
+        <file>resources/icons/USB状态-黑-11.svg</file>
+        <file>resources/icons/USB状态-红-11.svg</file>
+        <file>resources/icons/USB状态-灰-11.svg</file>
+        <file>resources/icons/WIFI状态-黑-11.svg</file>
+        <file>resources/icons/WIFI状态-红-11.svg</file>
+        <file>resources/icons/WIFI状态-灰-11.svg</file>
+        <file>resources/icons/标记点和点云三角面选择 (1).svg</file>
+        <file>resources/icons/标记点和点云三角面选择 (2).svg</file>
+        <file>resources/icons/标记点和点云三角面选择 (3).svg</file>
+        <file>resources/icons/标记点选择 (1).svg</file>
+        <file>resources/icons/标记点选择 (2).svg</file>
+        <file>resources/icons/标记点选择 (3).svg</file>
+        <file>resources/icons/表面选择 (1).svg</file>
+        <file>resources/icons/表面选择 (2).svg</file>
+        <file>resources/icons/表面选择 (3).svg</file>
+        <file>resources/icons/撤销选择 (1).svg</file>
+        <file>resources/icons/撤销选择 (2).svg</file>
+        <file>resources/icons/撤销选择 (3).svg</file>
+        <file>resources/icons/点云和三角面选择 (1).svg</file>
+        <file>resources/icons/点云和三角面选择 (2).svg</file>
+        <file>resources/icons/点云和三角面选择 (3).svg</file>
+        <file>resources/icons/反选 (1).svg</file>
+        <file>resources/icons/反选 (2).svg</file>
+        <file>resources/icons/反选 (3).svg</file>
+        <file>resources/icons/贯穿选择 (1).svg</file>
+        <file>resources/icons/贯穿选择 (3).svg</file>
+        <file>resources/icons/贯穿选择 (4).svg</file>
+        <file>resources/icons/全选 (1).svg</file>
+        <file>resources/icons/全选 (2).svg</file>
+        <file>resources/icons/全选 (3).svg</file>
+        <file>resources/icons/删除 (1).svg</file>
+        <file>resources/icons/删除 (2).svg</file>
+        <file>resources/icons/删除 (3).svg</file>
+        <file>resources/icons/套索 (1).svg</file>
+        <file>resources/icons/套索 (2).svg</file>
+        <file>resources/icons/套索 (3).svg</file>
+        <file>resources/icons/div.color-gradient-bar.svg</file>
+        <file>resources/icons/icon/bottom/allselect (1).svg</file>
+        <file>resources/icons/icon/bottom/allselect (2).svg</file>
+        <file>resources/icons/icon/bottom/allselect (3).svg</file>
+        <file>resources/icons/icon/bottom/antiselect  (2).svg</file>
+        <file>resources/icons/icon/bottom/antiselect  (3).svg</file>
+        <file>resources/icons/icon/bottom/antiselect (1).svg</file>
+        <file>resources/icons/icon/bottom/cancelselect (1).svg</file>
+        <file>resources/icons/icon/bottom/cancelselect (2).svg</file>
+        <file>resources/icons/icon/bottom/cancelselect (3).svg</file>
+        <file>resources/icons/icon/bottom/cloudandtriangleselect (1).svg</file>
+        <file>resources/icons/icon/bottom/cloudandtriangleselect (3).svg</file>
+        <file>resources/icons/icon/bottom/cloudandtriangleselect(2).svg</file>
+        <file>resources/icons/icon/bottom/delete (1).svg</file>
+        <file>resources/icons/icon/bottom/delete (2).svg</file>
+        <file>resources/icons/icon/bottom/delete (3).svg</file>
+        <file>resources/icons/icon/bottom/lasso (1).svg</file>
+        <file>resources/icons/icon/bottom/lasso (2).svg</file>
+        <file>resources/icons/icon/bottom/lasso (3).svg</file>
+        <file>resources/icons/icon/bottom/markandtriangleselect (2).svg</file>
+        <file>resources/icons/icon/bottom/markandtriangleselect (3).svg</file>
+        <file>resources/icons/icon/bottom/markandtriangleselect.svg</file>
+        <file>resources/icons/icon/bottom/markselect  (2).svg</file>
+        <file>resources/icons/icon/bottom/markselect  (3).svg</file>
+        <file>resources/icons/icon/bottom/markselect (1).svg</file>
+        <file>resources/icons/icon/bottom/surfaceselect  (3).svg</file>
+        <file>resources/icons/icon/bottom/surfaceselect (1).svg</file>
+        <file>resources/icons/icon/bottom/surfaceselect (2).svg</file>
+        <file>resources/icons/icon/bottom/throwselect (1).svg</file>
+        <file>resources/icons/icon/bottom/throwselect (3).svg</file>
+        <file>resources/icons/icon/bottom/throwselect (4).svg</file>
+        <file>resources/icons/icon/firstandsecond/analysis-black-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/analysis-gray-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/analysis-white-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/auto-black-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/auto-gray-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/auto-white-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/deci-gray-28.svg</file>
+        <file>resources/icons/icon/firstandsecond/deco-black-28.svg</file>
+        <file>resources/icons/icon/firstandsecond/deco-red-28.svg</file>
+        <file>resources/icons/icon/firstandsecond/handlescan-black-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/handlescan-gray-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/handlescan-white-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/last-black-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/last-gray-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/last-red-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/next-black-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/next-gray-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/next-red-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/photo-black-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/photo-gray-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/photo-white-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/save-black-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/save-gray-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/save-red-13.svg</file>
+        <file>resources/icons/icon/firstandsecond/trace-black-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/trace-gray-11.svg</file>
+        <file>resources/icons/icon/firstandsecond/trace-white-11.svg</file>
+        <file>resources/icons/icon/left/cloudlist-black-11.svg</file>
+        <file>resources/icons/icon/left/cloudlist-gray-11.svg</file>
+        <file>resources/icons/icon/left/cloudlist-red-11.svg</file>
+        <file>resources/icons/icon/left/cloudnumber-black-11.svg</file>
+        <file>resources/icons/icon/left/cloudnumber-gray-11.svg</file>
+        <file>resources/icons/icon/left/cloudnumber-red-11.svg</file>
+        <file>resources/icons/icon/left/infopanel-black-11.svg</file>
+        <file>resources/icons/icon/left/infopanel-gray-11.svg</file>
+        <file>resources/icons/icon/left/infopanel-red-11.svg</file>
+        <file>resources/icons/icon/left/marklist-black-11.svg</file>
+        <file>resources/icons/icon/left/marklist-gray-11.svg</file>
+        <file>resources/icons/icon/left/marklist-red-11.svg</file>
+        <file>resources/icons/icon/left/memory-black-11.svg</file>
+        <file>resources/icons/icon/left/memory-gray-11.svg</file>
+        <file>resources/icons/icon/left/memory-red-11.svg</file>
+        <file>resources/icons/icon/left/parapanel-black-11.svg</file>
+        <file>resources/icons/icon/left/parapanel-gray-11.svg</file>
+        <file>resources/icons/icon/left/parapanel-red-11.svg</file>
+        <file>resources/icons/icon/left/temprature-black-11.svg</file>
+        <file>resources/icons/icon/left/temprature-gray-11.svg</file>
+        <file>resources/icons/icon/left/temprature-red-11.svg</file>
+        <file>resources/icons/icon/left/USBstate-black-11.svg</file>
+        <file>resources/icons/icon/left/USBstate-gray-11.svg</file>
+        <file>resources/icons/icon/left/USBstate-red-11.svg</file>
+        <file>resources/icons/icon/left/WIFIstate-black-11.svg</file>
+        <file>resources/icons/icon/left/WIFIstate-gray-11.svg</file>
+        <file>resources/icons/icon/left/WIFIstate-red-11.svg</file>
+        <file>resources/icons/icon/third/both-black-14.svg</file>
+        <file>resources/icons/icon/third/both-gray-14.svg</file>
+        <file>resources/icons/icon/third/both-red-14.svg</file>
+        <file>resources/icons/icon/third/cloudscan-black-14.svg</file>
+        <file>resources/icons/icon/third/cloudscan-gray-14.svg</file>
+        <file>resources/icons/icon/third/cloudscan-red-14.svg</file>
+        <file>resources/icons/icon/third/equipcalib-black-14.svg</file>
+        <file>resources/icons/icon/third/equipcalib-gray-14.svg</file>
+        <file>resources/icons/icon/third/equipcalib-red-14.svg</file>
+        <file>resources/icons/icon/third/filemanager-black-14.svg</file>
+        <file>resources/icons/icon/third/filemanager-gray-14.svg</file>
+        <file>resources/icons/icon/third/filemanager-red-14.svg</file>
+        <file>resources/icons/icon/third/markscan-black-14.svg</file>
+        <file>resources/icons/icon/third/markscan-red-14.svg</file>
+        <file>resources/icons/icon/third/meshscan-black-14.svg</file>
+        <file>resources/icons/icon/third/meshscan-gray-14.svg</file>
+        <file>resources/icons/icon/third/meshscan-red-14.svg</file>
+        <file>resources/icons/icon/third/projmanager-black-14.svg</file>
+        <file>resources/icons/icon/third/projmanager-gray-14.svg</file>
+        <file>resources/icons/icon/third/projmanager-red-14.svg</file>
+        <file>resources/icons/icon/third/slicerscan-black-14.svg</file>
+        <file>resources/icons/icon/third/slicerscan-gray-14.svg</file>
+        <file>resources/icons/icon/third/slicerscan-red-14.svg</file>
+    </qresource>
+</RCC>
