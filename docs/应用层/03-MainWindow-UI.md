@@ -4,8 +4,9 @@
 
 ## 总体
 - 基类 `QMainWindow`，**无边框**（`Qt::FramelessWindowHint`），标题 "LeadScan K2"。
-- 持 `AppContext* m_appCtx`，按需取用框架对象（不 new）。
+- 持 `AppContext* m_appCtx`，按需取用其运行时容器（`DeviceStateCache` / `PointCloudBuffer` / `FrameBuffer`，不 new）。
 - 嵌入 `OSGWidget`（模块3）做 3D 点云渲染视图。
+- **构建状态（framework 退役后）**：现可全量构建。`MainWindow.cpp:9-13` 的 `#include "stubs/*.h"` 解析到 `app/stubs/` 下 5 个桩头（LEADSCANSeries / CameraControl / camera_calib_workflow / laser_calib_workflow / scan_workflow），include 不再悬空。`ScannerWindow`（集成测试窗口）已自 modules/02 迁入 `app/`，与 MainWindow 同目录。
 
 ## 布局结构（构造函数 127–158）
 ```
@@ -50,10 +51,10 @@ QMainWindow (FramelessWindowHint)
 ## 槽函数 → 业务集成
 | 槽 | 触发 | 行为 |
 |----|------|------|
-| `onIntegrateTestClicked` | 工具栏按钮 | 打开 `ScannerWindow(m_appCtx, this)`（集成测试） |
-| `onReloadPointCloud` | 按钮 | `m_3dView->loadTestDataFromPLY("D:/pointcloud_100M.ply")` |
-| `onCalibDeviceClicked` | 按钮 | 弹 `CalibDialog` → `cameraCalibClicked` 信号触发相机标定：经 `LEADSCANSeries::getCameraControl()` 取相机，循环采 15 帧 `cam->GetScannerImages()` |
-| `onScanClicked` | 按钮 | 隐藏标定板/彩条 → 清空 3D 场景 → 经 `LEADSCANSeries` 取相机 → **`calibration::ScanWorkflow().processFrameToCloud()`** → 结果点云载入 `m_3dView` |
+| `onIntegrateTestClicked` | 导航栏「集成测试」 | `new ScannerWindow(m_appCtx, this)` 赋给 `m_integrateTestDialog`（现声明为 `QWidget*`，见 MainWindow.h:104）并 show。ScannerWindow 现位于 `app/`（自 modules/02 迁入） |
+| `onReloadPointCloud` | 导航栏「加载点云」 | `m_3dView->loadTestDataFromPLY("D:/pointcloud_100M.ply", 0)` |
+| `onCalibDeviceClicked` | 工具栏「校准设备」 | 弹 `CalibDialog` → `cameraCalibClicked`/`laserCalibClicked` → 经 `LEADSCANSeries::getCameraControl()`（**stub**）取相机，循环采 15 帧 → `calibration::CameraCalibWorkflow`（**stub**）.run()。stub 的 `getCameraControl()` 返回 nullptr，相机检查恒失败 |
+| `onScanClicked` | 导航栏「扫描」 | 隐藏标定板/彩条 → 清空 3D 场景 → 经 `LEADSCANSeries`（**stub**）取相机 → **`calibration::ScanWorkflow`（stub）.processFrameToCloud()** → 结果点云载入 `m_3dView`。stub 返回 0 点，实际不载入 |
 
 ## 信息面板（系统监控显示）
 - `startInfoTimer()`：`QTimer` 周期触发 `updateInfoSection()`。
@@ -65,7 +66,7 @@ QMainWindow (FramelessWindowHint)
 - `renderSvg()` 把 SVG 渲染为 QPixmap；按钮工厂 `createIconButton/createNavButton/createToolButton/createSelectionButton` 统一生成。
 
 ## ⚠ 技术债（如实记录）
-1. **框架工作流层整体闲置**：`onScanClicked` 用 `calibration::ScanWorkflow`、`onCalibDeviceClicked` 用 `calibration::{Camera,Laser}CalibWorkflow`（均 calibration 模块内），**完全没用** AppContext 装配的框架 `Scanner::workflow::*`。
-2. **LEADSCANSeries 悬空 include（当前无法编译）**：`MainWindow.cpp:9` `#include "stubs/LEADSCANSeries.h"`，但该头文件**全仓库不存在**（glob 无结果）→ 此文件目前不可编译，属 WIP。`m_integrateTestDialog`（实为 `ScannerWindow*`，而 `ScannerWindow : public QMainWindow`）被 `static_cast<LEADSCANSeries*>` 也是 UB。
+1. **标定/扫描槽依赖空桩，未接真实算子链**：`onScanClicked` 用 `calibration::ScanWorkflow`、`onCalibDeviceClicked` 用 `calibration::{Camera,Laser}CalibWorkflow`，但这些类型现由 `app/stubs/*.h` 提供——均为返回 "not implemented" / 0 点的**空桩**，未接入 modules/09 算子库或真实标定/扫描流水线。（framework `Scanner::workflow::*` 已随 framework 退役删除，原"框架工作流层未被 UI 调用"之债随之失效，转化为"真实算子链尚未接入 UI"。）
+2. **LEADSCANSeries 桩 include（已补齐，现可构建）**：`app/stubs/` 下 5 个桩头（LEADSCANSeries.h / CameraControl.h / camera_calib_workflow.h / laser_calib_workflow.h / scan_workflow.h）已补齐，`MainWindow.cpp:9-13` 的 `#include "stubs/*.h"` 不再悬空，scan_demo 全量可构建（原"悬空无法编译 / WIP"状态已消除）。**残留设计气味**：`m_integrateTestDialog` 声明为 `QWidget*`（MainWindow.h:104），却同时承载 `ScannerWindow*` 与 `new LEADSCANSeries()` 两种**互不相关**的 QMainWindow 子类，槽内 `static_cast<LEADSCANSeries*>(m_integrateTestDialog)` 在实际持有 ScannerWindow 时仍为 UB。
 3. **硬编码路径**：`D:/pointcloud_100M.ply`、`E:/workfold/20260509intergrate/calib_debug.log`（调试日志直接 fopen）。
 4. **单文件 1672 行**：UI 构建、槽逻辑、信息面板全堆一处，可考虑拆分（如 ui_builder / slots / info_panel）。
