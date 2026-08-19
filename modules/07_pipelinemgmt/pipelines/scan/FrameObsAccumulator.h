@@ -1,0 +1,51 @@
+#pragma once
+// ============================================================================
+// FrameObsAccumulator.h — 逐帧观测累加器 + 激光帧缓存（GBA 输入 / D 重融合）
+//
+// GBA 需要逐帧观测 {R_init, t_init, markerObs[]}（设计方案 §4.3）：融合累积器的
+// 体素去重云已丢逐帧结构，不可替代。D 重融合另需逐帧激光 3D（host float xyz），
+// 按字节预算缓存，超限停累加并记 Degraded（markerObs 照常累加，整体不失败）。
+//
+// 线程模型：push 为 FuseConsumer 单线程写；snapshot/clear 与 push 经 mu_ 互斥。
+// ============================================================================
+#include <atomic>
+#include <cstddef>
+#include <mutex>
+#include <vector>
+
+#include "pipelines/scan/ScanTypes.h"
+
+namespace Scanner::pipeline {
+
+class FrameObsAccumulator {
+public:
+    /// laserBudgetBytes：激光帧缓存预算（字节）
+    explicit FrameObsAccumulator(size_t laserBudgetBytes);
+
+    /// laserXyz 为 host 拷贝（float xyz 三元组数组；空=无激光帧）。
+    /// 预算内：拷入缓存槽，obs.laserCacheSlot=槽号；
+    /// 超限/已降级：slot=kNoLaserSlot 且 degradedLaser 置位（整体不失败）。
+    void push(FrameObs obs, const std::vector<float>& laserXyz);
+
+    bool degradedLaser() const;              // 激光缓存是否已停累加（只置位，clear 复位）
+    size_t laserBytesUsed() const;
+    size_t frameCount() const;
+
+    struct Snapshot {
+        std::vector<FrameObs> obs;                        // 全部逐帧观测
+        std::vector<std::vector<float>> laserFrames;      // 下标=槽号（kNoLaserSlot 越界不访问）
+    };
+    Snapshot snapshot() const;               // mutex 护拷贝导出（快照后只读语义）
+
+    void clear();
+
+private:
+    mutable std::mutex mu_;                  // push(写) 与 snapshot(读) 互斥
+    std::vector<FrameObs> obsList_;
+    std::vector<std::vector<float>> laserFrames_;
+    size_t budgetBytes_;
+    size_t usedBytes_ = 0;
+    std::atomic<bool> degradedLaser_{false}; // 只置位不复位（clear 复位）
+};
+
+} // namespace Scanner::pipeline
