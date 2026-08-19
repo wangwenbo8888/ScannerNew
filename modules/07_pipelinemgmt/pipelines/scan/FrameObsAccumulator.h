@@ -7,6 +7,7 @@
 // 按字节预算缓存，超限停累加并记 Degraded（markerObs 照常累加，整体不失败）。
 //
 // 线程模型：push 为 FuseConsumer 单线程写；snapshot/clear 与 push 经 mu_ 互斥。
+// ⚠ 内存增长：obsList_ 无上限增长、snapshot 深拷贝瞬时双倍内存（万帧级实测后评估 reserve）。
 // ============================================================================
 #include <atomic>
 #include <cstddef>

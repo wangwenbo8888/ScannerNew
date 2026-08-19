@@ -142,16 +142,21 @@ TEST(PoolDestructorWithInFlight, WarnsInUseCount) {
     auto ring = std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(64);
     auto prev = spdlog::default_logger();
     spdlog::set_default_logger(std::make_shared<spdlog::logger>("pooltest", ring));
+    bool acquired = false;
+    std::vector<std::string> lines;
     {
         GpuPointCloudPool pool(2, 128, fakeAlloc());
         auto b = pool.acquire(std::chrono::milliseconds(100));
-        ASSERT_TRUE(b.has_value());
-        auto* leaked = new std::optional<std::shared_ptr<GpuPointCloudBlock>>(std::move(b));
-        (void)leaked;                              // 故意不析构（防 UB）
-        EXPECT_EQ(pool.inUse(), 1u);
+        acquired = b.has_value();
+        if (acquired) {
+            auto* leaked = new std::optional<std::shared_ptr<GpuPointCloudBlock>>(std::move(b));
+            (void)leaked;                          // 故意不析构（防 UB）
+            EXPECT_EQ(pool.inUse(), 1u);           // 池内检查用 EXPECT（不动 ASSERT）
+        }
     }                                              // 池先亡：inUse=1 → warn
-    auto lines = ring->last_formatted(16);
-    spdlog::set_default_logger(prev);
+    lines = ring->last_formatted(16);
+    spdlog::set_default_logger(prev);              // 恢复先于一切 ASSERT（防失败跳过恢复污染后续用例）
+    ASSERT_TRUE(acquired);
     bool found = false;
     for (const auto& s : lines)
         if (s.find("GpuPointCloudPool") != std::string::npos &&
