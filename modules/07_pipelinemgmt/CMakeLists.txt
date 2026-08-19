@@ -2,7 +2,8 @@
 set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
     pipelines/scan/FrameObsAccumulator.cpp
     pipelines/scan/FuseConsumer.cpp
-    pipelines/scan/ScanChains.cpp)
+    pipelines/scan/ScanChains.cpp
+    pipelines/scan/ScanPipeline.cpp)
 if(BUILD_CUDA)
     list(APPEND JMW_PM_PIPELINE_SRCS pipelines/scan/GpuPointCloudPool.cpp)  # GPU 点云块池（cv::cuda 类型）
 endif()
