@@ -1,5 +1,5 @@
 # Module 07_pipelinemgmt — 流水线管理（调度底座 + 五流水线对象）
-add_library(mod_pipelinemgmt STATIC sched/FrameResultQueue.cpp sched/PCoreBroker.cpp)
+add_library(mod_pipelinemgmt STATIC sched/FrameResultQueue.cpp sched/PCoreBroker.cpp sched/GpuSlotService.cpp)
 target_include_directories(mod_pipelinemgmt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(mod_pipelinemgmt PUBLIC base mod_fileio mod_operatorlib
     spdlog::spdlog ${OpenCV_LIBS})
