@@ -14,6 +14,9 @@ set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
 if(BUILD_CUDA)
     list(APPEND JMW_PM_PIPELINE_SRCS pipelines/scan/GpuPointCloudPool.cpp)  # GPU 点云块池（cv::cuda 类型）
 endif()
+if(BUILD_GLOBAL_OPTIM)                                                  # D 全局优化（GBA 依赖 Ceres）
+    list(APPEND JMW_PM_PIPELINE_SRCS pipelines/globaloptim/GlobalOptimObject.cpp)
+endif()
 add_library(mod_pipelinemgmt STATIC sched/FrameResultQueue.cpp sched/PCoreBroker.cpp
     sched/GpuSlotService.cpp sched/CpuTopology.cpp sched/SchedulerRuntime.cpp
     ${JMW_PM_PIPELINE_SRCS})
@@ -62,6 +65,9 @@ endif()
 # ============================================================================
 if(BUILD_TESTS)
     file(GLOB PM_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
+    if(NOT BUILD_GLOBAL_OPTIM)                        # D 对象测试依赖 GBA（Ceres）
+        list(REMOVE_ITEM PM_TESTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_globaloptim.cpp")
+    endif()
     foreach(t ${PM_TESTS})
         get_filename_component(tname ${t} NAME_WE)
         add_executable(${tname} ${t})
