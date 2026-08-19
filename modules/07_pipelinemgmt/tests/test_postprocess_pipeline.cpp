@@ -328,3 +328,51 @@ TEST(PostProcessPipelineTest, StartStopAdapter) {
     EXPECT_EQ(p.output().pointCount(), 2u) << "1 初始点 + 边界桩 1 点";
     EXPECT_EQ(exporter.calls, 0) << "stop 的 cancel 先于 join——导出前检查点取消，不导出";
 }
+
+// ============================================================================
+// 9：STL 导出两态（P5 审查 P2 补测）——不注 exporter → 整体 degraded +
+//    1902（未接线占位）+ 1900（完成）仍发；exporter 失败 → 1903（导出失败
+//    Fault）+ 整体 degraded + 1900 仍发（导出失败不中止完成上报）
+// ============================================================================
+TEST(PostProcessPipelineTest, StlPlaceholderAndFailEvents) {
+    // —— 1) 不注 exporter：产物占位 + Degraded 1902；完成 1900 仍发 ——
+    {
+        std::vector<std::string> log;
+        PostProcessPipeline p;
+        injectAll(p, log);
+        EventCollector ev;
+        PipelineDeps deps;
+        deps.eventBus = &ev.bus;
+        ASSERT_TRUE(p.configure(deps).success);          // 不 setStlExporter
+
+        CancelToken cancel;
+        auto res = p.run(makeCloud(1), nullptr, cancel);
+        EXPECT_TRUE(res.success) << "占位导出不算失败";
+        EXPECT_TRUE(res.isDegraded());
+        EXPECT_TRUE(ev.hasCode(1902)) << "STL 未接线应报 1902";
+        EXPECT_TRUE(ev.hasCode(1900)) << "占位仍发完成事件";
+    }
+
+    // —— 2) exporter 失败：Fault 1903 + 整体 degraded；完成 1900 仍发 ——
+    {
+        std::vector<std::string> log;
+        PostProcessPipeline p;
+        injectAll(p, log);
+        EventCollector ev;
+        PipelineDeps deps;
+        deps.eventBus = &ev.bus;
+        ASSERT_TRUE(p.configure(deps).success);
+        FakeExporter exporter;
+        exporter.ok = false;
+        wireExporter(p, exporter);
+
+        CancelToken cancel;
+        auto res = p.run(makeCloud(1), nullptr, cancel);
+        EXPECT_TRUE(res.success) << "导出失败不中止完成（降级非 fail）";
+        EXPECT_TRUE(res.isDegraded());
+        EXPECT_EQ(exporter.calls, 1);
+        EXPECT_TRUE(ev.hasCode(1903)) << "导出失败应报 1903";
+        EXPECT_TRUE(ev.hasCode(1900)) << "导出失败仍发完成事件";
+        EXPECT_FALSE(ev.hasCode(1901)) << "导出失败不是阶段失败";
+    }
+}

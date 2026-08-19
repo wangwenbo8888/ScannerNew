@@ -1,110 +1,169 @@
-﻿#include "PostProcessWorkflow.h"
+﻿// ============================================================================
+// PostProcessWorkflow.cpp — 后处理工作流实现（编排壳；五阶段移交 07 E 对象）
+//
+// P6-T29c：旧七阶段（GBA/重融合/法线/封装/补洞/光顺/边界）sleep 空壳删除
+// （GBA/重融合 Q5 定案归 02）——本类装配 07 PostProcessPipeline 阻塞 run：
+// 进度回调透传 UI、STL 导出经 StlExportFn 适配 06 file_io exportSTL
+// （file_io.cpp 编入 app 且依赖 OSG——07 库不链 OSG，适配须在本 app 编译
+// 单元内完成，见 exportStlViaFileIo）。
+// ============================================================================
+
+#include "PostProcessWorkflow.h"
 #include "PointCloudBuffer.h"
+#include "file_io.h"            // 06 STL 导出（app 编译单元内适配）
+
+#include "pipelines/PipelineDeps.h"
+
+#include <osg/Vec3>
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <utility>
 
 namespace Scanner::workflow {
+namespace {
 
-PostProcessWorkflow::PostProcessWorkflow(WorkflowContext* ctx) : ctx_(ctx) {}
+// ============================================================================
+// exportStlViaFileIo — StlExportFn → 06 file_io::exportSTL 适配
+//
+// 07 的 MeshData（float xyz/normals + uint32 三角索引）→ file_io::MeshData
+// （osg::Vec3 顶点/法线 + 索引）。真导出接线（T27 占位注释的兑现）：
+// file_io.cpp 与 OSG 均属 app 侧——本函数只能在 app 编译单元内存在。
+// ============================================================================
+bool exportStlViaFileIo(const std::string& path, const Scanner::pipeline::MeshData& mesh) {
+    file_io::MeshData out;
+    out.vertices.reserve(mesh.pointCount());
+    for (size_t i = 0; i + 2 < mesh.xyz.size(); i += 3) {
+        out.vertices.emplace_back(mesh.xyz[i], mesh.xyz[i + 1], mesh.xyz[i + 2]);
+    }
+    if (mesh.normals.size() == mesh.xyz.size()) {         // 法线数量匹配才透传
+        out.normals.reserve(mesh.pointCount());
+        for (size_t i = 0; i + 2 < mesh.normals.size(); i += 3) {
+            out.normals.emplace_back(mesh.normals[i], mesh.normals[i + 1], mesh.normals[i + 2]);
+        }
+    }
+    out.indices.assign(mesh.triangles.begin(), mesh.triangles.end());
+    return file_io::exportSTL(path, out);
+}
+
+} // namespace
+
+PostProcessWorkflow::PostProcessWorkflow(WorkflowContext* ctx)
+    : ctx_(ctx), cancelToken_(std::make_unique<Scanner::pipeline::CancelToken>()) {}
 PostProcessWorkflow::~PostProcessWorkflow() { stop(); }
 
 Result PostProcessWorkflow::initialize() {
     if (!ctx_) return Result::fail("无 WorkflowContext");
-    spdlog::info("[PostProcess] 初始化 (光顺迭代={}, 输出={})", smoothIter_, outputPath_);
+    spdlog::info("[PostProcess] 初始化 (五阶段, skip=0x{:x}, 输出={})", skipStages_, outputPath_);
+    return Result::ok();
+}
+
+Result PostProcessWorkflow::makeCloudData(Scanner::pipeline::MeshData& out) const {
+    if (!ctx_ || !ctx_->pointCloudBuffer()) return Result::fail("无点云数据");
+
+    uint64_t version = 0;
+    std::vector<cv::Point3f> points;
+    std::vector<cv::Vec3b> colors;
+    ctx_->pointCloudBuffer()->getSnapshot(version, points, colors);
+    if (points.empty()) return Result::fail("点云为空");
+
+    out.xyz.reserve(points.size() * 3);
+    for (const auto& p : points) {
+        out.xyz.push_back(p.x);
+        out.xyz.push_back(p.y);
+        out.xyz.push_back(p.z);
+    }
+    spdlog::info("[PostProcess] 读入 {} 点 (version={})", points.size(), version);
+    // TODO(接入期): 输入改 06 点云仓库（app 存活件）内存句柄——02 GBA 修正
+    // 点云写入仓库后此处直取修正结果（现 PointCloudBuffer 快照即其内存形态）
     return Result::ok();
 }
 
 Result PostProcessWorkflow::start() {
     if (state_ == WorkflowState::Running) return Result::ok();
+
+    Scanner::pipeline::MeshData cloud;
+    auto mr = makeCloudData(cloud);
+    if (!mr.success) {
+        result_.success = false;
+        result_.message = mr.message;
+        state_ = WorkflowState::Error;
+        spdlog::error("[PostProcess] {}", mr.message);
+        return Result::fail(mr.message);
+    }
+
+    // 装配 07 E（会话私有件：skipStages/outputPath 透传；STL 真导出接线）
+    Scanner::pipeline::PostProcessPipeline::Config cfg;
+    cfg.skipStages = skipStages_;
+    cfg.outputPath = outputPath_;
+    pipeline_ = std::make_unique<Scanner::pipeline::PostProcessPipeline>(std::move(cfg));
+    pipeline_->setStlExporter(&exportStlViaFileIo);   // app 侧适配 06 file_io exportSTL
+    // TODO(接入期): 网格四族算子 09 落地后经 pipeline_->setStageOp 注入
+
+    Scanner::pipeline::PipelineDeps deps;
+    deps.eventBus = ctx_ ? ctx_->eventBus() : nullptr;
+    auto cr = pipeline_->configure(deps);
+    if (!cr.success) {
+        pipeline_.reset();
+        result_.success = false;
+        result_.message = "PostProcessPipeline 装配失败: " + cr.message;
+        state_ = WorkflowState::Error;
+        return Result::fail(result_.message);
+    }
+
+    cancelToken_ = std::make_unique<Scanner::pipeline::CancelToken>();   // 会话新令牌
+    result_ = PostProcessResult{};
     state_ = WorkflowState::Running;
     running_ = true;
-    postThread_ = std::thread(&PostProcessWorkflow::postProcessLoop, this);
+    postThread_ = std::thread([this, c = std::move(cloud)]() mutable {
+        postProcessLoop(std::move(c));
+    });
     return Result::ok();
+}
+
+void PostProcessWorkflow::postProcessLoop(Scanner::pipeline::MeshData cloud) {
+    spdlog::info("[PostProcess] 后处理启动（五阶段移交 07 PostProcessPipeline）");
+    const auto t0 = std::chrono::steady_clock::now();
+
+    auto res = pipeline_->run(
+        std::move(cloud),
+        [this](int pct, const std::string& stage) {
+            WorkflowProgress p;
+            p.state = state_.load();
+            p.currentStage = pct / 20;                 // 0..100 → 阶段 0..5
+            p.totalStages = Scanner::pipeline::PostProcessPipeline::kStageCount;
+            p.stageName = stage;
+            p.progress = pct / 100.0f;
+            if (callback_) callback_(p);
+        },
+        *cancelToken_);
+
+    const auto t1 = std::chrono::steady_clock::now();
+    result_.success = res.success;
+    result_.meshTriangles = static_cast<int>(pipeline_->output().triangles.size() / 3);
+    result_.smoothTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    result_.outputPath = outputPath_;
+    result_.message = res.message;
+    state_ = res.success ? WorkflowState::Completed : WorkflowState::Error;
+    running_ = false;
+
+    spdlog::info("[PostProcess] 后处理结束: success={} degraded={} → {} (三角面 {}, {:.0f}ms)",
+                 res.success, res.isDegraded(), outputPath_, result_.meshTriangles,
+                 result_.smoothTimeMs);
 }
 
 Result PostProcessWorkflow::stop() {
     running_ = false;
-    state_ = WorkflowState::Idle;
+    if (cancelToken_) cancelToken_->cancel();   // 阶段前/导出前检查点安全退出
+    if (pipeline_) pipeline_->stop();           // cancel + join（run 路径经外部令牌）
     if (postThread_.joinable()) postThread_.join();
+    pipeline_.reset();
+    state_ = WorkflowState::Idle;
     return Result::ok();
 }
 
 Result PostProcessWorkflow::setProgressCallback(WorkflowCallback cb) {
     callback_ = std::move(cb);
     return Result::ok();
-}
-
-void PostProcessWorkflow::postProcessLoop() {
-    spdlog::info("[PostProcess] 后处理启动 (七阶段)");
-
-    // 读取点云快照
-    if (!ctx_ || !ctx_->pointCloudBuffer()) {
-        result_.success = false;
-        result_.message = "无点云数据";
-        state_ = WorkflowState::Error;
-        return;
-    }
-
-    uint64_t version = 0;
-    std::vector<cv::Point3f> points;
-    std::vector<cv::Vec3b> colors;
-    ctx_->pointCloudBuffer()->getSnapshot(version, points, colors);
-
-    if (points.empty()) {
-        result_.success = false;
-        result_.message = "点云为空";
-        state_ = WorkflowState::Error;
-        return;
-    }
-
-    spdlog::info("[PostProcess] 读入 {} 点 (version={})", points.size(), version);
-
-    // 七阶段流水线
-    const char* stages[] = {
-        "全局标记点优化",  // 0: GBA
-        "重融合",          // 1: laser_cloud_fuse
-        "法线计算",        // 2: laser_cloud_normal
-        "封装(网格化)",    // 3: Poisson/贪心三角化
-        "补洞",            // 4: 网格补洞
-        "光顺(HC)",        // 5: HC 平滑
-        "边界优化"         // 6: 边界优化
-    };
-
-    for (int i = 0; i < 7 && running_; ++i) {
-        notifyProgress(i, stages[i]);
-
-        // TODO: 调用对应算子
-        // Stage 0: global_ba_cpu (GBA)
-        // Stage 1: laser_cloud_fuse_cpu (重融合)
-        // Stage 2: laser_cloud_normal_cpu (法线)
-        // Stage 3: 网格封装 (待建)
-        // Stage 4: 补洞 (待建)
-        // Stage 5: HC 平滑 (待建)
-        // Stage 6: 边界优化 (待建)
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    // 导出 STL (TODO: 调用 FileService)
-    result_.success = true;
-    result_.meshTriangles = 0;  // 占位
-    result_.outputPath = outputPath_;
-    result_.message = "后处理完成";
-    state_ = WorkflowState::Completed;
-
-    spdlog::info("[PostProcess] 后处理完成 → {}", outputPath_);
-}
-
-void PostProcessWorkflow::notifyProgress(int stage, const std::string& name) {
-    spdlog::info("[PostProcess] [{}/7] {}", stage + 1, name);
-    if (!callback_) return;
-    WorkflowProgress p;
-    p.state = state_.load();
-    p.currentStage = stage;
-    p.totalStages = 7;
-    p.stageName = name;
-    p.progress = static_cast<float>(stage + 1) / 7.0f;
-    callback_(p);
 }
 
 } // namespace Scanner::workflow
