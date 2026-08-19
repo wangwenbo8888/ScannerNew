@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -484,4 +485,82 @@ TEST(SchedRuntime, RestartAfterDrain) {
     std::set<uint64_t> expect{0, 1, 2};
     EXPECT_EQ(ids, expect);                           // 轮 2 的 3 帧全到
     EXPECT_EQ(live.load(), 0);                        // 两轮流创建/销毁完全对称
+}
+
+// 用例 9（T10）：gpuChain 调 frontReady() 后返回 false —— pChain 成了孤儿但被
+// fut.wait() 等待完成才进下一帧：帧被弃置（processed==0）但无孤儿残留、无
+// TFront 并发写（等待在下一帧抓帧之前完成）、无崩溃，总时长 < 5s
+TEST(SchedRuntime, OrphanWaitAfterFrontReadyThenFalse) {
+    SlotRing<Frame> ring(8, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src(ring, 64);
+    writeFrames(ring, 2);
+    std::atomic<int> live{0};
+    std::atomic<int> pRan{0};
+
+    LaneHooks<Frame, Front, Out> hooks;
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                        std::function<void()> frontReady) {
+        frontReady();                                 // ccl 就绪点提交 pChain……
+        return false;                                 // ……随后帧销毁 → pChain 成孤儿
+    };
+    hooks.pChain = [&](const std::shared_ptr<const Frame>&, Front&, Out&) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 孤儿在飞一会儿
+        ++pRan;                                       // 正常执行完（写 TFront 分区）
+        return Result::ok();
+    };
+    hooks.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>&) {
+        return Result::fail("frame discarded");       // 不应被调用（帧已弃置）
+    };
+
+    SchedulerRuntime rt;
+    rt.setGpuStreamFactory(fakeFactory(live), fakeDestroyer(live));
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(rt.start(baseCfg(1), src, /*sequential=*/false, noQueue(), hooks).success);
+    ASSERT_TRUE(waitUntil([&] { return pRan.load() >= 2 && rt.stats().gpuRejects >= 2u; }));
+    rt.drainAndShutdown();
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
+
+    EXPECT_EQ(rt.stats().processed, 0u);              // 帧全弃置
+    EXPECT_EQ(pRan.load(), 2);                        // pChain 均执行过（孤儿被等完非弃置）
+    EXPECT_EQ(rt.stats().gpuRejects, 2u);             // false 帧只计 gpuRejects
+    EXPECT_EQ(live.load(), 0);                        // 流销毁对称：无泄漏/无二次销毁
+    EXPECT_LT(elapsedMs, 5000);                       // 无孤儿卡死
+}
+
+// 用例 10（T10）：eFinalize 抛异常 → runtime 顶层捕获、异常即停：
+// finalizeFails>=1，drain 不挂死（isRunning 变 false），processed 不计异常帧
+TEST(SchedRuntime, HookExceptionStopsRuntime) {
+    SlotRing<Frame> ring(8, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src(ring, 64);
+    writeFrames(ring, 3);
+    std::atomic<int> live{0};
+    std::atomic<int> finalized{0};
+
+    LaneHooks<Frame, Front, Out> hooks;
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                        std::function<void()>) { return true; };
+    hooks.pChain = [](const std::shared_ptr<const Frame>&, Front&, Out&) { return Result::ok(); };
+    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>& fut) -> Result {
+        (void)fut.get();
+        ++finalized;
+        throw std::runtime_error("eFinalize boom");   // 钩子异常：顶层须捕获并停机
+    };
+
+    SchedulerRuntime rt;
+    rt.setGpuStreamFactory(fakeFactory(live), fakeDestroyer(live));
+    ASSERT_TRUE(rt.start(baseCfg(1), src, /*sequential=*/false, noQueue(), hooks).success);
+    ASSERT_TRUE(waitUntil([&] { return finalized.load() >= 1; }));   // 异常已发生
+    const auto t0 = std::chrono::steady_clock::now();
+    rt.drainAndShutdown();                            // 异常已触发 requestStop：须不挂死
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
+
+    EXPECT_FALSE(rt.isRunning());                     // 停机
+    EXPECT_GE(rt.stats().finalizeFails, 1u);          // 异常被顶层捕获计数
+    EXPECT_EQ(rt.stats().processed, 0u);              // 异常帧不计成功
+    EXPECT_LT(elapsedMs, 5000);                       // drain 不挂死
+    EXPECT_EQ(live.load(), 0);                        // 流销毁对称（无崩溃）
 }

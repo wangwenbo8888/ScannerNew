@@ -11,7 +11,9 @@
 //     回调——runtime 由此刻提交 pChain 拿 future，激光链剩余段与 P 链帧内并行）
 //       · gpuChain 返回 true 且未触发 frontReady → 返回后兜底提交（A 模式路径）
 //       · gpuChain 返回 false=帧销毁：计 gpuRejects；已触发则先 fut.wait()
-//         有界等待孤儿 P 任务完成再进下一帧（防与下一帧并发读写 per-lane TFront）
+//         等孤儿 P 任务完成再进下一帧（防与下一帧并发读写 per-lane TFront）。
+//         注：wait() 无超时——依赖 Broker pChain 任务正常返回；任务卡死属
+//         Broker 层故障，本层不设看门狗
 //   → eFinalize（收有效 future：pChain 的 Result 与异常均由钩子经 get() 消费
 //     与处理；runtime 不预取 get，eFinalize 返回后不再触碰 future）
 //     成功 processed++ → guard 析构 → 下一帧（帧边界查 stop）
@@ -85,7 +87,9 @@ public:
     ~SchedulerRuntime();
 
     /// GPU 流工厂注入（测试假工厂路径）；默认空 = 生产 CUDA 工厂。
-    /// 须在 start 前调用；运行期调用返回 fail。
+    /// 须在 start 前调用；运行期调用返回 fail。⚠ 与 start 并发调用存在数据
+    /// 竞争窗口（本 setter 无锁写 gpuFactory_ vs start 锁内拷贝读）：约定仅在
+    /// 装配阶段（同线程、start 之前）调用，与 start 并发调用属 UB。
     Result setGpuStreamFactory(GpuSlotService::StreamFactory factory,
                                GpuSlotService::StreamDestroyer destroyer = {});
 
@@ -274,7 +278,8 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
             if (!gpuOk) {                             // false=帧销毁
                 gpuRejects_.fetch_add(1);
                 if (submitted.load()) {
-                    fut.wait();                       // 孤儿任务有界等待后再进下一帧（防 TFront 并发）
+                    fut.wait();                       // 等孤儿 P 任务完成再进下一帧（防 TFront 并发）；
+                                                     // 无超时——依赖 pChain 正常返回，卡死属 Broker 层故障
                 }
                 continue;                             // guard 归还槽；future 弃置（未 get 不抛）
             }
