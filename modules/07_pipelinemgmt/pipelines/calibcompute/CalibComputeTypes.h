@@ -15,8 +15,12 @@
 #include <opencv2/core.hpp>
 
 #include "calibration/camera/stereo_rectify_temp_table/stereo_rectify_temp_table_cpu.h"
+#include "calibration/laser_calib/plane_map/plane_map_cuda.h"
+#include "calibration/laser_calib/plane_map_temp_table/plane_map_temp_table.h"
+#include "calibration/laser_calib/projector_joint_calib/projector_joint_calib.h"
 #include "calibration/temp/extrinsic_compensate/extrinsic_compensate_cpu.h"
 #include "calibration/temp/intrinsic_compensate/intrinsic_compensate_cpu.h"
+#include "calibration/temp/laser_extrinsic_compensate/laser_extrinsic_compensate_cpu.h"
 
 namespace Scanner::pipeline {
 
@@ -40,6 +44,10 @@ struct CalibComputeOutput {        // B 输出（→06 仓库落盘）
     calib::ExtrinsicCompensateCPUResult extrinsicTempTable;   // 5-2 外参补偿表
     calib::StereoRectifyTempTableResult rectifyTempTable;     // 3-5 矫正温度表
     bool laserValid = false;       // 激光半区有效标志（T22 填）
+    calib::ProjectorJointCalibResult pjc;                      // PJC 光心+发射曲线（T22）
+    calib::PlaneMapResult planeMap;                            // 4-12 激光面映射表（T22）
+    calib::PlaneMapTempTableResult planeMapTempTable;          // 4-13 温度补偿映射表（T22）
+    calib::LaserExtrinsicCompensateCPUResult laserExtrinsicTempTable; // 5-3 激光外参补偿表（T22）
     struct QualityReport {         // T23 细化
         bool ok = false;
         std::string summary;

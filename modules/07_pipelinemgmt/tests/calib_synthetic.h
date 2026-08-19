@@ -12,6 +12,8 @@
 //   （已是矫正系=原始系等价，因初始参数给真值）+ PostureData.cycle 最小占位。
 // 板点序：r 外层 / c 内层（同 09 intrinsic_calib generateObjectPoints）。
 // 确定性：固定 seed（默认 42），同 seed 同数据。
+#include <algorithm>
+#include <cmath>
 #include <random>
 #include <vector>
 
@@ -137,6 +139,66 @@ inline InitialCalibParams makeInitialFromTruth(const SyntheticTruth& t) {
     p.R2 = t.R2.clone();  p.P2 = t.P2.clone();
     p.imageSize = t.imageSize;
     return p;
+}
+
+// ============================================================================
+// T22 激光链合成数据（层 2 真算子冒烟用）
+// ============================================================================
+// makeSyntheticLaserFrame：黑底 + nLines 条水平激光条纹（高斯剖面
+//   255·exp(-d²/2σ²)）。水平走向是 laser_label 的硬约束：其只保留与图像
+//   中心列相交的连通域（按中心列最小 Y 重编号 1..N，上→下）——竖直条纹
+//   不交中心列会被整域丢弃（T22 实测定版）。steger 需平滑剖面（实心条
+//   内部二阶导为零提不出中心）；同 09 steger 测试的合成条纹形态。
+inline cv::Mat makeSyntheticLaserFrame(const cv::Size& sz, int nLines = 2,
+                                       double sigma = 2.5) {
+    cv::Mat img(sz, CV_8UC1, cv::Scalar(8));           // 黑底（含少量底噪）
+    std::vector<double> centers;
+    for (int k = 0; k < nLines; ++k)
+        centers.push_back((k + 1.0) * sz.height / (nLines + 1.0));
+    const double denom = 2.0 * sigma * sigma;
+    for (int y = 0; y < sz.height; ++y) {
+        double v = 0.0;
+        for (double c : centers) {
+            const double d = y - c;
+            v = std::max(v, 255.0 * std::exp(-d * d / denom));
+        }
+        const uchar rowVal = static_cast<uchar>(std::min(v, 255.0));
+        for (int x = 0; x < sz.width; ++x) img.at<uchar>(y, x) = rowVal;
+    }
+    return img;
+}
+
+// attachSyntheticLaserFrames：为每个已确认姿态填 tubes 路激光管帧
+//   （laserFrames 扁平 N*2：偶=L/奇=R；L/R 同图 → 零视差，仅结构冒烟用）
+inline void attachSyntheticLaserFrames(PostureSessionData& s, int tubes,
+                                       const cv::Size& sz, int nLines = 2,
+                                       double sigma = 1.2) {
+    for (int i = 0; i < PostureSessionData::kTargetCount; ++i) {
+        if (!s.collected[i]) continue;
+        auto& frames = s.poses[i].cycle.laserFrames;
+        frames.clear();
+        frames.reserve(static_cast<size_t>(tubes) * 2);
+        for (int t = 0; t < tubes; ++t) {
+            frames.push_back(makeSyntheticLaserFrame(sz, nLines, sigma));  // L
+            frames.push_back(makeSyntheticLaserFrame(sz, nLines, sigma));  // R
+        }
+    }
+}
+
+// makeSyntheticStereoParams：由真值经 cv::stereoRectify 生成冒烟用 StereoParams
+//   （4-5 的矫正组 R1/P1/R2/P2 与 4-8 的 Q 均需有效矩阵；合成帧非真实投影，
+//   重建坐标无物理意义——只验证算子链不崩）
+inline StereoParams makeSyntheticStereoParams(const SyntheticTruth& t) {
+    StereoParams sp;
+    cv::Mat R1, R2, P1, P2, Q;
+    cv::stereoRectify(t.K1, t.D1, t.K2, t.D2, t.imageSize, t.R, t.T,
+                      R1, R2, P1, P2, Q, cv::CALIB_ZERO_DISPARITY);
+    sp.cameraMatrixL = t.K1.clone();  sp.distCoeffsL = t.D1.clone();
+    sp.cameraMatrixR = t.K2.clone();  sp.distCoeffsR = t.D2.clone();
+    sp.R = t.R.clone();               sp.T = t.T.clone();
+    sp.R1 = R1;  sp.R2 = R2;  sp.P1 = P1;  sp.P2 = P2;  sp.Q = Q;
+    sp.reprojError = 0.0;
+    return sp;
 }
 
 } // namespace Scanner::pipeline::synthetic
