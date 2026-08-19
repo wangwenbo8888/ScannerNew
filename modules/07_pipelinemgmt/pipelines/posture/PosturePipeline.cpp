@@ -243,6 +243,10 @@ Scanner::Result PosturePipeline::configure(const PipelineDeps& deps) {
             return Result::fail("PosturePipeline::configure: R1/R2/P1/P2/Q 须齐全");
         if (params_.imageWidth <= 0 || params_.imageHeight <= 0)
             return Result::fail("PosturePipeline::configure: imageWidth/imageHeight 须 >0");
+        // 0=恒真不过滤（激光线帧永不销毁，破坏 D3）；≥1 恒假全销毁——两向都拒
+        if (params_.maskRatioThreshold <= 0.0 || params_.maskRatioThreshold >= 1.0)
+            return Result::fail("PosturePipeline::configure: maskRatioThreshold 须在 (0,1) "
+                                "（0=激光线帧永不销毁，破坏 D3 语义）");
     }
 
     sink_ = makeSink(deps);
@@ -304,9 +308,13 @@ Scanner::Result PosturePipeline::start() {
         return Result::fail("PosturePipeline::start: runtime 启动失败: " + rs.message);
     }
 
+    // 先置 Running 再建 watcher：反序时 watcher 集齐收口置 Stopped 会被尾行
+    // store(Running) 覆盖（对象卡"运行中"实已停）；创建失败则回滚 Configured
+    state_.store(State::Running);
     try {
         watcher_ = std::thread([this] { watcherLoop(); });
     } catch (const std::exception& e) {
+        state_.store(State::Configured);          // 回滚（start 可重试）
         runtime_.requestStop();                   // 回退 runtime
         runtime_.drainAndShutdown();
         source_.reset();
@@ -314,7 +322,6 @@ Scanner::Result PosturePipeline::start() {
                             e.what());
     }
 
-    state_.store(State::Running);
     return Result::ok();
 }
 

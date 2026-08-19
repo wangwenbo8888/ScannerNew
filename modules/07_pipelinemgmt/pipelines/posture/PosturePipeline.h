@@ -104,7 +104,10 @@ public:
     /// 初始参数组（内参/畸变/R1/P1——形态对齐标记点链算子参数；生产模式必备）
     void attachInitialParams(const PostureInitialParams& params);
 
-    /// 收口钩子（② 装配期 01 注入）：集齐自动收口后携 SessionData 叫醒 B
+    /// 收口钩子（② 装配期 01 注入）：集齐自动收口后携 SessionData 叫醒 B。
+    /// 契约：①只做异步移交（取走数据唤醒下游即返）——长阻塞会占住收口 watcher
+    /// 线程并传导到 stop()/析构（二者 join watcher 才返回）；②禁止钩子内重入
+    /// 本对象 stop()（等价 watcher 自 join → 死锁/terminate）。
     void setCompletionHook(std::function<void(PostureSessionData&&)> continueWithB);
 
     // —— 测试模式注入（configure 前调用；与 attachInitialParams 互斥）——

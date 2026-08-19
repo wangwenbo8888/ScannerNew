@@ -14,6 +14,7 @@
 #include <climits>
 #include <cstdlib>
 #include <future>
+#include <initializer_list>
 #include <memory>
 #include <set>
 #include <thread>
@@ -146,19 +147,24 @@ PosturePipeline::Hooks fakeHooks(PosturePipeline& pipe, FakeSceneFeed* feed,
     return h;
 }
 
+// 显式逐元素构造（comma-initializer 出函数体即悬空引用，禁用）
+static cv::Mat matOf(int rows, int cols, std::initializer_list<double> v) {
+    cv::Mat_<double> m(rows, cols);
+    int i = 0;
+    for (double x : v) m(i / cols, i % cols) = x, ++i;
+    return m;
+}
+
 PostureInitialParams mkParams() {
     PostureInitialParams p;
-    auto K = [](double fx) {
-        return (cv::Mat_<double>(3, 3) << fx, 0, 320, 0, fx, 240, 0, 0, 1);
-    };
-    p.K1 = K(800.0);
-    p.K2 = K(810.0);
-    p.D1 = (cv::Mat_<double>(5, 1) << 0, 0, 0, 0, 0);
-    p.D2 = (cv::Mat_<double>(5, 1) << 0, 0, 0, 0, 0);
+    p.K1 = matOf(3, 3, {800, 0, 320, 0, 800, 240, 0, 0, 1});
+    p.K2 = matOf(3, 3, {810, 0, 320, 0, 810, 240, 0, 0, 1});
+    p.D1 = matOf(5, 1, {0, 0, 0, 0, 0});
+    p.D2 = matOf(5, 1, {0, 0, 0, 0, 0});
     p.R1 = cv::Mat::eye(3, 3, CV_64F);
     p.R2 = cv::Mat::eye(3, 3, CV_64F);
-    p.P1 = (cv::Mat_<double>(3, 4) << 800, 0, 320, 0, 0, 800, 240, 0, 0, 0, 1, 0);
-    p.P2 = (cv::Mat_<double>(3, 4) << 810, 0, 320, 0, 0, 810, 240, 0, 0, 0, 1, 0);
+    p.P1 = matOf(3, 4, {800, 0, 320, 0, 0, 800, 240, 0, 0, 0, 1, 0});
+    p.P2 = matOf(3, 4, {810, 0, 320, 0, 0, 810, 240, 0, 0, 0, 1, 0});
     p.Q = cv::Mat::eye(4, 4, CV_64F);
     p.imageWidth = 640;
     p.imageHeight = 480;
@@ -345,8 +351,6 @@ TEST(PosturePipelineTest, MissingAttachFail) {
         pipe.attachTestHooks(fakeHooks(pipe, nullptr));
         EXPECT_FALSE(pipe.configure(PipelineDeps{}).success);
     }
-    // BISECT-OFF
-    if (true) return;
     // b) 生产模式（未 attachTestHooks）未 attachInitialParams → configure fail
     {
         SlotRing<CycleUnit> ring(kRingSlots, SlotRing<CycleUnit>::WriterMode::Backpressure);
@@ -355,8 +359,6 @@ TEST(PosturePipelineTest, MissingAttachFail) {
         pipe.attachTargets(targets, kTargets);
         EXPECT_FALSE(pipe.configure(PipelineDeps{}).success);
     }
-    // BISECT-OFF
-    if (true) return;
     // c) 未 configure → start fail
     {
         SlotRing<CycleUnit> ring(kRingSlots, SlotRing<CycleUnit>::WriterMode::Backpressure);
@@ -366,8 +368,6 @@ TEST(PosturePipelineTest, MissingAttachFail) {
         pipe.attachTestHooks(fakeHooks(pipe, nullptr));
         EXPECT_FALSE(pipe.start().success);
     }
-    // BISECT-OFF
-    if (true) return;
     // d) configure ok 但未 attachRing → start fail
     {
         PosturePipeline pipe;
@@ -382,6 +382,28 @@ TEST(PosturePipelineTest, MissingAttachFail) {
         pipe.attachTargets(targets, kTargets);
         pipe.attachInitialParams(mkParams());
         pipe.attachTestHooks(fakeHooks(pipe, nullptr));
+        EXPECT_FALSE(pipe.configure(PipelineDeps{}).success);
+    }
+    // f) maskRatioThreshold=0（默认占位=恒真不过滤，激光线帧永不销毁，破坏 D3）
+    //    → configure fail；>=1.0 同理 fail
+    {
+        SlotRing<CycleUnit> ring(kRingSlots, SlotRing<CycleUnit>::WriterMode::Backpressure);
+        PosturePipeline pipe;
+        pipe.attachRing(ring);
+        pipe.attachTargets(targets, kTargets);
+        PostureInitialParams p0 = mkParams();
+        p0.maskRatioThreshold = 0.0;
+        pipe.attachInitialParams(p0);
+        EXPECT_FALSE(pipe.configure(PipelineDeps{}).success);
+    }
+    {
+        SlotRing<CycleUnit> ring(kRingSlots, SlotRing<CycleUnit>::WriterMode::Backpressure);
+        PosturePipeline pipe;
+        pipe.attachRing(ring);
+        pipe.attachTargets(targets, kTargets);
+        PostureInitialParams p1 = mkParams();
+        p1.maskRatioThreshold = 1.0;
+        pipe.attachInitialParams(p1);
         EXPECT_FALSE(pipe.configure(PipelineDeps{}).success);
     }
 }

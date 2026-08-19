@@ -13,8 +13,12 @@
 //   3. 集齐回调：collectedCount == targetCount → onComplete 恰一次
 //      （atomic flag 防重）。
 //
-// 线程模型：E 核单线程逐周期 report 为主用法；并发仅要求同一姿态确认恰一次
-// （§9.3 CAS 防重复）。簿记为 per-pose 细粒度锁（竞争≈0）+ collected 原子位。
+// 线程模型：多 lane eFinalize 并发 report 为主用法（A 姿态流水线 X lane 并行
+// 终段）；同一姿态确认恰一次由 §9.3 CAS 保证。簿记为 per-pose 细粒度锁
+// （竞争≈0）+ collected 原子位。
+// ⚠ "连续命中"（streak）以判定完成序计、非采集周期序：多 lane 在飞周期存在
+//   乱序窗口（≤在飞周期数），目标切换场景的 streak 可能被乱序打断或延长——
+//   语义为"连续 N 次有效判定命中同一目标"，非严格周期连续（01-D3 判定口径）。
 #include <array>
 #include <atomic>
 #include <functional>
