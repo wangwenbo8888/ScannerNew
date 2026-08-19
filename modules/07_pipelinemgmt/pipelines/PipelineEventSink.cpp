@@ -3,6 +3,8 @@
 
 #include "base/EventBus.h"
 
+#include <spdlog/spdlog.h>
+
 namespace Scanner::pipeline {
 
 EventBusEventSink::EventBusEventSink(Scanner::infra::EventBus* bus) : bus_(bus) {}
@@ -31,8 +33,14 @@ void EventBusEventSink::report(Scanner::QualityFlag q, int32_t code, const std::
     e.sourceId = kPipelineEventSourceId;
     e.param1 = code;
     e.param2 = static_cast<int64_t>(severity);
+
+    // EventBus 为控制通道不携带载荷，msg 落 spdlog 留存（防静默丢失）
+    if (severity == Scanner::FaultSeverity::Error) {
+        spdlog::error("[pipemgmt] code={} msg={}", code, msg);
+    } else {
+        spdlog::warn("[pipemgmt] code={} msg={}", code, msg);
+    }
     bus_->publish(e);
-    (void)msg;                                    // EventBus 控制通道不携带载荷，msg 仅作调用侧日志语义
 }
 
 } // namespace Scanner::pipeline
