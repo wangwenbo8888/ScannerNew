@@ -1,12 +1,14 @@
 // ============================================================================
 // test_sched_runtime.cpp — SchedulerRuntime 端到端单测（假钩子 + 假 GPU 工厂）
-// 组合底座件全链路：抓帧（两副面孔）→ GPU guard → gpuChain → pChain（Broker）
-// → eFinalize → 输出队列；启停逆序 / 帧内并行 / 在飞帧排空 / 三计数统计。
+// 组合底座件全链路：抓帧（两副面孔）→ GPU guard → gpuChain（ccl 就绪点
+// frontReady 回调提交 pChain）→ eFinalize（收有效 future）→ 输出队列；
+// 启停逆序 / 帧内并行 / 在飞帧排空 / 四计数统计 / restart。
 // ============================================================================
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -50,7 +52,7 @@ SchedConfig baseCfg(int lanes) {
     c.lanes = lanes;
     c.gpuSlots = 1;
     c.queueCapacity = 32;
-    c.dropThreshold = 64;   // 大阈值：用例内帧数不触发跳帧（用例 7 另行调小）
+    c.dropThreshold = 64;   // 大阈值：用例内帧数不触发跳帧（用例 8 另行调小）
     return c;               // gpuAcquireTimeout 默认 2s：假钩子持槽极短，不会超时
 }
 
@@ -105,16 +107,17 @@ TEST(SchedRuntime, E2E_AllFramesProcessed) {
     std::vector<uint64_t> gpuSeen;                    // gpuChain 见过的帧号
 
     LaneHooks<Frame, Front, Out> hooks;
-    hooks.gpuChain = [&](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>& f, Front&) {
+    hooks.gpuChain = [&](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>& f, Front&,
+                         std::function<void()>) {    // 不调 frontReady：走兜底提交
         { std::lock_guard<std::mutex> g(gpuSeenMu); gpuSeen.push_back(f->id); }
         return true;
     };
-    hooks.onFrontReady = [](const std::shared_ptr<const Frame>&, Front&) {};
     hooks.pChain = [](const std::shared_ptr<const Frame>& f, Front&, Out& r) {
         r.frameId = f->id;                            // 填 result.frameId=帧号
         return Result::ok();
     };
-    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out& r, std::future<Result>&) {
+    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out& r, std::future<Result>& fut) {
+        if (!fut.get().success) return Result::fail("pChain failed");  // 钩子消费 future
         q.push(r);
         return Result::ok();
     };
@@ -140,7 +143,8 @@ TEST(SchedRuntime, E2E_AllFramesProcessed) {
     }
 }
 
-// 用例 2：gpuChain 偶数帧 false=帧销毁 → 队列仅奇数帧；false 只计 gpuRejects
+// 用例 2：gpuChain 偶数帧 false=帧销毁（未触发 frontReady→不提交）→ 队列仅奇数帧；
+// false 只计 gpuRejects
 TEST(SchedRuntime, GpuChainFalseDropsFrame) {
     SlotRing<Frame> ring(32, SlotRing<Frame>::WriterMode::Overwrite);
     GrabLatestSource<Frame> src(ring, 64);
@@ -149,15 +153,16 @@ TEST(SchedRuntime, GpuChainFalseDropsFrame) {
     std::atomic<int> live{0};
 
     LaneHooks<Frame, Front, Out> hooks;
-    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>& f, Front&) {
-        return (f->id % 2) == 1;                      // 偶数帧 false=帧销毁
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>& f, Front&,
+                        std::function<void()>) {
+        return (f->id % 2) == 1;                      // 偶数帧 false=帧销毁（不提交）
     };
-    hooks.onFrontReady = [](const std::shared_ptr<const Frame>&, Front&) {};
     hooks.pChain = [](const std::shared_ptr<const Frame>& f, Front&, Out& r) {
         r.frameId = f->id;
         return Result::ok();
     };
-    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out& r, std::future<Result>&) {
+    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out& r, std::future<Result>& fut) {
+        if (!fut.get().success) return Result::fail("pChain failed");
         q.push(r);
         return Result::ok();
     };
@@ -178,8 +183,9 @@ TEST(SchedRuntime, GpuChainFalseDropsFrame) {
     EXPECT_EQ(st.processed, 10u);
 }
 
-// 用例 3：onFrontReady 非空 → 提交先于 gpuChain 返回（T1 前端就绪 < T2 P 链入口 < T3 GPU 链返回）。
-// 偶发调度延迟允许 3 轮取满足者。
+// 用例 3：ccl 就绪点提交 — gpuChain 前段记 T1、调 frontReady() 提交、sleep 50ms
+// （模拟激光链仍在跑）、记 T3 返回；pChain 入口记 T2。
+// T1 < T2 < T3：P 链在 GPU 链未完时已在跑（帧内并行）。偶发调度延迟 3 轮取满足者。
 TEST(SchedRuntime, ParallelFrontAndP) {
     for (int round = 0; round < 3; ++round) {
         SlotRing<Frame> ring(4, SlotRing<Frame>::WriterMode::Overwrite);
@@ -188,25 +194,22 @@ TEST(SchedRuntime, ParallelFrontAndP) {
         std::atomic<int> live{0};
         std::atomic<int64_t> t1{0}, t2{0}, t3{0};
 
-        auto onFront = [&](const std::shared_ptr<const Frame>&, Front&) {
-            int64_t exp = 0;
-            t1.compare_exchange_strong(exp, nowNs()); // 首次触发记 T1（重复调用不覆盖）
-        };
         LaneHooks<Frame, Front, Out> hooks;
-        hooks.gpuChain = [&](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>& f, Front& fr) {
-            onFront(f, fr);                           // 模拟 GPU 段中途触发前端就绪回调
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 模拟激光链仍在跑
+        hooks.gpuChain = [&](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                             std::function<void()> frontReady) {
+            t1.store(nowNs());                        // GPU 前段完成（ccl 数据就绪）
+            frontReady();                             // ccl 就绪点提交 pChain
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 激光链仍在跑
             t3.store(nowNs());
             return true;
         };
-        hooks.onFrontReady = onFront;
         hooks.pChain = [&](const std::shared_ptr<const Frame>&, Front&, Out& r) {
             t2.store(nowNs());                        // P 核任务入口
             r.frameId = 0;
             return Result::ok();
         };
-        hooks.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>&) {
-            return Result::ok();
+        hooks.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>& fut) {
+            return fut.get().success ? Result::ok() : Result::fail("pChain failed");
         };
 
         SchedulerRuntime rt;
@@ -227,6 +230,46 @@ TEST(SchedRuntime, ParallelFrontAndP) {
     FAIL() << "3 轮均未观察到 T1 < T2 < T3";
 }
 
+// 用例 3b：gpuChain 不调 frontReady → 兜底路径：pChain 仍在 gpuChain 返回后才提交执行。
+// gpuChain 内 sleep 20ms 保证若被错误提前提交则 T2 必落在 T3 之前 → 断言可检出。
+TEST(SchedRuntime, FrontReadyNotCalledSubmitsAfterReturn) {
+    SlotRing<Frame> ring(4, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src(ring, 64);
+    ring.write(mkFrame(0));
+    std::atomic<int> live{0};
+    std::atomic<int64_t> t2{0}, t3{0};
+    std::atomic<int> pRan{0};
+
+    LaneHooks<Frame, Front, Out> hooks;
+    hooks.gpuChain = [&](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                         std::function<void()> frontReady) {
+        (void)frontReady;                             // 不调：走兜底路径
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        t3.store(nowNs());                            // gpuChain 返回时刻
+        return true;
+    };
+    hooks.pChain = [&](const std::shared_ptr<const Frame>&, Front&, Out& r) {
+        t2.store(nowNs());                            // P 核任务入口
+        ++pRan;
+        r.frameId = 0;
+        return Result::ok();
+    };
+    hooks.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>& fut) {
+        return fut.get().success ? Result::ok() : Result::fail("pChain failed");
+    };
+
+    SchedulerRuntime rt;
+    rt.setGpuStreamFactory(fakeFactory(live), fakeDestroyer(live));
+    ASSERT_TRUE(rt.start(baseCfg(1), src, /*sequential=*/false, noQueue(), hooks).success);
+    ASSERT_TRUE(waitProcessed(rt, 1));
+    rt.requestStop();
+    rt.drainAndShutdown();
+
+    EXPECT_EQ(pRan.load(), 1);                        // 仍被提交执行
+    EXPECT_GE(t2.load(), t3.load());                  // 提交发生在 gpuChain 返回之后
+    EXPECT_EQ(rt.stats().processed, 1u);
+}
+
 // 用例 4：pChain 在飞时 requestStop+drain —— 在飞帧跑完并发布，不死锁（<5s）
 TEST(SchedRuntime, StopDrainsInFlight) {
     SlotRing<Frame> ring(8, SlotRing<Frame>::WriterMode::Overwrite);
@@ -236,8 +279,9 @@ TEST(SchedRuntime, StopDrainsInFlight) {
     std::atomic<int> live{0};
     std::atomic<bool> pChainEntered{false};
 
-    LaneHooks<Frame, Front, Out> hooks;               // onFrontReady 留空：gpuChain 返回后才提交
-    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&) {
+    LaneHooks<Frame, Front, Out> hooks;
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                        std::function<void()>) {      // 不调 frontReady：返回后兜底提交
         return true;
     };
     hooks.pChain = [&](const std::shared_ptr<const Frame>& f, Front&, Out& r) {
@@ -246,7 +290,8 @@ TEST(SchedRuntime, StopDrainsInFlight) {
         r.frameId = f->id;
         return Result::ok();
     };
-    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out& r, std::future<Result>&) {
+    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out& r, std::future<Result>& fut) {
+        if (!fut.get().success) return Result::fail("pChain failed");
         q.push(r);
         return Result::ok();
     };
@@ -267,8 +312,9 @@ TEST(SchedRuntime, StopDrainsInFlight) {
     EXPECT_GE(drainQueue(q).size(), 1u);              // 已提交帧的结果仍发布
 }
 
-// 用例 5：onFrontReady 空 → 提交推迟到 gpuChain 返回后：pChain 入口必见 gpuDone
-TEST(SchedRuntime, FrontReadyEmptyDefersSubmit) {
+// 用例 5：不调 frontReady → 提交推迟到 gpuChain 返回后：pChain 入口必见 gpuDone
+// （兜底路径保证数据依赖：gpuChain 完成后才提交）
+TEST(SchedRuntime, DeferredSubmitSeesGpuDone) {
     SlotRing<Frame> ring(4, SlotRing<Frame>::WriterMode::Overwrite);
     GrabLatestSource<Frame> src(ring, 64);
     ring.write(mkFrame(0));
@@ -277,8 +323,9 @@ TEST(SchedRuntime, FrontReadyEmptyDefersSubmit) {
     std::atomic<bool> pChainObservedAfterGpu{false};
     std::atomic<int> finalized{0};
 
-    LaneHooks<Frame, Front, Out> hooks;               // onFrontReady 空
-    hooks.gpuChain = [&](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&) {
+    LaneHooks<Frame, Front, Out> hooks;
+    hooks.gpuChain = [&](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                         std::function<void()>) {     // 不调 frontReady
         bool exp = false;
         gpuDone.compare_exchange_strong(exp, true);   // gpuChain 完成标记
         return true;
@@ -288,7 +335,8 @@ TEST(SchedRuntime, FrontReadyEmptyDefersSubmit) {
         r.frameId = 0;
         return Result::ok();
     };
-    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>&) {
+    hooks.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>& fut) {
+        (void)fut.get();
         ++finalized;
         return Result::ok();
     };
@@ -315,14 +363,16 @@ TEST(SchedRuntime, SequentialSourcePath) {
     std::vector<uint64_t> ids;                        // eFinalize 观察到的帧号序列
 
     LaneHooks<Frame, Front, Out> hooks;
-    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&) {
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                        std::function<void()>) {
         return true;
     };
     hooks.pChain = [](const std::shared_ptr<const Frame>& f, Front&, Out& r) {
         r.frameId = f->id;
         return Result::ok();
     };
-    hooks.eFinalize = [&](const std::shared_ptr<const Frame>& f, Front&, Out&, std::future<Result>&) {
+    hooks.eFinalize = [&](const std::shared_ptr<const Frame>& f, Front&, Out&, std::future<Result>& fut) {
+        (void)fut.get();
         { std::lock_guard<std::mutex> g(mu); ids.push_back(f->id); }
         return Result::ok();
     };
@@ -352,11 +402,13 @@ TEST(SchedRuntime, StatsSkipsAccumulate) {
     cfg.dropThreshold = 8;
 
     LaneHooks<Frame, Front, Out> hooks;
-    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&) {
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                        std::function<void()>) {
         return true;
     };
     hooks.pChain = [](const std::shared_ptr<const Frame>&, Front&, Out&) { return Result::ok(); };
-    hooks.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>&) {
+    hooks.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>& fut) {
+        (void)fut.get();
         return Result::ok();
     };
 
@@ -369,4 +421,67 @@ TEST(SchedRuntime, StatsSkipsAccumulate) {
     const auto st = rt.stats();
     EXPECT_GT(st.droppedSkips, 0u);                   // 期望 29（跳到最新丢中间帧）
     EXPECT_GT(st.processed, 0u);
+}
+
+// 用例 8：restart — start→drain 后同 runtime 再 start 全绿（gpu 服务重建、计数清零、
+// running 守卫 setGpuStreamFactory、流创建/销毁对称）
+TEST(SchedRuntime, RestartAfterDrain) {
+    std::atomic<int> live{0};
+    SchedulerRuntime rt;
+    rt.setGpuStreamFactory(fakeFactory(live), fakeDestroyer(live));
+
+    // 轮 1：2 帧处理 → drain
+    SlotRing<Frame> ring1(8, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src1(ring1, 64);
+    writeFrames(ring1, 2);
+    LaneHooks<Frame, Front, Out> hooks1;
+    hooks1.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                         std::function<void()>) { return true; };
+    hooks1.pChain = [](const std::shared_ptr<const Frame>&, Front&, Out&) { return Result::ok(); };
+    hooks1.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&, std::future<Result>& fut) {
+        (void)fut.get();
+        return Result::ok();
+    };
+    ASSERT_TRUE(rt.start(baseCfg(1), src1, /*sequential=*/false, noQueue(), hooks1).success);
+    EXPECT_TRUE(rt.isRunning());
+    ASSERT_TRUE(waitProcessed(rt, 2));
+    rt.requestStop();
+    rt.drainAndShutdown();
+    EXPECT_FALSE(rt.isRunning());
+    EXPECT_EQ(rt.stats().processed, 2u);
+
+    // 轮 2：同 runtime 再 start（gpu 服务重建；计数清零）
+    SlotRing<Frame> ring2(8, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src2(ring2, 64);
+    writeFrames(ring2, 3);
+    OutQueue q2(8);
+    LaneHooks<Frame, Front, Out> hooks2;
+    hooks2.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                         std::function<void()>) { return true; };
+    hooks2.pChain = [](const std::shared_ptr<const Frame>& f, Front&, Out& r) {
+        r.frameId = f->id;
+        return Result::ok();
+    };
+    hooks2.eFinalize = [&](const std::shared_ptr<const Frame>&, Front&, Out& r, std::future<Result>& fut) {
+        (void)fut.get();
+        q2.push(r);
+        return Result::ok();
+    };
+    ASSERT_TRUE(rt.start(baseCfg(1), src2, /*sequential=*/false, &q2, hooks2).success);
+    EXPECT_TRUE(rt.isRunning());
+    // running 守卫：运行中注入工厂须 fail
+    EXPECT_FALSE(rt.setGpuStreamFactory(fakeFactory(live), fakeDestroyer(live)).success);
+    ASSERT_TRUE(waitProcessed(rt, 3));
+    rt.requestStop();
+    rt.drainAndShutdown();
+    EXPECT_FALSE(rt.isRunning());
+
+    EXPECT_EQ(rt.stats().processed, 3u);              // 每轮清零后计数
+    auto results = drainQueue(q2);
+    ASSERT_EQ(results.size(), 3u);
+    std::set<uint64_t> ids;
+    for (auto& o : results) ids.insert(o.frameId);
+    std::set<uint64_t> expect{0, 1, 2};
+    EXPECT_EQ(ids, expect);                           // 轮 2 的 3 帧全到
+    EXPECT_EQ(live.load(), 0);                        // 两轮流创建/销毁完全对称
 }

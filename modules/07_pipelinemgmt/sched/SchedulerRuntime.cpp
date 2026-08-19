@@ -12,10 +12,14 @@ SchedulerRuntime::~SchedulerRuntime() {
     drainAndShutdown();
 }
 
-void SchedulerRuntime::setGpuStreamFactory(GpuSlotService::StreamFactory factory,
-                                           GpuSlotService::StreamDestroyer destroyer) {
+Result SchedulerRuntime::setGpuStreamFactory(GpuSlotService::StreamFactory factory,
+                                             GpuSlotService::StreamDestroyer destroyer) {
+    if (running_.load()) {
+        return Result::fail("SchedulerRuntime::setGpuStreamFactory: cannot change while running");
+    }
     gpuFactory_ = std::move(factory);
     gpuDestroyer_ = std::move(destroyer);
+    return Result::ok();
 }
 
 void SchedulerRuntime::requestStop() {
@@ -42,6 +46,7 @@ SchedulerRuntime::Stats SchedulerRuntime::stats() const {
     s.processed = processed_.load();
     s.droppedSkips = droppedSkips_.load();
     s.gpuRejects = gpuRejects_.load();
+    s.finalizeFails = finalizeFails_.load();
     return s;
 }
 
