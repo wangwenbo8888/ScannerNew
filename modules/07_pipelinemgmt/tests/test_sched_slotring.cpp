@@ -46,6 +46,8 @@ TEST(SlotRing, OverwriteKeepsRefs) {
     EXPECT_EQ(kept->payload, 100);
     EXPECT_EQ(ring.read(0), nullptr);               // 0 + 2 < 3：确定已覆盖
     EXPECT_EQ(ring.claim(), 0u);                    // 领 0 号成功
+    ring.done();                                    // Overwrite：done 空操作
+    EXPECT_EQ(ring.donePtr(), 0u);
 }
 
 // 语义 3：claim 多线程原子领号——4 线程各 2500 次，无重复且 min=0 max=9999
@@ -82,6 +84,7 @@ TEST(SlotRing, BackpressureBlocksUntilDone) {
     while (!entered.load()) std::this_thread::yield();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_FALSE(finished.load());                  // 仍阻塞
+    EXPECT_EQ(ring.writePtr(), 2u);                 // 阻塞期间未 park 也不会推进写指针
     ring.done();
     ring.done();                                    // 腾两位
     writer.join();
@@ -103,4 +106,19 @@ TEST(SlotRing, ReadUnwrittenIsNull) {
     SlotRing<Frame> ring(4);
     EXPECT_EQ(ring.read(99), nullptr);
     EXPECT_EQ(ring.read(0), nullptr);
+}
+
+// 语义 7：waitFor 阻塞后被 write() 唤醒——先 park 再 notify 的路径（区别于语义 5 的超时/已就绪）
+TEST(SlotRing, WaitForWakeupByWrite) {
+    SlotRing<Frame> ring(4);
+    std::atomic<bool> started{false}, result{false};
+    std::thread waiter([&] {
+        started = true;
+        result = ring.waitFor(0, std::chrono::seconds(2));   // 先阻塞 park
+    });
+    while (!started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    ring.write(mkFrame(0, 0));                       // notify 唤醒 waiter
+    waiter.join();
+    EXPECT_TRUE(result.load());
 }
