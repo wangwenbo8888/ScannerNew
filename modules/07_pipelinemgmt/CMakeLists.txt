@@ -1,5 +1,6 @@
 # Module 07_pipelinemgmt — 流水线管理（调度底座 + 五流水线对象）
 set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
+    pipelines/calibcompute/CameraChain.cpp
     pipelines/posture/PostureConfirmTable.cpp
     pipelines/posture/PosturePipeline.cpp
     pipelines/scan/FrameObsAccumulator.cpp
