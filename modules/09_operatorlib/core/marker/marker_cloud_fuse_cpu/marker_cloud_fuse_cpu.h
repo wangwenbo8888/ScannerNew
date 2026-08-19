@@ -10,6 +10,7 @@
 #include <cstddef>
 #include "common/calib_types.h"
 #include "common/calib_warmup_config.h"
+#include "common/result.h"
 #include "common/scanner_api.h"
 #include "common/version.h"
 
@@ -116,6 +117,13 @@ public:
 
     /// 融合一帧标记点（无变换，已在全球坐标系）
     MarkerCloudFuseCPUResult Execute(const std::vector<MarkerFuseInput>& frame);
+
+    /// 注入已存在高精度标记点进体素哈希累积器（existingMarkers 预填）。
+    /// 语义：等价于"这些点先于任何扫描帧落入"——与 Execute()/fuse 共用同一
+    /// 体素插入路径（首个落入者为代表），故 seed 点不会被后续扫描帧覆盖位置。
+    /// 前置：须在任何 Execute() 调用之前（保证"先入"）；重复调用=追加（不去重，
+    /// 调用方负责）；seed 内部两点同体素时取首个，后到者丢弃。
+    ResultStatus seed(const std::vector<MarkerCloudPoint>& pts);
 
     void Clear() noexcept;
     void Reserve(size_t voxelCount);

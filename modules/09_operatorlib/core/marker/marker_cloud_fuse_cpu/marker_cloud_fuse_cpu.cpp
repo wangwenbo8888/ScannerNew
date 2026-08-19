@@ -282,6 +282,47 @@ struct MarkerCloudFuseCPU::Impl {
                         n, survivingCount, deletedCount, newVoxelCount, size_, stats.totalTimeMs);
         return result;
     }
+
+    // seed：与 ExecuteImpl 共用同一插入路径（首个落入者为代表）——seed 点
+    // 只写入空体素作为代表；体素已占（含 seed 内部冲突）则丢弃后到者，
+    // 既不移动代表也不改计数。后续 fuse 命中已占体素仅递增 counts_，
+    // 不触碰 fusedPoints_，故 seed 代表点位置永不改变。
+    ResultStatus SeedImpl(const std::vector<MarkerCloudPoint>& pts) {
+        const float inv = 1.0f / params_.voxelSize;
+        try {
+            for (const auto& pt : pts) {
+                int ix = static_cast<int>(std::floor(pt.x * inv));
+                int iy = static_cast<int>(std::floor(pt.y * inv));
+                int iz = static_cast<int>(std::floor(pt.z * inv));
+                uint64_t key = packVoxelKey(ix, iy, iz);
+
+                uint64_t h = hash64(key);
+                uint8_t tag = tagFromHash(h);
+
+                size_t idx = h & mask_;
+                while (tags_[idx] != 0) {
+                    if (tags_[idx] == tag && keys_[idx] == key) break;
+                    idx = (idx + 1) & mask_;
+                }
+                if (tags_[idx] != 0) continue;   // 体素已占：首个为代表，后到 seed 点丢弃
+
+                ensureCapacityForOneMore();      // 可能 rehash → 重新探测
+                idx = h & mask_;
+                while (tags_[idx] != 0) idx = (idx + 1) & mask_;
+
+                uint32_t fi = static_cast<uint32_t>(fusedPoints_.size());
+                fusedPoints_.push_back(pt);
+                tags_[idx]     = tag;
+                keys_[idx]     = key;
+                fusedIdx_[idx] = fi;
+                counts_[idx]   = 1;              // 与 fuse 首落语义一致
+                ++size_;
+            }
+        } catch (const std::exception& e) {
+            return ResultStatus::fail(std::string("seed: ") + e.what());
+        }
+        return ResultStatus::ok();
+    }
 };
 
 // ============================================================
@@ -316,6 +357,14 @@ MarkerCloudFuseCPUResult MarkerCloudFuseCPU::Execute(const std::vector<MarkerFus
 MarkerCloudFuseCPUResult MarkerCloudFuseCPU::Execute(const std::vector<MarkerFuseInput>& frame) {
     return pImpl_->ExecuteImpl(frame.data(), frame.size(),
                      cv::Matx33d::eye(), cv::Vec3d(0, 0, 0));
+}
+
+// ============================================================
+// seed（existingMarkers 预填）
+// ============================================================
+
+ResultStatus MarkerCloudFuseCPU::seed(const std::vector<MarkerCloudPoint>& pts) {
+    return pImpl_->SeedImpl(pts);
 }
 
 // ============================================================
