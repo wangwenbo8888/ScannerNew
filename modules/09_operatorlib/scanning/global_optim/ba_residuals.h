@@ -36,4 +36,21 @@ struct PointPairResidual {
     }
 };
 
+// P4-T24 高精度已有點软先验残差（客户端扫描流水线.md §5.3）: r[i] = (X[0][i] − X_e[i]) / sigma
+// 动态参数块 functor 形态（T const* const*）, 配合
+//   ceres::DynamicAutoDiffCostFunction<MarkerPriorCost, 3> + AddParameterBlock(3) 使用;
+// 不加鲁棒损失（先验本身可信, 不应被 Tukey 压制）。
+// 升级路径（仅注释未实现）: 某子集需绝对固定时, 对相应参数块改用
+//   problem.SetParameterBlockConstant(X) 替代本软先验。
+struct MarkerPriorCost {
+    double X_e[3];   // 先验位置（与 X 同坐标系）
+    double sigma;    // 先验 σ（极小=高权重）
+
+    template <typename T>
+    bool operator()(T const* const* X, T* r) const {
+        for (int i = 0; i < 3; ++i) r[i] = (X[0][i] - T(X_e[i])) / T(sigma);
+        return true;
+    }
+};
+
 } // namespace calib

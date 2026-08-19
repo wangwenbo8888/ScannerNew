@@ -31,6 +31,15 @@ struct GlobalBAFrame {
 
 struct GlobalBAInput {
     std::vector<GlobalBAFrame> frames;
+
+    // P4-T24 高精度已有點软先验（客户端扫描流水线.md §5.3）:
+    // 对命中 highPrecisionGlobalIds 的全局点 X 加残差 ‖X−X_existing‖²/σ²（σ 极小=高权重）,
+    // 防止已有点被扫描观测挪动。X_existing 为原始全局系坐标（3n 展平 x,y,z）;
+    // priorSigma 每点一个, 空/缺项回退 params.defaultPriorSigma。
+    // id 无对应点 / X_existing 长度不足 → 忽略该 id 并 warn（不 fail, 鲁棒）。
+    std::vector<int>    highPrecisionGlobalIds;  // 高精度点 globalId 集
+    std::vector<double> X_existing;              // 对应先验位置（3n, 展平 x,y,z）
+    std::vector<double> priorSigma;              // 对应 σ（每点一个; 空/缺则用 params 默认）
 };
 
 struct GlobalBAParams {
@@ -44,6 +53,10 @@ struct GlobalBAParams {
     int    loopFrameGap          = 30;
     int    minPointsPerFrame     = 3;
     bool   centerOrigin          = true;
+    // P4-T24: 高精度已有點软先验开关与默认 σ（单位 mm, 文档 §5.3 建议 0.001 量级;
+    // σ 极小=高权重。useSoftPrior=false 或 ids 空 → 行为与无先验完全一致）
+    bool   useSoftPrior          = true;
+    double defaultPriorSigma     = 0.001;
 
     void validate() const;
     nlohmann::json toJson() const;

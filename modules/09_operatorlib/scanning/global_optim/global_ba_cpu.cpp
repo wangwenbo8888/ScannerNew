@@ -70,6 +70,7 @@ void GlobalBAParams::validate() const {
     if (minCovisForLoopEdge < 3) throw std::invalid_argument("minCovisForLoopEdge must be >= 3");
     if (loopFrameGap < 1) throw std::invalid_argument("loopFrameGap must be >= 1");
     if (minPointsPerFrame < 3) throw std::invalid_argument("minPointsPerFrame must be >= 3");
+    if (defaultPriorSigma <= 0.0) throw std::invalid_argument("defaultPriorSigma must be > 0");
 }
 
 nlohmann::json GlobalBAParams::toJson() const {
@@ -83,7 +84,9 @@ nlohmann::json GlobalBAParams::toJson() const {
         {"minCovisForLoopEdge", minCovisForLoopEdge},
         {"loopFrameGap", loopFrameGap},
         {"minPointsPerFrame", minPointsPerFrame},
-        {"centerOrigin", centerOrigin}
+        {"centerOrigin", centerOrigin},
+        {"useSoftPrior", useSoftPrior},
+        {"defaultPriorSigma", defaultPriorSigma}
     };
 }
 
@@ -99,6 +102,8 @@ GlobalBAParams GlobalBAParams::fromJson(const nlohmann::json& j) {
     if (j.contains("loopFrameGap")) p.loopFrameGap = j.at("loopFrameGap").get<int>();
     if (j.contains("minPointsPerFrame")) p.minPointsPerFrame = j.at("minPointsPerFrame").get<int>();
     if (j.contains("centerOrigin")) p.centerOrigin = j.at("centerOrigin").get<bool>();
+    if (j.contains("useSoftPrior")) p.useSoftPrior = j.at("useSoftPrior").get<bool>();
+    if (j.contains("defaultPriorSigma")) p.defaultPriorSigma = j.at("defaultPriorSigma").get<double>();
     p.validate();
     return p;
 }
@@ -412,6 +417,51 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             for (int k = 0; k < 3; ++k) tt[i][k] -= centroid(k);
     }
 
+    // ===== P4-T24 高精度已有點软先验（客户端扫描流水线.md §5.3）=====
+    // 对 highPrecisionGlobalIds 命中的点 X 加残差 ‖X−X_existing‖²/σ²（σ 极小=高权重）,
+    // 防止已有点被扫描观测挪动。useSoftPrior=false 或 ids 空 → 不加任何残差块, 行为与现状一致。
+    // 鲁棒性: id 无对应点 / X_existing 长度不足 / σ 非法 → 忽略该 id 并 warn（不 fail）。
+    // 注: X_existing 在原始全局系, 而优化中 X 已按 centerOrigin 平移 → 先验位置同步减质心。
+    // 升级路径（仅注释未实现）: 某子集需绝对固定时, 对该子集参数块改用
+    //   problem.SetParameterBlockConstant(X[pointIdx].data()) 替代本软先验。
+    struct PriorEntry { int pointIdx; double Xe[3]; double sigma; };
+    std::vector<PriorEntry> priorEntries;
+    if (pImpl_->params.useSoftPrior && !input.highPrecisionGlobalIds.empty()) {
+        const auto& priorIds = input.highPrecisionGlobalIds;
+        const auto& xeAll    = input.X_existing;
+        const auto& sgAll    = input.priorSigma;
+        for (size_t i = 0; i < priorIds.size(); ++i) {
+            auto it = idToIdx.find(priorIds[i]);
+            if (it == idToIdx.end()) {
+                spdlog::warn("[{}] soft prior: globalId {} has no matching point in scene; ignored",
+                             GlobalBundleAdjustmentCPU::kLogTag, priorIds[i]);
+                continue;
+            }
+            if (xeAll.size() < 3 * (i + 1)) {
+                spdlog::warn("[{}] soft prior: X_existing too short ({} < 3*{}); globalId {} ignored",
+                             GlobalBundleAdjustmentCPU::kLogTag, xeAll.size(), i + 1, priorIds[i]);
+                continue;
+            }
+            double sigma = pImpl_->params.defaultPriorSigma;
+            if (i < sgAll.size() && sgAll[i] > 0.0) {
+                sigma = sgAll[i];
+            } else if (i < sgAll.size()) {
+                spdlog::warn("[{}] soft prior: priorSigma[{}] <= 0; fallback to default {}",
+                             GlobalBundleAdjustmentCPU::kLogTag, i,
+                             pImpl_->params.defaultPriorSigma);
+            }
+            priorEntries.push_back({it->second,
+                xeAll[3 * i]     - (applyCenter ? centroid(0) : 0.0),
+                xeAll[3 * i + 1] - (applyCenter ? centroid(1) : 0.0),
+                xeAll[3 * i + 2] - (applyCenter ? centroid(2) : 0.0),
+                sigma});
+        }
+        if (!priorEntries.empty()) {
+            spdlog::info("[{}] soft prior: {} high-precision point(s) anchored",
+                         GlobalBundleAdjustmentCPU::kLogTag, priorEntries.size());
+        }
+    }
+
     // 5) RMSE 计算:遍历所有观测,算 r = R(q_i)ᵀ(X_j − t_i) − z 的范数
     //    读取当前 q/tt/X 数组,故 Solve 前调用得 initialRMSE,Solve 后得 finalRMSE
     // 观测扁平化 + 外点簿记(三层外点处理: 预清洗 + Tukey + 卡方剔除再收敛)
@@ -494,6 +544,16 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             problem.AddResidualBlock(cost, loss,
                                      q[o.frameIdx].data(), tt[o.frameIdx].data(),
                                      X[o.pointIdx].data());
+        }
+        // P4-T24: 高精度已有點软先验残差块 r = (X − X_existing)/σ。
+        // 不加鲁棒损失（先验可信, 不被 Tukey 压制）; 每阶段求解(plain/Tukey/重解)均重建题, 故每相都加。
+        // 升级路径（仅注释未实现）: 需绝对固定时改 problem.SetParameterBlockConstant(X[pe.pointIdx].data())。
+        for (const auto& pe : priorEntries) {
+            auto* priorCost = new ceres::DynamicAutoDiffCostFunction<MarkerPriorCost>(
+                new MarkerPriorCost{{pe.Xe[0], pe.Xe[1], pe.Xe[2]}, pe.sigma});
+            priorCost->AddParameterBlock(3);
+            priorCost->SetNumResiduals(3);
+            problem.AddResidualBlock(priorCost, nullptr, X[pe.pointIdx].data());
         }
         ceres::Solver::Options opt;
         opt.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
