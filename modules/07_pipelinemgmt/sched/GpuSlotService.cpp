@@ -1,5 +1,5 @@
 // ============================================================================
-// GpuSlotService.cpp — cudaStream 槽池实现（计数信号量 + RAII 归还）
+// GpuSlotService.cpp — cudaStream 槽池实现（空闲池承担计数信号量 + RAII 归还）
 // ============================================================================
 #include "sched/GpuSlotService.h"
 
@@ -8,13 +8,6 @@ namespace Scanner::pipeline::sched {
 Result GpuSlotService::start(int slots, StreamFactory factory, StreamDestroyer destroyer) {
     if (slots <= 0) {
         return Result::fail("GpuSlotService::start: slots must be > 0");
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (running_.load()) {
-        return Result::fail("GpuSlotService::start: already running");
-    }
-    if (stopped_) {
-        return Result::fail("GpuSlotService::start: not restartable after shutdown");
     }
 #ifdef JMW_BUILD_CUDA
     if (!factory)   factory   = [](StreamHandle* s) { return static_cast<int>(cudaStreamCreate(s)); };
@@ -25,19 +18,34 @@ Result GpuSlotService::start(int slots, StreamFactory factory, StreamDestroyer d
         return Result::fail("GpuSlotService::start: factory/destroyer required when CUDA disabled");
     }
 #endif
-    freeStreams_.clear();
-    freeStreams_.reserve(static_cast<size_t>(slots));
-    for (int i = 0; i < slots; ++i) {
-        StreamHandle s{};
-        if (factory(&s) != 0) {
-            for (auto created : freeStreams_) destroyer(created);
-            freeStreams_.clear();
-            return Result::fail("GpuSlotService::start: stream factory failed");
+    // 流创建全程在锁外（M1+M2：工厂可能慢/抛异常，锁内调用会阻塞 acquire/shutdown；
+    // 半成品只存在于局部 vector，任一流失败/异常 → 锁外销毁已建部分返回 fail，
+    // 成员不触碰——并发 shutdown/acquire 看不到半初始化状态）
+    std::vector<StreamHandle> created;
+    try {
+        created.reserve(static_cast<size_t>(slots));
+        for (int i = 0; i < slots; ++i) {
+            StreamHandle s{};
+            if (factory(&s) != 0) {
+                for (auto c : created) destroyer(c);
+                return Result::fail("GpuSlotService::start: stream factory failed");
+            }
+            created.push_back(s);
         }
-        freeStreams_.push_back(s);
+    } catch (...) {
+        for (auto c : created) destroyer(c);
+        return Result::fail("GpuSlotService::start: stream factory threw");
+    }
+    // 全部成功才持锁提交；提交时复查状态（锁外创建期间可能已被并发 start/shutdown 抢先）
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (running_.load() || stopped_) {
+        lock.unlock();
+        for (auto c : created) destroyer(c);
+        return Result::fail(running_.load() ? "GpuSlotService::start: already running"
+                                            : "GpuSlotService::start: not restartable after shutdown");
     }
     destroyer_ = std::move(destroyer);
-    available_ = slots;
+    freeStreams_ = std::move(created);
     running_.store(true);
     return Result::ok();
 }
@@ -47,13 +55,12 @@ std::optional<GpuSlotService::SlotGuard> GpuSlotService::acquire(std::chrono::mi
         return std::nullopt;  // 未 start / 已 shutdown
     }
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!slotAvailable_.wait_for(lock, timeout, [this] { return available_ > 0 || stopped_; })) {
+    if (!slotAvailable_.wait_for(lock, timeout, [this] { return !freeStreams_.empty() || stopped_; })) {
         return std::nullopt;  // 超时
     }
-    if (stopped_ || available_ <= 0) {
+    if (stopped_ || freeStreams_.empty()) {
         return std::nullopt;  // shutdown 唤醒：不再发放
     }
-    --available_;
     SlotGuard g;
     g.svc_ = this;
     g.stream = freeStreams_.back();
@@ -73,7 +80,6 @@ void GpuSlotService::releaseSlot(SlotGuard& g) {
         return;
     }
     freeStreams_.push_back(s);
-    ++available_;
     lock.unlock();
     slotAvailable_.notify_one();
 }
@@ -89,7 +95,6 @@ void GpuSlotService::shutdown() {
         running_.store(false);
         toDestroy = std::move(freeStreams_);
         freeStreams_.clear();
-        available_ = 0;
     }
     slotAvailable_.notify_all();  // 等待中的 acquire 立刻返回 nullopt
     for (auto s : toDestroy) destroyer_(s);

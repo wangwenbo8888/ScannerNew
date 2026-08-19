@@ -1,7 +1,8 @@
 #pragma once
 // ============================================================================
 // GpuSlotService.h — cudaStream 槽池（调度底座）
-// 计数信号量（先到先得）+ RAII SlotGuard 归还（支持 reset() 显式提前归还，幂等）。
+// 空闲流池承担计数信号量（先到先得；池空=无槽，恒等式 available==size 由
+// 全程持锁维护，无独立计数器）+ RAII SlotGuard 归还（支持 reset() 显式提前归还，幂等）。
 // 头文件经别名 StreamHandle 隔离 CUDA：仅 JMW_BUILD_CUDA 时映射 cudaStream_t，
 // BUILD_CUDA=OFF 时为 void*（本文件不含 CUDA 头亦可编译，此分支无 CUDA 依赖）。
 //
@@ -56,6 +57,8 @@ public:
     /// slots<=0 fail；factory/destroyer 为空时用默认实现（JMW_BUILD_CUDA 时
     /// cudaStreamCreate/cudaStreamDestroy；否则返回 fail —— CUDA 关闭时不支持
     /// 真 GPU 槽）。已在运行或 shutdown 后再次 start 均返回 fail。
+    /// 流创建在锁外进行（工厂慢/抛异常不阻塞其他操作），全部成功才持锁提交
+    /// （提交时复查状态，竞败方销毁自建流返回 fail）。
     Result start(int slots, StreamFactory factory = {}, StreamDestroyer destroyer = {});
 
     /// 阻塞至有空槽或超时；超时/未 start/已 shutdown 返回 nullopt
@@ -77,9 +80,9 @@ private:
 
     mutable std::mutex mutex_;
     std::condition_variable slotAvailable_;
-    std::vector<StreamHandle> freeStreams_;  // 空闲槽池（占用中不在内）
+    std::vector<StreamHandle> freeStreams_;  // 空闲槽池（占用中不在内；池空=无槽，
+                                             // size() 恒等承担信号量计数，全程持锁维护）
     StreamDestroyer destroyer_;
-    int available_{0};                       // 计数信号量（<= freeStreams_.size()）
     bool stopped_{false};                    // shutdown 置位后不可重启
     std::atomic<bool> running_{false};
 };

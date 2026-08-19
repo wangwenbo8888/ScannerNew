@@ -17,7 +17,9 @@ namespace Scanner::pipeline::sched {
 
 namespace {
 
-/// API 失败时的核数兜底估计：硬件并发数（逻辑处理器数，Win10 前/Ex API 不可用场景）
+/// API 失败时的核数兜底估计（降级路径）：hardware_concurrency 返回的是
+/// 逻辑核数（含超线程，约为物理核 2 倍）——降级时按逻辑核数估计，pCores
+/// 偏多为已知保守偏差（computeLanes 会钳位，不会超发 lane）
 int fallbackCoreEstimate() {
     const unsigned n = std::thread::hardware_concurrency();
     return n > 0 ? static_cast<int>(n) : 1;
@@ -110,7 +112,7 @@ void CpuTopology::setRealtime(std::thread& t) {
     const HANDLE handle = t.native_handle();
     if (!SetThreadPriority(handle, THREAD_PRIORITY_TIME_CRITICAL)) {
         if (!SetThreadPriority(handle, THREAD_PRIORITY_HIGHEST)) {
-            spdlog::warn("CpuTopology: SetThreadPriority(TimeCritical→Highest) 失败, err={}", GetLastError());
+            spdlog::warn("CpuTopology: SetThreadPriority TIME_CRITICAL 与 HIGHEST 均失败, err={}", GetLastError());
         }
     }
 }
