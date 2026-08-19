@@ -10,6 +10,7 @@
 // ============================================================================
 #include <cstdint>
 #include <thread>
+#include <vector>
 
 namespace Scanner::pipeline::sched {
 
@@ -17,6 +18,11 @@ struct TopologyInfo {
     int pCores{0};        // 物理 P 核数（不含超线程兄弟）
     int eCores{0};        // 物理 E 核数
     bool hybrid{false};   // 是否成功区分 P/E
+    // 每物理核亲和掩码（单处理器组；T8 起供 SchedulerRuntime 绑核用）。
+    // 仅 hybrid=true 时填充；非混合/探测失败为空 = 调用方不绑核（避免纯 P 核
+    // 机器误绑同核）。
+    std::vector<uint64_t> pMasks;
+    std::vector<uint64_t> eMasks;
 };
 
 /// 流水线数 X 纯函数：override>0 直接返回；否则 clamp(min(P-1,E),1,8)；

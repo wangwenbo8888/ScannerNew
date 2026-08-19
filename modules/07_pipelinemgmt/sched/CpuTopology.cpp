@@ -57,6 +57,7 @@ TopologyInfo CpuTopology::detect() {
         return info;
     }
     int total = 0, perf = 0, eff = 0;
+    std::vector<uint64_t> perfMasks, effMasks;
     DWORD offset = 0;
     while (offset < bytes) {
         auto* rec = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
@@ -64,19 +65,27 @@ TopologyInfo CpuTopology::detect() {
             break;  // 防御：请求即 Core，异常记录停遍历
         }
         ++total;
-        // 官方语义：值越大性能越高，仅异构系统非零 → 非零=P 核，0=E 核
-        if (rec->Processor.EfficiencyClass != 0) {
-            ++perf;
-        } else {
-            ++eff;
+        // 每物理核掩码（GroupCount 恒 1，目标机单处理器组；防御性下标检查）
+        if (rec->Processor.GroupCount >= 1) {
+            const uint64_t mask = static_cast<uint64_t>(rec->Processor.GroupMask[0].Mask);
+            // 官方语义：值越大性能越高，仅异构系统非零 → 非零=P 核，0=E 核
+            if (rec->Processor.EfficiencyClass != 0) {
+                ++perf;
+                perfMasks.push_back(mask);
+            } else {
+                ++eff;
+                effMasks.push_back(mask);
+            }
         }
         offset += rec->Size;
     }
     if (perf > 0) {
-        // 异构：P/E 已区分（Intel 混合架构 P=1, E=0）
+        // 异构：P/E 已区分（Intel 混合架构 P=1, E=0）；掩码一并导出供绑核
         info.hybrid = true;
         info.pCores = perf;
         info.eCores = eff;
+        info.pMasks = std::move(perfMasks);
+        info.eMasks = std::move(effMasks);
     } else {
         // 全 0：非混合架构或 Win10 前系统 → 全部按 P 核计（warn 一次）
         info.hybrid = false;
