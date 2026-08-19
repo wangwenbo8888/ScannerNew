@@ -134,6 +134,35 @@ TEST(MarkerCloudFuseCPU, SeedSameVoxelFirstWins) {
 }
 
 // ============================================================
+// 3b. 越界 fail 全有或全无：任一点越界 → 整批拒绝，零写入
+// ============================================================
+
+TEST(MarkerCloudFuseCPU, SeedOutOfRangeAtomic) {
+    MarkerCloudFuseCPUParams p;
+    p.voxelSize = 1.0f;
+    MarkerCloudFuseCPU fuse(p);
+
+    std::vector<MarkerCloudPoint> ok = {
+        mkSeed(0.5f, 0.5f, 0.5f),
+        mkSeed(10.5f, 0.5f, 0.5f),
+    };
+    ASSERT_TRUE(fuse.seed(ok).success);
+    ASSERT_EQ(fuse.GetFusedPointCount(), 2u);
+
+    // 3 正常 + 1 越界（1e9 远超 21-bit 体素轴范围）→ 全有或全无
+    std::vector<MarkerCloudPoint> batch = {
+        mkSeed(20.5f, 0.5f, 0.5f),
+        mkSeed(30.5f, 0.5f, 0.5f),
+        mkSeed(40.5f, 0.5f, 0.5f),
+        mkSeed(1e9f, 0.5f, 0.5f),
+    };
+    auto r = fuse.seed(batch);
+    EXPECT_FALSE(r.success);
+    EXPECT_EQ(fuse.GetFusedPointCount(), 2u);   // 零写入：前 3 个正常点也未入表
+    EXPECT_EQ(fuse.GetVoxelCount(), 2u);
+}
+
+// ============================================================
 // 4. Clear 后 fusedPoints 为空；可重新 seed
 // ============================================================
 

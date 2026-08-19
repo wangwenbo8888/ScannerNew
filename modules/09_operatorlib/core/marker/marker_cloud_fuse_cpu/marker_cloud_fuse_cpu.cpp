@@ -287,39 +287,53 @@ struct MarkerCloudFuseCPU::Impl {
     // 只写入空体素作为代表；体素已占（含 seed 内部冲突）则丢弃后到者，
     // 既不移动代表也不改计数。后续 fuse 命中已占体素仅递增 counts_，
     // 不触碰 fusedPoints_，故 seed 代表点位置永不改变。
+    // 全有或全无：第一遍全量预校验坐标范围（仅算 packVoxelKey，零写入），
+    // 任一点越界立即 fail 且表状态不变；第二遍才插入。
     ResultStatus SeedImpl(const std::vector<MarkerCloudPoint>& pts) {
         const float inv = 1.0f / params_.voxelSize;
+
+        // ---- 第一遍：全量预校验（packVoxelKey 越界即抛），零写入 ----
+        std::vector<uint64_t> keys;
+        keys.reserve(pts.size());
         try {
             for (const auto& pt : pts) {
                 int ix = static_cast<int>(std::floor(pt.x * inv));
                 int iy = static_cast<int>(std::floor(pt.y * inv));
                 int iz = static_cast<int>(std::floor(pt.z * inv));
-                uint64_t key = packVoxelKey(ix, iy, iz);
-
-                uint64_t h = hash64(key);
-                uint8_t tag = tagFromHash(h);
-
-                size_t idx = h & mask_;
-                while (tags_[idx] != 0) {
-                    if (tags_[idx] == tag && keys_[idx] == key) break;
-                    idx = (idx + 1) & mask_;
-                }
-                if (tags_[idx] != 0) continue;   // 体素已占：首个为代表，后到 seed 点丢弃
-
-                ensureCapacityForOneMore();      // 可能 rehash → 重新探测
-                idx = h & mask_;
-                while (tags_[idx] != 0) idx = (idx + 1) & mask_;
-
-                uint32_t fi = static_cast<uint32_t>(fusedPoints_.size());
-                fusedPoints_.push_back(pt);
-                tags_[idx]     = tag;
-                keys_[idx]     = key;
-                fusedIdx_[idx] = fi;
-                counts_[idx]   = 1;              // 与 fuse 首落语义一致
-                ++size_;
+                keys.push_back(packVoxelKey(ix, iy, iz));
             }
         } catch (const std::exception& e) {
             return ResultStatus::fail(std::string("seed: ") + e.what());
+        }
+
+        // ---- 第二遍：插入（key 已全部校验合法）----
+        for (size_t i = 0; i < pts.size(); ++i) {
+            uint64_t key = keys[i];
+            uint64_t h = hash64(key);
+            uint8_t tag = tagFromHash(h);
+
+            size_t idx = h & mask_;
+            while (tags_[idx] != 0) {
+                if (tags_[idx] == tag && keys_[idx] == key) break;
+                idx = (idx + 1) & mask_;
+            }
+            if (tags_[idx] != 0) continue;   // 体素已占：首个为代表，后到 seed 点丢弃
+
+            ensureCapacityForOneMore();      // 可能 rehash → 重新探测
+            idx = h & mask_;
+            while (tags_[idx] != 0) {
+                if (tags_[idx] == tag && keys_[idx] == key) break;  // 与 ExecuteImpl 对齐
+                idx = (idx + 1) & mask_;
+            }
+            if (tags_[idx] != 0) continue;   // rehash 后理论不可达，防御：不覆盖已有代表
+
+            uint32_t fi = static_cast<uint32_t>(fusedPoints_.size());
+            fusedPoints_.push_back(pts[i]);
+            tags_[idx]     = tag;
+            keys_[idx]     = key;
+            fusedIdx_[idx] = fi;
+            counts_[idx]   = 1;              // 与 fuse 首落语义一致
+            ++size_;
         }
         return ResultStatus::ok();
     }

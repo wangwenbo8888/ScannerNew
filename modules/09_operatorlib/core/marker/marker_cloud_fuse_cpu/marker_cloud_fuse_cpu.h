@@ -123,6 +123,8 @@ public:
     /// 体素插入路径（首个落入者为代表），故 seed 点不会被后续扫描帧覆盖位置。
     /// 前置：须在任何 Execute() 调用之前（保证"先入"）；重复调用=追加（不去重，
     /// 调用方负责）；seed 内部两点同体素时取首个，后到者丢弃。
+    /// 原子性：全有或全无——任一点坐标越界（21-bit 体素轴范围）则整批 fail
+    /// 且零写入，表状态不变。
     ResultStatus seed(const std::vector<MarkerCloudPoint>& pts);
 
     void Clear() noexcept;
