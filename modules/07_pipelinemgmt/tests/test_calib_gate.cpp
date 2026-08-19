@@ -4,7 +4,7 @@
 // 1 AllPassNormal       ：全好值合成 output → evaluate → ok=true/Normal/items=门禁数
 // 2 PjcFailFault        ：pjcRms 超阈 + PJC 产物缺 → overall=Fault
 // 3 SoftFailDegraded    ：stereoReprojError 轻超 → Degraded/ok=false/summary 含项名
-// 4 SerializeRoundtrip  ：serializeCalic → json 含 stereo/tempTables/pjc/quality；
+// 4 SerializeRoundtrip  ：serializeCalib → json 含 stereo/tempTables/pjc/quality；
 //                         quality.items 数组可读回
 // 5 RunEndWritesRepo    ：假 repo + 假链（TestHooks）→ run → write 恰 1 次且 json
 //                         可解析；repo 空 → 不调不崩；写失败 → sink 收 Fault 1801

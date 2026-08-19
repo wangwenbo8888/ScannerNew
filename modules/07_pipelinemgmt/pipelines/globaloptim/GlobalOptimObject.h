@@ -46,11 +46,12 @@ namespace Scanner::pipeline {
 #ifdef JMW_BUILD_CUDA
 /// 激光重融合重放窄接口（host xyz + 修正位姿 R/T）。生产适配器：host→GpuMat
 /// 上传 + 新 LaserCloudFuseCuda::Execute（每次 run 新实例=重放语义；法线不随
-/// 重放重估计——沿 C 线法线语义）。测试注入假实现免 GPU（注入式适配形态对齐
-/// FuseConsumer::ILaserFuse）。
+/// 重放重估计——沿 C 线法线语义）。fuse 返回 false=本帧融合失败/异常——调用方
+/// 聚合进质量（>0 帧 → Degraded + 1609 一次）。测试注入假实现免 GPU（注入式
+/// 适配形态对齐 FuseConsumer::ILaserFuse）。
 struct ILaserReplayFuse {
     virtual ~ILaserReplayFuse() = default;
-    virtual void fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) = 0;
+    virtual bool fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) = 0;
     /// 重放累积器设备上下文（供 output/渲染；默认空）
     virtual calib::LaserCloudFuseDeviceContext deviceContext() const { return {}; }
 };

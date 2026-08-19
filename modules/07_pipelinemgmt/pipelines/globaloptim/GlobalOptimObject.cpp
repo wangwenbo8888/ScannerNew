@@ -33,6 +33,7 @@ constexpr int32_t kEvtGbaFail = 1605;        // GBA 失败（Fault；沿初值�
 constexpr int32_t kEvtDone = 1606;           // D 完成（Normal/Degraded 按 out_.quality）
 constexpr int32_t kEvtRepoWriteFail = 1607;  // 点云入库失败（Fault）
 constexpr int32_t kEvtLaserNoReplay = 1608;  // 激光缓存降级：未重放（Degraded 近似）
+constexpr int32_t kEvtLaserReplayFail = 1609; // 激光重放融合部分帧失败（Degraded，每 run 一次）
 
 cv::Matx33d matxFromArr9(const double* a) {
     return cv::Matx33d(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]);
@@ -51,20 +52,29 @@ const char* qualityName(Scanner::QualityFlag q) {
 
 #ifdef JMW_BUILD_CUDA
 /// 生产激光重放适配器：host xyz → GpuMat 上传 → 新 LaserCloudFuseCuda 融合
-/// （每次 run 新实例=重放语义；法线不随重放重估计——沿 C 线法线语义，如实注明）
+/// （每次 run 新实例=重放语义；法线不随重放重估计——沿 C 线法线语义，如实注明）。
+/// 返回 false=本帧失败/异常（空/畸形输入、上传异常、融合失败——调用方聚合降级）
 class RealLaserReplayAdapter final : public ILaserReplayFuse {
 public:
-    void fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) override {
-        if (xyz.empty() || xyz.size() % 3 != 0) return;
+    bool fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) override {
+        if (xyz.empty() || xyz.size() % 3 != 0) return false;
         try {
             cv::Mat host(1, static_cast<int>(xyz.size() / 3), CV_32FC3,
                          const_cast<float*>(xyz.data()));   // 视图（upload 只读）
             cv::cuda::GpuMat dev;
             dev.upload(host);                               // host→device（默认流同步）
             auto r = fuse_.Execute(dev, matxFromArr9(R), vec3FromArr3(T));
-            if (!r.success) spdlog::warn("[GlobalOptim] 激光重放融合失败: {}", r.message);
+            if (!r.success) {
+                spdlog::warn("[GlobalOptim] 激光重放融合失败: {}", r.message);
+                return false;
+            }
+            return true;
         } catch (const std::exception& e) {
             spdlog::warn("[GlobalOptim] 激光重放上传/融合异常: {}", e.what());
+            return false;
+        } catch (...) {
+            spdlog::warn("[GlobalOptim] 激光重放上传/融合未知异常");
+            return false;
         }
     }
 
@@ -306,16 +316,29 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
             if (cb) cb(70, "laser 重融合重放");
             replayLaser_ = laserFactory_ ? laserFactory_()
                                          : std::make_unique<RealLaserReplayAdapter>();
+            size_t laserFuseFails = 0;              // 融合失败/异常帧聚合（I1）
             for (size_t i = 0; i < snap.obs.size(); ++i) {
                 if (cancel.cancelled()) break;     // 帧间检查点
                 const size_t slot = snap.obs[i].laserCacheSlot;
                 if (slot == FrameObs::kNoLaserSlot) continue;   // 本帧无激光（A 帧/空帧）
                 if (slot >= snap.laserFrames.size()) continue;  // 防御（契约不会发生）
-                replayLaser_->fuse(snap.laserFrames[slot], out_.poses[i].R, out_.poses[i].t);
+                if (!replayLaser_->fuse(snap.laserFrames[slot], out_.poses[i].R,
+                                        out_.poses[i].t))
+                    ++laserFuseFails;
             }
             if (!cancel.cancelled()) {
                 out_.laserReplayed = true;
                 out_.laserCtx = replayLaser_->deviceContext();
+            }
+            if (laserFuseFails > 0) {
+                // 部分帧融合失败：修正后激光点云可能不全 → Degraded（每 run 上报一次，
+                // 失败不中断重放——后续帧照常尝试）
+                quality = Scanner::QualityFlag::Degraded;
+                if (sink_)
+                    sink_->report(Scanner::QualityFlag::Degraded, kEvtLaserReplayFail,
+                                  "激光重放融合部分失败 " + std::to_string(laserFuseFails) +
+                                      "/" + std::to_string(snap.obs.size()) +
+                                      " 帧（修正后激光点云可能不全）");
             }
         }
     }

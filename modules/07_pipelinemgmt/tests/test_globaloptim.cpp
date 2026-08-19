@@ -6,6 +6,8 @@
 // 激光重放与 GBA 失败路径用注入假实现（ILaserReplayFuse 工厂 / GbaFn）——免 GPU
 // 数据语义依赖、免故障真造（同 test_scan_fuseconsumer 注入式风格）。
 // 事件断言走真 EventBus（EventBusEventSink 发布 FaultOccurred，param1=事件码）。
+// 8 LaserReplayFailDegrades（I1）：假工厂部分帧 fuse 返回 false → quality=Degraded、
+//   sink 收 1609 恰一次、run 返回 degraded 而非 fail。
 // ============================================================================
 #include <gtest/gtest.h>
 
@@ -142,7 +144,8 @@ struct FakeCloudRepo : ICloudRepoWriter {
 };
 
 #ifdef JMW_BUILD_CUDA
-// —— 假激光重放：工厂每次新建实例、写进共享日志（记录 xyz/R/T，不触 GPU）——
+// —— 假激光重放：工厂每次新建实例、写进共享日志（记录 xyz/R/T，不触 GPU）；
+//    failOn=第 N 次（1 基）fuse 返回 false（0=全成功）——I1 部分帧失败注入 ——
 struct FakeLaserReplay : ILaserReplayFuse {
     struct Call {
         std::vector<float> xyz;
@@ -150,20 +153,27 @@ struct FakeLaserReplay : ILaserReplayFuse {
         double T[3] = {};
     };
     std::shared_ptr<std::vector<Call>> log;          // 多实例共享（工厂每 run 新建）
-    explicit FakeLaserReplay(std::shared_ptr<std::vector<Call>> l) : log(std::move(l)) {}
+    uint64_t failOn = 0;
+    uint64_t seen = 0;
+    explicit FakeLaserReplay(std::shared_ptr<std::vector<Call>> l,
+                             uint64_t fail = 0)
+        : log(std::move(l)), failOn(fail) {}
 
-    void fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) override {
+    bool fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) override {
+        ++seen;
         Call c;
         c.xyz = xyz;
         for (int i = 0; i < 9; ++i) c.R[i] = R[i];
         for (int i = 0; i < 3; ++i) c.T[i] = T[i];
         log->push_back(std::move(c));
+        return seen != failOn;
     }
 };
 
 std::unique_ptr<ILaserReplayFuse> makeFakeLaserReplay(
-    const std::shared_ptr<std::vector<FakeLaserReplay::Call>>& log) {
-    return std::unique_ptr<ILaserReplayFuse>(new FakeLaserReplay(log));
+    const std::shared_ptr<std::vector<FakeLaserReplay::Call>>& log,
+    uint64_t failOn = 0) {
+    return std::unique_ptr<ILaserReplayFuse>(new FakeLaserReplay(log, failOn));
 }
 #endif
 
@@ -181,6 +191,10 @@ struct EventCollector {
     ~EventCollector() { bus.unsubscribe(sub); }
     bool hasCode(int32_t code) const {
         return std::find(codes.begin(), codes.end(), static_cast<int64_t>(code)) != codes.end();
+    }
+    size_t countOf(int32_t code) const {
+        return static_cast<size_t>(std::count(codes.begin(), codes.end(),
+                                              static_cast<int64_t>(code)));
     }
 };
 
@@ -474,3 +488,42 @@ TEST(GlobalOptimObjectTest, CancelRespected) {
     EXPECT_EQ(sf.cloudPushes, 0);                  // 未推送修正点云
     EXPECT_EQ(sf.freezes, (std::vector<bool>{true, false}));   // 解冻恢复
 }
+
+#ifdef JMW_BUILD_CUDA
+// ============================================================================
+// 8（I1）：激光重放融合失败聚合降级——假工厂第 2 帧返回 false（部分帧失败）→
+//    quality=Degraded、sink 收 1609（恰一次）、run 返回 degraded 而非 fail
+// ============================================================================
+TEST(GlobalOptimObjectTest, LaserReplayFailDegrades) {
+    const ScanScene scene = makeScanScene(2, 4, 1.0, 0.5);
+    const std::vector<std::vector<float>> laser = {{1, 2, 3, 4, 5, 6},
+                                                   {7, 8, 9, 10, 11, 12}};
+    FrameObsAccumulator acc(1 << 20);
+    pushObs(acc, scene, laser);
+    ASSERT_FALSE(acc.degradedLaser());
+
+    GlobalOptimObject obj;
+    FakeSceneFeed sf;
+    FakeCloudRepo repo;
+    EventCollector ev;
+    PipelineDeps deps;
+    deps.eventBus = &ev.bus;
+    deps.sceneFeed = &sf;
+    deps.cloudRepo = &repo;
+    ASSERT_TRUE(obj.configure(deps).success);
+    auto log = std::make_shared<std::vector<FakeLaserReplay::Call>>();
+    obj.attachTestLaserFuseFactory([log] { return makeFakeLaserReplay(log, 2); });   // 第 2 帧失败
+
+    CancelToken cancel;
+    auto res = obj.run(acc, nullptr, cancel);
+    EXPECT_TRUE(res.success) << "部分帧失败应降级非 fail";
+    EXPECT_TRUE(res.isDegraded());
+
+    const auto& out = obj.output();
+    EXPECT_EQ(out.quality, Scanner::QualityFlag::Degraded);
+    EXPECT_TRUE(ev.hasCode(1609));                 // 激光重放失败降级上报
+    EXPECT_EQ(ev.countOf(1609), 1u);               // 恰一次（非逐帧刷屏）
+    ASSERT_EQ(log->size(), 2u);                    // 两帧都调用了（失败不中断重放）
+    EXPECT_TRUE(out.laserReplayed);                // 重放整体已执行（部分失败如实聚合）
+}
+#endif
