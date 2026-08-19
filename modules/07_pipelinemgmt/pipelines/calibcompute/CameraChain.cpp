@@ -130,6 +130,8 @@ Scanner::Result CameraChain::run(const PostureSessionData& in,
         calib::IntrinsicCalibResult ires;
         if (!intrinsicOp.Execute(origL, origR, ires) || !ires.success)
             return Scanner::Result::fail("3-2: " + ires.message);
+        out.intrinsicRmsL = ires.left.rms_error;    // 门禁指标（T23）
+        out.intrinsicRmsR = ires.right.rms_error;
 
         const cv::Mat KL = ires.left.camera_matrix, DL = ires.left.dist_coeffs;
         const cv::Mat KR = ires.right.camera_matrix, DR = ires.right.dist_coeffs;
@@ -190,6 +192,8 @@ Scanner::Result CameraChain::run(const PostureSessionData& in,
         auto rres = rectifyOp.Execute();
         if (!rres.success)
             return Scanner::Result::fail("3-4: " + rres.message);
+        out.rectifyValidRoiL = rres.validRoiLeft;   // 门禁指标（T23）
+        out.rectifyValidRoiR = rres.validRoiRight;
 
         StereoParams sp;
         sp.cameraMatrixL = KL.clone();  sp.distCoeffsL = DL.clone();

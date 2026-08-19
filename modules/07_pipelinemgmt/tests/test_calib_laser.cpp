@@ -319,6 +319,7 @@ TEST(LaserChainTest, LaserCancelBeforeStart) {
 }
 
 // —— 5. 总装双线程：并行 join / 输出合并 / 进度 0..100 单调 ——
+// （T23 起 quality 由门禁合成：假链须填全好值产物方得 ok=true）
 TEST(CalibComputePipelineTest, PipelineTwoThreadsJoin) {
     SyntheticTruth truth;
     PostureSessionData session = makeLaserSession(25, truth);
@@ -342,6 +343,12 @@ TEST(CalibComputePipelineTest, PipelineTwoThreadsJoin) {
             return Scanner::Result::fail("laser chain not started concurrently");
         outStereo = spSent;
         out.stereo = spSent;
+        out.intrinsicRmsL = 0.1;
+        out.intrinsicRmsR = 0.1;
+        out.rectifyValidRoiL = cv::Rect(0, 0, 600, 460);
+        out.rectifyValidRoiR = cv::Rect(0, 0, 600, 460);
+        out.rectifyTempTable.success = true;
+        out.rectifyTempTable.tableSize = 1;
         promise.set_value(spSent);
         cb(50, "camera done");
         return Scanner::Result::ok("camera fake ok");
@@ -356,6 +363,12 @@ TEST(CalibComputePipelineTest, PipelineTwoThreadsJoin) {
         laserGotStereo.store(true);
         cb(50, "laser start");
         out.laserValid = true;
+        out.pjc.success = true;
+        out.planeMapTempTable.success = true;
+        out.planeMapTempTable.tableSize = 1;
+        out.laserExtrinsicTempTable.success = true;
+        out.laserExtrinsicTempTable.leftResult.table.resize(1);
+        out.laserExtrinsicTempTable.rightResult.table.resize(1);
         cb(100, "laser done");
         return Scanner::Result::ok("laser fake ok");
     };

@@ -13,9 +13,15 @@
 #include <utility>
 
 #include "pipelines/calibcompute/CameraChain.h"
+#include "pipelines/calibcompute/CalibSerialize.h"
 #include "pipelines/calibcompute/LaserChain.h"
 
 namespace Scanner::pipeline {
+
+namespace {
+constexpr int32_t kEvtCalibDone = 1800;         // B 标定完成（Normal/Degraded 按 overall）
+constexpr int32_t kEvtCalibRepoWriteFail = 1801; // B 落盘失败（Fault）
+} // namespace
 
 CalibComputePipeline::CalibComputePipeline(const Config& cfg) : cfg_(cfg) {}
 
@@ -40,7 +46,8 @@ void CalibComputePipeline::attachSession(PostureSessionData session) {
 Scanner::Result CalibComputePipeline::configure(const PipelineDeps& deps) {
     if (running_.load())
         return Scanner::Result::fail("cannot configure while running");
-    calibRepo_ = deps.calibRepo;   // 落盘 T23 接线：run 尾写（本版仅记录）
+    calibRepo_ = deps.calibRepo;   // run 尾自动写（06 仓库实现由 01/06 接入期适配）
+    sink_ = std::make_unique<EventBusEventSink>(deps.eventBus);   // nullptr 安全
     return Scanner::Result::ok("calib pipeline configured");
 }
 
@@ -143,20 +150,54 @@ Scanner::Result CalibComputePipeline::runLocked(const PostureSessionData& in,
     camThread.join();
     lasThread.join();
 
-    // —— 合成（join 后写 quality，无跨线程竞争）——
-    if (camRes.success && lasRes.success) {
-        out_.quality.ok = true;
-        out_.quality.summary = "calib compute ok | camera: " + camRes.message +
-                               " | laser: " + lasRes.message;
-        lastResult_ = Scanner::Result::ok(out_.quality.summary);
-    } else {
+    // —— 质量门禁 + 落盘 + 完成事件（join 后合成，无跨线程竞争）——
+    out_.quality = gate::evaluate(out_, cfg_.thresholds);
+    const bool chainsOk = camRes.success && lasRes.success;
+    if (!chainsOk) {
+        // 链失败 ⇒ 缺产物 ⇒ Fault；保留链消息便于定位
         out_.quality.ok = false;
-        out_.quality.summary = "calib compute fail | camera(ok=" +
-                               std::string(camRes.success ? "1" : "0") + "): " + camRes.message +
-                               " | laser(ok=" + std::string(lasRes.success ? "1" : "0") +
-                               "): " + lasRes.message;
-        lastResult_ = Scanner::Result::fail(out_.quality.summary);
+        out_.quality.overall = Scanner::QualityFlag::Fault;
+        out_.quality.summary =
+            "calib compute fail | camera(ok=" +
+            std::string(camRes.success ? "1" : "0") + "): " + camRes.message +
+            " | laser(ok=" + std::string(lasRes.success ? "1" : "0") +
+            "): " + lasRes.message + " | gate: " + out_.quality.summary;
     }
+    switch (out_.quality.overall) {
+    case Scanner::QualityFlag::Normal:
+        lastResult_ = Scanner::Result::ok(out_.quality.summary);
+        break;
+    case Scanner::QualityFlag::Degraded:
+    case Scanner::QualityFlag::Warning:
+        lastResult_ = Scanner::Result::degraded(out_.quality.summary);
+        break;
+    case Scanner::QualityFlag::Fault:
+    default:
+        lastResult_ = Scanner::Result::fail(out_.quality.summary);
+        break;
+    }
+
+    // 落盘：链成功尾自动写（Degraded 可复检也写；写失败/异常 → 1801 Fault 上报）
+    if (chainsOk && calibRepo_) {
+        bool wrote = false;
+        std::string writeErr;
+        try {
+            wrote = calibRepo_->write(serializeCalib(out_).dump());
+        } catch (const std::exception& e) {
+            writeErr = e.what();
+        } catch (...) {
+            writeErr = "unknown exception";
+        }
+        if (!wrote && sink_)
+            sink_->report(Scanner::QualityFlag::Fault, kEvtCalibRepoWriteFail,
+                          "calib repo write failed" +
+                              (writeErr.empty() ? std::string() : ": " + writeErr));
+    }
+
+    // 完成事件（1800）：Normal/Degraded 按 overall（info/warn 通道）
+    if (chainsOk && sink_)
+        sink_->reportCompletion(out_.quality.overall, kEvtCalibDone, out_.quality.summary);
+
     if (cb) {
         std::lock_guard<std::mutex> lk(pctMutex);
         cb(100, "calib compute done");   // 收尾必报 100（单调门终点）

@@ -11,8 +11,11 @@
 #include <atomic>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include <opencv2/core.hpp>
+
+#include "base/types.h"
 
 #include "calibration/camera/stereo_rectify_temp_table/stereo_rectify_temp_table_cpu.h"
 #include "calibration/laser_calib/plane_map/plane_map_cuda.h"
@@ -38,20 +41,36 @@ struct StereoParams {              // 3-2/3-3/3-4 产出（激光链等待的 pr
     double reprojError = 0.0;
 };
 
+// —— 质量门禁报告（T23；评估器见 QualityGate.h，纯函数）——
+struct QualityGateItem {           // 单项门禁：值/阈值/判定/备注
+    std::string name;
+    double value = 0.0;
+    double threshold = 0.0;
+    bool pass = false;
+    std::string note;              // 判据方向（≤/≥）或缺产物说明
+};
+struct QualityReport {
+    std::vector<QualityGateItem> items;
+    Scanner::QualityFlag overall = Scanner::QualityFlag::Normal;
+    bool ok = false;                       // 全过=true
+    std::string summary;                   // 一行汇总（含未过项名）
+};
+
 struct CalibComputeOutput {        // B 输出（→06 仓库落盘）
     StereoParams stereo;
     calib::IntrinsicCompensateCPUResult intrinsicTempTable;   // 5-1 内参补偿表
     calib::ExtrinsicCompensateCPUResult extrinsicTempTable;   // 5-2 外参补偿表
     calib::StereoRectifyTempTableResult rectifyTempTable;     // 3-5 矫正温度表
+    double intrinsicRmsL = 0.0;             // 3-2 左目 rms（门禁指标；CameraChain 填）
+    double intrinsicRmsR = 0.0;             // 3-2 右目 rms
+    cv::Rect rectifyValidRoiL{0, 0, 0, 0};  // 3-4 有效 ROI（门禁指标；CameraChain 填）
+    cv::Rect rectifyValidRoiR{0, 0, 0, 0};
     bool laserValid = false;       // 激光半区有效标志（T22 填）
     calib::ProjectorJointCalibResult pjc;                      // PJC 光心+发射曲线（T22）
     calib::PlaneMapResult planeMap;                            // 4-12 激光面映射表（T22）
     calib::PlaneMapTempTableResult planeMapTempTable;          // 4-13 温度补偿映射表（T22）
     calib::LaserExtrinsicCompensateCPUResult laserExtrinsicTempTable; // 5-3 激光外参补偿表（T22）
-    struct QualityReport {         // T23 细化
-        bool ok = false;
-        std::string summary;
-    } quality;
+    QualityReport quality;         // 门禁报告（run 尾总装层评估填，T23）
 
     CalibComputeOutput() = default;
     CalibComputeOutput(CalibComputeOutput&&) = default;        // 三表 move-only → 整体 move-only

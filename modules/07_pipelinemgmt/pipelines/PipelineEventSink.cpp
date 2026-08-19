@@ -9,14 +9,24 @@ namespace Scanner::pipeline {
 
 EventBusEventSink::EventBusEventSink(Scanner::infra::EventBus* bus) : bus_(bus) {}
 
-void EventBusEventSink::report(Scanner::QualityFlag q, int32_t code, const std::string& msg) {
+void EventBusEventSink::report(Scanner::QualityFlag q, int32_t code,
+                               const std::string& msg) {
     if (!bus_) return;
+    if (q == Scanner::QualityFlag::Normal) return;   // 帧级 Normal 静默（原契约）
+    publish(q, code, msg);
+}
 
+void EventBusEventSink::reportCompletion(Scanner::QualityFlag q, int32_t code,
+                                         const std::string& msg) {
+    if (!bus_) return;
+    publish(q, code, msg);                           // Normal→Info 也发（完成事件）
+}
+
+void EventBusEventSink::publish(Scanner::QualityFlag q, int32_t code,
+                                const std::string& msg) {
     Scanner::FaultSeverity severity;
     switch (q) {
     case Scanner::QualityFlag::Degraded:
-        severity = Scanner::FaultSeverity::Warning;
-        break;
     case Scanner::QualityFlag::Warning:
         severity = Scanner::FaultSeverity::Warning;
         break;
@@ -25,7 +35,8 @@ void EventBusEventSink::report(Scanner::QualityFlag q, int32_t code, const std::
         break;
     case Scanner::QualityFlag::Normal:
     default:
-        return;                                  // Normal 不发布
+        severity = Scanner::FaultSeverity::Info;
+        break;
     }
 
     Scanner::Event e;
@@ -37,6 +48,8 @@ void EventBusEventSink::report(Scanner::QualityFlag q, int32_t code, const std::
     // EventBus 为控制通道不携带载荷，msg 落 spdlog 留存（防静默丢失）
     if (severity == Scanner::FaultSeverity::Error) {
         spdlog::error("[pipemgmt] code={} msg={}", code, msg);
+    } else if (severity == Scanner::FaultSeverity::Info) {
+        spdlog::info("[pipemgmt] code={} msg={}", code, msg);
     } else {
         spdlog::warn("[pipemgmt] code={} msg={}", code, msg);
     }

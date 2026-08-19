@@ -29,7 +29,9 @@
 #include "base/types.h"
 #include "pipelines/IPipelineObject.h"
 #include "pipelines/PipelineDeps.h"
+#include "pipelines/PipelineEventSink.h"
 #include "pipelines/calibcompute/CalibComputeTypes.h"
+#include "pipelines/calibcompute/QualityGate.h"
 #include "pipelines/posture/PostureTypes.h"
 
 namespace Scanner::pipeline {
@@ -38,6 +40,7 @@ class CalibComputePipeline : public IPipelineObject {
 public:
     struct Config {
         cv::Vec3d pjcInitialT{80.0, 3.0, 3.0};   // PJC 初值（→ LaserChain::Deps）
+        gate::Thresholds thresholds;             // 质量门禁阈值（默认待联调，T23）
     };
 
     // 两条链的 run 签名（= CameraChain::run / LaserChain::run）
@@ -61,7 +64,8 @@ public:
     void attachInitialParams(InitialCalibParams init);          // 与 2-6 严格同组
     void attachSession(PostureSessionData session);             // start() 异步 run 的输入
 
-    // IPipelineObject：注入依赖（只接线不拥有）——本版仅记录 calibRepo（落盘 T23 接）
+    // IPipelineObject：注入依赖（只接线不拥有）——calibRepo（run 尾自动写）+
+    // eventBus（内建 EventBusEventSink：1800 完成/1801 落盘失败上报）
     Scanner::Result configure(const PipelineDeps& deps) override;
 
     // 阻塞批算（双线程：cam/las 并行 join；cancel 贯穿两链）
@@ -96,7 +100,8 @@ private:
     PostureSessionData session_;
     bool hasSession_ = false;
     TestHooks hooks_;                       // 空 → 真链
-    ICalibRepoWriter* calibRepo_ = nullptr; // T23 落盘接线（configure 记录）
+    ICalibRepoWriter* calibRepo_ = nullptr; // run 尾自动写（configure 记录）
+    std::unique_ptr<PipelineEventSink> sink_;   // 事件出口（configure 内建；可空）
 
     CalibComputeOutput out_;
     Scanner::Result lastResult_ = Scanner::Result::fail("not run");
