@@ -1,5 +1,5 @@
 # Module 07_pipelinemgmt — 流水线管理（调度底座 + 五流水线对象）
-add_library(mod_pipelinemgmt STATIC)
+add_library(mod_pipelinemgmt STATIC sched/FrameResultQueue.cpp)
 target_include_directories(mod_pipelinemgmt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(mod_pipelinemgmt PUBLIC base mod_fileio mod_operatorlib
     spdlog::spdlog ${OpenCV_LIBS})
@@ -38,4 +38,22 @@ if(BUILD_CUDA)
     unset(_jmw_cuda_ver_json)
     target_link_libraries(mod_pipelinemgmt PUBLIC CUDA::cudart)
     target_compile_definitions(mod_pipelinemgmt PUBLIC JMW_BUILD_CUDA=1)
+endif()
+
+# ============================================================================
+# 单测：每文件一 exe + 注册 ctest（仿 09_operatorlib）
+# ============================================================================
+if(BUILD_TESTS)
+    file(GLOB PM_TESTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
+    foreach(t ${PM_TESTS})
+        get_filename_component(tname ${t} NAME_WE)
+        add_executable(${tname} ${t})
+        target_link_libraries(${tname} PRIVATE mod_pipelinemgmt GTest::gtest_main)
+        target_include_directories(${tname} PRIVATE ${CMAKE_SOURCE_DIR})
+        if(MSVC)
+            target_compile_options(${tname} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+        endif()
+        add_test(NAME ${tname} COMMAND ${tname})
+        jmw_deploy_crt(${tname})
+    endforeach()
 endif()
