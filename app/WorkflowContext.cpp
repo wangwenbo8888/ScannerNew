@@ -4,7 +4,6 @@
 #include "DeviceStateCache.h"
 #include "StateMachine.h"
 #include "ParameterManager.h"
-#include "SessionService.h"
 #include "base/EventBus.h"
 #include "IScannerCamera.h"
 #include "IMCU.h"

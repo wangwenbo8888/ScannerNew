@@ -6,7 +6,7 @@
 // （Capture/Preprocess/Marker/Laser/Fuse）退役——帧处理路径改为持有
 // Scanner::pipeline::ScanPipeline（07 §1.1-C，会话私有件：每次扫描新建、
 // stop 后不重启），本类只留 IWorkflow 生命周期编排 + 会话记账
-// （SessionService/EventBus/UI 回调）。
+// （D6：记账归工作流自身成员，SessionService 随 07_session 退役）+ EventBus/UI 回调。
 //
 // 装配序（start 内）：
 //   ScanConfig（scanMode→enableLaser）→ attachRing（本类持有的 06 SlotRing·
@@ -75,6 +75,12 @@ private:
     ScanCalibration calib_;
     std::atomic<WorkflowState> state_{WorkflowState::Idle};
     WorkflowCallback callback_;
+
+    // —— 会话记账（D6：归工作流自身；起止时间戳/帧计数，接入期由 07 流水线回调回填）——
+    TimestampMs sessionStartTime_   = 0;
+    TimestampMs sessionEndTime_     = 0;
+    uint64_t    sessionFrames_      = 0;
+    uint64_t    sessionFusedFrames_ = 0;
 
     // —— 07 帧处理引擎（会话私有件：start 建、stop 收）——
     std::unique_ptr<Scanner::pipeline::ScanPipeline> pipeline_;

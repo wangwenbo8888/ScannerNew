@@ -11,7 +11,7 @@
 #include <functional>
 
 namespace Scanner::data   { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibStore; }
-namespace Scanner::service{ class StateMachine; class ParameterManager; class SessionService; }
+namespace Scanner::service{ class StateMachine; class ParameterManager; }
 namespace Scanner::infra  { class EventBus; }
 namespace Scanner::hal    { class IScannerCamera; class IMCU; }
 
@@ -36,11 +36,9 @@ public:
     // === Service 层 ===
     void setStateMachine(service::StateMachine* sm) { stateMachine_ = sm; }
     void setParameterManager(service::ParameterManager* pm) { paramManager_ = pm; }
-    void setSessionService(service::SessionService* ss) { sessionService_ = ss; }
 
     service::StateMachine* stateMachine() { return stateMachine_; }
     service::ParameterManager* params() { return paramManager_; }
-    service::SessionService* session() { return sessionService_; }
 
     // === HAL 层 ===
     void setCamera(hal::IScannerCamera* cam) { camera_ = cam; }
@@ -65,7 +63,6 @@ private:
 
     service::StateMachine*    stateMachine_ = nullptr;
     service::ParameterManager* paramManager_ = nullptr;
-    service::SessionService*  sessionService_ = nullptr;
 
     hal::IScannerCamera* camera_ = nullptr;
     hal::IMCU*           mcu_ = nullptr;

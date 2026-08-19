@@ -7,12 +7,12 @@
 // ============================================================================
 
 #include "ScanWorkflow.h"
-#include "SessionService.h"
 
 #include "pipelines/PipelineDeps.h"
 #include "pipelines/scan/ScanPipeline.h"
 
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <utility>
 
 namespace Scanner::workflow {
@@ -92,7 +92,11 @@ Result ScanWorkflow::start() {
     }
 
     state_ = WorkflowState::Running;
-    if (ctx_ && ctx_->session()) ctx_->session()->startSession();
+    sessionStartTime_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    sessionEndTime_ = 0;
+    sessionFrames_ = 0;
+    sessionFusedFrames_ = 0;
     ctx_->publishEvent(EventType::ScanStarted);
     spdlog::info("[ScanWorkflow] 已启动（帧处理移交 07 ScanPipeline）");
     return Result::ok();
@@ -102,7 +106,6 @@ Result ScanWorkflow::pause() {
     if (state_ != WorkflowState::Running) return Result::fail("非运行状态");
     if (pipeline_) pipeline_->pause();
     state_ = WorkflowState::Paused;
-    if (ctx_ && ctx_->session()) ctx_->session()->pauseSession();
     return Result::ok();
 }
 
@@ -113,7 +116,6 @@ Result ScanWorkflow::resume() {
         if (!rr.success) return Result::fail("ScanPipeline 恢复失败: " + rr.message);
     }
     state_ = WorkflowState::Running;
-    if (ctx_ && ctx_->session()) ctx_->session()->resumeSession();
     return Result::ok();
 }
 
@@ -125,11 +127,13 @@ Result ScanWorkflow::stop() {
         pipeline_.reset();          // 会话私有件：stop 后不重启，续扫建新对象
     }
     state_ = WorkflowState::Completed;
+    sessionEndTime_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
     if (ctx_) {
-        if (ctx_->session()) ctx_->session()->stopSession();
         ctx_->publishEvent(EventType::ScanStopped);
     }
-    spdlog::info("[ScanWorkflow] 已停止");
+    spdlog::info("[ScanWorkflow] 已停止（会话记账: 起={}ms 止={}ms 帧={}/融合={}）",
+                 sessionStartTime_, sessionEndTime_, sessionFrames_, sessionFusedFrames_);
     return Result::ok();
 }
 

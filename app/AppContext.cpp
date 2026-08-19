@@ -10,7 +10,6 @@
 #include "StateMachine.h"
 #include "ParameterManager.h"
 #include "FaultHandler.h"
-#include "SessionService.h"
 #include "base/EventBus.h"
 #include "modules/08_devicemgmt/CameraControl.h"
 #include "modules/08_devicemgmt/MCUDriver.h"
@@ -38,7 +37,6 @@ void AppContext::initialize() {
     stateMachine_   = std::make_unique<Scanner::service::StateMachine>(eventBus_.get());
     paramManager_   = std::make_unique<Scanner::service::ParameterManager>();
     faultHandler_   = std::make_unique<Scanner::service::FaultHandler>();
-    sessionService_ = std::make_unique<Scanner::service::SessionService>();
 
     faultHandler_->setEventBus(eventBus_.get());
     faultHandler_->setStateMachine(stateMachine_.get());
@@ -66,7 +64,6 @@ void AppContext::initialize() {
     wfCtx_->setCalibStore(calibStore_.get());
     wfCtx_->setStateMachine(stateMachine_.get());
     wfCtx_->setParameterManager(paramManager_.get());
-    wfCtx_->setSessionService(sessionService_.get());
     wfCtx_->setCamera(camera_.get());
     wfCtx_->setMCU(mcu_.get());
     wfCtx_->setEventBus(eventBus_.get());

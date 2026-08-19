@@ -10,7 +10,7 @@ find_package(Qt5 5.15 COMPONENTS Core Gui Widgets OpenGL Svg SerialPort)
 set(OSG_ROOT "C:/devlibs/osg-install" CACHE PATH "OSG 安装目录")
 
 # scan_demo 仅在 Qt5 Svg/SerialPort 齐备 + stubs/ 源码存在时构建
-# （stubs/LEADSCANSeries.h 等当前缺失→源码不完整→跳过保构建绿；Qt 已装，stubs 补齐后自动启用）
+# （stubs/ 5 个桩头已补齐，当前正常构建；若桩头缺失则跳过以保"库+测试"构建绿）
 if(Qt5_FOUND AND Qt5Svg_FOUND AND Qt5SerialPort_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/stubs/LEADSCANSeries.h")
 
 # === app 核心文件 ===
@@ -100,7 +100,6 @@ target_link_libraries(scan_demo PRIVATE
     mod_fileio
     mod_calibration
     mod_pipelinemgmt
-    mod_session
     mod_observability
     Qt5::Widgets
     Qt5::OpenGL
