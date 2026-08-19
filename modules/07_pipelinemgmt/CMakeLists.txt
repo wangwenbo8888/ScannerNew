@@ -44,7 +44,7 @@ endif()
 # 单测：每文件一 exe + 注册 ctest（仿 09_operatorlib）
 # ============================================================================
 if(BUILD_TESTS)
-    file(GLOB PM_TESTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
+    file(GLOB PM_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
     foreach(t ${PM_TESTS})
         get_filename_component(tname ${t} NAME_WE)
         add_executable(${tname} ${t})

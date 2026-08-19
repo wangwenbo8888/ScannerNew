@@ -3,6 +3,7 @@
 // ============================================================================
 #include "sched/PCoreBroker.h"
 
+#include <spdlog/spdlog.h>
 #include <windows.h>
 
 namespace Scanner::pipeline::sched {
@@ -20,13 +21,19 @@ Result PCoreBroker::start(int workers, const std::vector<uint64_t>& coreMasks) {
     for (int i = 0; i < workers; ++i) {
         workers_.emplace_back([this] { workerLoop(); });
         auto handle = workers_.back().native_handle();
-        // mask 非 0 才绑核（空 vector 或元素 0 = 不绑，保可测性）
+        // mask 非 0 才绑核（空 vector 或元素 0 = 不绑，保可测性）。
+        // 单 DWORD_PTR 不跨 processor group，>64 逻辑核需扩展（目标机无碍）
         const uint64_t mask = (static_cast<size_t>(i) < coreMasks.size()) ? coreMasks[i] : 0;
         if (mask != 0) {
-            SetThreadAffinityMask(handle, static_cast<DWORD_PTR>(mask));
+            if (SetThreadAffinityMask(handle, static_cast<DWORD_PTR>(mask)) == 0) {
+                spdlog::warn("PCoreBroker: SetThreadAffinityMask(mask={:#x}) 失败, err={}",
+                             mask, GetLastError());
+            }
         }
         // P 核 worker 固定提一档优先级（后续 SchedConfig 接线再参数化）
-        SetThreadPriority(handle, THREAD_PRIORITY_ABOVE_NORMAL);
+        if (!SetThreadPriority(handle, THREAD_PRIORITY_ABOVE_NORMAL)) {
+            spdlog::warn("PCoreBroker: SetThreadPriority(AboveNormal) 失败, err={}", GetLastError());
+        }
     }
     return Result::ok();
 }
@@ -44,10 +51,12 @@ std::future<Result> PCoreBroker::submit(PTask task) {
         notFull_.wait(lock, [this] {
             return queue_.size() < kQueueCapacity || stop_.load();
         });
-        if (queue_.size() < kQueueCapacity) {
-            queue_.push_back(std::move(sp));
+        // stop 检查必须在锁内 wait 之后（修 TOCTOU）：否则 shutdown 完整走完
+        // （stop_=true、worker 全退、队列空）后 submit 仍入队 → 任务孤儿化、future 永久悬挂
+        if (stop_.load()) {
+            throw std::logic_error("PCoreBroker::submit: shutting down");
         }
-        // stop_ 且队列仍满：放弃入队，sp 析构 → future.get() 抛 broken_promise
+        queue_.push_back(std::move(sp));
     }
     notEmpty_.notify_one();
     return fut;

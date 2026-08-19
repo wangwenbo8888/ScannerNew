@@ -4,6 +4,7 @@
 // X-1 个 worker 线程池（各可绑 1 个 P 核 + Above Normal 优先级），
 // 接收 E 核提交的 CPU 重活任务并返回 future；先到先得；
 // shutdown 置停后排空队列再 join（排空语义）。
+// 线程安全约定：shutdown()/析构不可与其他线程的 shutdown()/析构并发。
 // ============================================================================
 #include <atomic>
 #include <chrono>
@@ -31,7 +32,7 @@ public:
     Result start(int workers, const std::vector<uint64_t>& coreMasks);
 
     /// 提交任务（先到先得）；返回 packaged_task 的 future，任务内异常经 future 传递。
-    /// 未 start 或已 shutdown 时抛 std::logic_error。
+    /// 未 start、已 shutdown 或 shutdown 进行中（锁内检出 stop）时抛 std::logic_error。
     /// 队列满（容量 64）时阻塞提交方（E 核提交阻塞可接受）。
     std::future<Result> submit(PTask task);
 
