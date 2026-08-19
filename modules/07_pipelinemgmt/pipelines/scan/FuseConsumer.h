@@ -6,6 +6,7 @@
 // 适配器内，本类不感知）→ 渲染节流 pushCloudSnapshot → obs.push(FrameObs +
 // 激光 host 拷贝)。
 // drain 语义：stop 只在 pop 超时（=队列已空）后生效——退出前把队列已有帧消费完。
+// 单帧异常兜底：processOne 内 catch(...) → spdlog + sink Fault(1602) → 丢帧续跑。
 //
 // 注入边界：IMarkerFuse/ILaserFuse 为融合算子窄接口（测试注入假实现；生产由
 // ScanPipeline 装配真算子适配器——marker 侧走 MarkerCloudFuseCPU::Execute +
@@ -66,7 +67,7 @@ public:
         ISceneFeed* sceneFeed = nullptr;                  // 可空=不推渲染
         FrameObsAccumulator* obs = nullptr;               // 必填（start 校验）
         PipelineEventSink* sink = nullptr;                // 可空=不上报
-        int renderThrottleFrames = 5;                     // 每 N 帧 push 一次渲染（<=0 按 1）
+        int renderThrottleFrames = 5;                     // 首帧起每 N 帧 push 一次（第 1、N+1…；<=0 按 1）
         const std::vector<int>* highPrecisionGlobalIds = nullptr;  // 可空=全部 false
     };
 
@@ -82,7 +83,7 @@ public:
 
 private:
     void loop();                              // 消费主循环
-    void processOne(FrameResult& fr);         // 单帧：融合→下载→观测→渲染
+    void processOne(FrameResult& fr);         // 单帧：融合→下载→渲染→观测（catch 兜底丢帧续跑）
 
     Deps deps_;
     std::unordered_set<int> hpIds_;           // 高精度 globalId 查找集（ctor 拷贝）

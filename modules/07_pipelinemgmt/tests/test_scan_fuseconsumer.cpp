@@ -2,13 +2,14 @@
 // test_scan_fuseconsumer.cpp — FuseConsumer（队列消费→双融合→渲染节流→攒观测）
 // 全假注入：假 marker/laser 融合、假场景推送、假事件上报、假激光下载函数；
 // 队列用真 FrameResultQueue 预填帧（消费源契约即队列契约）。
-// 覆盖：按序消费+观测累积 / 激光路径开关 / 高精度映射 / 停止排空 / 渲染节流 /
-//       空转超时退出 / 激光缓存降级一次性上报 / 依赖缺失与重复启动失败
+// 覆盖：按序消费+观测累积 / 激光路径开关 / 高精度映射 / 停止排空 / 渲染节流（含首帧）/
+//       空转超时退出 / 激光缓存降级一次性上报 / 单帧异常兜底续跑 / 依赖缺失与重复启动失败
 // ============================================================================
 #include <gtest/gtest.h>
 
 #include <chrono>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -40,6 +41,24 @@ struct FakeMarkerFuse : IMarkerFuse {
     const std::vector<calib::MarkerCloudPoint>& fusedPoints() const override { return fused; }
 };
 
+// —— 异常注入 marker 融合：第 throwOn 帧（1 基）fuse 抛异常，其余转发 inner ——
+struct ThrowingMarkerFuse : IMarkerFuse {
+    IMarkerFuse* inner = nullptr;             // 实际干活（可空）
+    uint64_t throwOn = 0;                     // 0=不抛
+    uint64_t seen = 0;
+
+    void fuse(const std::vector<calib::MarkerPoint3D>& m,
+              const double R[9], const double T[3]) override {
+        ++seen;
+        if (seen == throwOn) throw std::runtime_error("boom");
+        if (inner) inner->fuse(m, R, T);
+    }
+    const std::vector<calib::MarkerCloudPoint>& fusedPoints() const override {
+        static const std::vector<calib::MarkerCloudPoint> kEmpty;
+        return inner ? inner->fusedPoints() : kEmpty;
+    }
+};
+
 #ifdef JMW_BUILD_CUDA
 // —— 假激光融合：只记录调用与块身份/R/T（不触 GPU）——
 struct FakeLaserFuse : ILaserFuse {
@@ -58,16 +77,20 @@ struct FakeLaserFuse : ILaserFuse {
 };
 #endif
 
-// —— 假场景推送：计数 + 记录 CloudViewHandle ——
+// —— 假场景推送：计数 + 记录 CloudViewHandle；mf 可选注入（push 时刻 fuse 已调
+//    次数 = 帧序 1 基，fuse 与 push 同在消费线程 → 序确定，可断言"哪帧被推"）——
 struct FakeSceneFeed : ISceneFeed {
     int cloudPushes = 0;
     std::vector<CloudViewHandle> handles;
+    const FakeMarkerFuse* mf = nullptr;       // 注入后记录 push 时帧序
+    std::vector<size_t> pushAtFrame;          // 每次 push 对应的帧序（1 基）
 
     void pushPostureView(const Scanner::Pose&, int,
                          const std::vector<uint8_t>&) override {}
     void pushCloudSnapshot(CloudViewHandle cloud) override {
         ++cloudPushes;
         handles.push_back(cloud);
+        if (mf) pushAtFrame.push_back(mf->calls.size());
     }
     void notifyFreeze(bool) override {}
 };
@@ -274,14 +297,16 @@ TEST(FuseConsumerTest, DrainOnStop) {
     EXPECT_EQ(obs.frameCount(), 10u);
 }
 
-// 5：throttle=3 → 6 帧后 sceneFeed 收到 2 次 pushCloudSnapshot（第 3、6 帧），
-//    hostMarker 指向 markerFuse->fusedPoints()、deviceLaser=nullptr
+// 5：throttle=3 → 6 帧后 sceneFeed 收到 2 次 pushCloudSnapshot（第 1、4 帧——
+//    首帧即推，此后每 N 帧再推），hostMarker 指向 markerFuse->fusedPoints()、
+//    deviceLaser=nullptr
 TEST(FuseConsumerTest, RenderThrottle) {
     FrameResultQueue<FrameResult> q(16);
     FrameObsAccumulator obs(1 << 20);
     FakeMarkerFuse mf;
     mf.fused.push_back(calib::MarkerCloudPoint{});   // 非空云（句柄指向稳定存储）
     FakeSceneFeed sf;
+    sf.mf = &mf;                                     // 记录 push 时刻帧序
     for (uint64_t i = 1; i <= 6; ++i) q.push(makeFrame(i, 0));
 
     FuseConsumer::Deps d;
@@ -296,6 +321,9 @@ TEST(FuseConsumerTest, RenderThrottle) {
 
     EXPECT_EQ(c.consumed(), 6u);
     EXPECT_EQ(sf.cloudPushes, 2);
+    ASSERT_EQ(sf.pushAtFrame.size(), 2u);
+    EXPECT_EQ(sf.pushAtFrame[0], 1u);                // 首帧被推（前值 0 % N == 0）
+    EXPECT_EQ(sf.pushAtFrame[1], 4u);                // 之后第 N+1=4 帧
     ASSERT_EQ(sf.handles.size(), 2u);
     EXPECT_EQ(sf.handles[0].hostMarker, static_cast<const void*>(&mf.fused));
     EXPECT_EQ(sf.handles[0].deviceLaser, nullptr);
@@ -320,6 +348,38 @@ TEST(FuseConsumerTest, PopTimeoutIdleNoSpin) {
     c.join();                                   // 100ms 超时周期内返回
     EXPECT_EQ(c.consumed(), 0u);
     EXPECT_EQ(obs.frameCount(), 0u);
+}
+
+// 9：第 2 帧 markerFuse 抛异常 → 丢帧续跑：线程不崩（join 正常返回）、
+//    consumed==3（出队即计数）、obs 只含第 1/3 帧、sink 一次性 Fault(1602)
+TEST(FuseConsumerTest, FrameExceptionDroppedAndContinue) {
+    FrameResultQueue<FrameResult> q(8);
+    FrameObsAccumulator obs(1 << 20);
+    FakeMarkerFuse mf;
+    ThrowingMarkerFuse tf;
+    tf.inner = &mf;
+    tf.throwOn = 2;
+    FakeSink sk;
+    for (uint64_t i = 1; i <= 3; ++i) q.push(makeFrame(i, 1));
+
+    FuseConsumer::Deps d;
+    d.queue = &q;
+    d.markerFuse = &tf;
+    d.obs = &obs;
+    d.sink = &sk;
+    FuseConsumer c(d);
+    ASSERT_TRUE(c.start().success);
+    c.join();                                       // 不崩不退：join 正常返回
+
+    EXPECT_EQ(c.consumed(), 3u);                    // 异常帧也计数（出队即消费）
+    EXPECT_EQ(mf.calls.size(), 2u);                 // 第 2 帧未达 inner
+    auto snap = obs.snapshot();
+    ASSERT_EQ(snap.obs.size(), 2u);                 // 第 2 帧被丢
+    EXPECT_EQ(snap.obs[0].frameId, 1u);
+    EXPECT_EQ(snap.obs[1].frameId, 3u);             // 第 3 帧续跑
+    ASSERT_EQ(sk.qualities.size(), 1u);
+    EXPECT_EQ(sk.qualities[0], Scanner::QualityFlag::Fault);
+    EXPECT_EQ(sk.codes[0], 1602);
 }
 
 #ifdef JMW_BUILD_CUDA
