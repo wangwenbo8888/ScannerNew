@@ -64,6 +64,9 @@ TEST(FrameObsDefaults, NoLaserSlot) {
 // GpuPointCloudPool（假分配器：默认构造 GpuMat，无 GPU）
 // ============================================================================
 #ifdef JMW_BUILD_CUDA
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/ringbuffer_sink.h>
+
 #include "pipelines/scan/GpuPointCloudPool.h"
 
 static GpuPointCloudPool::AllocFn fakeAlloc() {
@@ -92,6 +95,7 @@ TEST(PoolAcquireReleaseCycle, ReuseSameSlot) {
     auto b2 = pool.acquire(std::chrono::milliseconds(100));
     ASSERT_TRUE(b2.has_value());
     EXPECT_EQ((*b2)->slotId, slot);                // 同块复用
+    EXPECT_EQ((*b2)->count, 0);                    // T13 防御：acquire 出块 count 已清零
 }
 
 // 语义 2：取光后 acquire(50ms) 超时 → nullopt
@@ -130,5 +134,29 @@ TEST(PoolWakeupOnRelease, BlockedAcquireWoken) {
     EXPECT_EQ((*woken)->slotId, slot);             // 得到归还的同一块
     EXPECT_EQ(pool.inUse(), 1u);                   // woken 仍持有
     EXPECT_EQ(pool.available(), 0u);
+}
+
+// 语义 4（T13 防御）：池析构时仍有在飞块 → spdlog::warn（含 inUse 数字）。
+// 在飞块故意泄漏不析构：其回池 deleter 会触碰已亡池（UB），泄漏交由进程退出回收。
+TEST(PoolDestructorWithInFlight, WarnsInUseCount) {
+    auto ring = std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(64);
+    auto prev = spdlog::default_logger();
+    spdlog::set_default_logger(std::make_shared<spdlog::logger>("pooltest", ring));
+    {
+        GpuPointCloudPool pool(2, 128, fakeAlloc());
+        auto b = pool.acquire(std::chrono::milliseconds(100));
+        ASSERT_TRUE(b.has_value());
+        auto* leaked = new std::optional<std::shared_ptr<GpuPointCloudBlock>>(std::move(b));
+        (void)leaked;                              // 故意不析构（防 UB）
+        EXPECT_EQ(pool.inUse(), 1u);
+    }                                              // 池先亡：inUse=1 → warn
+    auto lines = ring->last_formatted(16);
+    spdlog::set_default_logger(prev);
+    bool found = false;
+    for (const auto& s : lines)
+        if (s.find("GpuPointCloudPool") != std::string::npos &&
+            s.find("inUse=1") != std::string::npos)
+            found = true;
+    EXPECT_TRUE(found);
 }
 #endif // JMW_BUILD_CUDA

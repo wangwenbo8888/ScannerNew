@@ -1,6 +1,8 @@
 // ============================================================================
 // GpuPointCloudPool.cpp — GPU 点云显存块池实现
 // ============================================================================
+#include <spdlog/spdlog.h>
+
 #include "pipelines/scan/GpuPointCloudPool.h"
 
 #ifdef JMW_BUILD_CUDA
@@ -23,7 +25,12 @@ GpuPointCloudPool::GpuPointCloudPool(size_t blocks, size_t pointsPerBlock, Alloc
     }
 }
 
-GpuPointCloudPool::~GpuPointCloudPool() = default;
+GpuPointCloudPool::~GpuPointCloudPool() {
+    if (size_t n = inUse(); n > 0) {
+        spdlog::warn("GpuPointCloudPool: 析构时 inUse={}（生命周期契约违反：池须长于所有在飞块，"
+                     "在飞块回池将触碰已亡池）", n);
+    }
+}
 
 std::optional<std::shared_ptr<GpuPointCloudBlock>> GpuPointCloudPool::acquire(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -32,6 +39,7 @@ std::optional<std::shared_ptr<GpuPointCloudBlock>> GpuPointCloudPool::acquire(st
 
     GpuPointCloudBlock* raw = free_.back();
     free_.pop_back();
+    raw->count = 0;                                               // 防御：复用块顺手清 count
     // 块析构自动回池（LIFO 复用，内容可覆盖）；池生命周期须长于所有在飞块
     return std::shared_ptr<GpuPointCloudBlock>(raw, [this](GpuPointCloudBlock* b) { release(b); });
 }
