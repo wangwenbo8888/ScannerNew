@@ -1,14 +1,15 @@
 # AGENTS.md — AI 查阅入口（工程导航）
 
-> AI 接手本工程先读本文件。真实实现以 `modules/` 与 `docs/` 为准。
+> AI 接手本工程先读本文件。真实实现以 `base/` `modules/` `app/` 与 `docs/` 为准。
 
 ### 优先查阅（AI 必读）
 - **数据归属/管理** → 原则见 `数据管理原则.md`（L1–L4 分类 + 判定规则）；代码现状 / 修改目标 / 待增加见 `docs/模块功能/06-文件管理.md`
-- **会话接力 / 当前进度** → `开发进度.md`（默认限读：快照+关键决策+近 3 条日志）
-- **禁区**：`framework/` 过时（见 `framework/AGENTS.md`，AI 默认不读）；`factory_calib/` AI 只读保护区（见 `factory_calib/AGENTS.md`）
-- **重要例外**：framework 虽过时，但 `framework/data` 的运行时容器（FrameBuffer / PointCloudBuffer / DeviceStateCache）仍被 app + modules 实际依赖（承重），治理见 `docs/模块功能/06-文件管理.md §2`
+- **会话接力 / 当前进度** → `开发进度.md`（默认限读：快照+关键决策+近 10 条日志）
+- **app 应用层** → `docs/应用层/README.md`（入口与启动 / AppContext 装配 / MainWindow UI / 构建与依赖）
+- **base 共享内核** → `docs/共享内核/README.md`（types.h + EventBus 通俗说明）
+- **禁区**：`factory_calib/` AI 只读保护区（见 `factory_calib/AGENTS.md`）
 
-> 详细架构见 `架构设计-简洁版.md`。**阶段**：骨架搭建中——framework 层契约桩 + 业务模块骨架；已迁入实现：`modules/09_operatorlib`（全部算子）+ `modules/03_rendering`（display 渲染组件）；`factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）。
+> **阶段**：framework/ 已退役删除（2026-08，决策与归属迁移记录见 `framework优化.md`）——共享层职责落入 `base/`（公共类型+EventBus）与各业务模块；分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`（06/07/08 均只链 base；08 的 HardwareMonitor 源码 include 06 的 DeviceStateCache，链接符号由 app 侧汇聚解析；10 链 07）；`scan_demo.exe` 全量构建 + ctest 43/43 绿（43 用例已核）。`factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）。
 
 ---
 
@@ -16,62 +17,59 @@
 
 ```
 JEAMMWARE260705/
-├── framework/      # ⚠ 过时无用（见 framework/AGENTS.md，AI 默认不读）
-├── modules/        # 11 业务模块（骨架桩），09 算子库 + 03 渲染已迁入实现
-├── sdk/            # 接入端 B（桩：IScannerSDK.h）
-├── app/            # exe 入口（jeammware.exe，main.cpp）
+├── base/           # 共享内核（types.h + EventBus；STATIC lib `base`；极薄，禁业务代码）
+├── modules/        # 11 业务模块（mod_* 静态库 + 编入 scan_demo 的源文件）
+├── app/            # 应用入口与装配层（scan_demo.exe；Qt5 UI + OSG）
+├── cmake/          # 构建辅助（CompilerSettings / PatchVcxproj / PatchCudaVcxproj / Version.h.in）
 ├── factory_calib/  # 厂家标定独立子工程（产线交付物，AI 只读保护区，见下文专节）
-├── docs/           # 架构 / 计划 / 算子说明文档 / 开发需要的信息
-├── build/          # 构建产物（gitignore）
+├── docs/           # 流水线 / 模块功能 / 算子说明 / 应用层 / 共享内核 / 开发信息
+├── build/          # Debug 构建产物（gitignore）
+├── build-rel/      # Release 构建产物（gitignore）
 └── CMakeLists.txt
 ```
 
+### 历史注记（framework 退役，2026-08）
+- `framework/` 整树已删：types.h+EventBus → `base/`；data 容器+Sink 契约、IWorkflow/Pipeline(Stage)、ParameterManager → `06_fileio`；CalibStore → `01_calibration`；hal 接口（IScannerCamera/IMCU）→ `08_devicemgmt`；service（StateMachine/SessionService/IState）→ `07_session`；FaultHandler → `10_observability`；工作流+WorkflowContext+ScannerWindow → `app/`。详见 `framework优化.md`。
+- `sdk/`（接入端 B 契约桩）已删；旧根文档 `架构设计-简洁版.md` / `工程目录地图.md` 已删，导航职责归本文件。
+
 ---
 
-## framework/ — ⚠ 过时无用（AI 默认不读）
+## base/ — 共享内核（最底层公共零件箱）
 
-> ⚠ **本目录已过时、被 `modules/` 架空，不再维护**（详见 `framework/AGENTS.md`）。**除非人工明确指令，AI 不得阅读/引用/修改本目录。** 下表仅作历史目录索引，**不作为架构或实现依据**——真实实现以 `modules/` 与 `docs/` 为准。
->
-> **例外**：`framework/data` 的运行时容器（FrameBuffer / PointCloudBuffer / DeviceStateCache + Sink 契约）仍被 app 与 modules 实际依赖（承重），迁移治理见 `docs/模块功能/06-文件管理.md §2`；引用这些类型时按需查阅。
+极薄：只放公共类型 + 事件总线，**禁业务代码**；铁规"谁都依赖它，它不依赖任何人"（仅 C++ 标准库）。定名 `base/` 以避开 09 的 `core/` 撞名。
 
-历史层契约定义（接口桩），子命名空间 `Scanner::<层>`：
+| 文件 | 职责 |
+|---|---|
+| `types.h` | 公共类型：`Result`（ok/fail/degraded/warning 工厂）、`QualityFlag`、`Pose`、`Event`/`EventType`、`DeviceState`、`ScanMode`、`UPtr`/`SPtr` |
+| `EventBus.h/.cpp` | 线程安全事件总线（订阅/发布），编入 STATIC lib `base` |
 
-| 目录 | 契约文件 | 职责 |
-|---|---|---|
-| `common/` | `types.h` `quality_flag.h` | 公共类型、工具、日志宏（静态库 `fw_common`） |
-| `hal/` | `ICamera.h` | 硬件抽象层（相机/激光/运动） |
-| `data/` | FrameBuffer/PointCloudBuffer/DeviceStateCache/CalibStore + Sink 契约 | 运行时容器（**承重，仍被 app+modules 依赖**；`IDataStore.h` 已删，治理见 docs/模块功能/06-文件管理.md §2） |
-| `algorithm/` | `operator_convention.h` | 算法层（调用算子库） |
-| `service/` | `IService.h` | 业务服务编排 |
-| `workflow/` | `IWorkflow.h` | 流水线/工作流编排（E 核调度核心） |
-| `ui/` | `IView.h` | UI 层（Qt，BUILD_UI=OFF 暂缓） |
-| `infra/` | `EventBus.h` | 基础设施（配置/调度/IPC 等） |
-| `crosscut/` | `IAuth.h` | 横切关注点（日志/监控/异常） |
-| `tests/` | `test_smoke.cpp` | 框架冒烟测试 |
+通俗说明：`docs/共享内核/README.md`。
 
 ---
 
 ## modules/ — 11 业务模块
 
-| 编号 | 模块 | 状态 |
-|---|---|---|
-| 01 | `calibration` | 桩 |
-| 02 | `scanning` | 桩 |
-| 03 | `rendering` | ✅ display 渲染组件已迁入（`mod_rendering`，含 scanner_viewer/laser_cloud_renderer/marker_cloud_renderer + point_expand_kernel） |
-| 04 | `postprocess` | 桩 |
-| 05 | `editing` | 桩 |
-| 06 | `fileio` | 桩 |
-| 07 | `session` | 桩 |
-| 08 | `devicemgmt` | 桩 |
-| **09** | **`operatorlib`** | **✅ 已迁入：全部算子，单库 `mod_operatorlib`，命名空间 `calib::`** |
-| 10 | `observability` | 桩 |
-| 11 | `deploy` | 桩 |
+> ⚠ **编译归属注意**：`01` 的 UI 类、`02/04` 工作流、`03` OSGWidget、`06` file_io **物理在 modules/ 下但直接编入 app 的 scan_demo**（见 `app/CMakeLists.txt`）；`01(部分)/06/07/08/09/10` 另编为 `mod_*` **静态库**。`02/03/04/05/11` 各有同名 INTERFACE 占位库（mod_scanning / mod_rendering / mod_postprocessing / mod_editing / mod_deploy，无源码，仅保目标名）。
+
+| 编号 | 模块 | 状态 | 内容 |
+|---|---|---|---|
+| 01 | `calibration` | 部分实现 | 库 `mod_calibration`=CalibStore；另有 CalibrationWorkflow / calib_workflow / CalibDialog / CalibDisplay / IntegrateTestDialog（编入 scan_demo；工作流帧处理已移交 07 A/B 对象，棋盘格链已退役） |
+| 02 | `scanning` | 部分实现 | ScanWorkflow（编入 scan_demo；scanLoop 五 Stage 已移交 07 ScanPipeline，自身只留编排/记账） |
+| 03 | `rendering` | 部分实现 | OSGWidget（编入 scan_demo）；`mod_rendering` 为 INTERFACE 占位（旧 display 渲染组件源码已退场，说明文档仍在 `docs/算子说明文档/display/`） |
+| 04 | `postprocessing` | 部分实现 | PostProcessWorkflow（编入 scan_demo；旧七阶段 sleep 壳已移交 07 PostProcessPipeline 五阶段编排） |
+| 05 | `editing` | 桩 | — |
+| **06** | **`fileio`** | **✅ 承重** | 库 `mod_fileio`：运行时容器 FrameBuffer / PointCloudBuffer / DeviceStateCache / RingBuffer / SlotRing（原子槽位环）/ EnhancedFrame / CycleUnit / FrameEnricher（出口查表） + Sink 契约（IFrameSink/IPointCloudSink/IDeviceStateSink）+ IWorkflow/Pipeline(Stage) 工作流框架 + ParameterManager + file_io |
+| 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology/PCoreBroker/GpuSlotService/IFrameSource/FrameResultQueue/SchedulerRuntime）+ 五流水线对象（pipelines/：A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）+ 装配公共件；命名空间 `Scanner::pipeline`。旧 `07_session` 已退役（StateMachine 迁 10、SessionService 随 D6/D7 定案撤销，会话记账归工作流自身） |
+| 08 | `devicemgmt` | ✅ | 库 `mod_devicemgmt`：IScannerCamera / IMCU 接口 + CameraControl / MCUDriver / HardwareMonitor |
+| **09** | **`operatorlib`** | **✅ 全部算子** | 单库 `mod_operatorlib`，命名空间 `calib::`（见下文专节）；GBA 含软先验扩展、marker_cloud_fuse 含 seed() |
+| 10 | `observability` | ✅ | 库 `mod_observability`：FaultHandler + StateMachine/IState（2026-08-20 自 07_session 迁入，D8 定案） |
+| 11 | `deploy` | 桩 | — |
 
 ---
 
 ## modules/09_operatorlib/ — 算子库（核心实现）
 
-> 09 模块的核心实现层（与 `03_rendering` 同为已迁入实现的模块）。单静态库 `mod_operatorlib`（core+calibration+scanning 合建）。算子规范见 `算子规范.md`，逐算子说明见 `docs/算子说明文档/`。
+> 09 模块的核心实现层。单静态库 `mod_operatorlib`（core+calibration+scanning 合建）。算子规范见 `算子规范.md`，逐算子说明见 `docs/算子说明文档/`。
 
 ```
 09_operatorlib/                         # 命名空间 calib::（3DSCANNER 机械迁入）
@@ -161,6 +159,27 @@ JEAMMWARE260705/
 
 ---
 
+## app/ — 应用入口与装配层（组合根）
+
+产物 `scan_demo.exe`（Qt5 Widgets + Svg/SerialPort + OSG）。app 不实现业务逻辑，只做装配与依赖注入：`AppContext` 拥有全部运行时组件，经 `WorkflowContext` 窄接口注入；分层装配 + 逆序析构。
+
+```
+app/
+├── main.cpp                  # 入口（Qt/OSG/spdlog 初始化 → 装配 AppContext → 全屏主窗口）
+├── AppContext.h/.cpp         # 装配根
+├── MainWindow.h/.cpp         # 主窗口 UI（无边框 "LeadScan K2"）
+├── WorkflowContext.h/.cpp    # 工作流注入窄接口
+├── ScannerWindow.h/.cpp/.ui  # 扫描窗口 UI
+├── stubs/                    # 外部依赖桩头（LEADSCANSeries.h 等 5 个，人工提供；scan_demo 条件构建守卫）
+├── copy_dlls.bat             # POST_BUILD 拷贝 Qt/OSG/OpenCV 运行时 DLL
+├── resources.qrc + resources/icons/  # Qt 资源（三态 SVG 图标）
+└── dark.qss                  # 暗色主题（未登记进 qrc，暂不生效）
+```
+
+详见 `docs/应用层/`（README + 01-入口与启动 / 02-AppContext装配 / 03-MainWindow-UI / 04-构建与依赖）。
+
+---
+
 ## factory_calib/ — 厂家标定独立子工程
 
 > ⚠ **AI 只读保护区**（见 `factory_calib/AGENTS.md`）：除非人工明确指令，AI 不得读取/修改/构建/测试本目录。下述仅作目录索引。
@@ -192,25 +211,31 @@ factory_calib/
 
 ```
 docs/
-├── 流水线/              # 三条流水线独立完整描述 + README 索引
+├── 流水线/            # 三条流水线独立完整描述 + README 索引
 │                        #   客户端标定 / 客户端扫描 / 03-厂家标定(factory_calib)
-├── 模块功能/            # 11 业务模块功能细化（01-11 各一文档），索引见根 模块功能目录.md
-├── 算子说明文档/         # 46 份算子/渲染组件说明（A–K 模板），自带索引 算子目录.md，
+│                        #   另有并行调度方案 2 份（扫描并行调度 / 姿态判断并行调度）
+├── 模块功能/          # 11 业务模块功能文档（01-标定工作流 … 11-安装部署），索引见根 模块功能目录.md
+├── 算子说明文档/       # 46 份算子/渲染组件说明（A–K 模板），自带索引 算子目录.md，
 │                        #   分 core/(19) calibration/(17) scanning/(7) display/(3)
-├── architecture/        # 架构设计文档
-├── plans/               # 实施计划 / 设计说明（YYYY-MM-DD-<topic>）
-└── 开发需要的信息/       # 大恒 Galaxy SDK 文档（C++接口为核心）+ 相机(VE2S-301-125U3MC-S)数据手册
+├── 应用层/            # app/ 核心要点 5 份（README / 01-入口与启动 / 02-AppContext装配 /
+│                        #   03-MainWindow-UI / 04-构建与依赖）
+├── 共享内核/          # base/ 通俗说明（README）
+├── plans/             # 实施计划存档（当前已清空，历史方案文档已删）
+└── 开发需要的信息/     # 大恒 Galaxy SDK 文档（C++接口为核心）+ 相机(VE2S-301-125U3MC-S)数据手册
+                         #   + 下位机和按键/（协议/按键资料）
 ```
 
 ---
 
 ## 构建速查
 
-**配置**（根 `CMakeLists.txt`）：C++17 / CUDA 17 / `CMAKE_CUDA_ARCHITECTURES=75;86;87` / nvcc pin v12.6 / `/MD(D)` CRT。
+**配置**（根 `CMakeLists.txt`）：C++17 / CUDA 17 / `CMAKE_CUDA_ARCHITECTURES=75;86;87` / nvcc pin v12.6 / `/MD(D)` CRT；`BUILD_UI=OFF`（暂缓）、`BUILD_GLOBAL_OPTIM=ON`。构建辅助脚本在 `cmake/`。
 
-**依赖**：OpenCV 4.13（Release `C:/opencv-cuda-4.13.0` / Debug 自建 `C:/opencv-cuda-4.13.0-debug`）、Eigen 3.4.1；Ceres 2.2 / spdlog 1.15 / nlohmann_json / gtest 经 FetchContent（github 被封时 `-DJMW_GH_MIRROR=https://ghfast.top/`）。
+**依赖**：OpenCV 4.13（Release `C:/opencv-cuda-4.13.0` / Debug 自建 `C:/opencv-cuda-4.13.0-debug`）、Eigen 3.4.1（`C:/devlibs/eigen-3.4.1-install`）、**Qt 5.15.2**（`C:/devlibs/Qt-5.15.2-msvc2019_64`；scan_demo 需 Core/Gui/Widgets/OpenGL/Svg/SerialPort）、**OSG**（`C:/devlibs/osg-install`）；Ceres 2.2 / spdlog 1.15 / nlohmann_json / gtest 经 FetchContent（github 被封时 `-DJMW_GH_MIRROR=https://ghfast.top/`）。路径详见 `环境配置汇总.md`。
 
-> ⚠ **现有 `build/` 是 Debug-only**（`CMAKE_CONFIGURATION_TYPES=Debug` + Debug OpenCV）。直接在 `build/` 跑 Release 会报 `MSB8013`。Release 请用独立目录 `build-rel`。
+**scan_demo 条件构建**：仅当 Qt5 Svg/SerialPort 齐备 **且** `app/stubs/LEADSCANSeries.h` 存在时构建，否则跳过以保"库+测试"构建绿。
+
+> ⚠ 现有 `build/` 是 **Debug-only**（`CMAKE_CONFIGURATION_TYPES=Debug` + Debug OpenCV）。直接在 `build/` 跑 Release 会报 `MSB8013`。Release 请用独立目录 `build-rel`。
 
 **Release**（独立目录，实测 43/43 绿）：
 ```powershell
@@ -238,12 +263,12 @@ ctest --test-dir build -C Debug --output-on-failure
 |---|---|
 | `CMakeLists.txt` | 工程构建配置（C++/CUDA 标准、依赖、FetchContent） |
 | `框架整体.md` | 框架整体设计（01.4 框架图：5 层主架构 + 部署期 wrapper + 横切） |
-| `架构设计-简洁版.md` | 三维扫描仪软件架构设计（简洁版，围绕「功能·性能·安全」三角） |
+| `framework优化.md` | framework/ 退役决策与归属迁移记录（2026-08） |
 | `模块功能目录.md` | `docs/模块功能/` 下 11 模块文档的目录与简介索引（仅导航，非代码改动基准） |
 | `数据管理原则.md` | 数据归属原则：L1–L4 分类 + 判定规则（现状/修改目标/待增加见 `docs/模块功能/06-文件管理.md`） |
 | `算子规范.md` | 算子契约 + 工程集成规范（v2.0，§0–§7） |
 | `算子目录.md` | 算子说明文档目录索引（导航至 `docs/算子说明文档/` 下 46 份说明） |
 | `算子提炼模板.md` | 算子开发参考卡模板（v1.0，12 段落） |
 | `开发进度.md` | AI 会话接力状态（当前快照 + 会话日志 + 关键决策，含限读规则） |
+| `环境配置汇总.md` | 本机开发环境（VS/CUDA/OpenCV/Qt/OSG/三方库路径） |
 | `AGENTS.md` | 本文件（AI 查阅入口 / 工程目录地图） |
-| `环境配置汇总.md` | 本机开发环境（VS/CUDA/OpenCV/三方库路径） |
