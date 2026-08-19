@@ -173,19 +173,30 @@ Scanner::Result CalibComputePipeline::start() {
         return Scanner::Result::fail("start() requires attachSession(...) first");
     if (worker_.joinable()) worker_.join();
 
-    auto token = std::make_unique<CancelToken>();
-    cancelToken_ = std::move(token);        // 管道持有（worker 先 join 后才重建/析构）
+    auto token = std::make_shared<CancelToken>();
+    cancelToken_ = token;                   // 管道持有；worker 捕获共享所有权（保活至线程退出）
     PostureSessionData snapshot = session_; // 快照（主线程不再动会话）
     running_.store(true);                   // 先置位（runLocked 的 guard 负责清位）
-    CancelToken& tokenRef = *cancelToken_;
-    worker_ = std::thread([this, &tokenRef, snap = std::move(snapshot)]() mutable {
-        runLocked(snap, nullptr, tokenRef);
-    });
+    try {
+        worker_ = std::thread([this, token, snap = std::move(snapshot)]() mutable {
+            runLocked(snap, nullptr, *token);
+        });
+    } catch (...) {                         // 线程构造失败：复位标志/令牌，不留卡死态
+        running_.store(false);
+        cancelToken_.reset();
+        return Scanner::Result::fail("calib compute failed to start worker thread");
+    }
     return Scanner::Result::ok("calib compute started (background run)");
 }
 
 void CalibComputePipeline::stop() {
-    if (cancelToken_) cancelToken_->cancel();
+    // 锁内取令牌共享引用再 cancel：与 start() 重建令牌互斥（消 UAF 窗口）
+    std::shared_ptr<CancelToken> token;
+    {
+        std::lock_guard<std::mutex> lock(runMutex_);
+        token = cancelToken_;
+    }
+    if (token) token->cancel();
     std::thread local;
     {
         std::lock_guard<std::mutex> lock(runMutex_);

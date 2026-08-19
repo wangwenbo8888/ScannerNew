@@ -347,7 +347,7 @@ Scanner::Result LaserChain::run(const PostureSessionData& in,
         if (cancelled())
             return Scanner::Result::fail("laser chain cancelled before start");
 
-        LaserOps ops = deps_.ops;   // 测试注入优先；缺失则真算子
+        LaserOps ops = deps_.ops;   // 测试注入优先；任一缺失→整组换真算子
         if (!ops.front || !ops.back || !ops.pjc || !ops.planeMap ||
             !ops.planeMapTempTable || !ops.laserExtrinsicCompensate)
             ops = makeRealLaserOps();

@@ -103,7 +103,7 @@ private:
     std::mutex runMutex_;                   // run/start 不可重入
     std::thread worker_;                    // start() 后台线程
     std::atomic<bool> running_{false};
-    std::unique_ptr<CancelToken> cancelToken_;   // start/stop 路径令牌（start 重建）
+    std::shared_ptr<CancelToken> cancelToken_;  // start/stop 路径令牌（start 重建；worker 持共享保活）
 };
 
 } // namespace Scanner::pipeline
