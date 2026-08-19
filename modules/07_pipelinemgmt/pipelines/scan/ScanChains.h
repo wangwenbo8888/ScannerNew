@@ -61,6 +61,7 @@ struct ScanFront {
     // —— 激光分区（frontReady() 后仅 gpuChain 激光段写、eFinalize 读）——
 #ifdef JMW_BUILD_CUDA
     std::shared_ptr<GpuPointCloudBlock> laserBlock;   // 空=无激光（A 模式/失败/池耗尽）
+    bool laserTruncated = false;                      // 本帧激光块因池容量截断（降级用）
 #endif
     // —— lane 锚（gpuChain 首帧惰性创建，先于 frontReady()；此后两链只读）——
     std::shared_ptr<ScanLaneOps> ops;

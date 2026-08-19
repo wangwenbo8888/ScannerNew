@@ -153,9 +153,9 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
         if (deps_.laserTable) {
             if (!ops->matchScan->SetTempTable(deps_.laserTable))
                 spdlog::warn("[ScanChains] laser_match_scan 温度表注入失败（空表？）");
-        } else {
+        } else if (cfg_.enableLaser) {
             spdlog::warn("[ScanChains] 未注入温度表，激光匹配将失败");
-        }
+        }                                        // A 模式无表属正常配置，不告警
         ops->recon = std::make_unique<calib::LaserReconstructCuda>();
 #endif
         calib::ImageSplitCPUParams sp;
@@ -224,6 +224,7 @@ ScanChains::Hooks ScanChains::assemble() {
         ScanLaneOps& ops = *front.ops;
         auto stream = cv::cuda::StreamAccessor::wrapStream(guard.stream);
         front.laserBlock.reset();               // 防上帧残留（失败/池耗尽路径）
+        front.laserTruncated = false;           // 同上（截断标志逐帧重置）
 
         // 1) mask_separation L/R（host Mat 入参，算子自上传）
         calib::LaserMarkingSeparationResult sepL, sepR;
@@ -375,6 +376,12 @@ ScanChains::Hooks ScanChains::assemble() {
                         auto src = rc.d_points3d->reshape(3, 1);   // 统一 1×N CV_32FC3
                         int n = std::min<int>(src.cols,
                                               blk->get()->points.cols);  // 池容量裁剪
+                        if (n < src.cols) {
+                            spdlog::warn("[ScanChains] 激光点数 {} 超池块容量 {}，"
+                                         "截断至 {}（降级）",
+                                         src.cols, blk->get()->points.cols, n);
+                            front.laserTruncated = true;
+                        }
                         if (n > 0) {
                             cv::cuda::GpuMat dst = blk->get()->points.colRange(0, n);
                             src.colRange(0, n).copyTo(dst, stream);
@@ -442,8 +449,13 @@ ScanChains::Hooks ScanChains::assemble() {
 #ifdef JMW_BUILD_CUDA
         result.laser = std::move(front.laserBlock);
         front.laserBlock.reset();
-        if (cfg_.enableLaser && !result.laser)
-            result.quality = Scanner::QualityFlag::Degraded;       // 有激光无块→降级
+        // quality 单调降级：仅 Normal 可降为 Degraded（不把 Warning 升级/覆盖已有降级）
+        if (result.quality == Scanner::QualityFlag::Normal) {
+            if (cfg_.enableLaser && !result.laser)
+                result.quality = Scanner::QualityFlag::Degraded;   // 有激光无块→降级
+            else if (front.laserTruncated)
+                result.quality = Scanner::QualityFlag::Degraded;   // 池容量截断→降级
+        }
 #endif
         if (deps_.sink) deps_.sink->push(result);                   // T8：eFinalize 自行 push
         return Result::ok();
