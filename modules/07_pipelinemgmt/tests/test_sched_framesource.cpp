@@ -62,6 +62,23 @@ TEST(GrabLatest, SkipsToLatestWhenLagExceedsThreshold) {
     EXPECT_EQ(src.writePtr(), 20u);
 }
 
+// 语义 2b：GrabLatest 竞态重试分支——落后 10 未超阈值 100（不触发前置跳帧），
+//          但帧 0 在容量 4 环中确定已被覆盖（read(0)=null）→ 走"跳最新重试一次"
+//          路径：取到帧 9、skipped=9（重试路径补记 0..8）、counter=10
+TEST(GrabLatest, RetryOnOverwritten) {
+    SlotRing<Frame> ring(4, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src(ring, 100);         // 阈值宽松：不触发前置跳帧
+    for (uint64_t i = 0; i < 10; ++i) ring.write(mkFrame(i));
+    EXPECT_EQ(ring.read(0), nullptr);               // 前置：帧 0 确定已被覆盖
+    uint64_t counter = 0;
+    size_t skipped = 0;
+    auto f = src.grabLatest(counter, skipped);
+    ASSERT_NE(f, nullptr);
+    EXPECT_EQ(f->id, 9u);                           // 重试跳最新取到帧 9
+    EXPECT_EQ(skipped, 9u);                         // 重试分支补记 0..8 被丢
+    EXPECT_EQ(counter, 10u);
+}
+
 // 语义 3：GrabLatest 空环——无帧返回 nullptr 不崩；计数不动；grabNext 不支持恒 nullptr
 TEST(GrabLatest, EmptyRingReturnsNull) {
     SlotRing<Frame> ring(4);
@@ -165,7 +182,7 @@ TEST(Sequential, TimeoutReturnsNullAndRetriesSameFrame) {
 //         每帧 done() 腾位驱动写侧走完；消费侧 30 帧全到、序号无缺无重
 TEST(Sequential, ConsumesAllWithBackpressureDone) {
     SlotRing<Frame> ring(4, SlotRing<Frame>::WriterMode::Backpressure);
-    SequentialSource<Frame> src(ring, std::chrono::milliseconds(200));
+    SequentialSource<Frame> src(ring, std::chrono::milliseconds(50));
     constexpr uint64_t kTotal = 30;
     std::atomic<uint64_t> written{0};
     std::thread writer([&] {

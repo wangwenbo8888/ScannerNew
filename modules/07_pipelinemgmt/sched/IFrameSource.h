@@ -20,7 +20,12 @@
 //     nextId_ 维护（首个 = claim()），超时/异常不推进（重试仍取同一帧号）。
 //
 // 线程安全：GrabLatest 可多 lane 并发（无共享可变状态，counter 由各 lane
-//   外部持有）；Sequential 设计为单线程顺序消费（姿态链单消费者）。
+//   外部持有）；SequentialSource 设计为单线程顺序消费（姿态链单消费者）；
+//   多 lane 顺序消费须每 lane 一实例（nextId_ 为实例私有状态），claim 帧号
+//   唯一性由 ring.claim() 原子保证。
+//   ⚠ SequentialSource 不得配 Overwrite 环在落后>slots 工况下使用：帧被
+//   覆盖后 read 永久 null 且 nextId_ 不推进，grabNext 将死循环空转（须配
+//   Backpressure 环——写满阻塞写侧，由 done() 腾位保证帧不被覆盖丢失）。
 #include <chrono>
 #include <cstdint>
 #include <memory>
