@@ -99,6 +99,7 @@ target_link_libraries(scan_demo PRIVATE
     mod_operatorlib
     mod_fileio
     mod_calibration
+    mod_pipelinemgmt
     mod_session
     mod_observability
     Qt5::Widgets

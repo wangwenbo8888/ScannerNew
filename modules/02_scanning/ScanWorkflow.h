@@ -1,32 +1,39 @@
 ﻿#pragma once
 // ============================================================================
-// ScanWorkflow.h — 扫描工作流（双模式：纯标记点 / 标记点+激光）
+// ScanWorkflow.h — 扫描工作流（编排/记账壳；帧处理已移交 07 ScanPipeline）
 //
-// CPU 管线（BUILD_CUDA=OFF）:
-//   Stage0: Capture    — 从 FrameBuffer 取帧
-//   Stage1: Preprocess — OpenCV 阈值/形态学生成标记点掩码
-//   Stage2: Marker     — 标记点链: CCL→split→zernike→ellipse→match→reconstruct
-//   Stage3: Laser      — 跳过（CUDA only）
-//   Stage4: Fuse       — laser_cloud_fuse_cpu → PointCloudBuffer
+// P6-T29a（07 文档 §3 修改 1）：旧 scanLoop 单线程五 Stage
+// （Capture/Preprocess/Marker/Laser/Fuse）退役——帧处理路径改为持有
+// Scanner::pipeline::ScanPipeline（07 §1.1-C，会话私有件：每次扫描新建、
+// stop 后不重启），本类只留 IWorkflow 生命周期编排 + 会话记账
+// （SessionService/EventBus/UI 回调）。
 //
-// GPU 管线（BUILD_CUDA=ON，待启用）:
-//   Stage1: mask_separation_cuda
-//   Stage3: steger→undistort→epipolar_interp→laser_match→laser_reconstruct
+// 装配序（start 内）：
+//   ScanConfig（scanMode→enableLaser）→ attachRing（本类持有的 06 SlotRing·
+//   Overwrite 扫描面孔）→ attachCalib（ScanCalibration 注入转接——静态 K/D
+//   过渡契约）→ configure（EventBus 接线）→ start ⇄ pause/resume → stop。
+//
+// TODO(接入期接线，见 07 文档 §3/客户端扫描流水线.md)：
+//   - 08 采集侧：StereoFrame → EnhancedFrame 写入 ring_（FrameBuffer 扫描
+//     路径退役）；当前无真帧源写入——ring_ 空转，07 防御路径保留
+//     （无 ring/无标定时 configure/start 返回 fail，不崩）。
+//   - 06 出口查表：attachCalib 的逐温档 K/D 与激光温度表整表注入
+//     （现静态 K/D + 空表=A 模式可空）。
+//   - 03 渲染：PipelineDeps.sceneFeed（ISceneFeed→OSG 点云/姿态推送；现空）。
+//   - existingMarkers（app 点云仓库高精度先验）装配期注入 ScanConfig。
+//   - 02-⑦ 收尾批算：GlobalOptimObject 消费 pipeline_->obs()（Q5 定案归 02）。
 // ============================================================================
 
 #include "IWorkflow.h"
-#include "Pipeline.h"
 #include "WorkflowContext.h"
-#include "IFrameSink.h"
+#include "SlotRing.h"
+#include "EnhancedFrame.h"
 #include "base/types.h"
-#include <opencv2/core.hpp>
 #include <memory>
 #include <atomic>
-#include <thread>
-#include <mutex>
 
-// 前向声明（全局命名空间）
-namespace calib { class ZernikeEdgeCPU; class EllipseFitCPU; class MarkerMatchCPU; class LaserCloudFuseCPU; }
+// 前向声明（07 流水线对象；定义见 modules/07_pipelinemgmt/pipelines/scan/）
+namespace Scanner::pipeline { class ScanPipeline; }
 
 namespace Scanner::workflow {
 
@@ -42,118 +49,7 @@ struct ScanCalibration {
 };
 
 // ============================================================================
-// ScanFrameResult — 单帧处理结果
-// ============================================================================
-struct ScanFrameResult {
-    std::vector<cv::Point3f> markerPoints3d;
-    std::vector<cv::Point3f> laserPoints3d;
-    std::vector<cv::Point3f> markerNormals;
-    cv::Matx33d R = cv::Matx33d::eye();
-    cv::Vec3d T{0, 0, 0};
-    int markerCount = 0;
-    bool success = false;
-};
-
-// ============================================================================
-// CaptureStage — 从 FrameBuffer 消费帧
-// ============================================================================
-class CaptureStage : public Stage {
-public:
-    explicit CaptureStage(WorkflowContext* ctx);
-    Result process() override;
-    data::FrameData getLatestFrame() const;
-private:
-    WorkflowContext* ctx_;
-    data::FrameData latestFrame_;
-    mutable std::mutex frameMutex_;
-};
-
-// ============================================================================
-// PreprocessStage — CPU 掩码生成（OpenCV 阈值 + 形态学）
-// ============================================================================
-class PreprocessStage : public Stage {
-public:
-    explicit PreprocessStage(WorkflowContext* ctx);
-    Result process() override;
-    void setInput(const data::FrameData& frame) { inputFrame_ = frame; hasInput_ = true; }
-
-    cv::Mat leftMarkerMask;
-    cv::Mat rightMarkerMask;
-
-private:
-    WorkflowContext* ctx_;
-    data::FrameData inputFrame_;
-    bool hasInput_ = false;
-
-    cv::Mat createMarkerMask(const cv::Mat& gray);
-};
-
-//
-// ============================================================================
-// MarkerStage — 标记点链（CCL→split→zernike→ellipse→match→reconstruct）
-// ============================================================================
-class MarkerStage : public Stage {
-public:
-    explicit MarkerStage(WorkflowContext* ctx);
-    ~MarkerStage() override;
-    Result process() override;
-    void setInput(const data::FrameData& frame,
-                  const cv::Mat& leftMask, const cv::Mat& rightMask);
-    void setCalibration(const ScanCalibration& calib) { calib_ = calib; }
-
-    ScanFrameResult result;
-
-private:
-    WorkflowContext* ctx_;
-    data::FrameData inputFrame_;
-    cv::Mat leftMask_, rightMask_;
-    ScanCalibration calib_;
-
-    // 复用算子（避免每帧创建/销毁）
-    std::unique_ptr<::calib::ZernikeEdgeCPU> zernikeOp_;
-    std::unique_ptr<::calib::EllipseFitCPU> ellipseOp_;
-    std::unique_ptr<::calib::MarkerMatchCPU> matchOp_;
-
-    int processCounter_ = 0;  // 隔帧处理计数器
-
-    std::vector<cv::Point2f> detectCenters(const cv::Mat& gray, const cv::Mat& mask);
-};
-
-// ============================================================================
-// LaserStage — 激光链（CUDA only，CPU 模式跳过）
-// ============================================================================
-class LaserStage : public Stage {
-public:
-    explicit LaserStage(WorkflowContext* ctx, ScanMode mode);
-    Result process() override;
-    void setInput(const data::FrameData& frame) { inputFrame_ = frame; }
-private:
-    WorkflowContext* ctx_;
-    ScanMode mode_;
-    data::FrameData inputFrame_;
-};
-
-// ============================================================================
-// FuseStage — 体素融合 → 写 PointCloudBuffer
-// ============================================================================
-class FuseStage : public Stage {
-public:
-    explicit FuseStage(WorkflowContext* ctx);
-    ~FuseStage() override;
-    Result process() override;
-    void addPoints(const std::vector<cv::Point3f>& points,
-                   const cv::Matx33d& R, const cv::Vec3d& T);
-private:
-    WorkflowContext* ctx_;
-    std::vector<cv::Point3f> pendingPoints_;
-    cv::Matx33d pendingR_ = cv::Matx33d::eye();
-    cv::Vec3d pendingT_{0, 0, 0};
-    mutable std::mutex pointsMutex_;
-    std::unique_ptr<::calib::LaserCloudFuseCPU> fuseOp_;
-};
-
-// ============================================================================
-// ScanWorkflow — 扫描工作流（实现 IWorkflow）
+// ScanWorkflow — 扫描工作流（实现 IWorkflow；帧处理移交 07）
 // ============================================================================
 class ScanWorkflow : public IWorkflow {
 public:
@@ -180,17 +76,17 @@ private:
     std::atomic<WorkflowState> state_{WorkflowState::Idle};
     WorkflowCallback callback_;
 
-    std::unique_ptr<CaptureStage>    capture_;
-    std::unique_ptr<PreprocessStage> preprocess_;
-    std::unique_ptr<MarkerStage>     marker_;
-    std::unique_ptr<LaserStage>      laser_;
-    std::unique_ptr<FuseStage>       fuse_;
+    // —— 07 帧处理引擎（会话私有件：start 建、stop 收）——
+    std::unique_ptr<Scanner::pipeline::ScanPipeline> pipeline_;
 
-    std::thread scanThread_;
-    std::atomic<bool> running_{false};
+    // —— 输入环（本类持有的 06 会话件；08 采集侧写入——TODO 接入期）——
+    static constexpr size_t kRingSlots = 16;
+    Scanner::data::SlotRing<Scanner::data::EnhancedFrame> ring_{
+        kRingSlots,
+        Scanner::data::SlotRing<Scanner::data::EnhancedFrame>::WriterMode::Overwrite};
 
-    void scanLoop();
-    void notifyProgress(const std::string& stage, float progress);
+    /// 装配 07 ScanPipeline（attachRing/attachCalib/configure；失败自清理）
+    Result assemblePipeline();
 };
 
 } // namespace Scanner::workflow
