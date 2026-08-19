@@ -19,14 +19,15 @@ public:
     explicit FrameResultQueue(size_t capacity)
         : capacity_(capacity == 0 ? 1 : capacity) {}
 
-    /// 推入元素；队列满时覆盖最旧并计入 dropped（永不阻塞）
+    /// 推入元素；队列满时覆盖最旧并计入 dropped（永不阻塞）。
+    /// 先 push 再判超限（锁内瞬时 capacity+1 外部不可见，语义等价，获强异常保证）
     void push(T item) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (buffer_.size() >= capacity_) {
+        buffer_.push_back(std::move(item));
+        if (buffer_.size() > capacity_) {
             buffer_.pop_front();
             ++dropped_;
         }
-        buffer_.push_back(std::move(item));
         notEmpty_.notify_one();
     }
 

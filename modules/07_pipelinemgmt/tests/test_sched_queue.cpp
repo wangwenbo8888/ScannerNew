@@ -19,8 +19,10 @@ TEST(Queue, OverflowOverwritesOldest) {
     FrameResultQueue<int> q(2);
     q.push(1); q.push(2); q.push(3);          // 1 被覆盖
     EXPECT_EQ(q.dropped(), 1u);
-    EXPECT_EQ(*q.pop(std::chrono::milliseconds(10)), 2);
-    EXPECT_EQ(*q.pop(std::chrono::milliseconds(10)), 3);
+    auto a = q.pop(std::chrono::milliseconds(10));
+    ASSERT_TRUE(a); EXPECT_EQ(*a, 2);
+    auto b = q.pop(std::chrono::milliseconds(10));
+    ASSERT_TRUE(b); EXPECT_EQ(*b, 3);
 }
 TEST(Queue, PushNeverBlocksWhenFull) {
     FrameResultQueue<int> q(2);
