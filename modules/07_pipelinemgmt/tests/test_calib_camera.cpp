@@ -125,6 +125,33 @@ TEST(CameraChainTest, CancelMidway) {
     EXPECT_EQ(fut.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
 }
 
+// —— 3b. 3-4 兑现后取消：不构成失败——run 跑完 3-5 返回 ok、promise/outStereo 有效 ——
+TEST(CameraChainTest, CancelAfterStereoDefined) {
+    SyntheticTruth truth;
+    PostureSessionData session = Scanner::pipeline::synthetic::makeSyntheticSession(25, truth);
+    InitialCalibParams init = Scanner::pipeline::synthetic::makeInitialFromTruth(truth);
+
+    CancelToken cancel;
+    Scanner::pipeline::ProgressCb cb = [&](int percent, const std::string&) {
+        if (percent >= 42) cancel.cancel();       // 42% = promise 已兑现、3-5 起点
+    };
+
+    CameraChain chain;
+    StereoParams stereo;
+    std::promise<StereoParams> toLaser;
+    auto fut = toLaser.get_future();
+    CalibComputeOutput out;
+    auto res = chain.run(session, init, truth.boardPoints3D, stereo, toLaser, out,
+                         cb, cancel);
+
+    EXPECT_TRUE(res.success) << res.message;      // 3-5 纯 CPU 且短：跑完返回 ok 最干净
+    EXPECT_FALSE(stereo.cameraMatrixL.empty());   // outStereo 有效
+    EXPECT_EQ(fut.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_TRUE(out.rectifyTempTable.success);    // 3-5 表仍生成
+    EXPECT_EQ(static_cast<int>(out.rectifyTempTable.table.size()), kExpectedTempEntries);
+    EXPECT_TRUE(out.quality.ok);
+}
+
 // —— 4. 进度：percent 单调不减、≤50（相机半区） ——
 TEST(CameraChainTest, ProgressMonotonic) {
     SyntheticTruth truth;

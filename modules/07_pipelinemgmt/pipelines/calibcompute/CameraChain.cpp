@@ -199,11 +199,12 @@ Scanner::Result CameraChain::run(const PostureSessionData& in,
         sp.P1 = rres.P1.clone();  sp.P2 = rres.P2.clone();
         sp.Q = rres.Q.clone();
         sp.reprojError = reproj;
-        outStereo = sp;                 // 写 outStereo（此后失败不再回滚——3-4 已定案）
-        out.stereo = sp;
-        toLaser.set_value(sp);          // ← promise 兑现：3-4 完成即 set，激光链 4-5 起跟随
+        // 取消点（3-4 后/兑现前——安全失败窗口：promise 未 set，激光链得 broken_promise）
         if (cancelled())
-            return Scanner::Result::fail("camera chain cancelled after 3-4");
+            return Scanner::Result::fail("camera chain cancelled before stereo publish");
+        outStereo = sp;                 // 兑现（写 outStereo + set promise）后取消不再中断：
+        out.stereo = sp;                //   3-5 纯 CPU 且短，跑完返回 ok 最干净
+        toLaser.set_value(sp);          // ← promise 兑现：3-4 完成即 set，激光链 4-5 起跟随
 
         // ===== 旁支 3-5 温度补偿立体矫正参数表 =====
         report(42, "3-5 stereo_rectify_temp_table");
