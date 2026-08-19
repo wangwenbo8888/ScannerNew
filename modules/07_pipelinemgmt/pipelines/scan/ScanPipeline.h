@@ -21,6 +21,10 @@
 // pause/resume：runtime 是 drain 后可 restart 的（T8 用例 8 验证；GpuService 每
 // 周期重建，GPU 流工厂注入一次即续用）；queue/pool/obs/融合累积器全保留，
 // 配准 prevState 锚（ScanChains deps 内）随 chains_ 存续跨 pause 延续。
+// **消费水位持久**：pause 记 runtime.lastCounter()（下一待读帧号），resume 以
+// startCounter 注入重启——已消费帧不重扫（防错误 R/T 重复污染点云与 obs）。
+// **异常停收敛**：runtime 钩子异常即停（自灭）后，isRunning()/pause()/stop()
+// 入口惰性收敛 Faulted + Fault(1604) 一次性上报（Sink）；累积数据保留待 stop 收尾。
 // pause 期间 ring 写入由 08 停——本对象不碰采集。
 //
 // 停止顺序（不丢在飞帧）：runtime.requestStop（lane 停抓新帧）→
@@ -105,13 +109,17 @@ public:
     Scanner::Result resume();                      // runtime 重启（restart 语义）
 
 private:
-    enum class State { Idle, Configured, Running, Paused, Stopped };
+    enum class State { Idle, Configured, Running, Paused, Faulted, Stopped };
 
     std::unique_ptr<PipelineEventSink> makeSink(const PipelineDeps& deps) const;
     sched::SchedConfig scanSchedConfig() const;
+    /// 惰性状态收敛：Running 且 runtime lanes 已全退（正常停不会有此态——只有
+    /// 异常即停/资源故障）→ Faulted + sink Fault(1604) 一次性上报。
+    /// isRunning/pause/stop 入口先调（const：从 const isRunning 惰性触发）
+    void syncState() const;
 
     ScanConfig cfg_;
-    State state_ = State::Idle;
+    mutable State state_ = State::Idle;
 
     // —— 装配输入 ——
     Scanner::data::SlotRing<Scanner::data::EnhancedFrame>* ring_ = nullptr;
@@ -151,6 +159,7 @@ private:
 
     std::atomic<int> fakeStreamSeq_{0};                      // 测试模式假流句柄序号
     bool seeded_ = false;                                    // seed 一次性守卫（start 重试不重复 seed）
+    uint64_t pauseCounter_ = 0;                              // pause 时消费水位（resume 注入）
 };
 
 } // namespace Scanner::pipeline

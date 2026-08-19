@@ -564,3 +564,47 @@ TEST(SchedRuntime, HookExceptionStopsRuntime) {
     EXPECT_LT(elapsedMs, 5000);                       // drain 不挂死
     EXPECT_EQ(live.load(), 0);                        // 流销毁对称（无崩溃）
 }
+
+// 用例 11（T17 审查 I1）：startCounter 注入消费水位初值——写 8 帧、counter=5 起步
+// 只消费 5..7（不重扫 0..4）；lastCounter 返回 drain 后最终水位（=8）；
+// lanesExited 运行中 false / drain 后 true
+TEST(SchedRuntime, StartCounterAndLastCounter) {
+    SlotRing<Frame> ring(8, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src(ring, 64);
+    writeFrames(ring, 8);
+    OutQueue q(16);
+    std::atomic<int> live{0};
+
+    LaneHooks<Frame, Front, Out> hooks;
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                        std::function<void()>) { return true; };
+    hooks.pChain = [](const std::shared_ptr<const Frame>& f, Front&, Out& r) {
+        r.frameId = f->id;
+        return Result::ok();
+    };
+    hooks.eFinalize = [&q](const std::shared_ptr<const Frame>&, Front&, Out& r,
+                           std::future<Result>& fut) {
+        (void)fut.get();
+        q.push(r);
+        return Result::ok();
+    };
+
+    SchedulerRuntime rt;
+    rt.setGpuStreamFactory(fakeFactory(live), fakeDestroyer(live));
+    ASSERT_TRUE(rt.start(baseCfg(1), src, /*sequential=*/false, &q, hooks,
+                         /*startCounter=*/5)
+                    .success);
+    EXPECT_FALSE(rt.lanesExited());                   // lanes 在飞
+    ASSERT_TRUE(waitProcessed(rt, 3));                // 只消费 5/6/7
+    EXPECT_EQ(rt.lastCounter(), 8u);                  // 最终水位=下一待读帧号
+    rt.requestStop();
+    rt.drainAndShutdown();
+    EXPECT_TRUE(rt.lanesExited());                    // lanes 全退
+
+    auto res = drainQueue(q);
+    ASSERT_EQ(res.size(), 3u);
+    std::set<uint64_t> ids;
+    for (auto& o : res) ids.insert(o.frameId);
+    std::set<uint64_t> expect{5, 6, 7};
+    EXPECT_EQ(ids, expect);                           // 帧号恰 5..7，无重扫
+}

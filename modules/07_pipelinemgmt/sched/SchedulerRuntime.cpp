@@ -54,4 +54,12 @@ bool SchedulerRuntime::isRunning() const {
     return running_.load();
 }
 
+uint64_t SchedulerRuntime::lastCounter() const {
+    return lastCounter_.load();
+}
+
+bool SchedulerRuntime::lanesExited() const {
+    return activeLanes_.load() == 0;
+}
+
 } // namespace Scanner::pipeline::sched

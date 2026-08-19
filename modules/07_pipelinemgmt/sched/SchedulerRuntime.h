@@ -96,9 +96,13 @@ public:
     /// sequential=true 用 grabNext（A 姿态顺序反压），false 用 grabLatest（C 扫描跳最新）；
     /// queue 参数预留（见文件头），A 模式可传空。已运行时返回 fail；
     /// drainAndShutdown 后可再次 start（restart）。
+    /// startCounter：共享抓帧计数器初值（消费水位注入——pause/resume 后跳过已消费
+    /// 帧）。语义随面孔：GrabLatest=下一待读帧号（lane 循环推进为已取帧号+1）；
+    /// Sequential=最近已取帧号（源内部 nextId_ 推进）。默认 0=从头消费。
     template<typename TFrame, typename TFront, typename TResult>
     Result start(const SchedConfig& cfg, IFrameSource<TFrame>& source, bool sequential,
-                 FrameResultQueue<TResult>* queue, const LaneHooks<TFrame, TFront, TResult>& hooks);
+                 FrameResultQueue<TResult>* queue, const LaneHooks<TFrame, TFront, TResult>& hooks,
+                 uint64_t startCounter = 0);
 
     /// 置停标志（lane 跑完在飞帧后退出）
     void requestStop();
@@ -109,6 +113,14 @@ public:
 
     /// 四计数快照
     Stats stats() const;
+
+    /// 当前共享抓帧计数器值（每次成功 grab 后随锁更新；drain 后即最终消费水位，
+    /// 供 restart 作 startCounter 注入）
+    uint64_t lastCounter() const;
+
+    /// lanes 是否已全部退出（含"从未 start"的空集语义）——正常 requestStop 停与
+    /// 异常即停均会置位；运行中 false。供上层（ScanPipeline）惰性发现 runtime 自灭
+    bool lanesExited() const;
 
     bool isRunning() const;
 
@@ -130,6 +142,8 @@ private:
     std::atomic<uint64_t> droppedSkips_{0};
     std::atomic<uint64_t> gpuRejects_{0};
     std::atomic<uint64_t> finalizeFails_{0};
+    std::atomic<uint64_t> lastCounter_{0};           // 共享抓帧计数器镜像（随锁单调）
+    std::atomic<int> activeLanes_{0};                // 在飞 lane 数（0=已全退/未启动）
     PCoreBroker broker_;
     std::unique_ptr<GpuSlotService> gpu_;             // 一次性服务：每运行周期重建（支持 restart）
     GpuSlotService::StreamFactory gpuFactory_;        // 可注入（测试假工厂；空=生产默认）
@@ -142,7 +156,8 @@ private:
 template<typename TFrame, typename TFront, typename TResult>
 Result SchedulerRuntime::start(const SchedConfig& cfg, IFrameSource<TFrame>& source, bool sequential,
                                FrameResultQueue<TResult>* /*queue：参数预留，eFinalize 钩子自行 push*/,
-                               const LaneHooks<TFrame, TFront, TResult>& hooks) {
+                               const LaneHooks<TFrame, TFront, TResult>& hooks,
+                               uint64_t startCounter) {
     std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
     if (running_.load()) {
         return Result::fail("SchedulerRuntime::start: already running");
@@ -183,13 +198,15 @@ Result SchedulerRuntime::start(const SchedConfig& cfg, IFrameSource<TFrame>& sou
     droppedSkips_.store(0);
     gpuRejects_.store(0);
     finalizeFails_.store(0);
+    lastCounter_.store(startCounter, std::memory_order_relaxed);   // 消费水位基线（restart 注入）
+    activeLanes_.store(lanes);                        // lane 退出时递减（0=全退）
     stopFlag_.store(false);
     running_.store(true);                             // 置位提前：线程创建前（失败路径回退）
 
     // 抓帧互斥 + 共享计数器：每帧恰送一条 lane（顺序面孔下单 SequentialSource
     // 实例多 lane 也安全；跳最新面孔下多 lane 分工不重复消费）
     auto grabMutex = std::make_shared<std::mutex>();
-    auto sharedCounter = std::make_shared<uint64_t>(0);
+    auto sharedCounter = std::make_shared<uint64_t>(startCounter);
     auto hooksp = std::make_shared<LaneHooks<TFrame, TFront, TResult>>(hooks);
 
     try {
@@ -200,6 +217,7 @@ Result SchedulerRuntime::start(const SchedConfig& cfg, IFrameSource<TFrame>& sou
                 auto front = std::make_shared<TFront>();
                 laneLoop<TFrame, TFront, TResult>(source, sequential, timeout, *hooksp,
                                                   *grabMutex, *sharedCounter, front);
+                activeLanes_.fetch_sub(1, std::memory_order_release);   // 退出即减（异常停可被上层发现）
             });
             auto& t = lanes_.back();
             // 绑 E 核 eMasks 轮转；无 E 核（非 hybrid）不绑；绑核（mask≠0）才提实时优先级
@@ -246,6 +264,8 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
                     frame = source.grabLatest(sharedCounter, skipped);
                     if (skipped > 0) droppedSkips_.fetch_add(skipped);
                 }
+                // 水位镜像（锁内随 counter 单调推进）：drain 后 lastCounter() 即最终值
+                lastCounter_.store(sharedCounter, std::memory_order_relaxed);
             }
             if (!frame) {
                 // sequential：grabNext 内部已阻塞一个超时周期，直接重查 stop；

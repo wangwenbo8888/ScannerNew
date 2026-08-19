@@ -27,6 +27,7 @@ namespace Scanner::pipeline {
 namespace {
 
 constexpr int32_t kEvtLaserOffNoCuda = 1603;   // 无 CUDA：enableLaser 强制关（A 模式降级）
+constexpr int32_t kEvtRuntimeDied = 1604;      // runtime 异常即停/lanes 全退（非用户 stop）
 constexpr size_t kQueueCapacity = 64;          // 输出队列容量（consumer 持续排空，宽裕）
 constexpr int kScanGpuSlots = 2;               // 扫描 GPU 槽（设计 §4.3）
 constexpr int kRenderThrottleFrames = 5;       // 渲染节流（首帧起每 N 帧）
@@ -172,6 +173,19 @@ std::unique_ptr<PipelineEventSink> ScanPipeline::makeSink(const PipelineDeps& de
     return std::make_unique<EventBusEventSink>(deps.eventBus);   // nullptr 安全（no-op）
 }
 
+void ScanPipeline::syncState() const {
+    // Running 且 lanes 全退 = runtime 自灭（用户 stop/pause 路径会先转 Stopped/Paused，
+    // 不会以 Running 态观测到全退）→ 惰性收敛 Faulted + Fault(1604) 一次性上报。
+    // state_ 一经转移不会回到 Running → 上报天然幂等
+    if (state_ == State::Running && runtime_.lanesExited()) {
+        state_ = State::Faulted;
+        if (sink_) {
+            sink_->report(Scanner::QualityFlag::Fault, kEvtRuntimeDied,
+                          "C 扫描流水线异常停（帧钩子异常/资源故障），累积数据保留待 stop 收尾");
+        }
+    }
+}
+
 sched::SchedConfig ScanPipeline::scanSchedConfig() const {
     sched::SchedConfig sc;
     sc.lanes = 0;                                // 自动探测（clamp(min(P-1,E),1,8)）
@@ -186,11 +200,15 @@ sched::SchedConfig ScanPipeline::scanSchedConfig() const {
 // ============================================================================
 Scanner::Result ScanPipeline::configure(const PipelineDeps& deps) {
     if (state_ != State::Idle)
-        return Result::fail("ScanPipeline::configure: 已配置/已运行（每对象恰一次）");
+        return Result::fail("ScanPipeline::configure: 当前态不可再配置（已配置/运行/暂停/"
+                            "异常停/已停止，每对象恰一次）");
     if (testHooksSet_ && !K1_.empty())
         return Result::fail("ScanPipeline::configure: 测试钩子与 attachCalib 互斥");
     if (!testHooksSet_ && K1_.empty())
         return Result::fail("ScanPipeline::configure: 生产模式须先 attachCalib（K/D/W/H）");
+    if (testMarkerFuseSet_ && !testHooksSet_)
+        return Result::fail("ScanPipeline::configure: attachTestFuseAdapters 须配合 "
+                            "attachTestHooks（无假链时假适配器无意义）");
 
     sink_ = makeSink(deps);
 
@@ -276,6 +294,7 @@ Scanner::Result ScanPipeline::start() {
         case State::Idle:     return Result::fail("ScanPipeline::start: 须先 configure");
         case State::Running:  return Result::fail("ScanPipeline::start: 已在运行");
         case State::Paused:   return Result::fail("ScanPipeline::start: 暂停态请用 resume()");
+        case State::Faulted:  return Result::fail("ScanPipeline::start: 已异常停（会话私有件，续扫建新对象）");
         case State::Stopped:  return Result::fail("ScanPipeline::start: 已停止（会话私有件，续扫建新对象）");
         case State::Configured: break;
     }
@@ -328,36 +347,45 @@ Scanner::Result ScanPipeline::start() {
 // stop — 停止顺序见头文件：lane 停抓新帧 → 在飞排空 → consumer 排空队列后退出
 // ============================================================================
 void ScanPipeline::stop() {
-    runtime_.requestStop();                      // 幂等；未 start 过也安全
+    if (state_ == State::Idle) return;            // 未配置：无物可停（保持 Idle 可装配）
+    syncState();                                  // Faulted 一次性上报后再收尾
+    runtime_.requestStop();                       // 幂等；未 start 过也安全
     runtime_.drainAndShutdown();
     if (consumer_) {
         consumer_->requestStop();
-        consumer_->join();                       // drain 语义：排空队列后返回
+        consumer_->join();                        // drain 语义：排空队列后返回
     }
     state_ = State::Stopped;
 }
 
-bool ScanPipeline::isRunning() const { return state_ == State::Running; }
+bool ScanPipeline::isRunning() const {
+    syncState();                                  // 惰性收敛（异常停发现点）
+    return state_ == State::Running;
+}
 
 // ============================================================================
 // pause / resume — 扫描会话控制（⑥ 就绪态再按键回 ③④⑤）
 // ============================================================================
 void ScanPipeline::pause() {
+    syncState();
     if (state_ != State::Running) {
         spdlog::warn("[ScanPipeline] pause: 非运行态（忽略）");
         return;
     }
     runtime_.requestStop();
     runtime_.drainAndShutdown();                 // lane 停抓新帧；在飞帧输出已入队列
+    pauseCounter_ = runtime_.lastCounter();      // 记消费水位（resume 注入，防已消费帧重扫）
     state_ = State::Paused;
     // consumer 保持活着：fusion/obs/pool 与配准 prevState 锚（chains_ 内存续）全保留
 }
 
 Scanner::Result ScanPipeline::resume() {
     if (state_ != State::Paused) return Result::fail("ScanPipeline::resume: 非暂停态");
-    // restart 语义：GpuService 每周期重建（流工厂已注入续用；T8 用例 8 验证）
+    // restart 语义：GpuService 每周期重建（流工厂已注入续用；T8 用例 8 验证）；
+    // startCounter=暂停前水位——GrabLatest 语义"下一待读帧号"，跳过已消费帧
     Hooks hooks = testHooksSet_ ? testHooks_ : chains_->assemble();
-    auto rs = runtime_.start(scanSchedConfig(), *source_, /*sequential=*/false, &queue_, hooks);
+    auto rs = runtime_.start(scanSchedConfig(), *source_, /*sequential=*/false, &queue_, hooks,
+                             pauseCounter_);
     if (!rs.success)
         return Result::fail("ScanPipeline::resume: runtime 重启失败: " + rs.message);
     state_ = State::Running;

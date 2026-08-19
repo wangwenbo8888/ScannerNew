@@ -13,6 +13,7 @@
 #include <future>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -375,4 +376,155 @@ TEST(ScanPipelineTest, ConfigureMissingDeps) {
         ASSERT_TRUE(pipe.configure(PipelineDeps{}).success);
         EXPECT_FALSE(pipe.configure(PipelineDeps{}).success);
     }
+    // e)（审查 Minor3）attachTestFuseAdapters 未配 attachTestHooks → configure 快失败
+    {
+        SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+        ScanPipeline pipe(baseCfg());
+        FakeSeedMarkerFuse mf;
+        pipe.attachRing(ring, 64);
+        pipe.attachTestFuseAdapters(&mf);              // 无假链：无意义组合
+        EXPECT_FALSE(pipe.configure(PipelineDeps{}).success);
+    }
+    // f)（审查 Minor2）stop() 自 Idle 为 no-op：状态不被带偏，仍可正常 configure+start
+    {
+        SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+        ScanPipeline pipe(baseCfg());
+        pipe.attachRing(ring, 64);
+        pipe.attachTestHooks(passthroughHooks(&pipe.outputQueue()));
+        pipe.stop();                                  // Idle 安全网调用
+        ASSERT_TRUE(pipe.configure(PipelineDeps{}).success);   // 仍处可装配态
+        writeFrames(ring, 0, 2);
+        ASSERT_TRUE(pipe.start().success);
+        ASSERT_TRUE(waitUntil([&] { return pipe.obs().frameCount() >= 2; }));
+        pipe.stop();
+    }
+}
+
+// 7（审查 I1）：resume 消费水位持久——dropThreshold=64 大值下 pause→ring 写 3 帧→
+//    resume 从已消费水位续扫（不重扫 0..2）；obs 恰 6 帧、帧号集合恰 0..5
+TEST(ScanPipelineTest, ResumeDoesNotRescan) {
+    SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+    ScanPipeline pipe(baseCfg());
+    pipe.attachRing(ring, 64);
+    pipe.attachTestHooks(passthroughHooks(&pipe.outputQueue()));
+    ASSERT_TRUE(pipe.configure(PipelineDeps{}).success);
+    ASSERT_TRUE(pipe.start().success);
+
+    writeFrames(ring, 0, 3);                          // lag 小（≤lane 数），无跳帧
+    ASSERT_TRUE(waitUntil([&] { return pipe.obs().frameCount() >= 3; }));
+
+    pipe.pause();
+    ASSERT_EQ(waitStableObs(pipe), 3u);               // 在飞帧消费完
+
+    writeFrames(ring, 3, 3);                          // pause 窗口写入 3..5
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(pipe.obs().frameCount(), 3u);           // 窗口内不被处理
+
+    ASSERT_TRUE(pipe.resume().success);
+    ASSERT_TRUE(waitUntil([&] { return pipe.obs().frameCount() >= 6; }));
+    pipe.stop();
+
+    auto snap = pipe.obs().snapshot();
+    ASSERT_EQ(snap.obs.size(), 6u);                   // 无重复重扫（bug 时 0..5 重扫 → 9）
+    std::set<uint64_t> ids;
+    for (const auto& fo : snap.obs) ids.insert(fo.frameId);
+    ASSERT_EQ(ids.size(), 6u);
+    for (uint64_t i = 0; i < 6; ++i) EXPECT_EQ(ids.count(i), 1u);   // 无丢失
+}
+
+// 8（审查 I1）：两轮 pause/resume——无重复无丢失（水位跨轮持久）
+TEST(ScanPipelineTest, DoublePauseResumeCycle) {
+    SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+    ScanPipeline pipe(baseCfg());
+    pipe.attachRing(ring, 64);
+    pipe.attachTestHooks(passthroughHooks(&pipe.outputQueue()));
+    ASSERT_TRUE(pipe.configure(PipelineDeps{}).success);
+    ASSERT_TRUE(pipe.start().success);
+
+    // 轮 1：0..1 → pause → 写 2..3 → resume
+    writeFrames(ring, 0, 2);
+    ASSERT_TRUE(waitUntil([&] { return pipe.obs().frameCount() >= 2; }));
+    pipe.pause();
+    ASSERT_EQ(waitStableObs(pipe), 2u);
+    writeFrames(ring, 2, 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(pipe.obs().frameCount(), 2u);
+    ASSERT_TRUE(pipe.resume().success);
+    ASSERT_TRUE(waitUntil([&] { return pipe.obs().frameCount() >= 4; }));
+
+    // 轮 2：pause → 写 4..5 → resume
+    pipe.pause();
+    ASSERT_EQ(waitStableObs(pipe), 4u);
+    writeFrames(ring, 4, 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(pipe.obs().frameCount(), 4u);
+    ASSERT_TRUE(pipe.resume().success);
+    ASSERT_TRUE(waitUntil([&] { return pipe.obs().frameCount() >= 6; }));
+    pipe.stop();
+
+    auto snap = pipe.obs().snapshot();
+    ASSERT_EQ(snap.obs.size(), 6u);
+    std::set<uint64_t> ids;
+    for (const auto& fo : snap.obs) ids.insert(fo.frameId);
+    ASSERT_EQ(ids.size(), 6u);
+    for (uint64_t i = 0; i < 6; ++i) EXPECT_EQ(ids.count(i), 1u);
+}
+
+// 9（审查 I2）：钩子异常→runtime 自灭（无人 drain）→isRunning() 惰性收敛 false +
+//    Fault(1604) 一次性上报；随后 stop() 正常收尾
+TEST(ScanPipelineTest, HookExceptionAutoStops) {
+    Scanner::infra::EventBus bus;
+    std::atomic<int> faults{0};
+    bus.subscribe(Scanner::EventType::FaultOccurred, [&](const Scanner::Event& e) {
+        if (e.param1 == 1604) ++faults;
+    });
+
+    SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+    ScanPipeline pipe(baseCfg());
+
+    // 抛异常假链：eFinalize 首帧即抛（runtime 顶层捕获→异常即停）
+    ScanPipeline::Hooks h;
+    h.gpuChain = [](sched::GpuSlotService::SlotGuard&,
+                    const std::shared_ptr<const EnhancedFrame>&, ScanFront&,
+                    std::function<void()>) { return true; };
+    h.pChain = [](const std::shared_ptr<const EnhancedFrame>&, ScanFront&, FrameResult&) {
+        return Result::ok();
+    };
+    h.eFinalize = [](const std::shared_ptr<const EnhancedFrame>&, ScanFront&, FrameResult&,
+                     std::future<Result>&) -> Result {
+        throw std::runtime_error("eFinalize boom");
+    };
+    pipe.attachRing(ring, 64);
+    pipe.attachTestHooks(std::move(h));
+
+    PipelineDeps deps;
+    deps.eventBus = &bus;
+    ASSERT_TRUE(pipe.configure(deps).success);
+    writeFrames(ring, 0, 1);
+    ASSERT_TRUE(pipe.start().success);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(waitUntil([&] { return !pipe.isRunning(); }));   // 惰性收敛（每次查询触发）
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - t0)
+                               .count();
+    EXPECT_LT(elapsedMs, 2000);                       // runtime 自灭后很快被发现
+    EXPECT_GE(faults.load(), 1);                      // Fault(1604) 已上报
+    EXPECT_FALSE(pipe.isRunning());                   // 稳定 false（幂等，不重复上报）
+
+    pipe.stop();                                      // Faulted 态正常收尾不挂死
+    EXPECT_FALSE(pipe.isRunning());
+}
+
+// 10（审查 Minor1）：重复 start → fail（运行中不可重入）
+TEST(ScanPipelineTest, RepeatStartFails) {
+    SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+    ScanPipeline pipe(baseCfg());
+    pipe.attachRing(ring, 64);
+    pipe.attachTestHooks(passthroughHooks(&pipe.outputQueue()));
+    ASSERT_TRUE(pipe.configure(PipelineDeps{}).success);
+    ASSERT_TRUE(pipe.start().success);
+    EXPECT_FALSE(pipe.start().success);               // 已运行 → fail
+    pipe.stop();
+    EXPECT_FALSE(pipe.start().success);               // 已停止（会话私有件）→ fail
 }
