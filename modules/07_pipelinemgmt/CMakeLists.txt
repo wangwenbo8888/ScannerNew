@@ -8,6 +8,7 @@ set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
     pipelines/posture/PostureConfirmTable.cpp
     pipelines/posture/PosturePipeline.cpp
     pipelines/postprocess/PostProcessPipeline.cpp
+    pipelines/postprocess/NormalStage.cpp
     pipelines/scan/FrameObsAccumulator.cpp
     pipelines/scan/FuseConsumer.cpp
     pipelines/scan/ScanChains.cpp
