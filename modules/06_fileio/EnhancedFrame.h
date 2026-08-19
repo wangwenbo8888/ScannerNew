@@ -13,9 +13,11 @@ namespace Scanner::data {
 
 // 标定快照（查表结果）：立体矫正档参数 + 两表命中的温度档索引
 struct CalibSnapshot {
-    cv::Matx33d R1, R2;
-    cv::Matx34d P1, P2;
-    cv::Matx44d Q;
+    cv::Matx33d R1 = cv::Matx33d::zeros();
+    cv::Matx33d R2 = cv::Matx33d::zeros();
+    cv::Matx34d P1 = cv::Matx34d::zeros();
+    cv::Matx34d P2 = cv::Matx34d::zeros();
+    cv::Matx44d Q  = cv::Matx44d::zeros();
     int stereoTier = 0;      // 命中的立体表温度档索引（表空时 -1）
     int laserTier = 0;       // 命中的激光映射表温度档索引（表空时 -1）
 };
