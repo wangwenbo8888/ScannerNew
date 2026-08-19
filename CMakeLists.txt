@@ -27,6 +27,44 @@ if(BUILD_CUDA)
     string(APPEND CMAKE_CUDA_FLAGS " --extended-lambda -DFMT_UNICODE=0")
 endif()
 
+# --- CUDAToolkit pin 到工程锁定的 CUDA（v12.6），防并存 v12.4 串味 ---
+# 背景：FindCUDAToolkit 优先采信 CUDA 语言检测结果（CMAKE_CUDA_COMPILER_TOOLKIT_ROOT），
+# 无视 CUDAToolkit_ROOT；VS 生成器下 CMake 检测可能无视上方 nvcc pin，
+# 自行从注册表解析到 v12.4 并以普通变量 CMAKE_CUDA_COMPILER 遮蔽 CACHE 中的 pin 值
+#（PATH/CUDA_PATH/VS CUDA props 均只有 12.6，实际编译与 OpenCV-CUDA 都是 12.6）。
+# 故用 $CACHE{} 直读上方写入的 pin 原值，反推工具链根并覆写检测变量。
+#（原置 modules/07_pipelinemgmt（P1-T1）；上移至此（T31 技术债）——统一在
+#   enable_language(CUDA) 之后、任何 find_package(CUDAToolkit) 之前解析一次，
+#   保护全部消费方、与目录遍历序无关；模块侧仅剩消费。）
+if(BUILD_CUDA)
+    get_filename_component(_jmw_cuda_root "$CACHE{CMAKE_CUDA_COMPILER}" DIRECTORY)  # .../v12.6/bin
+    get_filename_component(_jmw_cuda_root "${_jmw_cuda_root}" DIRECTORY)            # .../v12.6
+    set(CMAKE_CUDA_COMPILER_TOOLKIT_ROOT "${_jmw_cuda_root}")
+    set(CMAKE_CUDA_COMPILER_LIBRARY_ROOT "${_jmw_cuda_root}/lib/x64")
+    set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES "${_jmw_cuda_root}/include")
+    set(CMAKE_CUDA_HOST_IMPLICIT_LINK_DIRECTORIES "${_jmw_cuda_root}/lib/x64")
+    set(CMAKE_CUDA_COMPILER_TOOLKIT_VERSION "")
+    if(EXISTS "${_jmw_cuda_root}/version.json")
+        file(READ "${_jmw_cuda_root}/version.json" _jmw_cuda_ver_json)
+        string(REGEX MATCH "\"version\"[ \t]*:[ \t]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _ "${_jmw_cuda_ver_json}")
+        set(CMAKE_CUDA_COMPILER_TOOLKIT_VERSION "${CMAKE_MATCH_1}")
+    endif()
+    set(CUDAToolkit_ROOT "${_jmw_cuda_root}")
+    unset(CUDAToolkit_DIR CACHE)                 # 防旧缓存残留串味
+    unset(CUDAToolkit_CUPTI_INCLUDE_DIR CACHE)   # 同上：缓存命中会短路按新根的 re-search
+    unset(CUDA_CUDART CACHE)                     # 同上：FindCUDAToolkit 复用 FindCUDA 时代的缓存名
+    find_package(CUDAToolkit REQUIRED)
+    # 守卫：CUDAToolkit 必须解析到 pin 的工具链根，不一致即失败，绝不静默混链
+    cmake_path(IS_PREFIX _jmw_cuda_root "${CUDAToolkit_LIBRARY_ROOT}" _jmw_cudatk_ok NORMALIZE)
+    if(NOT _jmw_cudatk_ok)
+        message(FATAL_ERROR "CUDAToolkit 解析到 ${CUDAToolkit_LIBRARY_ROOT}，与 pin 的 "
+            "${_jmw_cuda_root}（来自 CMAKE_CUDA_COMPILER）不一致，存在 v12.4/v12.6 串味风险")
+    endif()
+    unset(_jmw_cuda_root)
+    unset(_jmw_cudatk_ok)
+    unset(_jmw_cuda_ver_json)
+endif()
+
 # 第三方路径（CACHE，骨架桩不强制 find；算子迁入后启用）
 # OpenCV 有两套：Release 预装包（C:/opencv-cuda-4.13.0，/MD CRT）与 Debug 自建包
 # （C:/opencv-cuda-4.13.0-debug，/MDd CRT + debug_build_guard 符号，与工程 Debug 匹配，
