@@ -30,6 +30,11 @@ Scanner::TimestampMs systemNowMs() {   // 墙钟：上行帧时间戳/心跳（�
 
 } // namespace
 
+namespace {
+template <typename T, size_t N>
+void drainRing(serial::SpscRing<T, N>& ring) { T v; while (ring.pop(v)) {} }
+} // namespace
+
 MCUDriver::MCUDriver(WriteOverride writeOverride)
     : writeOverride_(std::move(writeOverride)), channel_(makeDeps()) {}
 
@@ -64,6 +69,14 @@ bool MCUDriver::writeFrame(const std::string& frame) {
 Scanner::Result MCUDriver::open(const std::string& port) {
     if (open_.load()) return Scanner::Result::ok("MCU已打开");
     applyVersion();
+    // reopen 复位：排空残留上行环 + 清 seq 对账基线/心跳——上一会话数据不串染
+    drainRing(keyRing_);
+    drainRing(statusRing_);
+    drainRing(ackRing_);
+    drainRing(tempRing_);
+    hasTSeq_ = false;
+    lastTSeq_ = 0;
+    lastRx_.store(0, std::memory_order_release);
     if (writeOverride_) {                 // 测试模式：不开真串口、不起 rx 线程
         open_.store(true);
         return Scanner::Result::ok();
@@ -83,7 +96,7 @@ Scanner::Result MCUDriver::close() {
         rxRunning_.store(false);
         rxThread_.join();
     }
-    serial_.close();                      // 阻断中的 ReadFile 以 ABORTED 退出
+    serial_.close();                      // rx 靠 rxRunning_ 退出：read 受 COMMTIMEOUTS 50ms 解堵，join 有界
     if (open_.exchange(false)) spdlog::info("[MCUDriver] 串口已关闭");
     return Scanner::Result::ok();
 }

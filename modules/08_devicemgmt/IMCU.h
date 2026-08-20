@@ -44,7 +44,7 @@ public:
     virtual void setProtocolVersion(Scanner::device::serial::FrameCodec::Version v) = 0; // open 前配
     virtual Scanner::TimestampMs lastRxTime() const = 0;    // 通讯心跳时间戳（设计方案 §4-4）
     virtual uint64_t seqGapCount() const = 0;               // seq 跳变丢帧计数（对账 §6.2-9）
-    virtual void pump() = 0;                                // 逻辑线程调：排空双环→分流回调+onAck
+    virtual void pump() = 0;    // 逻辑线程调：排空 4 环→分流回调+onAck；回调内不得再调 pump/send（短平快铁律）
 };
 
 } // namespace Scanner::hal

@@ -168,3 +168,27 @@ TEST(MCUDriver, V2LegacyEIgnored) {
     d.pump();
     EXPECT_EQ(log.temp + log.key + log.status, 0);
 }
+
+// —— 9. ReopenDrainsRings：close 前未消费的环残留经 reopen 排空、对账基线/
+//      心跳复位——上一会话数据不得串染下一会话 ——
+TEST(MCUDriver, ReopenDrainsRings) {
+    FrameLog io;
+    MCUDriver d([&](const std::string& f) { return io.write(f); });
+    d.setProtocolVersion(FCodec::Version::V3);
+    FCodec enc(FCodec::Version::V3);
+    UplinkLog log;
+    d.setUplink(log.uplink());
+
+    d.open("");
+    d.testInjectRaw(enc.encode("KM1,1234", 1));
+    d.pump();
+    EXPECT_EQ(log.key, 1);                          // 正常收到
+
+    d.testInjectRaw(enc.encode("KU1,2000", 2));     // 残留（未 pump 即关）
+    EXPECT_GT(d.lastRxTime(), 0u);
+    d.close();
+    d.open("");
+    EXPECT_EQ(d.lastRxTime(), 0u);                  // 心跳复位
+    d.pump();                                       // 残留已被 open 排空
+    EXPECT_EQ(log.key, 1);                          // 无任何回调再触发
+}

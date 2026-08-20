@@ -38,30 +38,9 @@ void HardwareMonitor::monitorLoop() {
         auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-        // 1. MCU 温度（TODO(T16): 升级 HardwareMonitor 接新 IMCU——温度经 McuUplink
-        //    上行、心跳经 lastRxTime；本段暂不查 MCU）
-        if (mcu_) {
-            const double mcuTemp = 0.0;
-
-            if (stateCache_) {
-                data::DeviceStateInfo info;
-                info.deviceId = "MCU";
-                info.deviceType = "MCU";
-                info.state = (camera_ && camera_->isOpen()) ? DeviceState::Connected
-                                                            : DeviceState::Offline;
-                info.temperature = mcuTemp;
-                info.timestamp = ts;
-                stateCache_->pushState(info);
-            }
-
-            if (eventBus_ && mcuTemp > 0.0) {
-                Event evt;
-                evt.type = EventType::TemperatureUpdate;
-                evt.param1 = static_cast<int64_t>(mcuTemp * 100);
-                evt.timestamp = ts;
-                eventBus_->publish(evt);
-            }
-        }
+        // 1. MCU（TODO(T16): 接新 IMCU 后恢复 MCU 行（心跳/状态/温度）——垫片期
+        //    不推 MCU 状态行：无真实数据源，推 0 温/借相机判态属错误状态；
+        //    读方（DeviceStateCache.getState）对未写设备返回默认 Offline/0.0，兼容）
 
         // 2. 相机温度 + 帧率
         if (camera_) {
