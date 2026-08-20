@@ -91,6 +91,20 @@ enum class ScanMode : uint8_t {
     MarkerPlusLaser = 1
 };
 
+// 健康指标快照（08 侧采集 / 10 侧消费；字段对齐 08 文档差距清单）
+struct HealthMetrics {
+    double cpuTempC{-1.0};      // CPU 温度 ℃
+    double cpuPercent{-1.0};    // CPU 占用 %（仅记录）
+    double gpuMemPercent{-1.0}; // GPU 显存 %
+    double gpuTempC{-1.0};      // GPU 温度 ℃
+    double memPercent{-1.0};    // 内存水位 %
+    double diskFreeGB{-1.0};    // 磁盘剩余 GB
+    double captureFps{-1.0};    // 采集帧率
+    double processFps{-1.0};    // 处理帧率
+    double dropRate{-1.0};      // 丢帧率 %
+    int64_t timestampMs{0};     // -1=未知/未采
+};
+
 enum class EventType : uint16_t {
     DeviceConnected = 0x0100,
     DeviceDisconnected = 0x0101,
@@ -112,6 +126,17 @@ enum class EventType : uint16_t {
     SessionSaved = 0x0502,
 
     StateChanged = 0x0600,
+
+    // —— mod10 可观测性扩展（2026-08-20 设计方案 §9）——
+    CalibStarted        = 0x0204,
+    CalibFinished       = 0x0205,
+    PostProcessStarted  = 0x0206,
+    PostProcessFinished = 0x0207,
+    SystemReady         = 0x0601,
+    CommandRejected     = 0x0602,
+    SelfCheckPassed     = 0x0402,
+    LedControl          = 0x0302,   // param1: 0=灭 1=红 2=绿
+    HealthReport        = 0x0303,   // param1: 0=正常 1=降级摘要码
 
     UserDefined = 0x1000
 };
