@@ -118,6 +118,9 @@ bool StateMachine::canOperate(const std::string& operation) const {
         operation == "postprocess" || operation == "edit") {
         return s == SystemState::Standby;
     }
+    if (operation == "scanning") {
+        return s == SystemState::ScanMarker || s == SystemState::ScanMarkerLaser;
+    }
     return false;
 }
 

@@ -30,10 +30,11 @@ public:
 
     struct Spec {
         std::string name;
-        std::string gateOp;        // canOperate 操作名；""=不查门禁（内部命令如 system_ready）
+        std::string gateOp;        // canOperate 操作名；""=跳过门禁（纯点火型内部命令）；
+                                   //   纯触发型（started=0&&finished≠0）必配，registerCommand 校验
         EventType startedEvent{kNoEvent};  // kNoEvent=触发型不切态（finish_scan 型）；非 0=切态事件
-        SystemState startedTo{};   // 调试/文档用（实际目标由状态机矩阵定）
-        EventType finishedEvent{kNoEvent}; // notifyCompleted 切态事件；kNoEvent=无切态（system_ready 型）
+        EventType finishedEvent{kNoEvent}; // notifyCompleted 切态事件；kNoEvent=无切态（纯点火型）；
+                                           //   切态型（started≠0）必配，registerCommand 校验
         Precondition pre;
         Handler handler;
     };

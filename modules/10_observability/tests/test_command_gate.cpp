@@ -12,6 +12,7 @@
 // ============================================================================
 #include <gtest/gtest.h>
 #include <atomic>
+#include <stdexcept>
 #include <thread>
 #include "CommandGate.h"
 #include "StateMachine.h"
@@ -32,7 +33,6 @@ CommandGate::Spec calibSpec() {
     s.name = "start_calibration";
     s.gateOp = "calibrate";
     s.startedEvent = EventType::CalibStarted;
-    s.startedTo = SystemState::Calibrating; // 调试/文档用
     s.finishedEvent = EventType::CalibFinished;
     return s;
 }
@@ -160,35 +160,40 @@ TEST(Gate, NotifyCompletedSwitchesBack) {
 }
 
 TEST(Gate, ConcurrentSubmitExactlyOneWins) {
-    StateMachine sm; // 不接 bus：并发下 publish 计数无断言意义
-    CommandGate gate(&sm);
-    auto spec = calibSpec();
-    spec.handler = [] { return Result::ok(); };
-    ASSERT_TRUE(gate.registerCommand(spec).success);
-    driveToStandby(sm);
-    constexpr int kThreads = 8;
-    std::atomic<int> okCount{0};
-    std::atomic<bool> go{false};
-    auto racer = [&] {
-        while (!go.load(std::memory_order_acquire)) {}
-        if (gate.submit("start_calibration").success) okCount.fetch_add(1);
-    };
-    std::thread threads[kThreads];
-    for (auto& t : threads) t = std::thread(racer);
-    go.store(true, std::memory_order_release);
-    for (auto& t : threads) t.join();
-    EXPECT_EQ(okCount.load(), 1); // CAS 转态唯一仲裁：败者门禁或切态关被拒
-    EXPECT_EQ(sm.getCurrentState(), SystemState::Calibrating);
+    // 50 轮压 TOCTOU 窗口：每轮新 SM+Gate，S2 起 8 线程同 submit
+    for (int round = 0; round < 50; ++round) {
+        StateMachine sm; // 不接 bus：并发下 publish 计数无断言意义
+        CommandGate gate(&sm);
+        auto spec = calibSpec();
+        spec.handler = [] { return Result::ok(); };
+        ASSERT_TRUE(gate.registerCommand(spec).success);
+        driveToStandby(sm);
+        constexpr int kThreads = 8;
+        std::atomic<int> okCount{0};
+        std::atomic<bool> go{false};
+        auto racer = [&] {
+            while (!go.load(std::memory_order_acquire)) {}
+            if (gate.submit("start_calibration").success) okCount.fetch_add(1);
+        };
+        std::thread threads[kThreads];
+        for (auto& t : threads) t = std::thread(racer);
+        go.store(true, std::memory_order_release);
+        for (auto& t : threads) t.join();
+        // CAS 转态唯一仲裁：败者门禁或切态关被拒
+        ASSERT_EQ(okCount.load(), 1) << "round=" << round;
+        ASSERT_EQ(sm.getCurrentState(), SystemState::Calibrating) << "round=" << round;
+    }
 }
 
 TEST(Gate, FinishScanOnlyCompletesOnNotify) {
     EventBus bus;
     StateMachine sm(&bus);
     CommandGate gate(&sm, &bus);
-    // finish_scan：触发型（startedEvent=0 不切态），finishedEvent=ScanStopped
+    // finish_scan：触发型（startedEvent=0 不切态），finishedEvent=ScanStopped；
+    // gateOp="scanning"——仅 S4/S5 内合法（触发型必配 gateOp，注册校验）
     CommandGate::Spec fin;
     fin.name = "finish_scan";
-    fin.gateOp = ""; // 触发型在 S4 内提交，不走 S2 门禁
+    fin.gateOp = "scanning";
     fin.startedEvent = static_cast<EventType>(0);
     fin.finishedEvent = EventType::ScanStopped;
     std::atomic<int> fired{0};
@@ -209,6 +214,32 @@ TEST(Gate, FinishScanOnlyCompletesOnNotify) {
     EXPECT_EQ(sm.getCurrentState(), SystemState::Standby);
 }
 
+TEST(Gate, TriggerCommandDeniedOutsideScanningStates) {
+    EventBus bus;
+    StateMachine sm(&bus);
+    CommandGate gate(&sm, &bus);
+    // 触发型命令门禁收紧：gateOp="scanning" 在 S2 拒——非法态 submit 必须被拦
+    CommandGate::Spec fin;
+    fin.name = "finish_scan";
+    fin.gateOp = "scanning";
+    fin.startedEvent = static_cast<EventType>(0);
+    fin.finishedEvent = EventType::ScanStopped;
+    std::atomic<int> fired{0};
+    fin.handler = [&] {
+        fired.fetch_add(1);
+        return Result::ok();
+    };
+    ASSERT_TRUE(gate.registerCommand(fin).success);
+    driveToStandby(sm);
+    EventCounter rej;
+    rej.sub(bus, EventType::CommandRejected);
+    Result r = gate.submit("finish_scan");
+    EXPECT_FALSE(r.success);
+    EXPECT_EQ(fired.load(), 0);                    // 未点火
+    EXPECT_EQ(sm.getCurrentState(), SystemState::Standby); // 态不变
+    EXPECT_EQ(rej.count.load(), 1);
+}
+
 // ---- 酌情补充（目录/收尾口边界）----
 
 TEST(Gate, DuplicateRegistrationRejected) {
@@ -218,16 +249,88 @@ TEST(Gate, DuplicateRegistrationRejected) {
     EXPECT_FALSE(gate.registerCommand(calibSpec()).success); // 重名注册 fail
 }
 
-TEST(Gate, NotifyCompletedNoFinishEventFails) {
+TEST(Gate, RegisterComboValidation) {
     StateMachine sm;
     CommandGate gate(&sm);
-    // system_ready 型：finishedEvent=0 → notifyCompleted 无转态可切，fail
+    // a) 纯触发型（started=0 finished≠0）无 gateOp → fail：否则任意态可点火
+    CommandGate::Spec fin;
+    fin.name = "finish_scan";
+    fin.gateOp = "";
+    fin.startedEvent = static_cast<EventType>(0);
+    fin.finishedEvent = EventType::ScanStopped;
+    EXPECT_FALSE(gate.registerCommand(fin).success);
+    // b) 切态型（started≠0）无 finishedEvent → fail：无收尾/回滚，悬死 S3–S6
     CommandGate::Spec sys;
     sys.name = "system_ready";
     sys.gateOp = "";
     sys.startedEvent = EventType::SystemReady;
     sys.finishedEvent = static_cast<EventType>(0);
-    ASSERT_TRUE(gate.registerCommand(sys).success);
-    EXPECT_FALSE(gate.notifyCompleted("system_ready", true).success);
+    EXPECT_FALSE(gate.registerCommand(sys).success);
+}
+
+TEST(Gate, NotifyCompletedNoFinishEventFails) {
+    StateMachine sm;
+    CommandGate gate(&sm);
+    // 纯点火型（双 kNoEvent，过组合校验）：notifyCompleted 无转态可切，fail
+    CommandGate::Spec ping;
+    ping.name = "ping";
+    ping.gateOp = "";
+    ping.startedEvent = static_cast<EventType>(0);
+    ping.finishedEvent = static_cast<EventType>(0);
+    ASSERT_TRUE(gate.registerCommand(ping).success);
+    EXPECT_FALSE(gate.notifyCompleted("ping", true).success);
     EXPECT_FALSE(gate.notifyCompleted("unregistered", true).success); // 未注册同 fail
+}
+
+TEST(Gate, NotifyCompletedTwiceSecondFails) {
+    EventBus bus;
+    StateMachine sm(&bus);
+    CommandGate gate(&sm, &bus);
+    ASSERT_TRUE(gate.registerCommand(calibSpec()).success);
+    driveToStandby(sm);
+    ASSERT_TRUE(gate.submit("start_calibration").success);
+    ASSERT_EQ(sm.getCurrentState(), SystemState::Calibrating);
+    EXPECT_TRUE(gate.notifyCompleted("start_calibration", true).success);
+    ASSERT_EQ(sm.getCurrentState(), SystemState::Standby);
+    // 双重收尾：S2 下 CalibFinished 无边可走 → fail，态保持 S2
+    EXPECT_FALSE(gate.notifyCompleted("start_calibration", true).success);
+    EXPECT_EQ(sm.getCurrentState(), SystemState::Standby);
+}
+
+TEST(Gate, PreAndHandlerExceptionsContained) {
+    // pre 抛 → 拒绝路径不外泄；handler 抛（含非 std::exception）→ 视同同步失败回滚
+    {
+        EventBus bus;
+        StateMachine sm(&bus);
+        CommandGate gate(&sm, &bus);
+        auto spec = calibSpec();
+        spec.pre = []() -> Result { throw std::runtime_error("pre 炸了"); };
+        ASSERT_TRUE(gate.registerCommand(spec).success);
+        driveToStandby(sm);
+        EventCounter rej;
+        rej.sub(bus, EventType::CommandRejected);
+        Result r = gate.submit("start_calibration");
+        EXPECT_FALSE(r.success);
+        EXPECT_NE(r.message.find("precondition 异常"), std::string::npos);
+        EXPECT_EQ(sm.getCurrentState(), SystemState::Standby); // 拒绝后态不变
+        EXPECT_EQ(rej.count.load(), 1);
+    }
+    {
+        EventBus bus;
+        StateMachine sm(&bus);
+        CommandGate gate(&sm, &bus);
+        auto spec = calibSpec();
+        spec.handler = []() -> Result { throw 42; }; // catch(...) 兜底
+        ASSERT_TRUE(gate.registerCommand(spec).success);
+        driveToStandby(sm);
+        EventCounter rej;
+        rej.sub(bus, EventType::CommandRejected);
+        EventCounter started;
+        started.sub(bus, EventType::CalibStarted);
+        Result r = gate.submit("start_calibration");
+        EXPECT_FALSE(r.success);
+        EXPECT_EQ(sm.getCurrentState(), SystemState::Standby); // 回滚 S2
+        EXPECT_EQ(rej.count.load(), 1);
+        EXPECT_EQ(started.count.load(), 0);
+    }
 }

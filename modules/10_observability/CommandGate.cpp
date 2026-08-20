@@ -8,6 +8,7 @@
 #include "CommandGate.h"
 #include "base/EventBus.h"
 #include <spdlog/spdlog.h>
+#include <exception>
 
 namespace Scanner::service {
 
@@ -16,6 +17,17 @@ CommandGate::CommandGate(StateMachine* sm, infra::EventBus* bus) : sm_(sm), bus_
 Result CommandGate::registerCommand(Spec spec) {
     if (spec.name.empty()) {
         return Result::fail("命令名为空");
+    }
+    // 组合校验（两类约束）：
+    //  a) 纯触发型（startedEvent==kNoEvent && finishedEvent!=kNoEvent，如 finish_scan）
+    //     submit 不切态即点火，若无 gateOp 则任意态可提交——必配 gateOp 声明合法态
+    //  b) 切态型（startedEvent!=kNoEvent）必有 finishedEvent：否则 handler 失败无回滚、
+    //     异步完成无收尾，会悬死 S3–S6
+    if (spec.startedEvent == kNoEvent && spec.finishedEvent != kNoEvent && spec.gateOp.empty()) {
+        return Result::fail("触发型命令必须配 gateOp: " + spec.name);
+    }
+    if (spec.startedEvent != kNoEvent && spec.finishedEvent == kNoEvent) {
+        return Result::fail("切态型命令必须配 finishedEvent（收尾/回滚）: " + spec.name);
     }
     std::string name = spec.name; // emplace 败时 spec 已被 move 进临时节点，先留名
     std::lock_guard lock(mtx_);
@@ -35,16 +47,22 @@ void CommandGate::publishRejected(const std::string& name, const std::string& re
 }
 
 Result CommandGate::submit(const std::string& name, int64_t payload) {
-    // ① 查注册：拷贝 Spec 即解锁（handler/pre 执行不许持锁）
+    // ① 查注册：拷贝 Spec 即解锁（handler/pre 执行不许持锁；publish 一律锁外，
+    //   锁内只收集拒绝原因）
     Spec spec;
+    std::string reject;
     {
         std::lock_guard lock(mtx_);
         auto it = cmds_.find(name);
         if (it == cmds_.end()) {
-            publishRejected(name, "未注册");
-            return Result::fail("命令未注册: " + name);
+            reject = "未注册";
+        } else {
+            spec = it->second;
         }
-        spec = it->second;
+    }
+    if (!reject.empty()) {
+        publishRejected(name, reject);
+        return Result::fail("命令未注册: " + name);
     }
 
     // ② 门禁：gateOp 非空才查（内部命令/触发型免检）
@@ -53,9 +71,17 @@ Result CommandGate::submit(const std::string& name, int64_t payload) {
         return Result::fail("门禁拒绝: " + name);
     }
 
-    // ③ 业务前置谓词（如 02 参数就绪）；fail message 透传
+    // ③ 业务前置谓词（如 02 参数就绪）；fail message 透传；异常视同 fail 走拒绝路径，
+    //   不得外泄调用方线程
     if (spec.pre) {
-        Result pr = spec.pre();
+        Result pr;
+        try {
+            pr = spec.pre();
+        } catch (const std::exception& e) {
+            pr = Result::fail(std::string("precondition 异常: ") + e.what());
+        } catch (...) {
+            pr = Result::fail("precondition 异常: unknown");
+        }
         if (!pr.success) {
             publishRejected(name, pr.message);
             return Result::fail(pr.message);
@@ -75,15 +101,28 @@ Result CommandGate::submit(const std::string& name, int64_t payload) {
         switched = true;
     }
 
-    // ⑤ handler 点火（锁外，毫秒级返回）；同步失败且切过态 → ⑥ 回滚收尾态
+    // ⑤ handler 点火（锁外，毫秒级返回）；异常视同同步失败（不得外泄调用方线程）；
+    //   同步失败且切过态 → ⑥ 回滚收尾态
     if (spec.handler) {
-        Result hr = spec.handler();
+        Result hr;
+        try {
+            hr = spec.handler();
+        } catch (const std::exception& e) {
+            hr = Result::fail(std::string("handler 异常: ") + e.what());
+        } catch (...) {
+            hr = Result::fail("handler 异常: unknown");
+        }
         if (!hr.success) {
             if (switched && spec.finishedEvent != kNoEvent) {
-                sm_->transition(spec.finishedEvent); // 回滚 S2（§3.3）
+                const Result rb = sm_->transition(spec.finishedEvent); // 回滚 S2（§3.3）
+                if (rb.success) {
+                    spdlog::info("[CommandGate] 已回滚至 {}", sm_->getStateName());
+                } else {
+                    spdlog::warn("[CommandGate] 回滚失败（态已被并发迁走，落点合法）");
+                }
             }
             spdlog::error("[CommandGate] handler 同步失败{}: {} - {}",
-                          switched ? "（已回滚）" : "", name, hr.message);
+                          switched ? "（已尝试回滚）" : "", name, hr.message);
             publishRejected(name, hr.message);
             return Result::fail(hr.message);
         }
