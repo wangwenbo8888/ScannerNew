@@ -4,10 +4,13 @@
 // 用例 = 设计 §2.3 + §7 单元行 + 二轮 R2-A2 组步链：非阻塞首发 / ACK 销项 /
 // 超时重传 / 3 败 Fault / 表容量 8 逐出 / 查询不挂表 / 组步链 happy+中段败 /
 // v2 降级 / seq 循环 / 未知 ACK / write 失败口径 / v2 组 / 回调重入。
-// 假件：假写（计数+帧序录制+可置失败）、假钟（闭包持有 int64 可推进）。
+// 假件：假写（计数+帧序录制+可置失败+可同步重入）、假钟（闭包持有 int64 可推进）。
 // seq 分配自 0 顺序可预期（nextSeq 契约），ACK 用已知 seq 回填。
 // 口径（钉死）：write 失败=消耗一次尝试（不立即补发，由 tick 推进至 1+maxRetries
 // 发用尽判败）；判败与最后一发同 tick 收口（3 tick→4 write→fail）。
+// 二轮修复钉死：重传写重入（onAck 销项/挪位 + send 扩容）不悬垂；Deps 空容忍
+// 构造 clamp（write 空→恒 false、nowMs 空→恒 0、codec 空→裸载荷）；ackTimeoutMs
+// 钳 ≥1（防 tick 活锁）；空组立即成功。
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -31,13 +34,17 @@ struct Harness {
     int writes = 0;
     bool writeOk = true;
     std::vector<std::string> frames;
+    CommandChannel* target = nullptr;                 // 重入目标（装配后回填）
+    int reenterOnWrite = 0;                           // 第 N 次 write 触发同步重入（0=不触发）
+    std::function<void(CommandChannel&)> reenter;     // 重入动作（write 回调内同步调）
 
     CommandChannel::Deps deps() {
         CommandChannel::Deps d;
         d.codec = &codec;
         d.write = [this](const std::string& f) {
-            writes++;
+            const int n = ++writes;
             frames.push_back(f);
+            if (reenter && target && n == reenterOnWrite) reenter(*target);
             return writeOk;
         };
         d.nowMs = [this] { return clock; };
@@ -398,4 +405,174 @@ TEST(CommandChannel, ReentrancyGuard) {
         ch.tick();
         EXPECT_EQ(h.writes, 5);  // Q2 已 ACK，无重传
     }
+}
+
+// —— 15. 重传写重入销项（Important #1 回归·单条）：tick 重传的第 2 次 write 回调内
+//    同步 onAck(seq) → 不崩溃；该条按 ACK 收口（onDone(true) 一次、无 Fault、
+//    不再计 attempts——后续 tick 无重传无判败）——
+TEST(CommandChannel, RetransmitWriteReentrantAck) {
+    Harness h;
+    CommandChannel ch(h.deps());
+    h.target = &ch;
+    int done = 0;
+    bool ok = false;
+    int faults = 0;
+    ch.onFault = [&](const std::string&, int) { faults++; };
+    ch.send("N11H1", [&](bool o, const std::string&) {
+        done++;
+        ok = o;
+    });
+    h.advance(100);
+    h.reenterOnWrite = 2;  // 第 2 次 write = 首次重传
+    h.reenter = [&](CommandChannel& c) { c.onAck(0); };
+    ch.tick();
+    EXPECT_EQ(h.writes, 2);
+    EXPECT_EQ(done, 1);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(faults, 0);
+    h.advance(1000);
+    ch.tick();
+    EXPECT_EQ(h.writes, 2);
+    EXPECT_EQ(faults, 0);
+}
+
+// —— 16. 重传写重入销项·错位（Important #1 回归）：A/B 双挂表，重传 A 的 write
+//    回调内 onAck(A) → A 销项后 B 前移；B 的 attempts 不得被错位 ++（同 tick B
+//    依序正常重传 1 次；判败前 B 恰 4 次写）——
+TEST(CommandChannel, RetransmitWriteReentrantAckShift) {
+    Harness h;
+    CommandChannel ch(h.deps());
+    h.target = &ch;
+    int faults = 0;
+    int faultAttempts = 0;
+    ch.onFault = [&](const std::string&, int a) {
+        faults++;
+        faultAttempts = a;
+    };
+    int doneB = 0;
+    bool okB = true;
+    ch.send("A", [](bool, const std::string&) {});
+    ch.send("B", [&](bool o, const std::string&) {
+        doneB++;
+        okB = o;
+    });
+    EXPECT_EQ(h.writes, 2);
+    h.advance(100);
+    h.reenterOnWrite = 3;  // 第 3 次 write = A 的首次重传
+    h.reenter = [&](CommandChannel& c) { c.onAck(0); };
+    ch.tick();
+    EXPECT_EQ(h.writes, 4);  // A 重传 + B 依序重传（错位 ++ 会漏 B 这 1 写）
+    EXPECT_EQ(doneB, 0);
+    h.reenterOnWrite = 0;
+    int ticksNeeded = 0;
+    for (int k = 1; k <= 2; ++k) {  // B 再 2 轮重传达 4 尝试 → 3 败
+        h.advance(100);
+        ch.tick();
+        if (doneB) {
+            ticksNeeded = k;
+            break;
+        }
+    }
+    EXPECT_EQ(ticksNeeded, 2);
+    EXPECT_EQ(h.writes, 6);  // A:2 + B:4（1 首发+3 重传）
+    EXPECT_FALSE(okB);
+    EXPECT_EQ(faults, 1);
+    EXPECT_EQ(faultAttempts, 4);
+}
+
+// —— 17. 重传写重入 send·扩容（Important #1 回归）：重传 A 的 write 回调内同步
+//    send(C)（push_back 扩容搬移表内元素）→ A 计数不丢（不重发不漏发），C 正常 ——
+TEST(CommandChannel, RetransmitWriteReentrantSend) {
+    Harness h;
+    CommandChannel ch(h.deps());
+    h.target = &ch;
+    int doneA = 0;
+    bool okA = true;
+    int faults = 0;
+    ch.onFault = [&](const std::string&, int) { faults++; };
+    ch.send("A", [&](bool o, const std::string&) {
+        doneA++;
+        okA = o;
+    });
+    h.advance(100);
+    h.reenterOnWrite = 2;  // 第 2 次 write = A 首次重传
+    h.reenter = [&](CommandChannel& c) { c.send("C", [](bool, const std::string&) {}); };
+    ch.tick();
+    EXPECT_EQ(h.writes, 3);  // A 首发 + A 重传恰 1 + C 首发（悬垂会致 A 漏记重发）
+    ch.onAck(1);             // C（seq=1）销项，隔离后续断言
+    h.reenterOnWrite = 0;
+    int ticksNeeded = 0;
+    for (int k = 1; k <= 2; ++k) {  // A 已 2 尝试，再 2 轮重传 → 3 败
+        h.advance(100);
+        ch.tick();
+        if (doneA) {
+            ticksNeeded = k;
+            break;
+        }
+    }
+    EXPECT_EQ(ticksNeeded, 2);
+    EXPECT_EQ(h.writes, 5);
+    EXPECT_FALSE(okA);
+    EXPECT_EQ(faults, 1);
+    h.advance(100);
+    ch.tick();
+    EXPECT_EQ(h.writes, 5);  // A 已败 C 已销 → 无动作
+}
+
+// —— 18. Deps 空容忍（构造 clamp 钉死）：codec/write/nowMs 全空 → 不抛不崩、
+//    发不挂账、tick 安全（write 空=恒 false、nowMs 空=恒 0、codec 空=裸载荷直发）——
+TEST(CommandChannel, NullDepsClamped) {
+    CommandChannel ch(CommandChannel::Deps{});
+    int done = 0;
+    ch.onFault = [](const std::string&, int) {};
+    EXPECT_NO_THROW({
+        ch.send("N11H1", [&](bool, const std::string&) { done++; });
+        ch.sendFireAndForget("N15V2");
+        ch.tick();
+    });
+    EXPECT_EQ(done, 0);
+}
+
+// —— 19. ackTimeoutMs 钳 ≥1（构造时）：0 注入 → t=0 tick 不重传（未钳则到期时刻
+//    0 触发活锁式连发）；钳后按 1ms 节奏正常推进 ——
+TEST(CommandChannel, AckTimeoutClampedMin1) {
+    Harness h;
+    auto d = h.deps();
+    d.ackTimeoutMs = 0;
+    d.maxRetries = 1;
+    CommandChannel ch(d);
+    int done = 0;
+    bool ok = true;
+    int faults = 0;
+    ch.onFault = [&](const std::string&, int) { faults++; };
+    ch.send("N11H1", [&](bool o, const std::string&) {
+        done++;
+        ok = o;
+    });
+    ch.tick();  // t=0：dueMs=0+1=1 > 0 → 不重传（防活锁）
+    EXPECT_EQ(h.writes, 1);
+    h.advance(1);
+    ch.tick();  // t=1：到期 → 重传+发尽判败同 tick
+    EXPECT_EQ(h.writes, 2);
+    EXPECT_EQ(done, 1);
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(faults, 1);
+}
+
+// —— 20. 空组（#5 钉死）：sendGroup({}, cb) → 立即 cb(true, "") 恰一次，无 write ——
+TEST(CommandChannel, GroupEmpty) {
+    Harness h;
+    CommandChannel ch(h.deps());
+    int done = 0;
+    bool ok = false;
+    std::string payload = "x";
+    ch.sendGroup({}, [&](bool o, const std::string& p) {
+        done++;
+        ok = o;
+        payload = p;
+    });
+    EXPECT_EQ(done, 1);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(payload, "");
+    EXPECT_EQ(h.writes, 0);
 }

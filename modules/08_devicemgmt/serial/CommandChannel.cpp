@@ -5,7 +5,11 @@
 
 namespace Scanner::device::serial {
 
-CommandChannel::CommandChannel(Deps d) : deps_(std::move(d)) {}
+CommandChannel::CommandChannel(Deps d) : deps_(std::move(d)) {
+    if (!deps_.write) deps_.write = [](const std::string&) { return false; };  // 空写=恒失败
+    if (!deps_.nowMs) deps_.nowMs = [] { return 0; };                          // 空钟=恒 0
+    if (deps_.ackTimeoutMs < 1) deps_.ackTimeoutMs = 1;                        // 防 tick 活锁
+}
 
 uint16_t CommandChannel::nextSeq() {
     const uint16_t s = seq_;
@@ -80,10 +84,10 @@ void CommandChannel::onAck(uint16_t ackedSeq) {
 
 void CommandChannel::tick() {
     if (!deps_.reliable) return;
-    for (;;) {
+    for (;;) {  // 表序处理，同 tick 排空全部到期项
         const int64_t now = deps_.nowMs();
         size_t idx = table_.size();
-        for (size_t i = 0; i < table_.size(); ++i) {  // 表序即旧序 → 首个到期=最旧到期
+        for (size_t i = 0; i < table_.size(); ++i) {
             if (now >= table_[i].dueMs) {
                 idx = i;
                 break;
@@ -96,14 +100,20 @@ void CommandChannel::tick() {
             failEntry(std::move(dead));
             continue;
         }
-        PendingCmd& e = table_[idx];
-        writeFrame(e.seq, e.payload);  // 重传（write 失败同计数——尝试已消耗）
-        ++e.attempts;
-        e.dueMs = now + deps_.ackTimeoutMs;
-        if (e.attempts >= 1 + deps_.maxRetries) {  // 最后一发与判败同 tick 收口（3 败）
-            PendingCmd dead = std::move(e);
-            table_.erase(table_.begin() + idx);
-            failEntry(std::move(dead));
+        const uint16_t seq = table_[idx].seq;      // 拷贝字段——write 期间不持表内引用
+        const std::string payload = table_[idx].payload;  //（write 可重入 send/onAck 改表）
+        writeFrame(seq, payload);                  // 重传（write 失败同计数——尝试已消耗）
+        for (size_t i = 0; i < table_.size(); ++i) {  // 按 seq 重取（重入已销项则跳过）
+            if (table_[i].seq != seq) continue;
+            PendingCmd& e = table_[i];             // 此引用不再跨 writeFrame 持有
+            ++e.attempts;
+            e.dueMs = now + deps_.ackTimeoutMs;
+            if (e.attempts >= 1 + deps_.maxRetries) {  // 最后一发与判败同 tick 收口（3 败）
+                PendingCmd dead = std::move(e);
+                table_.erase(table_.begin() + i);
+                failEntry(std::move(dead));
+            }
+            break;
         }
     }
 }

@@ -10,6 +10,8 @@
 // 口径：write 失败=消耗一次尝试（不立即补发，tick 推进）；判败与最后一发同
 // tick 收口（总尝试 1+maxRetries 发用尽即败）；表满逐出最旧=判超时
 // （onDone(false)+onFault(payload, 当次尝试数)）。
+// 构造防护：write 空→钳为恒 false、nowMs 空→钳为恒 0、codec 空→裸载荷直发、
+// ackTimeoutMs 钳 ≥1（防 tick 活锁）；重传写期间不持表内引用（write 可重入改表）。
 // ============================================================================
 #include "serial/FrameCodec.h"
 #include <cstdint>
@@ -36,7 +38,7 @@ public:
 
     explicit CommandChannel(Deps d);
 
-    // 关键命令：挂待确认表+组帧+写——立即返回（挂表序号；v2 恒触发 onDone(true,"未确认"))
+    // 关键命令：挂待确认表+组帧+写——立即返回（v2 恒触发 onDone(true,"未确认"))
     void send(const std::string& payload, DoneCb onDone);
     // 查询类（N15）：发不等不挂表
     void sendFireAndForget(const std::string& payload);
