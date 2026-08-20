@@ -39,6 +39,7 @@ struct MenuState {            // 快照（UI 读）
                               //  08 文档 §4.2.3 v2.0 原文 modeCursor 默认=3 普通交叉）
 };
 
+// 单线程契约：仅逻辑线程调用（KeySemantics 判定后 DeviceManager 逻辑线程 apply）
 class MenuLogic {
 public:
     // apply 一个操作 → 返回是否生效（门禁外的操作 KeySemantics 已拦，这里恒 true；
