@@ -324,11 +324,20 @@ void ScannerWindow::onStartScanner()
         return;
     }
 
-    // 启动 ScanWorkflow（暂时禁用，定位崩溃原因）
-    // if (m_appCtx && m_appCtx->scanWorkflow()) {
-    //     m_appCtx->scanWorkflow()->initialize();
-    //     auto wfR = m_appCtx->scanWorkflow()->start();
-    // }
+    // P5-T15 ①：经统一命令通道点火扫描（门禁 S2→S4/S5；payload=ScanMode 0/1
+    // 只喂状态机 S4/S5 判别——handler 无参拿不到，模式经 setScanMode 先设进
+    // 工作流）。TODO(UI 接入期)：模式选择控件落地后改读控件值；现状固定 A 模式
+    // （纯标记点——激光温度表空=A 模式正常配置）。拒绝时 gate 已发
+    // CommandRejected 事件，此处沿用信息面板轻提示（同 T14 口径）
+    if (m_appCtx && m_appCtx->scanWorkflow()) {
+        const auto mode = Scanner::ScanMode::MarkerOnly;
+        m_appCtx->scanWorkflow()->setScanMode(mode);
+        auto gr = m_appCtx->commandGate()->submit("start_scan",
+                                                  static_cast<int64_t>(mode));
+        if (!gr.success)
+            ui.textEdit_Info->append(QString("扫描启动被拒: %1")
+                .arg(QString::fromStdString(gr.message)));
+    }
 
     // 启动 HardwareMonitor（周期采集温度/帧率）
     if (m_appCtx && m_appCtx->hwMonitor()) {
@@ -345,13 +354,23 @@ void ScannerWindow::onStopScanner()
 {
     if (!m_cam) return;
 
-    // 先停止 ScanWorkflow
+    // P5-T15 ⑦：工作流收尾经 gate 触发（finish_scan：S4/S5 内合法，handler 点火
+    // stop() 合账 → ⑩ onFinished_ 回报 notifyCompleted 切 S2——切态不在 ⑦）。
+    // 门禁拒绝且无活跃会话属预期（如未开扫即点停）；但断连已切 S1 等角落路径下
+    // 工作流可能仍活——兜底直停保证回收（§3.3 不许悬死）
     if (m_appCtx && m_appCtx->scanWorkflow()) {
-        m_appCtx->scanWorkflow()->stop();
-        ui.textEdit_Info->append("扫描管线已停止");
+        auto gr = m_appCtx->commandGate()->submit("finish_scan");
+        const auto ws = m_appCtx->scanWorkflow()->getState();
+        if (gr.success) {
+            ui.textEdit_Info->append("扫描管线已停止");
+        } else if (ws == Scanner::workflow::WorkflowState::Running ||
+                   ws == Scanner::workflow::WorkflowState::Paused) {
+            m_appCtx->scanWorkflow()->stop();
+            ui.textEdit_Info->append("扫描管线已停止（兜底直停——门禁已拒绝）");
+        }
     }
 
-    // 停止 HardwareMonitor
+    // 硬件停采（②③⑥ 采集启停语义=S4/S5 子态不经 gate）：监视器/下位机/相机一律直调
     if (m_appCtx && m_appCtx->hwMonitor()) {
         m_appCtx->hwMonitor()->stop();
     }

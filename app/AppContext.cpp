@@ -63,6 +63,51 @@ void AppContext::initialize() {
                 return calibWf_->start();
             };
         }
+        if (spec.name == "start_scan") {
+            // pre（§9 02-①）：参数就绪谓词——查 06 CalibStore（T14 后 01 已写入）。
+            // TODO(06 差距): 出口查表（逐温档 K/D + 激光温度表）接入后由 02 侧升级判据
+            spec.pre = [this]() {
+                if (!wfCtx_ || !wfCtx_->calibStore() || !wfCtx_->calibStore()->hasData())
+                    return Scanner::Result::fail("标定参数未就绪——请先完成标定");
+                return Scanner::Result::ok();
+            };
+            // 点火语义：CalibStore→ScanCalibration 静态转接（app=组合根做注入，
+            // CalibStore 本身注释「供 CalibrationWorkflow 写入、ScanWorkflow 读取」；
+            // TODO 06 出口查表后逐温档 K/D/激光温度表归 02 侧自查）+ initialize +
+            // start——帧处理归 07 内部线程，handler 毫秒级即返；同步失败（07 装配
+            // 失败等）返回 fail 由 gate 回滚 S2（§3.3）。
+            // ScanMode 不经 gate payload（handler 无参，payload 只喂 transition 的
+            // S4/S5 判别）——UI 入口先 setScanMode 设进工作流（见 ScannerWindow）
+            spec.handler = [this]() {
+                if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
+                auto* cs = wfCtx_ ? wfCtx_->calibStore() : nullptr;
+                if (cs && cs->hasData()) {
+                    Scanner::workflow::ScanCalibration c;
+                    c.cameraMatrixL = cs->cameraMatrixL();
+                    c.cameraMatrixR = cs->cameraMatrixR();
+                    c.distCoeffsL   = cs->distCoeffsL();
+                    c.distCoeffsR   = cs->distCoeffsR();
+                    c.R1 = cs->R1();  c.R2 = cs->R2();
+                    c.P1 = cs->P1();  c.P2 = cs->P2();  c.Q = cs->Q();
+                    c.imageSize = cs->imageSize();
+                    c.valid = true;
+                    scanWf_->setCalibration(c);
+                }
+                auto r = scanWf_->initialize();
+                if (!r.success) return r;
+                return scanWf_->start();
+            };
+        }
+        if (spec.name == "finish_scan") {
+            // 触发型（§3.2 ⑦）：用户点「完成扫描/停止」仅点火收尾——S4/S5→S2 切态
+            // 不在此（⑩ 合账后由 notifyCompleted 执行，02-D3/D4）。现状收尾=stop()
+            // 回收合账；02-⑦ GBA 批算（GlobalOptimObject 消费 pipeline_->obs()）
+            // TODO 接入期——enableFinalBA=false 时收尾语义不变（设计 §3.2 注）
+            spec.handler = [this]() {
+                if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
+                return scanWf_->stop();
+            };
+        }
         commandGate_->registerCommand(std::move(spec));
     }
 
@@ -98,6 +143,11 @@ void AppContext::initialize() {
 
     // === Workflow ===
     scanWf_  = std::make_unique<Scanner::workflow::ScanWorkflow>(wfCtx_.get());
+    // P5-T15 完成回报注入（§9 02-⑩）：工作流 stop() 活跃会话终止回调 → 合账切 S2；
+    // app 是组合根，可同时触达 02 工作流与 10 门禁（02 自身不依赖 10）
+    scanWf_->setOnFinished([this](bool ok) {
+        commandGate_->notifyCompleted("start_scan", ok);
+    });
     calibWf_ = std::make_unique<Scanner::workflow::CalibrationWorkflow>(wfCtx_.get());
     // P5-T14 完成回报注入（§9 01-⑨）：工作流 B 批算线程尾回调 → 合账切 S2；
     // app 是组合根，可同时触达 01 工作流与 10 门禁（01 自身不依赖 10）

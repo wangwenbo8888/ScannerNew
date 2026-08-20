@@ -121,6 +121,10 @@ Result ScanWorkflow::resume() {
 
 Result ScanWorkflow::stop() {
     if (state_ == WorkflowState::Idle) return Result::ok();
+    // 完成回报（P5-T15）只在「活跃会话终止」时恰一次：重复 stop / 停后析构 /
+    // Error 态（start 同步失败已由 gate 回滚 S2）不重报——重报=gate 侧非法转换噪声
+    const bool reportFinish =
+        (state_ == WorkflowState::Running || state_ == WorkflowState::Paused);
     state_ = WorkflowState::Stopping;
     if (pipeline_) {
         pipeline_->stop();          // 停止顺序见 07：lane 停→在飞排空→consumer 排空
@@ -134,6 +138,13 @@ Result ScanWorkflow::stop() {
     }
     spdlog::info("[ScanWorkflow] 已停止（会话记账: 起={}ms 止={}ms 帧={}/融合={}）",
                  sessionStartTime_, sessionEndTime_, sessionFrames_, sessionFusedFrames_);
+    // 合账钩子——app 侧注入调 gate->notifyCompleted 切 S2（§9 02-⑩）。
+    // 02 不依赖 10：经 std::function 回调反向解耦（JMW_LOG 宏头在 10，
+    // 以下按其展开格式直写 spdlog——输出与 JMW_LOG_INFO 等价，§8.2 生命周期）
+    if (reportFinish && onFinished_) {
+        spdlog::info("[02-ScanWorkflow] 扫描会话终止 ok=true（⑩ 合账回报）");
+        onFinished_(true);
+    }
     return Result::ok();
 }
 

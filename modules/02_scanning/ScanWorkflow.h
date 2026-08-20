@@ -29,6 +29,7 @@
 #include "SlotRing.h"
 #include "EnhancedFrame.h"
 #include "base/types.h"
+#include <functional>
 #include <memory>
 #include <atomic>
 
@@ -59,6 +60,12 @@ public:
     void setScanMode(ScanMode mode) { scanMode_ = mode; }
     void setCalibration(const ScanCalibration& calib);
 
+    // —— 完成回报钩子（P5-T15 门禁接线，同 01 T14 模式）——
+    /// 会话终态回报（stop() 活跃会话终止处调用，bool=ok）。
+    /// app 侧注入 lambda 调 CommandGate::notifyCompleted 合账切 S2——
+    /// 依赖方向 app→02/10，02 不 include 10 头（经回调反向解耦）。
+    void setOnFinished(std::function<void(bool)> cb) { onFinished_ = std::move(cb); }
+
     // IWorkflow
     std::string getName() const override { return "ScanWorkflow"; }
     Result initialize() override;
@@ -75,6 +82,7 @@ private:
     ScanCalibration calib_;
     std::atomic<WorkflowState> state_{WorkflowState::Idle};
     WorkflowCallback callback_;
+    std::function<void(bool)> onFinished_;         // 完成回报（app 注入；可空）
 
     // —— 会话记账（D6：归工作流自身；起止时间戳/帧计数，接入期由 07 流水线回调回填）——
     TimestampMs sessionStartTime_   = 0;
