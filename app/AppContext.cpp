@@ -47,8 +47,24 @@ void AppContext::initialize() {
     faultHandler_->start();
 
     commandGate_ = std::make_unique<Scanner::service::CommandGate>(stateMachine_.get(), eventBus_.get());
-    for (auto& spec : Scanner::service::makeDefaultCommandSpecs())
+    // P5-T14 01 标定接线：注册前逐个填 handler（DefaultCommands 返回时全空）
+    auto specs = Scanner::service::makeDefaultCommandSpecs();
+    for (auto& spec : specs) {
+        if (spec.name == "start_calibration") {
+            // 点火语义：initialize（参数校验）+ start 均毫秒级返回——start() 异步启
+            // A 姿态采集（07 收口 watcher 线程），B 批算在专属 calibThread_，handler
+            // 即返不阻塞；同步失败（缺参/A 启动失败）返回 fail 由 gate 回滚 S2（§3.3）。
+            // finish_calibration（触发型）handler 留空：收尾由工作流跑完经 onFinished_
+            // 回调 notifyCompleted 合账（下方 calibWf_ 装配处注入）
+            spec.handler = [this]() {
+                if (!calibWf_) return Scanner::Result::fail("标定工作流未装配");
+                auto r = calibWf_->initialize();
+                if (!r.success) return r;
+                return calibWf_->start();
+            };
+        }
         commandGate_->registerCommand(std::move(spec));
+    }
 
     monitorSourceId_ = faultHandler_->registerSource("Monitor");
     perfMonitor_ = std::make_unique<Scanner::service::PerfMonitor>(eventBus_.get(), faultHandler_.get(), monitorSourceId_);
@@ -83,6 +99,11 @@ void AppContext::initialize() {
     // === Workflow ===
     scanWf_  = std::make_unique<Scanner::workflow::ScanWorkflow>(wfCtx_.get());
     calibWf_ = std::make_unique<Scanner::workflow::CalibrationWorkflow>(wfCtx_.get());
+    // P5-T14 完成回报注入（§9 01-⑨）：工作流 B 批算线程尾回调 → 合账切 S2；
+    // app 是组合根，可同时触达 01 工作流与 10 门禁（01 自身不依赖 10）
+    calibWf_->setOnFinished([this](bool ok) {
+        commandGate_->notifyCompleted("start_calibration", ok);
+    });
     postWf_  = std::make_unique<Scanner::workflow::PostProcessWorkflow>(wfCtx_.get());
 
     spdlog::info("[AppContext] 全部组件装配完成");

@@ -29,6 +29,7 @@
 #include "pipelines/posture/PosturePipeline.h"   // PostureInitialParams/PostureSessionData
 #include <array>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -59,6 +60,12 @@ public:
     void setTargets(std::vector<std::array<double, 16>> targets) { targets_ = std::move(targets); }
     /// 温度补偿后板点（B 相机链 2-6 消费）
     void setBoardPoints(std::vector<cv::Point3f> pts) { boardPoints_ = std::move(pts); }
+
+    // —— 完成回报钩子（P5-T14 门禁接线）——
+    /// 会话终态回报（B 批算线程尾/B 线程创建失败处调用，bool=ok）。
+    /// app 侧注入 lambda 调 CommandGate::notifyCompleted 合账切 S2——
+    /// 依赖方向 app→01/10，01 不 include 10 头（经回调反向解耦）。
+    void setOnFinished(std::function<void(bool)> cb) { onFinished_ = std::move(cb); }
 
     // IWorkflow
     std::string getName() const override { return "CalibrationWorkflow"; }
@@ -98,6 +105,7 @@ private:
 
     std::thread calibThread_;                      // completionHook 异步移交 → B 批算线程
     std::atomic<bool> running_{false};
+    std::function<void(bool)> onFinished_;         // 完成回报（app 注入；可空）
 
     /// 装配参数是否齐备（初始参数/目标表/板点）
     bool paramsReady() const;

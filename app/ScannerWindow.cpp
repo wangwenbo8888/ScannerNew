@@ -5,6 +5,7 @@
 #include "CalibrationWorkflow.h"
 #include "modules/08_devicemgmt/HardwareMonitor.h"
 #include "StateMachine.h"
+#include "CommandGate.h"
 
 #include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
@@ -383,7 +384,6 @@ void ScannerWindow::onCalibrateClicked()
 
     ui.textEdit_Info->append("开始标定流程...");
     auto* calib = m_appCtx->calibWorkflow();
-    calib->initialize();
     calib->setProgressCallback([this](const Scanner::workflow::WorkflowProgress& p) {
         QMetaObject::invokeMethod(this, [this, p]() {
             ui.textEdit_Info->append(QString("[标定] %1 (%2%)")
@@ -404,7 +404,13 @@ void ScannerWindow::onCalibrateClicked()
         });
     }
 
-    calib->start();
+    // P5-T14：经统一命令通道点火（门禁 S2→S3）——initialize+start 移入 gate
+    // handler（毫秒级点火，B 批算在专属线程）；拒绝时 gate 已发 CommandRejected
+    // 事件，UI 统一反馈后续接（此处仅沿用信息面板轻提示）
+    auto r = m_appCtx->commandGate()->submit("start_calibration");
+    if (!r.success)
+        ui.textEdit_Info->append(QString("标定启动被拒: %1")
+            .arg(QString::fromStdString(r.message)));
 }
 
 // ============================================================================

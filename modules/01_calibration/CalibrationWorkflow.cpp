@@ -158,6 +158,9 @@ Result CalibrationWorkflow::startPosture() {
             state_ = WorkflowState::Error;
             running_ = false;
             notifyError(std::string("标定计算线程创建失败: ") + e.what());
+            // 异步失败同样合账（§3.3 不许悬死 S3——会话已终，回报 false）
+            spdlog::info("[01-CalibWorkflow] 标定完成 ok=false（B 线程创建失败）");
+            if (onFinished_) onFinished_(false);
         }
     });
 
@@ -236,6 +239,12 @@ void CalibrationWorkflow::runCompute(Scanner::pipeline::PostureSessionData sessi
         spdlog::info("[CalibWorkflow] 标定参数已写 CalibStore（{}）+ 全量 JSON（{}）",
                      kCalibStorePath, kCalibJsonPath);
     }
+
+    // 完成回报（P5-T14）：合账钩子——app 侧注入调 gate->notifyCompleted 切 S2。
+    // 01 不依赖 10：此处经 std::function 回调反向解耦（JMW_LOG 宏头在 10，
+    // 以下按其展开格式直写 spdlog——输出与 JMW_LOG_INFO 等价，§8.2 生命周期）
+    spdlog::info("[01-CalibWorkflow] 标定完成 ok={}", res.success);
+    if (onFinished_) onFinished_(res.success);
 }
 
 Result CalibrationWorkflow::stop() {
