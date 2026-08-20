@@ -27,10 +27,12 @@
 // 逻辑线程一拍（logicTick，!manualTick 时 10ms 循环）：
 //   drain 任务队列 → pump 上行环 → 按键手势 drain/dispatch → CommandChannel
 //   对账 tick（经 MCUDriver::channelTick——S-T5 口径：pump 不调 tick，归本类驱动）
-//   → Warmup tick → v2 温度断流兜底 → 采集中相机掉线巡检（只报不停）→ 参数快照。
+//   → Warmup tick → v2 温度断流兜底 → 故障巡检（相机掉线边沿/串口无声/K 环溢/
+//   seq 跳变——D-T13 §6.2；温度双警在 onTemp 回调内）→ 参数快照。
 // 切模式 = 命令组步链（sendSeq：前一条 ACK 完成回调里发下一条；任一步 3 败
 // 整组短路+Fault）；组成功回调才擦板（ModeController「命令成功后才落板」）。
-// Fault 出口统一 publishFault：EventBus FaultOccurred + spdlog warn。
+// Fault 出口统一 publishFault：EventBus FaultOccurred + spdlog warn；码表=DevFault
+//（§6.2 十类 → 8 码：#7≡#8 ACK 3 败同源并入 0x0807、#2≡#10 心跳同源并入 0x0802）。
 //
 // 口径裁定（D-T12b，未见计划明文的细节）：
 //   - ctor 第 5 参 serialWriteOverride：MCUDriver 测试缝透传（std::function 直传，
@@ -75,6 +77,28 @@ namespace Scanner::device {
 class MCUDriver;      // 子零件仅前向声明（铁规：不漏零件类型）
 class KeySemantics;
 
+// —— Fault 码表（D-T13；设计方案 §6.2 十类事故 → 8 码，#7≡#8、#2≡#10 合并）——
+// 边沿纪律：每类记「上次触发锚」，恢复（心跳到帧/温度回落/相机重开）清锚允许
+// 再触发——防爆屏；FaultOccurred 事件 param1=码（sourceId=8）。§6.2「只报不动手」。
+enum class DevFault : int64_t {
+    CameraLost      = 0x0801,  // #1 相机掉线：任意时刻 isOpen 翻 false 边沿（原开过
+                               //     才算；不限采集中；只报不停手）
+    SerialSilent    = 0x0802,  // #2≡#10 串口无声=通讯心跳丢失（同源合并）：收到过帧
+                               //     （lastRx>0）后停更超 heartbeatTimeoutMs；帧到清锚
+    TempOverMax     = 0x0803,  // #3 温度爆表：任一路 >tempMaxC；全路回落清锚
+    TempSpike       = 0x0804,  // #4 温度乱跳：相邻 T 帧同路 |Δ|/Δt>tempSpikeC ℃/s；
+                               //     次帧平稳清锚
+    WarmupTimeout   = 0x0805,  // #5 预热超时：WarmupSequence onTimeout（只报不停加热）
+    KeyRingOverflow = 0x0806,  // #6 按键队列挤爆：K 事件环满丢新计数增长（事件型）
+    CmdNoAck        = 0x0807,  // #7≡#8 命令无应答（含 ACK 重传 3 败——v3 下同源合并）：
+                               //     单发/组链中段/自检/加热命令的 3 败收口均归此码，
+                               //     detail 串区分命令名
+    SeqGap          = 0x0808,  // #9 seq 跳变丢帧：T seq 对账计数每拍增量 ≥seqGapWarn
+    // —— 表外既有路径（T12b 占位码 0x0801-0x0807 让位重排至 0x081x 开机段）——
+    CameraOpenFail  = 0x0810,  // open 一条龙相机打开失败（同步倒序关）
+    McuOpenFail     = 0x0811,  // open 一条龙 MCU 串口打开失败（同步倒序关）
+};
+
 struct DeviceConfig {
     std::string serialPort;
     int baud = 115200;
@@ -83,6 +107,11 @@ struct DeviceConfig {
     GestureThresholds keys{};
     WarmupConfig warmup{};
     bool manualTick = false;      // 测试：不起逻辑线程，logicTick() 手动驱动
+    // —— D-T13 故障巡检阈值（§6.2；产线默认值，测试可注入小值换快用例）——
+    int heartbeatTimeoutMs = 10000;  // 串口无声（#2/#10）：距末帧超此值报 0x0802
+    double tempMaxC = 60.0;          // 温度爆表（#3）：任一路超此值报 0x0803
+    double tempSpikeC = 2.0;         // 温度乱跳（#4）：同路相邻 T 帧速率超此 ℃/s 报 0x0804
+    int seqGapWarn = 5;              // seq 跳变（#9）：对账计数每拍增量达此值报 0x0808
 };
 
 class DeviceManager {
@@ -150,6 +179,7 @@ private:
     void logicLoop();                           // 10ms 循环调 logicTick
     void post(std::function<void()> task);      // 跨线程编队（容量 64 满丢新+warn）
     void drainPosts();                          // logicTick 开头排空（逻辑线程属主）
+    void checkTempFaults(const serial::TempFrame& t);  // 温度双警 0x0803/0x0804（onTemp 内）
     void publishFault(int64_t code, const std::string& detail);
     void publishEvent(EventType t, int64_t p1, int64_t p2);
     void dispatchKeyGesture(const KeyGesture&);
@@ -203,7 +233,16 @@ private:
     TimestampMs tempRxTime_ = 0;                // 最近 T 帧到达时刻（v2 兜底判据）
     std::function<void(bool)> warmupDone_;      // 当前预热完成回调（onStable/onTimeout 消费）
     bool standbyActive_ = false;                // MCU 侧待机记账（切模式前退待机判据）
-    bool camFaultLatched_ = false;              // 掉线故障边沿锁（复报抑制）
+    // —— D-T13 故障边沿锚（逻辑线程属主；恢复清锚防复报）——
+    bool camFaultLatched_ = false;              // 0x0801 掉线锁（相机重开清锚）
+    bool camWasOpen_ = false;                   // 0x0801 前置锚：相机曾开（open 成功即置）
+    bool serialSilentLatched_ = false;          // 0x0802 锁（再收到帧清锚）
+    bool tempHotLatched_ = false;               // 0x0803 锁（全路回落清锚）
+    bool tempSpikeLatched_ = false;             // 0x0804 锁（次帧平稳清锚）
+    serial::TempFrame prevTemps_{};             // 0x0804 上一 T 帧（速率分子/分母）
+    bool prevTempsValid_ = false;
+    uint64_t lastKeyDrop_ = 0;                  // 0x0806 上拍 K 环丢新计数（单调累计对齐）
+    uint64_t lastSeqGap_ = 0;                   // 0x0808 上拍 seq 跳变计数（单调累计对齐）
     bool opened_ = false;
     std::atomic<bool> running_{false};
     std::thread logicThread_;

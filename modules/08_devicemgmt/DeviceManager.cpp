@@ -9,7 +9,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <utility>
 
 namespace Scanner::device {
@@ -27,14 +29,9 @@ constexpr int64_t kV2TempFallbackMs = 1200;   // v2 温度断流兜底周期（�
 constexpr int kV2TempQueryCh = 2;             // N15 查询通道（现状单路）
 constexpr size_t kPostQueueCap = 64;          // 编队队列容量（满丢新+warn——Critical #1）
 
-// Fault 码（0x08xx = 08 模块来源段；T13 故障表补全前先立占位）
-constexpr int64_t kFaultCameraOpen = 0x0801;  // 相机打开失败
-constexpr int64_t kFaultMcuOpen = 0x0802;     // MCU（串口）打开失败
-constexpr int64_t kFaultCameraLost = 0x0803;  // 采集中相机掉线（只报不停手）
-constexpr int64_t kFaultCmdFail = 0x0804;     // 单命令 ACK 3 败（N11 启停）
-constexpr int64_t kFaultGroupFail = 0x0805;   // 命令组中段 3 败（切模式）
-constexpr int64_t kFaultHeatCmd = 0x0806;     // 加热命令下发失败
-constexpr int64_t kFaultSelfCheck = 0x0807;   // 开机自检命令失败
+// Fault 码表归头文件 DevFault（D-T13 §6.2：十类 → 8 码 + 0x081x 开机段）；
+// 调用点统一经 code() 取值
+constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 
 std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
     return {
@@ -100,6 +97,8 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
         if (cb) cb(true);
     };
     warmup_->onTimeout = [this] {
+        publishFault(code(DevFault::WarmupTimeout),
+                     "预热超时（只报不停加热——停止机制待协议 §8-13）");
         auto cb = std::move(warmupDone_);
         if (cb) cb(false);
     };
@@ -142,9 +141,10 @@ Result DeviceManager::open() {
         const Result r = camera_->open();
         if (!r.success) {
             camera_.reset();
-            publishFault(kFaultCameraOpen, r.message);
+            publishFault(code(DevFault::CameraOpenFail), r.message);
             return Result::fail("相机打开失败: " + r.message);
         }
+        camWasOpen_ = true;                     // 0x0801 前置锚：open 成功即「曾开」
     }
     // ② MCU（测试 writeOverride 模式=逻辑开，不开真串口不起 rx 线程）
     mcu_->setProtocolVersion(cfg_.protocol);
@@ -155,12 +155,13 @@ Result DeviceManager::open() {
             camera_->close();
             camera_.reset();
         }
-        publishFault(kFaultMcuOpen, rm.message);
+        publishFault(code(DevFault::McuOpenFail), rm.message);
         return Result::fail("MCU 打开失败: " + rm.message);
     }
-    // ③ 上行分流接线（onTemp 温度记账+Warmup 喂入 / onKey→KeyManager / onStatus 记账）
+    // ③ 上行分流接线（onTemp 温度双警+记账+Warmup 喂入 / onKey→KeyManager / onStatus 记账）
     hal::McuUplink up;
     up.onTemp = [this](const serial::TempFrame& t) {
+        checkTempFaults(t);                      // 0x0803 爆表 / 0x0804 乱跳（D-T13）
         lastTemps_ = t;
         tempRxTime_ = t.ts;
         warmup_->onTemperature(t.celsius[0], static_cast<int64_t>(t.ts));
@@ -176,7 +177,7 @@ Result DeviceManager::open() {
     // ⑦ 开机自检 N12 Z1——**起逻辑线程前**发（Critical #1：open 全程单线程；
     //    ACK 经 rx 线程入环、逻辑线程 pump 消化，DoneCb 失败异步 Fault）
     mcu_->enterSelfCheck([this](bool ok, const std::string& p) {
-        if (!ok) publishFault(kFaultSelfCheck, "N12Z1 " + p);
+        if (!ok) publishFault(code(DevFault::CmdNoAck), "N12Z1 " + p);   // 3 败=无应答（#7≡#8）
     });
     // ⑥ 逻辑线程（manualTick=true 测试跳过）
     if (!cfg_.manualTick) {
@@ -201,7 +202,13 @@ Result DeviceManager::close() {
     mcu_->close();
     if (camera_) camera_->close();
     standbyActive_ = false;
-    camFaultLatched_ = false;
+    camFaultLatched_ = false;                   // D-T13：边沿锚/锁全复位（重开=新会话）
+    camWasOpen_ = false;
+    serialSilentLatched_ = false;
+    tempHotLatched_ = false;
+    tempSpikeLatched_ = false;
+    prevTempsValid_ = false;
+    // lastKeyDrop_/lastSeqGap_ 不复位：MCUDriver 计数器单调累计（open 不清），增量对齐
     tempRxTime_ = 0;
     opened_ = false;
     return Result::ok();
@@ -232,16 +239,46 @@ void DeviceManager::logicTick() {
         mcu_->queryTemperature(kV2TempQueryCh);
         tempRxTime_ = static_cast<TimestampMs>(now);
     }
-    // ⑦ 采集中相机掉线巡检（只报不停手；边沿锁防复报，相机恢复即复位）
-    if (mode_->isCapturing() && camera_ && !camera_->isOpen()) {
-        if (!camFaultLatched_) {
-            camFaultLatched_ = true;
-            publishFault(kFaultCameraLost, "采集中相机掉线（不自主停采）");
-        }
-    } else if (!camera_ || camera_->isOpen()) {
-        camFaultLatched_ = false;
+    // ⑦ 相机掉线巡检（#1，D-T13 扩为任意时刻：曾开→isOpen 翻 false 边沿；只报
+    //    不停手；相机重开清锚允许再触发——防爆屏）
+    if (camera_ && camera_->isOpen()) {
+        camWasOpen_ = true;
+        camFaultLatched_ = false;               // 恢复清锚
+    } else if (camera_ && camWasOpen_ && !camFaultLatched_) {
+        camFaultLatched_ = true;
+        publishFault(code(DevFault::CameraLost), "相机掉线（isOpen 翻 false；只报不停手）");
     }
-    // ⑧ 快照刷新（菜单/温度/参数——跨线程读口统一互斥快照；轻拷）
+    // ⑧ 串口无声（#2≡#10 心跳丢失同源）：收到过帧（lastRx>0）后停更超
+    //    heartbeatTimeoutMs → 边沿一次；再收到任何有效帧即恢复清锚
+    if (const int64_t lastRx = static_cast<int64_t>(mcu_->lastRxTime()); lastRx > 0) {
+        if (now - lastRx > static_cast<int64_t>(cfg_.heartbeatTimeoutMs)) {
+            if (!serialSilentLatched_) {
+                serialSilentLatched_ = true;
+                publishFault(code(DevFault::SerialSilent),
+                             "串口无声(心跳丢失) 距末帧 " + std::to_string(now - lastRx) + "ms");
+            }
+        } else {
+            serialSilentLatched_ = false;       // 心跳恢复清锚
+        }
+    }
+    // ⑨ 按键队列挤爆（#6）：K 事件环满丢新计数增长即报（事件型——增量即边沿，
+    //    无需恢复语义；计数单调累计）
+    if (const uint64_t kd = mcu_->keyDropCount(); kd > lastKeyDrop_) {
+        publishFault(code(DevFault::KeyRingOverflow),
+                     "K 事件环满丢新 +" + std::to_string(kd - lastKeyDrop_) +
+                         "（累计 " + std::to_string(kd) + "）");
+        lastKeyDrop_ = kd;
+    }
+    // ⑩ seq 跳变丢帧（#9）：T seq 对账计数每拍增量达 seqGapWarn 即报（事件型；
+    //    v2 无 seq 对账恒 0 不触发）
+    if (const uint64_t sg = mcu_->seqGapCount();
+        sg - lastSeqGap_ >= static_cast<uint64_t>(std::max(1, cfg_.seqGapWarn))) {
+        publishFault(code(DevFault::SeqGap),
+                     "T 帧 seq 跳变 +" + std::to_string(sg - lastSeqGap_) +
+                         "（累计 " + std::to_string(sg) + "）");
+        lastSeqGap_ = sg;
+    }
+    // ⑪ 快照刷新（菜单/温度/参数——跨线程读口统一互斥快照；轻拷）
     refreshParamSnapshot();
     {
         std::lock_guard<std::mutex> lock(menuSnapMtx_);
@@ -301,7 +338,8 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
     cur.send([this, desc = cur.desc, rest = std::move(steps), onDone = std::move(onDone)](
                  bool ok, const std::string& payload) mutable {
         if (!ok) {
-            publishFault(kFaultGroupFail, desc + " 命令组中段失败: " + payload);
+            publishFault(code(DevFault::CmdNoAck),   // 组中段 3 败=无应答（#7≡#8）
+                         desc + " 命令组中段失败: " + payload);
             if (onDone) onDone(false);
             return;
         }
@@ -375,7 +413,7 @@ void DeviceManager::startCaptureOnLogic() {
     if (mode_->isCapturing()) return;            // 幂等：黑板同值直返
     mcu_->startScan([this](bool ok, const std::string& p) {
         if (!ok) {
-            publishFault(kFaultCmdFail, "N11H1 " + p);
+            publishFault(code(DevFault::CmdNoAck), "N11H1 " + p);   // 3 败=无应答（#7≡#8）
             return;
         }
         mode_->setCapturing(true);
@@ -387,7 +425,7 @@ void DeviceManager::stopCaptureOnLogic() {
     if (!mode_->isCapturing()) return;
     mcu_->stopScan([this](bool ok, const std::string& p) {
         if (!ok) {
-            publishFault(kFaultCmdFail, "N11H0 " + p);
+            publishFault(code(DevFault::CmdNoAck), "N11H0 " + p);   // 3 败=无应答（#7≡#8）
             return;
         }
         mode_->setCapturing(false);
@@ -408,7 +446,8 @@ void DeviceManager::startWarmup(int targetC, std::function<void(bool stable)> do
         warmupDone_ = std::move(done);           // 重开=后值胜出（旧未触发作废）
         warmup_->start(targetC);
         mcu_->setHeatTarget(targetC, [this, targetC](bool ok, const std::string& p) {
-            if (!ok) publishFault(kFaultHeatCmd, "N14T" + std::to_string(targetC) + " " + p);
+            if (!ok) publishFault(code(DevFault::CmdNoAck),           // 3 败=无应答（#7≡#8）
+                                  "N14T" + std::to_string(targetC) + " " + p);
         });
     });
 }
@@ -558,6 +597,55 @@ Result DeviceManager::stopFrameStream() {
         if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
     });
     return Result::ok("已编队");
+}
+
+// ============================================================================
+// 温度双警（D-T13 #3/#4；onTemp 回调内即逻辑线程，无跨线程）
+// ============================================================================
+
+void DeviceManager::checkTempFaults(const serial::TempFrame& t) {
+    const int n = std::min<int>(t.channels, 4);
+    // #3 爆表：任一路 >tempMaxC → 边沿一次；全路回落 ≤ 限清锚
+    bool over = false;
+    for (int i = 0; i < n; ++i)
+        if (t.celsius[i] > cfg_.tempMaxC) over = true;
+    if (over && !tempHotLatched_) {
+        tempHotLatched_ = true;
+        std::string d;
+        for (int i = 0; i < n; ++i)
+            if (t.celsius[i] > cfg_.tempMaxC)
+                d += " 路" + std::to_string(i) + "=" + std::to_string(t.celsius[i]) + "C";
+        publishFault(code(DevFault::TempOverMax),
+                     "温度爆表(>" + std::to_string(cfg_.tempMaxC) + "C):" + d);
+    } else if (!over) {
+        tempHotLatched_ = false;                // 全路回落清锚
+    }
+    // #4 乱跳：相邻 T 帧同路 |Δ|/Δt >tempSpikeC ℃/s → 边沿一次；次帧平稳清锚
+    //（dt 下钳 1ms：同拍连注两帧按 1ms 算——测试回灌口径）
+    if (prevTempsValid_) {
+        const int pn = std::min<int>(prevTemps_.channels, 4);
+        const int64_t dtMs =
+            std::max<int64_t>(1, static_cast<int64_t>(t.ts) - static_cast<int64_t>(prevTemps_.ts));
+        bool spiky = false;
+        double worst = 0.0;
+        for (int i = 0; i < n && i < pn; ++i) {
+            const double rate =
+                std::abs(t.celsius[i] - prevTemps_.celsius[i]) * 1000.0 / static_cast<double>(dtMs);
+            if (rate > cfg_.tempSpikeC) {
+                spiky = true;
+                worst = std::max(worst, rate);
+            }
+        }
+        if (spiky && !tempSpikeLatched_) {
+            tempSpikeLatched_ = true;
+            publishFault(code(DevFault::TempSpike),
+                         "温度乱跳: 峰值速率 " + std::to_string(worst) + "C/s");
+        } else if (!spiky) {
+            tempSpikeLatched_ = false;          // 次帧平稳清锚
+        }
+    }
+    prevTemps_ = t;
+    prevTempsValid_ = true;
 }
 
 // ============================================================================

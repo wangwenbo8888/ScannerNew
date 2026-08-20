@@ -1,5 +1,5 @@
 // ============================================================================
-// test_device_manager.cpp — DeviceManager 门面集成测（D-T12b；T1–T12）
+// test_device_manager.cpp — DeviceManager 门面集成测（D-T12b T1–T14 + D-T13 F1–F7）
 //
 // 全链真件（MCUDriver/KeyManager/KeySemantics/MenuLogic/ParamStore/Warmup/
 // ModeController 全真配），假件仅两处边界：
@@ -8,7 +8,8 @@
 //   - FakeCamera：IScannerCamera 全接口空壳，isOpen 可拨（掉线模拟）。
 // manualTick=true：不起逻辑线程，logicTick() 手动驱动；KeyManager/Warmup 时基
 // 用真实系统钟（手势静默窗/预热窗以小阈值+毫秒级 sleep 换确定论）。
-// 用例语义 = 08 设计方案 §7 集成行（T1–T12）。
+// 用例语义 = 08 设计方案 §7 集成行（T1–T12）+ T13/T14（并发冒烟/标定组链）+
+// F1–F7（§6.2 故障 8 码：掉线边沿/心跳/温度双警/预热超时/K 环溢/seq 跳变）。
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -60,7 +61,18 @@ struct EventRecorder {
             if (e.type == EventType::UserDefined && e.param1 == p1) ++n;
         return n;
     }
+    // Fault 按码计数（D-T13：DevFault 码表断言）
+    int fault(int64_t faultCode) const {
+        std::lock_guard<std::mutex> lock(m);
+        int n = 0;
+        for (const auto& e : ev)
+            if (e.type == EventType::FaultOccurred && e.param1 == faultCode) ++n;
+        return n;
+    }
 };
+
+// DevFault 码 → int64（断言简写）
+constexpr int64_t FC(DevFault f) { return static_cast<int64_t>(f); }
 
 // —— 假相机：全接口空壳 + isOpen 可控（T8 掉线模拟）——
 struct FakeCamera : Scanner::hal::IScannerCamera {
@@ -669,4 +681,194 @@ TEST(DeviceManager, T14_EnterCalibrationGroupChain) {
     EXPECT_EQ(mock.count("N16B1"), 5);                         // 前段 4 + 本段 1
     EXPECT_EQ(dm.mode(), DeviceMode::Calibrating);             // 组成功才擦板
     EXPECT_EQ(rec.count(EventType::StateChanged), 1);          // 落板广播恰一次
+}
+
+// ============================================================================
+// D-T13：故障 8 码接线（设计方案 §6.2 十类事故 → 8 码；边沿纪律=恢复清锚）
+// ============================================================================
+
+// —— F1（#1）：非采集中相机掉线 → 0x0801 恰一次；再拍不重复；恢复→再掉→再触发 ——
+TEST(DeviceManager, F1_CameraLostAnyTimeEdge) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    FakeCamera* fake = nullptr;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus,
+                     [&] {
+                         auto c = std::make_unique<FakeCamera>();
+                         fake = c.get();
+                         return c;
+                     },
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+    ASSERT_FALSE(dm.isCapturing());                            // 全程非采集中
+
+    fake->openState = false;                                   // 掉线（曾开→翻 false 边沿）
+    dm.logicTick();
+    EXPECT_EQ(rec.fault(FC(DevFault::CameraLost)), 1);
+    dm.logicTick();                                            // 边沿锁：不重复
+    EXPECT_EQ(rec.fault(FC(DevFault::CameraLost)), 1);
+
+    fake->openState = true;                                    // 恢复 → 清锚
+    dm.logicTick();
+    fake->openState = false;                                   // 再掉 → 再触发
+    dm.logicTick();
+    EXPECT_EQ(rec.fault(FC(DevFault::CameraLost)), 2);
+}
+
+// —— F2（#2≡#10）：心跳超时 → 0x0802 边沿一次；恢复帧清锚后可再触发 ——
+TEST(DeviceManager, F2_HeartbeatTimeoutEdgeAndRecover) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    Kit kit;
+    DeviceConfig cfg = makeCfg();
+    cfg.heartbeatTimeoutMs = 100;                              // 测试注入：100ms 判无声
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    kit.dm = &dm;
+    ASSERT_TRUE(dm.open().success);                            // N12Z1 ACK 回灌 → lastRx>0
+
+    dm.logicTick();                                            // 距末帧 <100ms：无声警
+    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 0);
+    sleepMs(150);
+    dm.logicTick();                                            // 超时 → 边沿一次
+    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
+    dm.logicTick();                                            // 锁定不重复
+    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
+
+    kit.raw("T20.0");                                          // 恢复帧（任意有效帧清锚）
+    dm.logicTick();
+    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
+    sleepMs(150);
+    dm.logicTick();                                            // 再超时 → 证明锚已清
+    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 2);
+}
+
+// —— F3（#3）：温度爆表 → 0x0803 边沿一次；持续超限不重复；回落清锚后再触发 ——
+TEST(DeviceManager, F3_TempOverMaxEdge) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    Kit kit;
+    DeviceConfig cfg = makeCfg();                              // tempMaxC 默认 60
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    kit.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    kit.temp(61.0);                                            // 爆表 → 边沿一次
+    EXPECT_EQ(rec.fault(FC(DevFault::TempOverMax)), 1);
+    kit.temp(61.5);                                            // 仍超限：锁定制不重复
+    EXPECT_EQ(rec.fault(FC(DevFault::TempOverMax)), 1);
+    kit.temp(55.0);                                            // 回落清锚
+    kit.temp(61.0);                                            // 再爆 → 再触发
+    EXPECT_EQ(rec.fault(FC(DevFault::TempOverMax)), 2);
+}
+
+// —— F4（#4）：温度乱跳 → 0x0804 边沿一次；平稳帧清锚后可再触发 ——
+TEST(DeviceManager, F4_TempSpikeEdge) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    Kit kit;
+    DeviceConfig cfg = makeCfg();                              // tempSpikeC 默认 2.0℃/s
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    kit.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    kit.temp(25.0);                                            // 基线帧（无前帧无警）
+    EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 0);
+    kit.temp(30.0);                                            // 相邻帧 |Δ5|/<1s → 速率远超 2℃/s
+    EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 1);
+    kit.temp(30.0);                                            // 平稳帧（Δ=0）→ 清锚
+    EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 1);
+    kit.temp(36.0);                                            // 再跳 → 再触发
+    EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 2);
+}
+
+// —— F5（#5）：预热超时 → done(false) + 0x0805 恰一次（T4 基础上断言码）——
+TEST(DeviceManager, F5_WarmupTimeoutFault) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    cfg.warmup.timeoutMs = 200;
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    int cbCount = 0;
+    dm.startWarmup(42, [&](bool) { ++cbCount; });
+    for (int i = 0; i < 60 && cbCount == 0; ++i) {
+        sleepMs(25);
+        dm.logicTick();
+    }
+    EXPECT_EQ(cbCount, 1);
+    EXPECT_EQ(rec.fault(FC(DevFault::WarmupTimeout)), 1);      // D-T13：超时补 Fault
+    EXPECT_EQ(mock.count("N14T0"), 0);                         // 只报不停加热
+}
+
+// —— F6（#6）：按键洪峰挤爆 K 环 → keyDrop 增长 → 0x0806 一次；无增量不重复 ——
+TEST(DeviceManager, F6_KeyRingOverflowFault) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    Kit kit;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    kit.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    uint32_t t = 100;
+    for (int i = 0; i < 50; ++i) {                             // 100 K 帧 > 环容 63 → 丢新
+        kit.ev('M', true, t);
+        kit.ev('M', false, t + 30);
+        t += 1000;
+    }
+    dm.logicTick();                                            // 泵消化 + 巡检报溢
+    EXPECT_GE(rec.fault(FC(DevFault::KeyRingOverflow)), 1);
+    dm.logicTick();                                            // 增量 0 → 不再报
+    EXPECT_EQ(rec.fault(FC(DevFault::KeyRingOverflow)), 1);
+}
+
+// —— F7（#9）：T 帧 seq 跳变 → 对账计数增长 → 0x0808 一次；连续 seq 不重复 ——
+TEST(DeviceManager, F7_SeqGapFault) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    Kit kit;
+    DeviceConfig cfg = makeCfg();
+    cfg.seqGapWarn = 1;                                        // 测试注入：1 跳即警
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    kit.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.testInjectRaw(kit.enc.encode("T25.0", 10));             // 对账基线
+    dm.logicTick();
+    EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 0);
+    dm.testInjectRaw(kit.enc.encode("T25.0", 16));             // v3 下 seq 10→16 跳变
+    dm.logicTick();
+    EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 1);
+    dm.testInjectRaw(kit.enc.encode("T25.0", 17));             // 连续 → 无增量不重复
+    dm.logicTick();
+    EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 1);
 }

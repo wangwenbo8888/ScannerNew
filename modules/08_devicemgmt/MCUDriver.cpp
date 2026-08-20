@@ -264,6 +264,10 @@ uint64_t MCUDriver::seqGapCount() const { return seqGapCount_.load(std::memory_o
 
 void MCUDriver::channelTick() { channel_.tick(); }   // D-T12b：对账出口（逻辑线程驱动）
 
+uint64_t MCUDriver::keyDropCount() const {           // D-T13：K 环丢新计数出口
+    return keyRing_.dropped();
+}
+
 void MCUDriver::setAckTimeoutMs(int ms) {            // D-T12b：open 前注入生效
     if (ms < 1) ms = 1;                              // 防 tick 活锁（与 Deps 构造防护同口径）
     ackTimeoutMs_ = ms;

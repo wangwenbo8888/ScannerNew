@@ -65,6 +65,8 @@ public:
     void channelTick();          // CommandChannel 对账 tick 出口（S-T5 口径：pump 不调
                                  // tick——重传/3 败收口归 DeviceManager 逻辑线程驱动）
     void setAckTimeoutMs(int ms);  // ACK 超时注入（open 前配；钳 ≥1；测试缩短重传周期用）
+    uint64_t keyDropCount() const;  // D-T13：K 事件环满丢新计数出口（门面 0x0806 巡检用；
+                                    // 单调累计不随 open 复位——与 parseFailCount 同口径）
 
     // —— 测试缝（仅测试）：等价 rx 线程收到原始字节——喂 codec 并分发入环 ——
     void testInjectRaw(const std::string& frameBytes);
