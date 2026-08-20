@@ -151,7 +151,6 @@ void AppContext::initialize() {
     hwMonitor_ = std::make_unique<Scanner::device::HardwareMonitor>();
     hwMonitor_->setDeviceStateCache(deviceStateCache_.get());
     hwMonitor_->setEventBus(eventBus_.get());
-    hwMonitor_->setMCU(mcu_.get());
     hwMonitor_->setCamera(camera_.get());
 
     // === WorkflowContext 装配 ===

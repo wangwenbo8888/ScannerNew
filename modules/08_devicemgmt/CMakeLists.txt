@@ -48,7 +48,9 @@ if(BUILD_TESTS)
     foreach(t ${DEV_TESTS})
         get_filename_component(tname ${t} NAME_WE)
         add_executable(${tname} ${t})
-        target_link_libraries(${tname} PRIVATE mod_devicemgmt GTest::gtest_main)
+        # mod_fileio：DeviceStateCache 真件（H-T16 测试链接；测试 exe 是叶子消费方，
+        # 引 06 不违「06 不链 08」铁律——库间依赖方向不变，仅叶子汇聚解析符号）
+        target_link_libraries(${tname} PRIVATE mod_devicemgmt mod_fileio GTest::gtest_main)
         target_include_directories(${tname} PRIVATE ${CMAKE_SOURCE_DIR})
         add_test(NAME ${tname} COMMAND ${tname})
         jmw_deploy_crt(${tname})
