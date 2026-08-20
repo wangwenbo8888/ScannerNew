@@ -9,6 +9,8 @@
 
 #include "base/types.h"
 #include <memory>
+#include <mutex>
+#include <string>
 
 namespace Scanner::data    { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibStore; }
 namespace Scanner::service { class StateMachine; class ParameterManager; class FaultHandler; class CommandGate; class PerfMonitor; }
@@ -24,6 +26,10 @@ public:
     // 初始化所有组件
     void initialize();
     void shutdown();
+
+    // 自检清单（S1→S2 唯一出口经 system_ready，设计 §2.4）
+    void notifySelfCheckItem(const std::string& item, bool ok);   // 自检项打勾/打叉（"camera"/"serialPort"/"license"）
+    bool selfCheckAllPassed() const;
 
     // Data 层
     Scanner::data::FrameBuffer*      frameBuffer()     { return frameBuffer_.get(); }
@@ -81,4 +87,14 @@ private:
     std::unique_ptr<Scanner::workflow::ScanWorkflow>        scanWf_;
     std::unique_ptr<Scanner::workflow::CalibrationWorkflow> calibWf_;
     std::unique_ptr<Scanner::workflow::PostProcessWorkflow> postWf_;
+
+    // 自检清单（ScannerWindow 线程回调与查询并发防护）
+    struct SelfCheck {
+        bool camera{false};        // 相机连接（ScannerWindow 设备连接事件置位）
+        bool serialPort{false};    // 串口连接（同上）
+        // 加密狗/授权：暂占位 true（TODO: 08/授权落地后接入实际检测）
+        bool license{true};
+    };
+    SelfCheck selfCheck_;
+    mutable std::mutex selfCheckMtx_;
 };

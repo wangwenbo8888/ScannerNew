@@ -183,6 +183,7 @@ void ScannerWindow::openPorts()
             QByteArray data = m_serialPort1->readAll();
             ui.textEdit_Info->append(QString("串口1 收到: %1").arg(QString(data)));
         });
+        if (m_appCtx) m_appCtx->notifySelfCheckItem("serialPort", true);  // 自检清单: 串口连接一项
         ui.textEdit_Info->append(QString("串口1 已打开: %1").arg(m_portNameList[0]));
     } else {
         ui.textEdit_Info->append(QString("串口1 打开失败: %1").arg(m_serialPort1->errorString()));
@@ -202,6 +203,7 @@ void ScannerWindow::openPorts()
                 QByteArray data = m_serialPort2->readAll();
                 ui.textEdit_Info->append(QString("串口2 收到: %1").arg(QString(data)));
             });
+            if (m_appCtx) m_appCtx->notifySelfCheckItem("serialPort", true);  // 自检清单: 串口连接一项
             ui.textEdit_Info->append(QString("串口2 已打开: %1").arg(m_portNameList[1]));
         } else {
             ui.textEdit_Info->append(QString("串口2 打开失败: %1").arg(m_serialPort2->errorString()));
@@ -268,9 +270,9 @@ void ScannerWindow::onOpenScannerCamera()
     ui.textEdit_Info->append(r.success ? "扫描仪相机已打开" :
         QString("打开失败: %1").arg(QString::fromStdString(r.message)));
 
-    // 状态机: Init → DeviceReady
-    if (r.success && m_appCtx && m_appCtx->stateMachine()) {
-        m_appCtx->stateMachine()->transition(Scanner::EventType::DeviceConnected);
+    // 自检清单: 相机连接一项（设备连接不再直切态，全过经 system_ready，设计 §2.4）
+    if (r.success && m_appCtx) {
+        m_appCtx->notifySelfCheckItem("camera", true);
     }
 }
 
@@ -282,9 +284,10 @@ void ScannerWindow::onCloseScannerCamera()
     ui.textEdit_Info->append(r.success ? "扫描仪相机已关闭" :
         QString("关闭失败: %1").arg(QString::fromStdString(r.message)));
 
-    // 状态机: → Init
+    // 保留 transition 直连：断连→S1 是状态机矩阵合法边，属设备事件桥非命令通道写口（设计 §9）
     if (r.success && m_appCtx && m_appCtx->stateMachine()) {
         m_appCtx->stateMachine()->transition(Scanner::EventType::DeviceDisconnected);
+        m_appCtx->notifySelfCheckItem("camera", false);  // 重置对应自检项，重连后重新过自检
     }
 }
 

@@ -13,6 +13,7 @@
 #include "CommandGate.h"
 #include "DefaultCommands.h"
 #include "PerfMonitor.h"
+#include "jmw_logging.h"
 #include "base/EventBus.h"
 #include "modules/08_devicemgmt/CameraControl.h"
 #include "modules/08_devicemgmt/MCUDriver.h"
@@ -100,4 +101,25 @@ void AppContext::shutdown() {
     if (camera_)    { camera_->stopAsyncCapture(); camera_->close(); }
     if (mcu_)       mcu_->close();
     spdlog::info("[AppContext] 全部组件已关闭");
+}
+
+void AppContext::notifySelfCheckItem(const std::string& item, bool ok) {
+    {
+        std::lock_guard<std::mutex> lock(selfCheckMtx_);
+        if      (item == "camera")     selfCheck_.camera     = ok;
+        else if (item == "serialPort") selfCheck_.serialPort = ok;
+        else if (item == "license")    selfCheck_.license    = ok;
+        else return;
+    }
+    JMW_LOG_INFO("app", "自检项 {}: {}", item, ok ? "通过" : "失败");
+    // 全过且仍处 S1 → 经命令通道切 S2（恰一次：submit 成功即离 S1，重复调用幂等失败）
+    if (selfCheckAllPassed() &&
+        stateMachine_->getCurrentState() == Scanner::service::SystemState::Init) {
+        commandGate_->submit("system_ready");
+    }
+}
+
+bool AppContext::selfCheckAllPassed() const {
+    std::lock_guard<std::mutex> lock(selfCheckMtx_);
+    return selfCheck_.camera && selfCheck_.serialPort && selfCheck_.license;
 }
