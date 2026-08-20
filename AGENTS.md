@@ -4,6 +4,7 @@
 
 ### 优先查阅（AI 必读）
 - **数据归属/管理** → 原则见 `数据管理原则.md`（L1–L4 分类 + 判定规则）；代码现状 / 修改目标 / 待增加见 `docs/模块功能/06-文件管理.md`
+- **设计对象基准** → `模块功能目录.md` §二 对象对口速查 + §三 设计对象功能基准（🔒 人工锁定，重构/新增代码的对齐基准）；蓝图三视图见 `框架整体.md`
 - **会话接力 / 当前进度** → `开发进度.md`（默认限读：快照+关键决策+近 10 条日志）
 - **app 应用层** → `docs/应用层/README.md`（入口与启动 / AppContext 装配 / MainWindow UI / 构建与依赖）
 - **base 共享内核** → `docs/共享内核/README.md`（types.h + EventBus 通俗说明）
@@ -29,7 +30,7 @@ JEAMMWARE260705/
 ```
 
 ### 历史注记（framework 退役，2026-08）
-- `framework/` 整树已删：types.h+EventBus → `base/`；data 容器+Sink 契约、IWorkflow/Pipeline(Stage)、ParameterManager → `06_fileio`；CalibStore → `01_calibration`；hal 接口（IScannerCamera/IMCU）→ `08_devicemgmt`；service（StateMachine/SessionService/IState）→ `07_session`；FaultHandler → `10_observability`；工作流+WorkflowContext+ScannerWindow → `app/`。详见 `framework优化.md`。
+- `framework/` 整树已删：types.h+EventBus → `base/`；data 容器+Sink 契约、IWorkflow/Pipeline(Stage)、ParameterManager → `06_fileio`；CalibStore → `01_calibration`；hal 接口（IScannerCamera/IMCU）→ `08_devicemgmt`；service（StateMachine/SessionService/IState）→ `07_session`（**该目录 2026-08-20 亦退役**：StateMachine/IState 迁 10、SessionService 撤销，07 编号现归 mod_pipelinemgmt）；FaultHandler → `10_observability`；工作流+WorkflowContext+ScannerWindow → `app/`。详见 `framework优化.md`。
 - `sdk/`（接入端 B 契约桩）已删；旧根文档 `架构设计-简洁版.md` / `工程目录地图.md` 已删，导航职责归本文件。
 
 ---
@@ -60,8 +61,8 @@ JEAMMWARE260705/
 | 05 | `editing` | 桩 | — |
 | **06** | **`fileio`** | **✅ 承重** | 库 `mod_fileio`：运行时容器 FrameBuffer / PointCloudBuffer / DeviceStateCache / RingBuffer / SlotRing（原子槽位环）/ EnhancedFrame / CycleUnit / FrameEnricher（出口查表） + Sink 契约（IFrameSink/IPointCloudSink/IDeviceStateSink）+ IWorkflow/Pipeline(Stage) 工作流框架 + ParameterManager + file_io |
 | 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology/PCoreBroker/GpuSlotService/IFrameSource/FrameResultQueue/SchedulerRuntime）+ 五流水线对象（pipelines/：A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）+ 装配公共件；命名空间 `Scanner::pipeline`。旧 `07_session` 已退役（StateMachine 迁 10、SessionService 随 D6/D7 定案撤销，会话记账归工作流自身） |
-| 08 | `devicemgmt` | ✅ | 库 `mod_devicemgmt`：IScannerCamera / IMCU 接口 + CameraControl / MCUDriver / HardwareMonitor |
-| **09** | **`operatorlib`** | **✅ 全部算子** | 单库 `mod_operatorlib`，命名空间 `calib::`（见下文专节）；GBA 含软先验扩展、marker_cloud_fuse 含 seed() |
+| 08 | `devicemgmt` | 部分实现 | 库 `mod_devicemgmt`：IScannerCamera / IMCU 接口 + CameraControl / MCUDriver / HardwareMonitor。**未造**：DeviceManager 总门面 / KeyManager 手势分类（app 现直连三零件）；MCU 命令号与协议表待对齐、温度仅 1 路（详见 08 文档 §3 差距清单） |
+| **09** | **`operatorlib`** | **✅ 全部算子** | 单库 `mod_operatorlib`，命名空间 `calib::`（见下文专节）；GBA 含软先验扩展、marker_cloud_fuse 含 seed()。**待建**：网格四族算子（封装/补洞/光顺/边界，07-E 后处理消费） |
 | 10 | `observability` | 部分实现 | 库 `mod_observability`：StateMachine/IState（7 态表驱动 CAS，2026-08-20 自 07_session 迁入并重写）+ CommandGate 统一命令通道（双口）+ FaultHandler 故障档案表 + ObsLogger/jmw_logging + CrashHandler + PerfMonitor。**待建/待接**：08 检测源与性能指标源（归 08）、PerfMonitor 定时轮询、日志宏全模块推广 |
 | 11 | `deploy` | 桩 | — |
 
@@ -220,7 +221,8 @@ docs/
 ├── 应用层/            # app/ 核心要点 5 份（README / 01-入口与启动 / 02-AppContext装配 /
 │                        #   03-MainWindow-UI / 04-构建与依赖）
 ├── 共享内核/          # base/ 通俗说明（README）
-├── plans/             # 实施计划存档（当前已清空，历史方案文档已删）
+├── plans/             # 设计/实施方案存档 3 份：2026-08-18 DeviceManager-design、
+│                        #   2026-08-19 流水线管理模块07 设计方案+实施计划
 └── 开发需要的信息/     # 大恒 Galaxy SDK 文档（C++接口为核心）+ 相机(VE2S-301-125U3MC-S)数据手册
                          #   + 下位机和按键/（协议/按键资料）
 ```
@@ -262,9 +264,10 @@ ctest --test-dir build -C Debug --output-on-failure
 | 文件 | 用途 |
 |---|---|
 | `CMakeLists.txt` | 工程构建配置（C++/CUDA 标准、依赖、FetchContent） |
-| `框架整体.md` | 框架整体设计（01.4 框架图：5 层主架构 + 部署期 wrapper + 横切） |
+| `框架整体.md` | 框架整体设计（01.4 框架图：5 层主架构 + 部署期 wrapper + 横切；§2 状态机总目录、§3 数据流） |
 | `framework优化.md` | framework/ 退役决策与归属迁移记录（2026-08） |
-| `模块功能目录.md` | `docs/模块功能/` 下 11 模块文档的目录与简介索引（仅导航，非代码改动基准） |
+| `模块功能目录.md` | `docs/模块功能/` 11 模块文档索引 + §二 对象对口速查 + §三 设计对象功能基准（🔒 人工锁定，重构/新增代码的对齐基准）+ 落地状态速记 |
+| `模块文档重构提示词模板.md` | 模块功能文档四段式（目标/现状/差距/附录）重构模板（v0.1，01–11 文档 2026-08-18 起按此重构） |
 | `数据管理原则.md` | 数据归属原则：L1–L4 分类 + 判定规则（现状/修改目标/待增加见 `docs/模块功能/06-文件管理.md`） |
 | `算子规范.md` | 算子契约 + 工程集成规范（v2.0，§0–§7） |
 | `算子目录.md` | 算子说明文档目录索引（导航至 `docs/算子说明文档/` 下 46 份说明） |
