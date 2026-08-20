@@ -18,16 +18,16 @@ Result CommandGate::registerCommand(Spec spec) {
     if (spec.name.empty()) {
         return Result::fail("命令名为空");
     }
-    // 组合校验（两类约束）：
+    // 组合校验（P1-T6 放宽后语义，两类约束）：
     //  a) 纯触发型（startedEvent==kNoEvent && finishedEvent!=kNoEvent，如 finish_scan）
     //     submit 不切态即点火，若无 gateOp 则任意态可提交——必配 gateOp 声明合法态
-    //  b) 切态型（startedEvent!=kNoEvent）必有 finishedEvent：否则 handler 失败无回滚、
-    //     异步完成无收尾，会悬死 S3–S6
+    //  b) 切态型（startedEvent!=kNoEvent）无 finishedEvent → 收尾禁用型，允许注册
+    //     （P1-T6 实施期补正：system_ready（S1→S2 自检全过）不是工作流命令，无「收尾」
+    //      概念。安全性已有保障：notifyCompleted 对其 fail（无转态可切，T5 已测
+    //      NotifyCompletedNoFinishEventFails）；handler 同步失败不回滚——§3.3 回滚
+    //      依赖 finishedEvent，此处无态可回，命令语义即「切过去就成」）
     if (spec.startedEvent == kNoEvent && spec.finishedEvent != kNoEvent && spec.gateOp.empty()) {
         return Result::fail("触发型命令必须配 gateOp: " + spec.name);
-    }
-    if (spec.startedEvent != kNoEvent && spec.finishedEvent == kNoEvent) {
-        return Result::fail("切态型命令必须配 finishedEvent（收尾/回滚）: " + spec.name);
     }
     std::string name = spec.name; // emplace 败时 spec 已被 move 进临时节点，先留名
     std::lock_guard lock(mtx_);

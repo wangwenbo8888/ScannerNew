@@ -259,13 +259,14 @@ TEST(Gate, RegisterComboValidation) {
     fin.startedEvent = static_cast<EventType>(0);
     fin.finishedEvent = EventType::ScanStopped;
     EXPECT_FALSE(gate.registerCommand(fin).success);
-    // b) 切态型（started≠0）无 finishedEvent → fail：无收尾/回滚，悬死 S3–S6
+    // b) 切态型（started≠0）无 finishedEvent → 允许（P1-T6 收尾禁用型，如 system_ready：
+    //    S1→S2 无收尾概念；notifyCompleted 对其 fail 已由 NotifyCompletedNoFinishEventFails 覆盖）
     CommandGate::Spec sys;
     sys.name = "system_ready";
     sys.gateOp = "";
     sys.startedEvent = EventType::SystemReady;
     sys.finishedEvent = static_cast<EventType>(0);
-    EXPECT_FALSE(gate.registerCommand(sys).success);
+    EXPECT_TRUE(gate.registerCommand(sys).success);
 }
 
 TEST(Gate, NotifyCompletedNoFinishEventFails) {

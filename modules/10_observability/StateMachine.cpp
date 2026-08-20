@@ -121,6 +121,15 @@ bool StateMachine::canOperate(const std::string& operation) const {
     if (operation == "scanning") {
         return s == SystemState::ScanMarker || s == SystemState::ScanMarkerLaser;
     }
+    // P1-T6 三态门禁键：finish_calibration/finish_postprocess 触发型命令的合法态键
+    // （实施期补正：收尾命令在 S3/S6 态点火，用 "calibrate"/"postprocess"（仅 S2
+    //  放行）会被误拒；设计基准 docs/plans/2026-08-20-可观测性模块10设计方案.md §3.2）
+    if (operation == "calibrating") {
+        return s == SystemState::Calibrating;
+    }
+    if (operation == "postprocessing") {
+        return s == SystemState::PostProcessing;
+    }
     return false;
 }
 

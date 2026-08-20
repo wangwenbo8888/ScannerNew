@@ -33,8 +33,10 @@ public:
         std::string gateOp;        // canOperate 操作名；""=跳过门禁（纯点火型内部命令）；
                                    //   纯触发型（started=0&&finished≠0）必配，registerCommand 校验
         EventType startedEvent{kNoEvent};  // kNoEvent=触发型不切态（finish_scan 型）；非 0=切态事件
-        EventType finishedEvent{kNoEvent}; // notifyCompleted 切态事件；kNoEvent=无切态（纯点火型）；
-                                           //   切态型（started≠0）必配，registerCommand 校验
+        EventType finishedEvent{kNoEvent}; // notifyCompleted 切态事件；kNoEvent=无切态：
+                                            //   切态型无 finishedEvent=收尾禁用型（P1-T6 放宽，
+                                            //   如 system_ready：无收尾概念，notifyCompleted fail）；
+                                            //   纯触发型（started=0）必配非 0，registerCommand 校验
         Precondition pre;
         Handler handler;
     };
