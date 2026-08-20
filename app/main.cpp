@@ -1,19 +1,27 @@
 #include "MainWindow.h"
 #include "AppContext.h"
+#include "ObsLogger.h"
+#include "CrashHandler.h"
+#include "jmw_logging.h"
 #include <QApplication>
 #include <QFile>
 #include <QScreen>
 #include <QSurfaceFormat>
-#include <spdlog/spdlog.h>
+#include <string>
 
 int main(int argc, char *argv[])
 {
+    Scanner::service::obsLoggerInit({});
+    Scanner::service::crash::install("dumps");
+    if (std::string residual; Scanner::service::crash::detectResidualDump(residual)) {
+        JMW_LOG_WARN("10-Crash", "检测到崩溃残留: {}", residual);
+        Scanner::service::obsExportDiagnosticsPackage(residual);
+    }
+    JMW_LOG_INFO("app", "=== ScannerFramework 启动 ===");
+
     _putenv_s("OSG_PLUGIN_PATH", "F:/osg3.6.5/install/bin/osgPlugins-3.6.5");
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
-
-    spdlog::set_level(spdlog::level::info);
-    spdlog::info("=== ScannerFramework 启动 ===");
 
     // 8x MSAA 抗锯齿（参照 LEADSCAN K2 的 setNumMultiSamples(8)），消除网格鱼鳞/闪烁
     QSurfaceFormat fmt;
@@ -42,6 +50,6 @@ int main(int argc, char *argv[])
     int ret = app.exec();
 
     appCtx.shutdown();
-    spdlog::info("=== ScannerFramework 退出 ===");
+    JMW_LOG_INFO("app", "=== ScannerFramework 退出 ===");
     return ret;
 }

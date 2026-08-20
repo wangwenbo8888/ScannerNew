@@ -11,7 +11,7 @@
 #include <memory>
 
 namespace Scanner::data    { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibStore; }
-namespace Scanner::service { class StateMachine; class ParameterManager; class FaultHandler; }
+namespace Scanner::service { class StateMachine; class ParameterManager; class FaultHandler; class CommandGate; class PerfMonitor; }
 namespace Scanner::infra   { class EventBus; }
 namespace Scanner::device  { class CameraControl; class MCUDriver; class HardwareMonitor; }
 namespace Scanner::workflow{ class WorkflowContext; class ScanWorkflow; class CalibrationWorkflow; class PostProcessWorkflow; }
@@ -35,6 +35,8 @@ public:
     Scanner::service::StateMachine*    stateMachine()    { return stateMachine_.get(); }
     Scanner::service::ParameterManager*paramManager()    { return paramManager_.get(); }
     Scanner::service::FaultHandler*    faultHandler()    { return faultHandler_.get(); }
+    Scanner::service::CommandGate*     commandGate()     { return commandGate_.get(); }
+    Scanner::service::PerfMonitor*     perfMonitor()     { return perfMonitor_.get(); }
 
     // HAL 层
     Scanner::device::CameraControl*   camera()    { return camera_.get(); }
@@ -57,10 +59,14 @@ private:
     std::unique_ptr<Scanner::data::DeviceStateCache>  deviceStateCache_;
     std::unique_ptr<Scanner::data::CalibStore>        calibStore_;
 
-    // Service
+    // Service（commandGate_/perfMonitor_ 声明于 faultHandler_/stateMachine_ 之后：
+    // 析构逆序 → gate/perf 先亡——两者持 SM/FH 裸指针）
     std::unique_ptr<Scanner::service::StateMachine>    stateMachine_;
     std::unique_ptr<Scanner::service::ParameterManager> paramManager_;
     std::unique_ptr<Scanner::service::FaultHandler>     faultHandler_;
+    std::unique_ptr<Scanner::service::CommandGate>      commandGate_;
+    std::unique_ptr<Scanner::service::PerfMonitor>      perfMonitor_;
+    int monitorSourceId_ = 0;
 
     // Infra
     std::unique_ptr<Scanner::infra::EventBus> eventBus_;

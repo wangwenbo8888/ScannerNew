@@ -10,6 +10,9 @@
 #include "StateMachine.h"
 #include "ParameterManager.h"
 #include "FaultHandler.h"
+#include "CommandGate.h"
+#include "DefaultCommands.h"
+#include "PerfMonitor.h"
 #include "base/EventBus.h"
 #include "modules/08_devicemgmt/CameraControl.h"
 #include "modules/08_devicemgmt/MCUDriver.h"
@@ -39,7 +42,16 @@ void AppContext::initialize() {
     faultHandler_   = std::make_unique<Scanner::service::FaultHandler>(eventBus_.get());
 
     faultHandler_->setStateMachine(stateMachine_.get());
+    faultHandler_->setSafeStopCallback([] {});  // TODO: 08 落地后接 DeviceManager::toIdle()
     faultHandler_->start();
+
+    commandGate_ = std::make_unique<Scanner::service::CommandGate>(stateMachine_.get(), eventBus_.get());
+    for (auto& spec : Scanner::service::makeDefaultCommandSpecs())
+        commandGate_->registerCommand(std::move(spec));
+
+    monitorSourceId_ = faultHandler_->registerSource("Monitor");
+    perfMonitor_ = std::make_unique<Scanner::service::PerfMonitor>(eventBus_.get(), faultHandler_.get(), monitorSourceId_);
+    // 08 落地后注入 IHealthProvider 并由巡检线程/app 定时器调 poll()
 
     // === HAL ===
     Scanner::device::StereoPairConfig camCfg;
