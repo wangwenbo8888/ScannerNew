@@ -112,16 +112,13 @@ enum class EventType : uint16_t {
 
     ScanStarted = 0x0200,
     ScanStopped = 0x0201,
-    ScanPaused = 0x0202,
     ScanFrameReady = 0x0203,
 
-    EmergencyStop = 0x0300,
     TemperatureUpdate = 0x0301,
 
     FaultOccurred = 0x0400,
     FaultCleared = 0x0401,
 
-    SessionStarted = 0x0500,
     SessionStopped = 0x0501,
     SessionSaved = 0x0502,
 

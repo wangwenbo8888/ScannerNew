@@ -11,6 +11,8 @@
 //     故障链动作归直调口（§4.6：08 落地接 reportFault 注入口）
 //   · 红灯走 LedControl(param1: 1=红 2=绿)，不复用 EmergencyStop
 //     通道（§4.3 语义解耦）
+//   · ⚠ 勿在 EventBus 订阅回调内调用 reportFault——会经 transition→StateChanged
+//     publish 重入总线锁死锁
 // ============================================================================
 
 #include "base/types.h"

@@ -112,6 +112,12 @@ void FaultHandler::handleFault(int sourceId, FaultSeverity severity,
         if (hit) {
             if (nowMs - hit->firstTimeMs < kAggregateWindowMs) {
                 ++hit->count;  // 防风暴：只计数——不发事件不转态
+                if (hit->count == 2) {  // 窗口内首次抑制打一条汇总（后续抑制不刷屏）
+                    auto nit = sourceNames_.find(sourceId);  // 锁内直查（sourceName 会重入锁）
+                    spdlog::info("[FaultHandler] 同源同类故障 1s 窗口内聚合：source={}({}) severity={} count={}",
+                                 nit != sourceNames_.end() ? nit->second : std::to_string(sourceId),
+                                 sourceId, static_cast<int>(severity), hit->count);
+                }
                 return;
             }
             hit->firstTimeMs = nowMs;  // 窗口已过：新一次故障，重置沿用档位
@@ -142,6 +148,9 @@ void FaultHandler::handleFault(int sourceId, FaultSeverity severity,
     // ── 故障链（仅直调口，§4.4）：Error 级以上且非 S6（免疫）/S7（不重转）→ S7 ──
     // 订阅口不做故障链动作：EventBus 同步分发持总线锁，锁内 transition 会经
     // StateChanged publish 重入死锁——外部源按 §4.6 接 reportFault 注入口
+    if (viaBus && severity >= FaultSeverity::Error) {
+        spdlog::warn("[FaultHandler] 外部 Error 级故障经总线通道仅记档——应接 reportFault 注入口走完整故障链");
+    }
     if (!viaBus && severity >= FaultSeverity::Error && stateMachine_) {
         const SystemState cur = stateMachine_->getCurrentState();
         if (cur != SystemState::PostProcessing && cur != SystemState::FaultSelfCheck) {
