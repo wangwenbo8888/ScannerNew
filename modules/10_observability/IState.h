@@ -1,38 +1,26 @@
 #pragma once
-// ============================================================================
-// IState.h — 状态机接口（Service 层）
-//
-// 扫描仪全局状态机：管理设备就绪→标定→扫描→后处理的状态流转。
-// ============================================================================
-
+// IState.h — 全局门禁状态机接口（7 态模型 S1–S7，2026-08-20 设计方案 §2）
 #include "base/types.h"
 #include <string>
 
 namespace Scanner::service {
 
-enum class ScannerState : uint8_t {
-    Init,           // 初始化中
-    DeviceReady,    // 设备就绪
-    Calibrating,    // 标定中
-    Calibrated,     // 已标定
-    Scanning,       // 扫描中
-    Paused,         // 暂停
-    PostProcessing, // 后处理中
-    Error,          // 故障
-    EmergencyStop   // 急停
+enum class SystemState : uint8_t {
+    Init = 1,           // S1 初始化（自检：通讯/加密狗/授权）
+    Standby = 2,        // S2 待机（门禁主战场）
+    Calibrating = 3,    // S3 标定
+    ScanMarker = 4,     // S4 扫描标记点
+    ScanMarkerLaser = 5,// S5 扫描标记点+激光
+    PostProcessing = 6, // S6 后处理（免疫故障转态）
+    FaultSelfCheck = 7  // S7 设备故障+自检中
 };
 
 class IState {
 public:
     virtual ~IState() = default;
-
-    virtual ScannerState getCurrentState() const = 0;
+    virtual SystemState getCurrentState() const = 0;
     virtual std::string getStateName() const = 0;
-
-    /// 状态转移（由事件驱动）
     virtual Result transition(EventType event, int64_t param = 0) = 0;
-
-    /// 查询当前状态是否允许某操作
     virtual bool canOperate(const std::string& operation) const = 0;
 };
 
