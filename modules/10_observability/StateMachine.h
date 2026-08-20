@@ -24,6 +24,8 @@ public:
     bool canOperate(const std::string& operation) const override;
 
     using StateChangeCallback = std::function<void(SystemState oldState, SystemState newState)>;
+    // 并发转态下回调可能乱序到达（后转态先通知）；回调方需要当前态请查 getCurrentState()，
+    // 勿由回调参数推导
     void onStateChange(StateChangeCallback cb);
 
     static std::string stateToString(SystemState s);

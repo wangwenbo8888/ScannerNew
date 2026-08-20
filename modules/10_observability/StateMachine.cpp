@@ -90,11 +90,13 @@ Result StateMachine::transition(EventType event, int64_t param) {
                          static_cast<int>(event));
             return Result::fail("非法状态转换");
         }
+        // lastHealthy 先写后 CAS：CAS 败者重试的残留 store 无害（lastHealthy 仅 S7 出口
+        // 被读，真正入 S7 前的下一次 store 会覆盖），换取「入 S7 时 from 必已记录」无竞态
+        if (to == SystemState::FaultSelfCheck && from != SystemState::FaultSelfCheck) {
+            lastHealthy_.store(from, std::memory_order_release);
+        }
         if (state_.compare_exchange_weak(from, to, std::memory_order_acq_rel,
                                          std::memory_order_acquire)) {
-            if (to == SystemState::FaultSelfCheck && from != SystemState::FaultSelfCheck) {
-                lastHealthy_.store(from, std::memory_order_release);
-            }
             notifyChange(from, to);
             if (eventBus_) {
                 Event evt;
@@ -111,7 +113,7 @@ Result StateMachine::transition(EventType event, int64_t param) {
 }
 
 bool StateMachine::canOperate(const std::string& operation) const {
-    const auto s = state_.load();
+    const auto s = state_.load(std::memory_order_acquire);
     if (operation == "calibrate" || operation == "scan" ||
         operation == "postprocess" || operation == "edit") {
         return s == SystemState::Standby;
@@ -125,8 +127,12 @@ void StateMachine::onStateChange(StateChangeCallback cb) {
 }
 
 void StateMachine::notifyChange(SystemState oldState, SystemState newState) {
-    std::lock_guard lock(cbMutex_);
-    if (callback_) callback_(oldState, newState);
+    StateChangeCallback cb;
+    {
+        std::lock_guard lock(cbMutex_);
+        cb = callback_;
+    }
+    if (cb) cb(oldState, newState);
 }
 
 } // namespace Scanner::service

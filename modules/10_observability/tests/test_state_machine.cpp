@@ -33,7 +33,6 @@ using Scanner::service::StateMachine;
 using Scanner::service::SystemState;
 using Scanner::EventType;
 using Scanner::Result;
-namespace ss = Scanner::service;
 
 namespace {
 
