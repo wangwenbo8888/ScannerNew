@@ -32,6 +32,9 @@ set(GALAXY_DLL_DIR "${GALAXY_SDK_DIR}/lib/x64" CACHE PATH "Galaxy DLL dir")
 # serial/ 协议子层（T5 起其余源文件陆续登记于此）
 target_sources(mod_devicemgmt PRIVATE serial/McuFrame.cpp serial/FrameCodec.cpp serial/SerialPort.cpp serial/CommandChannel.cpp)
 
+# PC 侧零件（T6 起陆续登记于此）
+target_sources(mod_devicemgmt PRIVATE KeyManager.cpp)
+
 if(BUILD_TESTS)
     file(GLOB DEV_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
     foreach(t ${DEV_TESTS})
