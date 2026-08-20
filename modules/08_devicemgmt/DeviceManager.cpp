@@ -241,8 +241,16 @@ void DeviceManager::logicTick() {
     } else if (!camera_ || camera_->isOpen()) {
         camFaultLatched_ = false;
     }
-    // ⑧ 参数快照（≤6 项轻拷——getParam 跨线程读口）
+    // ⑧ 快照刷新（菜单/温度/参数——跨线程读口统一互斥快照；轻拷）
     refreshParamSnapshot();
+    {
+        std::lock_guard<std::mutex> lock(menuSnapMtx_);
+        menuSnap_ = menu_->state();
+    }
+    {
+        std::lock_guard<std::mutex> lock(tempSnapMtx_);
+        tempSnap_ = lastTemps_;
+    }
 }
 
 void DeviceManager::testInjectRaw(const std::string& frameBytes) {
@@ -513,11 +521,17 @@ bool DeviceManager::isDeviceReady() const {
     return camera_ && camera_->isOpen();
 }
 
-serial::TempFrame DeviceManager::getLastTemperatures() const { return lastTemps_; }
+serial::TempFrame DeviceManager::getLastTemperatures() const {
+    std::lock_guard<std::mutex> lock(tempSnapMtx_);
+    return tempSnap_;                           // 快照（logicTick 末刷新——拍后读即最新）
+}
 
 bool DeviceManager::isCapturing() const { return mode_->isCapturing(); }
 DeviceMode DeviceManager::mode() const { return mode_->mode(); }
-MenuState DeviceManager::menuState() const { return menu_->state(); }
+MenuState DeviceManager::menuState() const {
+    std::lock_guard<std::mutex> lock(menuSnapMtx_);
+    return menuSnap_;                           // 快照（logicTick 末刷新——拍后读即最新）
+}
 
 bool DeviceManager::isCameraOpen() const { return camera_ && camera_->isOpen(); }
 

@@ -55,7 +55,7 @@ public:
     void exitCalibration(DoneCb cb) override;
 
     // —— IMCU：上行/配置/观测 ——
-    void setUplink(hal::McuUplink h) override;                    // 逻辑线程调
+    void setUplink(hal::McuUplink h) override;                    // open 时设，逻辑线程 pump 消费
     void setProtocolVersion(serial::FrameCodec::Version v) override;  // open 前配；开启中调用无效直至重开
     Scanner::TimestampMs lastRxTime() const override;
     uint64_t seqGapCount() const override;

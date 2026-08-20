@@ -396,6 +396,9 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     kit.holdPress('L');
     kit.holdPress('R');
     EXPECT_EQ(st().layer, 1);
+    // 快照一致性：末拍刷新后 menuState()（互斥快照口）= 逻辑线程账本状态
+    EXPECT_EQ(dm.menuState().layer, 1);
+    EXPECT_EQ(dm.menuState().adjustCtx, MenuState::AdjustCtx::None);
 }
 
 // —— T7：按键洪峰 100 帧 → 环有效容量 63（SpscRing<64> 满判 tail+1==head）收敛

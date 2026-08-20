@@ -21,6 +21,8 @@
 //     pump 消化）；close() 特例：停线程后余任务丢弃（退出场景不保送）。
 //   - 参数双口：getParam 读互斥保护快照（logicTick 每拍全量拷≤6 项）；
 //     setParam 编队调账本 setValue。params() 引用出口已删（跨线程直调=竞态）。
+//     menuState()/getLastTemperatures() 同款互斥快照（logicTick 末统一刷新——
+//     快照语义：拍后读即最新）。
 //
 // 逻辑线程一拍（logicTick，!manualTick 时 10ms 循环）：
 //   drain 任务队列 → pump 上行环 → 按键手势 drain/dispatch → CommandChannel
@@ -189,9 +191,15 @@ private:
     mutable std::mutex snapshotMutex_;
     std::map<std::string, ParamEntry> paramSnapshot_;
 
-    // —— 运行时记账（逻辑线程属主；const 读口走原子/值拷贝）——
+    // —— 菜单/温度快照（同款互斥模式；logicTick 末与参数快照同段统一刷新）——
+    mutable std::mutex menuSnapMtx_;
+    MenuState menuSnap_{};
+    mutable std::mutex tempSnapMtx_;
+    serial::TempFrame tempSnap_{};
+
+    // —— 运行时记账（逻辑线程属主；跨线程读口走上方快照）——
     hal::FrameCallback frameCb_;                // startFrameStream 登记的帧出口
-    serial::TempFrame lastTemps_{};
+    serial::TempFrame lastTemps_{};             // 逻辑线程账本（快照源）
     TimestampMs tempRxTime_ = 0;                // 最近 T 帧到达时刻（v2 兜底判据）
     std::function<void(bool)> warmupDone_;      // 当前预热完成回调（onStable/onTimeout 消费）
     bool standbyActive_ = false;                // MCU 侧待机记账（切模式前退待机判据）
