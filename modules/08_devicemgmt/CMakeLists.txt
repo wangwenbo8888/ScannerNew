@@ -24,6 +24,7 @@ target_link_libraries(mod_devicemgmt
         spdlog::spdlog
     PRIVATE
         "${GALAXY_SDK_DIR}/lib/x64/GxIAPICPPEx.lib"
+        Pdh    # SelfCheckCollector CPU 占用（PDH 查询）
 )
 
 # Galaxy SDK DLL 运行时路径（构建后复制）
@@ -40,6 +41,7 @@ target_sources(mod_devicemgmt PRIVATE ModeController.cpp)
 target_sources(mod_devicemgmt PRIVATE ParamStore.cpp)
 target_sources(mod_devicemgmt PRIVATE WarmupSequence.cpp)
 target_sources(mod_devicemgmt PRIVATE DeviceManager.cpp)
+target_sources(mod_devicemgmt PRIVATE SelfCheckCollector.cpp)
 
 if(BUILD_TESTS)
     file(GLOB DEV_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
