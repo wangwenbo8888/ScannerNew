@@ -36,6 +36,7 @@ target_sources(mod_devicemgmt PRIVATE serial/McuFrame.cpp serial/FrameCodec.cpp 
 target_sources(mod_devicemgmt PRIVATE KeyManager.cpp)
 target_sources(mod_devicemgmt PRIVATE MenuLogic.cpp)
 target_sources(mod_devicemgmt PRIVATE KeySemantics.cpp)
+target_sources(mod_devicemgmt PRIVATE ModeController.cpp)
 
 if(BUILD_TESTS)
     file(GLOB DEV_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
