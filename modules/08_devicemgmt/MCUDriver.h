@@ -36,7 +36,8 @@ public:
     MCUDriver& operator=(const MCUDriver&) = delete;
 
     // —— IMCU：开闭（open 内起 rx 线程；close 倒序：停线程→关串口）——
-    Scanner::Result open(const std::string& port) override;
+    Scanner::Result open(const std::string& port) override;         // 默认波特率
+    Scanner::Result open(const std::string& port, int baud);        // D-T12b：baud 接通
     Scanner::Result close() override;
     bool isOpen() const override;
 
@@ -87,7 +88,7 @@ private:
     serial::CommandChannel channel_;             // ctor/open/applyVersion 以 makeDeps() 重建
     serial::SerialPort serial_;
 
-    // —— 上行 4 环（rx 生产 / pump 消费；满丢最旧各自计数）——
+    // —— 上行 4 环（rx 生产 / pump 消费；满丢新各自计数——D-T12a 口径）——
     serial::SpscRing<serial::RawKeyEvent, 64> keyRing_;
     serial::SpscRing<serial::StatusFrame, 64> statusRing_;
     serial::SpscRing<serial::AckFrame, 64> ackRing_;

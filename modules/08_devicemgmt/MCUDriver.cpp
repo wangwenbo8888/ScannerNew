@@ -68,6 +68,10 @@ bool MCUDriver::writeFrame(const std::string& frame) {
 // open/close（close 倒序：停 rx 线程 → 关串口）
 // ============================================================================
 Scanner::Result MCUDriver::open(const std::string& port) {
+    return open(port, kDefaultBaud);
+}
+
+Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     if (open_.load()) return Scanner::Result::ok("MCU已打开");
     applyVersion();
     // reopen 复位：排空残留上行环 + 清 seq 对账基线/心跳——上一会话数据不串染
@@ -82,12 +86,12 @@ Scanner::Result MCUDriver::open(const std::string& port) {
         open_.store(true);
         return Scanner::Result::ok();
     }
-    auto r = serial_.open(port, kDefaultBaud);
+    auto r = serial_.open(port, baud);
     if (!r.success) return r;
     open_.store(true);
     rxRunning_.store(true);
     rxThread_ = std::thread(&MCUDriver::rxLoop, this);
-    spdlog::info("[MCUDriver] 串口已打开: {} @ {} baud (v{})", port, kDefaultBaud,
+    spdlog::info("[MCUDriver] 串口已打开: {} @ {} baud (v{})", port, baud,
                  version_ == serial::FrameCodec::Version::V3 ? 3 : 2);
     return Scanner::Result::ok();
 }

@@ -16,8 +16,10 @@
 #include "modules/08_devicemgmt/DeviceManager.h"
 #include "modules/08_devicemgmt/serial/FrameCodec.h"
 
+#include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,13 +37,27 @@ void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)
 auto gateOk = [](const std::string&) { return Result::ok(); };
 auto gateReject = [](const std::string& op) { return Result::fail(1, "门禁拒绝:" + op); };
 
-// —— 事件记账（subscribeAll 同步回调）——
+// —— 事件记账（subscribeAll 同步回调；互斥保护——T13 双线程并发 publish）——
 struct EventRecorder {
+    mutable std::mutex m;
     std::vector<Event> ev;
+    void record(const Event& e) {
+        std::lock_guard<std::mutex> lock(m);
+        ev.push_back(e);
+    }
     int count(EventType t) const {
+        std::lock_guard<std::mutex> lock(m);
         int n = 0;
         for (const auto& e : ev)
             if (e.type == t) ++n;
+        return n;
+    }
+    // UserDefined 按 param1 计数（menuSelect ③/④ 出口——Important #4 去污染后）
+    int userParam(int64_t p1) const {
+        std::lock_guard<std::mutex> lock(m);
+        int n = 0;
+        for (const auto& e : ev)
+            if (e.type == EventType::UserDefined && e.param1 == p1) ++n;
         return n;
     }
 };
@@ -180,7 +196,7 @@ struct Kit {
 TEST(DeviceManager, T1_OpenFailCameraRollbackAndFault) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     DeviceConfig cfg = makeCfg();
     DeviceManager dm(cfg, gateOk, &bus,
@@ -203,7 +219,7 @@ TEST(DeviceManager, T1_OpenFailCameraRollbackAndFault) {
 TEST(DeviceManager, T2_GateRejectEnterScanNoFrames) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     DeviceConfig cfg = makeCfg();
     DeviceManager dm(cfg, gateReject, &bus, nullptr,
@@ -211,10 +227,12 @@ TEST(DeviceManager, T2_GateRejectEnterScanNoFrames) {
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    dm.enterScan();
+    EXPECT_FALSE(dm.enterScan().success);                     // 门禁拒：同步返回 fail（不入队）
     EXPECT_EQ(mock.count("N10"), 0);
     EXPECT_EQ(mock.count("N11"), 0);
     EXPECT_EQ(mock.count("N13"), 0);
+    dm.logicTick();                                            // 补一拍证明确无任务落地
+    EXPECT_EQ(mock.frames.size(), 1u);                        // 仅 open 的 N12Z1
     EXPECT_EQ(rec.count(EventType::StateChanged), 0);          // 黑板未动
 }
 
@@ -222,7 +240,7 @@ TEST(DeviceManager, T2_GateRejectEnterScanNoFrames) {
 TEST(DeviceManager, T3_WarmupStableCallbackOnce) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     Kit kit;
     DeviceConfig cfg = makeCfg();
@@ -238,6 +256,7 @@ TEST(DeviceManager, T3_WarmupStableCallbackOnce) {
         ++cbCount;
         cbVal = stable;
     });
+    dm.logicTick();                                            // 编队任务落地（N14T42 下发）
     EXPECT_EQ(mock.count("N14T42"), 1);                        // 加热命令已发
 
     kit.temp(20.0);
@@ -259,7 +278,7 @@ TEST(DeviceManager, T3_WarmupStableCallbackOnce) {
 TEST(DeviceManager, T4_WarmupTimeoutCallbackOnceNoStopHeat) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     DeviceConfig cfg = makeCfg();
     cfg.warmup.timeoutMs = 200;
@@ -288,7 +307,7 @@ TEST(DeviceManager, T4_WarmupTimeoutCallbackOnceNoStopHeat) {
 TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     Kit kit;
     DeviceConfig cfg = makeCfg();
@@ -323,7 +342,7 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
 TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     Kit kit;
     DeviceConfig cfg = makeCfg();
@@ -349,22 +368,22 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     EXPECT_EQ(st().modeCursor, 2);
     kit.doublePress('M');
     EXPECT_EQ(st().modeCursor, 3);
-    const int post0 = rec.count(EventType::PostProcessStarted);
-    kit.shortPress('M');                                       // 中键短按 L2 选中④：派后处理工作流事件
-    EXPECT_EQ(rec.count(EventType::PostProcessStarted), post0 + 1);
+    const int post0 = rec.userParam(4);
+    kit.shortPress('M');                                       // 中键短按 L2 选中④：派后处理工作流（UserDefined p1=4）
+    EXPECT_EQ(rec.userParam(4), post0 + 1);
     kit.shortPress('U');                                       // 上键短按 L2：退菜单
     EXPECT_EQ(st().layer, 1);
 
     kit.doublePress('U');                                      // 上键双击：None→View
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::View);
     kit.shortPress('R');                                       // View 上下文：暂仅日志（曝光不动）
-    const double base = dm.params().get("exposure").value;
+    const double base = dm.getParam("exposure").value;
     kit.doublePress('U');                                      // View→Brightness
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::Brightness);
     kit.shortPress('R');                                       // 右键短按：曝光 +1ms（相机直设）
-    EXPECT_DOUBLE_EQ(dm.params().get("exposure").value, base + 1.0);
+    EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, base + 1.0);
     kit.shortPress('L');                                       // 左键短按：曝光 -1ms
-    EXPECT_DOUBLE_EQ(dm.params().get("exposure").value, base);
+    EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, base);
     kit.doublePress('U');                                      // Brightness→None
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::None);
 
@@ -379,11 +398,12 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     EXPECT_EQ(st().layer, 1);
 }
 
-// —— T7：按键洪峰 100 帧 → 环容量 64 收敛（满丢新）→ ≥60 原始事件被消化、无崩溃 ——
+// —— T7：按键洪峰 100 帧 → 环有效容量 63（SpscRing<64> 满判 tail+1==head）收敛
+//      （满丢新）→ ≥60 原始事件被消化（31 对完整手势）、无崩溃 ——
 TEST(DeviceManager, T7_KeyFlood100NoCrash) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     Kit kit;
     DeviceConfig cfg = makeCfg();
@@ -412,7 +432,7 @@ TEST(DeviceManager, T7_KeyFlood100NoCrash) {
 TEST(DeviceManager, T8_CameraDisconnectDuringCaptureFaultNoAutoStop) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     FakeCamera* fake = nullptr;
     DeviceConfig cfg = makeCfg();
@@ -442,7 +462,7 @@ TEST(DeviceManager, T8_CameraDisconnectDuringCaptureFaultNoAutoStop) {
 TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     Kit kit;
     auto write = [&](const std::string& f) { return mock.write(f); };
@@ -472,7 +492,7 @@ TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
 TEST(DeviceManager, T10_AckLossRetransmitNonBlocking) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     DeviceConfig cfg = makeCfg();
     cfg.ackTimeoutMs = 30;
@@ -483,6 +503,7 @@ TEST(DeviceManager, T10_AckLossRetransmitNonBlocking) {
     ASSERT_TRUE(dm.open().success);
 
     dm.startCapture();
+    dm.logicTick();                                            // 编队任务落地（N11H1 首发）
     EXPECT_EQ(mock.count("N11H1"), 1);
     const auto t0 = std::chrono::steady_clock::now();          // 非阻塞证明：连 10 拍立即返回
     for (int i = 0; i < 10; ++i) dm.logicTick();
@@ -505,7 +526,7 @@ TEST(DeviceManager, T10_AckLossRetransmitNonBlocking) {
 TEST(DeviceManager, T11_V2DegradedFullChain) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     DeviceConfig cfg = makeCfg(FCodec::Version::V2);
     DeviceManager dm(cfg, gateOk, &bus, nullptr,
@@ -513,7 +534,8 @@ TEST(DeviceManager, T11_V2DegradedFullChain) {
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    dm.startCapture();                                         // v2：send 内立即回调 ok「未确认」
+    dm.startCapture();                                         // v2：编队执行 send 内立即回调 ok「未确认」
+    dm.logicTick();
     EXPECT_TRUE(dm.isCapturing());
     EXPECT_EQ(mock.count("N11H1"), 1);
     for (int i = 0; i < 10; ++i) {
@@ -539,7 +561,7 @@ TEST(DeviceManager, T11_V2DegradedFullChain) {
 TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.ev.push_back(e); });
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     DeviceConfig cfg = makeCfg();
     cfg.ackTimeoutMs = 50;
@@ -575,4 +597,73 @@ TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
     EXPECT_EQ(dm.mode(), DeviceMode::Scanning);
     EXPECT_TRUE(dm.isCapturing());
     EXPECT_EQ(rec.count(EventType::StateChanged), 1);          // commit(Scanning) 落板广播恰一次
+}
+
+// —— T13（Critical #1 回归）：双线程真并发冒烟——manualTick=false 起真逻辑线程，
+//      另一线程连发 50 次 setParam+startCapture/stopCapture 交替（+并发 getParam
+//      快照读），2s 后 close 停线程清队——无死锁无崩溃（互踩冒烟；TSAN 级
+//      确定性验证归 T18 收口）——
+TEST(DeviceManager, T13_ConcurrentPostSmoke) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    cfg.manualTick = false;                                    // 真逻辑线程 10ms
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    std::atomic<bool> stopFlag{false};
+    std::thread worker([&] {
+        for (int i = 0; i < 50 && !stopFlag.load(); ++i) {
+            dm.setParam("bgLight", 60.0 + (i % 40), ParamEntry::Source::Ui);
+            dm.setParam("exposure", 20.0 + (i % 50), ParamEntry::Source::Ui);
+            if (i % 2 == 0) dm.startCapture();
+            else dm.stopCapture();
+            (void)dm.getParam("exposure");                     // 并发快照读
+            sleepMs(20);
+        }
+    });
+    sleepMs(2000);                                             // 逻辑线程满速跑拍
+    stopFlag.store(true);
+    worker.join();
+    EXPECT_TRUE(dm.close().success);                           // 停线程+清队+关 MCU 无死锁
+    EXPECT_GE(mock.count("N11H1") + mock.count("N11H0"), 1);   // 任务确有落地
+    EXPECT_GE(dm.getParam("bgLight").value, 0.0);              // 快照口仍可读
+}
+
+// —— T14（Important #3 补缺）：enterCalibration 组链——N16 3 败→不擦板+Fault；
+//      全 ACK→commit Calibrating+StateChanged 恰一次（MCU open 失败回滚分支由
+//      T1 相机败回滚用例+代码审查双覆盖——writeOverride 测试模式 open 恒成功）——
+TEST(DeviceManager, T14_EnterCalibrationGroupChain) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    cfg.ackTimeoutMs = 50;
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    mock.noAck = {"N16"};                                      // N16 ACK 丢失 → 组 3 败
+    ASSERT_TRUE(dm.open().success);
+
+    EXPECT_TRUE(dm.enterCalibration().success);                // 门禁过（编队执行）
+    for (int i = 0; i < 80 && mock.count("N16B1") < 4; ++i) {  // 首发+重传×3
+        sleepMs(5);
+        dm.logicTick();
+    }
+    EXPECT_EQ(mock.count("N16B1"), 4);
+    EXPECT_EQ(dm.mode(), DeviceMode::Idle);                    // 黑板不落 Calibrating
+    EXPECT_EQ(rec.count(EventType::StateChanged), 0);
+    EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
+
+    mock.noAck.clear();                                        // 对照：全 ACK 路径
+    EXPECT_TRUE(dm.enterCalibration().success);
+    for (int i = 0; i < 10; ++i) dm.logicTick();
+    EXPECT_EQ(mock.count("N16B1"), 5);                         // 前段 4 + 本段 1
+    EXPECT_EQ(dm.mode(), DeviceMode::Calibrating);             // 组成功才擦板
+    EXPECT_EQ(rec.count(EventType::StateChanged), 1);          // 落板广播恰一次
 }
