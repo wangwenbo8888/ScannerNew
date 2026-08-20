@@ -1,246 +1,241 @@
 // ============================================================================
-// MCUDriver.cpp — 下位机 MCU 串口驱动实现（Windows）
+// MCUDriver.cpp — 三小层组合壳实现（契约见 MCUDriver.h / 设计方案 §2.2-§2.5）
 // ============================================================================
 
 #include "MCUDriver.h"
 #include <spdlog/spdlog.h>
-#include <cstring>
 #include <chrono>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 
 namespace Scanner::device {
 
-MCUDriver::MCUDriver(int baudRate) : baudRate_(baudRate) {}
+namespace {
 
-MCUDriver::~MCUDriver() {
-    close();
+int64_t steadyNowMs() {   // 单调时钟：CommandChannel 对账/半帧超时用
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+Scanner::TimestampMs systemNowMs() {   // 墙钟：上行帧时间戳/心跳（对齐 base TimestampMs 口径）
+    return static_cast<Scanner::TimestampMs>(std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+} // namespace
+
+MCUDriver::MCUDriver(WriteOverride writeOverride)
+    : writeOverride_(std::move(writeOverride)), channel_(makeDeps()) {}
+
+MCUDriver::~MCUDriver() { close(); }
+
+// ============================================================================
+// 三小层装配
+// ============================================================================
+serial::CommandChannel::Deps MCUDriver::makeDeps() {
+    serial::CommandChannel::Deps d;
+    d.codec = &codec_;
+    d.write = [this](const std::string& f) { return writeFrame(f); };
+    d.nowMs = [] { return steadyNowMs(); };
+    d.reliable = (version_ == serial::FrameCodec::Version::V3);   // v2 降级：发不等（§2.5）
+    return d;
+}
+
+void MCUDriver::applyVersion() {
+    codec_ = serial::FrameCodec(version_);            // 复位半帧挂起缓冲（重开语义）
+    channel_ = serial::CommandChannel(makeDeps());    // 重建依赖（reliable 随版本）
+}
+
+bool MCUDriver::writeFrame(const std::string& frame) {
+    if (writeOverride_) return writeOverride_(frame);           // 测试模式
+    if (!open_.load(std::memory_order_acquire)) return false;
+    return serial_.write(frame).success;
 }
 
 // ============================================================================
-// 打开/关闭
+// open/close（close 倒序：停 rx 线程 → 关串口）
 // ============================================================================
-Result MCUDriver::open(const std::string& portOrDevice) {
-    if (isOpen_) return Result::ok("MCU已打开");
-
-    std::string dev = portOrDevice;
-    if (dev.substr(0, 3) != "\\\\.") dev = "\\\\.\\" + dev;
-
-    hSerial_ = CreateFileA(dev.c_str(), GENERIC_READ | GENERIC_WRITE,
-                           0, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (hSerial_ == INVALID_HANDLE_VALUE) {
-        return Result::fail(-1, "MCU串口打开失败: " + portOrDevice);
+Scanner::Result MCUDriver::open(const std::string& port) {
+    if (open_.load()) return Scanner::Result::ok("MCU已打开");
+    applyVersion();
+    if (writeOverride_) {                 // 测试模式：不开真串口、不起 rx 线程
+        open_.store(true);
+        return Scanner::Result::ok();
     }
+    auto r = serial_.open(port, kDefaultBaud);
+    if (!r.success) return r;
+    open_.store(true);
+    rxRunning_.store(true);
+    rxThread_ = std::thread(&MCUDriver::rxLoop, this);
+    spdlog::info("[MCUDriver] 串口已打开: {} @ {} baud (v{})", port, kDefaultBaud,
+                 version_ == serial::FrameCodec::Version::V3 ? 3 : 2);
+    return Scanner::Result::ok();
+}
 
-    DCB dcb = {};
-    dcb.DCBlength = sizeof(DCB);
-    if (!GetCommState(hSerial_, &dcb)) {
-        CloseHandle(hSerial_); hSerial_ = nullptr;
-        return Result::fail(-2, "GetCommState失败");
+Scanner::Result MCUDriver::close() {
+    if (rxThread_.joinable()) {
+        rxRunning_.store(false);
+        rxThread_.join();
     }
-    dcb.BaudRate = baudRate_;
-    dcb.ByteSize = 8;
-    dcb.Parity = NOPARITY;
-    dcb.StopBits = ONESTOPBIT;
-    if (!SetCommState(hSerial_, &dcb)) {
-        CloseHandle(hSerial_); hSerial_ = nullptr;
-        return Result::fail(-3, "SetCommState失败");
-    }
-
-    COMMTIMEOUTS timeouts = {};
-    timeouts.ReadIntervalTimeout = 50;
-    timeouts.ReadTotalTimeoutConstant = 50;
-    timeouts.ReadTotalTimeoutMultiplier = 10;
-    timeouts.WriteTotalTimeoutConstant = 50;
-    timeouts.WriteTotalTimeoutMultiplier = 10;
-    SetCommTimeouts(hSerial_, &timeouts);
-
-    isOpen_ = true;
-    rxRunning_ = true;
-    rxThread_ = std::thread(&MCUDriver::receiveLoop, this);
-
-    spdlog::info("[MCUDriver] 串口已打开: {} @ {} baud", portOrDevice, baudRate_);
-    return Result::ok();
+    serial_.close();                      // 阻断中的 ReadFile 以 ABORTED 退出
+    if (open_.exchange(false)) spdlog::info("[MCUDriver] 串口已关闭");
+    return Scanner::Result::ok();
 }
 
-Result MCUDriver::close() {
-    if (!isOpen_) return Result::ok();
-    rxRunning_ = false;
-    if (rxThread_.joinable()) rxThread_.join();
-    if (hSerial_) { CloseHandle(hSerial_); hSerial_ = nullptr; }
-    isOpen_ = false;
-    spdlog::info("[MCUDriver] 串口已关闭");
-    return Result::ok();
-}
-
-bool MCUDriver::isOpen() const { return isOpen_; }
+bool MCUDriver::isOpen() const { return open_.load(); }
 
 // ============================================================================
-// 串口发送
+// rx 线程：零业务——read → feed → 入环；半帧超时推进（与 feed 同线程）
 // ============================================================================
-void MCUDriver::sendCommand(const std::string& cmd) {
-    if (!hSerial_ || !isOpen_) return;
-    DWORD written = 0;
-    WriteFile(hSerial_, cmd.c_str(), static_cast<DWORD>(cmd.size()), &written, nullptr);
-    spdlog::debug("[MCUDriver] 发送 {} 字节: {}", written, cmd);
-}
-
-// ============================================================================
-// 串口接收线程
-// ============================================================================
-void MCUDriver::receiveLoop() {
+void MCUDriver::rxLoop() {
+    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);  // C7 优先级提升
     char buf[256];
-    std::string accum;
-    while (rxRunning_ && hSerial_) {
-        DWORD read = 0;
-        if (ReadFile(hSerial_, buf, sizeof(buf) - 1, &read, nullptr) && read > 0) {
-            accum.append(buf, read);
-            size_t pos;
-            while ((pos = accum.find(';')) != std::string::npos) {
-                std::string msg = accum.substr(0, pos + 1);
-                accum.erase(0, pos + 1);
-                parseReceived(msg);
-            }
+    std::vector<serial::FrameCodec::Frame> frames;
+    auto lastTick = std::chrono::steady_clock::now();
+    while (rxRunning_.load()) {
+        const int n = serial_.read(buf, static_cast<int>(sizeof buf));
+        if (n > 0) {
+            codec_.feed(std::string(buf, buf + n), frames);
+            for (const auto& f : frames) dispatchFrame(f);
+            frames.clear();
+        } else if (n < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));  // 未开/错误防忙转
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTick);
+        if (el.count() > 0) {
+            codec_.advanceTimeout(el.count());
+            lastTick = now;
         }
     }
 }
 
-void MCUDriver::parseReceived(const std::string& data) {
-    spdlog::debug("[MCUDriver] 收到: {}", data);
-
-    // 解析温度: "T25.3;"
-    if (data.size() > 1 && data[0] == 'T') {
-        try {
-            double t = std::stod(data.substr(1));
-            temperature_.store(t, std::memory_order_release);
-            hal::McuEvent evt;
-            evt.type = hal::McuEventType::Temperature;
-            evt.param1 = static_cast<int64_t>(t * 100);
-            evt.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            std::lock_guard lock(callbackMutex_);
-            if (callback_) callback_(evt);
-        } catch (...) {}
+void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
+    const Scanner::TimestampMs now = systemNowMs();
+    lastRx_.store(now, std::memory_order_release);   // 任何有效帧（分帧+CRC 过）刷新心跳（§4-4）
+    if (f.payload.empty()) { onParseFail(f.payload); return; }
+    switch (f.payload[0]) {
+    case 'T': {
+        serial::TempFrame t;
+        if (serial::parseTempPayload(f.payload, t)) { t.seq = f.seq; t.ts = now; tempRing_.push(t); }
+        else onParseFail(f.payload);
+        break;
     }
-
-    // 解析按键: "K1;" / "K0;"
-    if (data.size() >= 2 && data[0] == 'K') {
-        hal::McuEvent evt;
-        evt.type = hal::McuEventType::KeyEvent;
-        evt.param1 = (data[1] == '1') ? 1 : 0;
-        std::lock_guard lock(callbackMutex_);
-        if (callback_) callback_(evt);
+    case 'K': {
+        serial::RawKeyEvent k;
+        if (serial::parseKeyPayload(f.payload, k)) { k.seq = f.seq; k.ts = now; keyRing_.push(k); }
+        else onParseFail(f.payload);   // v2 匿名 K1;/K0; 落此（§2.5 按键链停用）
+        break;
     }
-
-    // 急停: "E1;"
-    if (data.size() >= 2 && data[0] == 'E' && data[1] == '1') {
-        emergency_.store(true);
-        hal::McuEvent evt;
-        evt.type = hal::McuEventType::EmergencyStop;
-        std::lock_guard lock(callbackMutex_);
-        if (callback_) callback_(evt);
+    case 'S': {
+        serial::StatusFrame s;
+        if (serial::parseStatusPayload(f.payload, s)) { s.seq = f.seq; s.ts = now; statusRing_.push(s); }
+        else onParseFail(f.payload);
+        break;
+    }
+    case 'A': {
+        serial::AckFrame a;
+        if (serial::parseAckPayload(f.payload, a)) { a.seq = f.seq; ackRing_.push(a); }
+        else onParseFail(f.payload);
+        break;
+    }
+    case 'E':
+        onParseFail(f.payload);   // v2 旧 E1; 急停牌已删——忽略+warn（§2.2 删净）
+        break;
+    default:
+        onParseFail(f.payload);
+        break;
     }
 }
 
-// ============================================================================
-// 触发
-// ============================================================================
-Result MCUDriver::sendSoftwareTrigger() {
-    sendCommand("N12 T0;");
-    return Result::ok();
-}
-
-Result MCUDriver::setHardwareTriggerMode(bool enabled) {
-    hwTrigger_ = enabled;
-    return Result::ok();
+void MCUDriver::onParseFail(const std::string& payload) {
+    const uint64_t n = parseFailCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+    spdlog::warn("[MCUDriver] 上行载荷丢弃(计{}): '{}'", n, payload);
 }
 
 // ============================================================================
-// 激光/光源
+// pump（逻辑线程）：排空 4 环 → Uplink 分流 / onAck 回填 / T seq 对账
 // ============================================================================
-Result MCUDriver::setLaserOn(bool on) {
-    laserOn_ = on;
-    if (!on) sendCommand("N13 L0;");
-    return Result::ok();
+void MCUDriver::pump() {
+    serial::AckFrame a;
+    while (ackRing_.pop(a)) channel_.onAck(a.ackedSeq);        // A 先行：ACK 最速销项
+    serial::RawKeyEvent k;
+    while (keyRing_.pop(k)) { if (uplink_.onKey) uplink_.onKey(k); }
+    serial::StatusFrame s;
+    while (statusRing_.pop(s)) { if (uplink_.onStatus) uplink_.onStatus(s); }
+    serial::TempFrame t;
+    while (tempRing_.pop(t)) {
+        accountTempSeq(t.seq);
+        if (uplink_.onTemp) uplink_.onTemp(t);
+    }
 }
 
-Result MCUDriver::setLaserPower(int level) {
-    laserPower_ = level;
-    sendCommand("N13 L" + std::to_string(level) + ";");
-    return Result::ok();
-}
-
-Result MCUDriver::setLedOn(bool on) {
-    ledOn_ = on;
-    if (!on) sendCommand("N14 B0;");
-    else sendCommand("N14 B" + std::to_string(fillLight_) + ";");
-    return Result::ok();
-}
-
-// ============================================================================
-// 急停
-// ============================================================================
-Result MCUDriver::emergencyStop() {
-    emergency_.store(true);
-    sendCommand("N15 E1;");
-    spdlog::warn("[MCUDriver] 急停已发送");
-    return Result::ok();
-}
-
-bool MCUDriver::isEmergencyStop() const {
-    return emergency_.load();
+void MCUDriver::accountTempSeq(uint16_t seq) {
+    if (version_ != serial::FrameCodec::Version::V3) return;   // v2 seq 恒 0——不对账
+    if (hasTSeq_ && static_cast<uint8_t>(lastTSeq_ + 1) != static_cast<uint8_t>(seq)) {
+        seqGapCount_.fetch_add(1, std::memory_order_relaxed);
+        spdlog::debug("[MCUDriver] T 帧 seq 跳变 {}→{}（丢帧对账计 {}）",
+                      lastTSeq_, seq, seqGapCount_.load());
+    }
+    hasTSeq_ = true;
+    lastTSeq_ = seq;
 }
 
 // ============================================================================
-// 温度
+// typed N10–N16（协议表 §2.2；payload 拼装 → CommandChannel）
 // ============================================================================
-double MCUDriver::getTemperature() const {
-    return temperature_.load(std::memory_order_acquire);
+void MCUDriver::setCaptureParams(const hal::CaptureParams& p, DoneCb cb) {
+    channel_.send("N10H" + std::to_string(p.freqHz) +
+                  "B" + std::to_string(p.bgLight) +
+                  "T" + std::to_string(p.laserSelectA) +
+                  "V" + std::to_string(p.laserSelectB) +
+                  "L" + std::to_string(p.laserLevel), std::move(cb));
+}
+void MCUDriver::startScan(DoneCb cb)        { channel_.send("N11H1", std::move(cb)); }
+void MCUDriver::stopScan(DoneCb cb)         { channel_.send("N11H0", std::move(cb)); }
+void MCUDriver::enterSelfCheck(DoneCb cb)   { channel_.send("N12Z1", std::move(cb)); }
+void MCUDriver::exitSelfCheck(DoneCb cb)    { channel_.send("N12Z0", std::move(cb)); }
+void MCUDriver::enterStandby(DoneCb cb)     { channel_.send("N13E1", std::move(cb)); }
+void MCUDriver::exitStandby(DoneCb cb)      { channel_.send("N13E0", std::move(cb)); }
+void MCUDriver::setHeatTarget(int celsius, DoneCb cb) {
+    channel_.send("N14T" + std::to_string(celsius), std::move(cb));
+}
+void MCUDriver::queryTemperature(int v0to2) {
+    channel_.sendFireAndForget("N15V" + std::to_string(v0to2));   // 查询类：发不等（§2.3）
+}
+void MCUDriver::enterCalibration(DoneCb cb) { channel_.send("N16B1", std::move(cb)); }
+void MCUDriver::exitCalibration(DoneCb cb)  { channel_.send("N16B0", std::move(cb)); }
+
+// ============================================================================
+// 上行/配置/观测
+// ============================================================================
+void MCUDriver::setUplink(hal::McuUplink h) { uplink_ = std::move(h); }
+
+void MCUDriver::setProtocolVersion(serial::FrameCodec::Version v) {
+    if (open_.load()) {
+        spdlog::warn("[MCUDriver] setProtocolVersion 开启中调用无效（重开串口才生效）");
+        return;
+    }
+    version_ = v;
+    applyVersion();
 }
 
-// ============================================================================
-// 回调
-// ============================================================================
-Result MCUDriver::registerCallback(hal::McuEventCallback cb) {
-    std::lock_guard lock(callbackMutex_);
-    callback_ = std::move(cb);
-    return Result::ok();
+Scanner::TimestampMs MCUDriver::lastRxTime() const {
+    return lastRx_.load(std::memory_order_acquire);
 }
 
-Result MCUDriver::unregisterCallback() {
-    std::lock_guard lock(callbackMutex_);
-    callback_ = nullptr;
-    return Result::ok();
-}
+uint64_t MCUDriver::seqGapCount() const { return seqGapCount_.load(std::memory_order_relaxed); }
 
-// ============================================================================
-// 扫描控制
-// ============================================================================
-Result MCUDriver::startScan(int freq, int bgLight, int laserLight,
-                            int trigger, int version) {
-    fillLight_ = bgLight;
-    laserPower_ = laserLight;
-    laserOn_ = true;
-    emergency_.store(false);
-
-    char cmd[128];
-    std::snprintf(cmd, sizeof(cmd),
-        "N10 H%d B%d T%d V%d L%d;",
-        freq, bgLight, trigger, version, laserLight);
-    sendCommand(cmd);
-
-    spdlog::info("[MCUDriver] 扫描启动: freq={} bg={} laser={}", freq, bgLight, laserLight);
-    return Result::ok();
-}
-
-Result MCUDriver::stopScan() {
-    laserOn_ = false;
-    sendCommand("N11 H0;");
-    spdlog::info("[MCUDriver] 扫描停止");
-    return Result::ok();
+void MCUDriver::testInjectRaw(const std::string& frameBytes) {
+    std::vector<serial::FrameCodec::Frame> out;
+    codec_.feed(frameBytes, out);
+    for (const auto& f : out) dispatchFrame(f);
 }
 
 } // namespace Scanner::device

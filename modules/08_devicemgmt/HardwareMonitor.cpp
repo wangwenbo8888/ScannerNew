@@ -38,15 +38,17 @@ void HardwareMonitor::monitorLoop() {
         auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-        // 1. MCU 温度
+        // 1. MCU 温度（TODO(T16): 升级 HardwareMonitor 接新 IMCU——温度经 McuUplink
+        //    上行、心跳经 lastRxTime；本段暂不查 MCU）
         if (mcu_) {
-            double mcuTemp = mcu_->getTemperature();
+            const double mcuTemp = 0.0;
 
             if (stateCache_) {
                 data::DeviceStateInfo info;
                 info.deviceId = "MCU";
                 info.deviceType = "MCU";
-                info.state = mcu_->isOpen() ? DeviceState::Connected : DeviceState::Offline;
+                info.state = (camera_ && camera_->isOpen()) ? DeviceState::Connected
+                                                            : DeviceState::Offline;
                 info.temperature = mcuTemp;
                 info.timestamp = ts;
                 stateCache_->pushState(info);

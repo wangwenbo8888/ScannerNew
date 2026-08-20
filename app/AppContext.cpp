@@ -146,7 +146,7 @@ void AppContext::initialize() {
     camCfg.deviceIndexRight = 1;
     camCfg.rotateRight180 = true;
     camera_ = std::make_unique<Scanner::device::CameraControl>(camCfg);
-    mcu_    = std::make_unique<Scanner::device::MCUDriver>(115200);
+    mcu_    = std::make_unique<Scanner::device::MCUDriver>();   // 波特率/端口语义归 open(port)（S-T5）
 
     hwMonitor_ = std::make_unique<Scanner::device::HardwareMonitor>();
     hwMonitor_->setDeviceStateCache(deviceStateCache_.get());
