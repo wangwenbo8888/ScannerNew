@@ -28,6 +28,18 @@ TEST(McuFrameParse, TempIllegal) {
     EXPECT_FALSE(parseTempPayload("X25.3", f));       // 前缀非 T
 }
 
+// —— parseTempPayload 严格性（S-T5 前置清理：from_chars 口径——locale 无关，
+//    拒 '+'/前导空白/inf/nan/内嵌 NUL 残留；strtod 曾全部放过）——
+TEST(McuFrameParse, TempStrictRejects) {
+    TempFrame f;
+    EXPECT_FALSE(parseTempPayload("T+25.3", f));                     // '+' 前缀
+    EXPECT_FALSE(parseTempPayload("T 25.3", f));                     // 前导空白
+    EXPECT_FALSE(parseTempPayload("Tinf", f));                       // 非有限
+    EXPECT_FALSE(parseTempPayload("Tnan", f));                       // 非有限
+    EXPECT_FALSE(parseTempPayload("T1e999", f));                     // 溢出
+    EXPECT_FALSE(parseTempPayload(std::string("T25.3\0x", 7), f));   // 内嵌 NUL 残留
+}
+
 // —— parseKeyPayload：K+键号(U/L/M/R)+按下(0/1)+','+毫秒 ——
 TEST(McuFrameParse, KeyLegal) {
     RawKeyEvent e;

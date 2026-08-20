@@ -21,6 +21,7 @@ public:
     // 喂字节流（串口rx线程调）：内部累积+分帧，完整帧追加到 out
     void feed(const std::string& bytes, std::vector<Frame>& out);
     // 逻辑时钟推进（半帧超时 A3）：超时则丢弃挂起缓冲并复位（返回是否发生丢弃）
+    // 线程契约：须与 feed 同线程调用（挂起缓冲无锁——S-T5 前置清理注明）
     bool advanceTimeout(int64_t ms);
     // 组帧：V3 校验载荷禁 '$' ';'（违规返回空串）；V2 = payload + ';'
     std::string encode(const std::string& payload, uint16_t seq) const;

@@ -7,49 +7,45 @@
 
 #include "McuFrame.h"
 
-#include <cerrno>
+#include <charconv>
 #include <cmath>
-#include <cstdlib>
 
 namespace Scanner::device::serial {
 
 namespace {
 
-// 整串消费式浮点：拒绝空串/残留字符/溢出/非有限值（"25.x"/""/"1e999" 等）
+// 整串消费式浮点（from_chars：locale 无关、拒 '+'/前导空白；溢出/残留/非有限全拒）
 bool parseDoubleFull(const std::string& s, double& out) {
     if (s.empty()) return false;
-    errno = 0;
-    char* end = nullptr;
-    double v = std::strtod(s.c_str(), &end);
-    if (end == s.c_str() || *end != '\0' || errno == ERANGE || !std::isfinite(v)) return false;
+    const char* b = s.data();
+    const char* e = b + s.size();
+    double v = 0.0;
+    const auto r = std::from_chars(b, e, v);
+    if (r.ec != std::errc{} || r.ptr != e || !std::isfinite(v)) return false;
     out = v;
     return true;
 }
 
-// 纯十进制数字串 → uint32（拒绝空串/非数字/溢出）
+// 纯十进制数字串 → uint32（from_chars：拒空串/符号/非数字/溢出；指针距离判全消费）
 bool parseU32Full(const std::string& s, uint32_t& out) {
     if (s.empty()) return false;
-    for (char c : s)
-        if (c < '0' || c > '9') return false;
-    errno = 0;
-    char* end = nullptr;
-    unsigned long long v = std::strtoull(s.c_str(), &end, 10);
-    if (end == s.c_str() || *end != '\0' || errno == ERANGE || v > 0xFFFFFFFFull) return false;
-    out = static_cast<uint32_t>(v);
+    const char* b = s.data();
+    const char* e = b + s.size();
+    uint32_t v = 0;
+    const auto r = std::from_chars(b, e, v, 10);
+    if (r.ec != std::errc{} || r.ptr != e) return false;
+    out = v;
     return true;
 }
 
-// 纯 hex 字符串 → uint32（拒绝空串/非 hex 字符/溢出；限长由调用方保证）
+// 纯 hex 字符串 → uint32（拒空串/非 hex 字符/溢出；限长由调用方保证）
 bool parseHexFull(const std::string& s, uint32_t& out) {
     if (s.empty()) return false;
-    for (char c : s) {
-        bool hex = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
-        if (!hex) return false;
-    }
-    errno = 0;
-    char* end = nullptr;
-    unsigned long v = std::strtoul(s.c_str(), &end, 16);
-    if (end == s.c_str() || *end != '\0' || errno == ERANGE) return false;
+    const char* b = s.data();
+    const char* e = b + s.size();
+    uint32_t v = 0;
+    const auto r = std::from_chars(b, e, v, 16);
+    if (r.ec != std::errc{} || r.ptr != e) return false;
     out = v;
     return true;
 }

@@ -33,18 +33,18 @@ bool parseAckPayload(const std::string& payload, AckFrame& out);
 template <typename T, size_t N>
 class SpscRing {
 public:
-    bool push(T v) {               // 生产者：满则丢最旧
-        if (full()) { popCount_.fetch_add(1, std::memory_order_relaxed); head_.store((head_+1)%N); }
+    bool push(T v) {               // 生产者：满则丢最旧（恒 true——丢最旧语义，保留 bool 兼容既有调用）
+        if (full()) { dropCount_.fetch_add(1, std::memory_order_relaxed); head_.store((head_+1)%N); }
         buf_[tail_] = std::move(v); tail_.store((tail_+1)%N); return true; }
     bool pop(T& out) {             // 消费者
         if (empty()) return false; out = std::move(buf_[head_]); head_.store((head_+1)%N); return true; }
     bool empty() const { return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire); }
-    uint64_t dropped() const { return popCount_.load(std::memory_order_relaxed); }
+    uint64_t dropped() const { return dropCount_.load(std::memory_order_relaxed); }
 private:
     bool full() const { return (tail_+1)%N == head_.load(std::memory_order_acquire); }
     std::array<T, N> buf_{};
     std::atomic<size_t> head_{0}, tail_{0};
-    std::atomic<uint64_t> popCount_{0};
+    std::atomic<uint64_t> dropCount_{0};
 };
 
 } // namespace Scanner::device::serial

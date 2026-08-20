@@ -80,6 +80,10 @@ void FrameCodec::feed(const std::string& bytes, std::vector<Frame>& out) {
             if (pending_.empty()) continue;         // 非 '$' 前导丢弃（含 ';'）
             if (ch == ';') { parsePending(out); continue; }
             pending_.push_back(ch);
+            if (pending_.size() >= kMaxFrame) {  // 无尾超长流早弃：挂起缓冲封顶（可观测行为不变）
+                pending_.clear();
+                pendingAgeMs_ = 0;
+            }
         } else {
             if (ch == ';') {
                 if (!pending_.empty()) out.push_back(Frame{std::move(pending_), 0});

@@ -180,3 +180,17 @@ TEST(FrameCodecV2, NoLengthLimit) {
     ASSERT_EQ(out.size(), 1u);
     EXPECT_EQ(out[0].payload, seg.substr(0, seg.size() - 1));
 }
+
+// —— 15. 无尾超长流：挂起缓冲早弃封顶（内存有界），后续正常帧仍可解
+//      （S-T5 前置清理回归钉——防御加固，可观测行为不变）——
+TEST(FrameCodecV3, RunawayPendingCappedThenRecovers) {
+    FrameCodec c(FrameCodec::Version::V3);
+    std::vector<FrameCodec::Frame> out;
+    c.feed("$" + std::string(64, 'A'), out);   // 64B 无 ';' 垃圾流
+    EXPECT_TRUE(out.empty());
+    c.feed("BBBB;", out);                       // 尾巴（无 '$' 前导）不复活
+    EXPECT_TRUE(out.empty());
+    c.feed(c.encode("T25.3,24.8", 0x03), out);  // 正常帧照解
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].seq, 0x03);
+}
