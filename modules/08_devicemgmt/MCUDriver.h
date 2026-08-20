@@ -60,6 +60,11 @@ public:
     uint64_t seqGapCount() const override;
     void pump() override;                                         // 逻辑线程调（含 A→onAck/T→seq 对账）
 
+    // —— D-T12b 增补（门面驱动用）——
+    void channelTick();          // CommandChannel 对账 tick 出口（S-T5 口径：pump 不调
+                                 // tick——重传/3 败收口归 DeviceManager 逻辑线程驱动）
+    void setAckTimeoutMs(int ms);  // ACK 超时注入（open 前配；钳 ≥1；测试缩短重传周期用）
+
     // —— 测试缝（仅测试）：等价 rx 线程收到原始字节——喂 codec 并分发入环 ——
     void testInjectRaw(const std::string& frameBytes);
 
@@ -73,6 +78,7 @@ private:
     void applyVersion();                                          // version_ → codec_/channel_ 重建（须未 open）
 
     static constexpr int kDefaultBaud = 115200;   // 协议现状固定波特率（旧构造参已删）
+    int ackTimeoutMs_ = 100;                      // CommandChannel Deps 默认口径（可注入）
 
     // —— 组合三小层（声明序即初始化序：version_ 先于 codec_/channel_）——
     WriteOverride writeOverride_;                // 测试注入（空=走 SerialPort）

@@ -39,6 +39,7 @@ target_sources(mod_devicemgmt PRIVATE KeySemantics.cpp)
 target_sources(mod_devicemgmt PRIVATE ModeController.cpp)
 target_sources(mod_devicemgmt PRIVATE ParamStore.cpp)
 target_sources(mod_devicemgmt PRIVATE WarmupSequence.cpp)
+target_sources(mod_devicemgmt PRIVATE DeviceManager.cpp)
 
 if(BUILD_TESTS)
     file(GLOB DEV_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")

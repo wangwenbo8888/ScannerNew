@@ -49,6 +49,7 @@ serial::CommandChannel::Deps MCUDriver::makeDeps() {
     d.write = [this](const std::string& f) { return writeFrame(f); };
     d.nowMs = [] { return steadyNowMs(); };
     d.reliable = (version_ == serial::FrameCodec::Version::V3);   // v2 降级：发不等（§2.5）
+    d.ackTimeoutMs = ackTimeoutMs_;                               // D-T12b：可注入（默认 100）
     return d;
 }
 
@@ -256,6 +257,15 @@ Scanner::TimestampMs MCUDriver::lastRxTime() const {
 }
 
 uint64_t MCUDriver::seqGapCount() const { return seqGapCount_.load(std::memory_order_relaxed); }
+
+void MCUDriver::channelTick() { channel_.tick(); }   // D-T12b：对账出口（逻辑线程驱动）
+
+void MCUDriver::setAckTimeoutMs(int ms) {            // D-T12b：open 前注入生效
+    if (ms < 1) ms = 1;                              // 防 tick 活锁（与 Deps 构造防护同口径）
+    ackTimeoutMs_ = ms;
+    if (!open_.load()) applyVersion();               // 重建 channel 依赖
+    else spdlog::warn("[MCUDriver] setAckTimeoutMs 开启中调用不重建（重开才生效）");
+}
 
 void MCUDriver::testInjectRaw(const std::string& frameBytes) {
     std::vector<serial::FrameCodec::Frame> out;
