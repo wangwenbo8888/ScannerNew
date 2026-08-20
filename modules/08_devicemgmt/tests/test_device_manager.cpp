@@ -96,9 +96,10 @@ struct FakeCamera : Scanner::hal::IScannerCamera {
         return Result::ok();
     }
     Result setGain(double) override { return Result::ok(); }
-    Result setFrameRate(double) override { return Result::ok(); }        // T14 删
     Result setResolution(int, int) override { return Result::ok(); }
-    Result loadCalibration(const std::string&) override { return Result::ok(); }
+    Result setCalibration(const Scanner::hal::CameraIntrinsics&,
+                          const Scanner::hal::CameraIntrinsics&,
+                          const Scanner::hal::StereoExtrinsics&) override { return Result::ok(); }
     Scanner::hal::CameraIntrinsics getLeftIntrinsics() const override { return {}; }
     Scanner::hal::CameraIntrinsics getRightIntrinsics() const override { return {}; }
     Scanner::hal::StereoExtrinsics getStereoExtrinsics() const override { return {}; }
@@ -111,8 +112,6 @@ struct FakeCamera : Scanner::hal::IScannerCamera {
     }
     Result stopAsyncCapture() override { return Result::ok(); }
     double getTemperature() const override { return 0.0; }
-    Result setLaserOn(bool) override { return Result::ok(); }            // T14 删
-    Result setLaserPower(int) override { return Result::ok(); }          // T14 删
     std::string getPlatform() const override { return "Windows"; }
 };
 

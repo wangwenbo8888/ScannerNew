@@ -52,10 +52,11 @@ public:
 
     Result setExposure(double ms) override;
     Result setGain(double dB) override;
-    Result setFrameRate(double fps) override;
     Result setResolution(int width, int height) override;
 
-    Result loadCalibration(const std::string& jsonPath) override;
+    Result setCalibration(const hal::CameraIntrinsics& left,
+                          const hal::CameraIntrinsics& right,
+                          const hal::StereoExtrinsics& stereo) override;
     hal::CameraIntrinsics getLeftIntrinsics() const override;
     hal::CameraIntrinsics getRightIntrinsics() const override;
     hal::StereoExtrinsics getStereoExtrinsics() const override;
@@ -70,8 +71,6 @@ public:
     Result stopAsyncCapture() override;
 
     double getTemperature() const override;
-    Result setLaserOn(bool on) override;
-    Result setLaserPower(int level) override;
 
     static int enumerateDevices();
 
@@ -97,6 +96,13 @@ private:
     std::atomic<bool> m_isOpen{false};
     std::atomic<bool> m_isCapturing{false};
     std::atomic<double> m_currentExposureMs{10.0};
+    std::atomic<double> m_currentGain{0.0};      // 按 GainRaw 原生单位传，dB 语义由上层换算
+
+    // 标定缓存（注入式 B3：app 从 01 CalibStore 喂入，08 不做第二真相源）
+    mutable std::mutex m_calibMutex;
+    hal::CameraIntrinsics m_calibLeft;
+    hal::CameraIntrinsics m_calibRight;
+    hal::StereoExtrinsics m_calibStereo;
 
     SideResource m_sides[2];
     SideBuffer   m_buffers[2];

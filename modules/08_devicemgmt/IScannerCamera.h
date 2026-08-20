@@ -57,13 +57,16 @@ public:
     virtual bool isOpen() const = 0;
 
     // 参数
+    // 注：帧率=N10 H 拍照频率（下位机管）；激光归 MCU——2026-08-20 08 设计 §5.1 裁决
     virtual Result setExposure(double ms) = 0;
     virtual Result setGain(double dB) = 0;
-    virtual Result setFrameRate(double fps) = 0;
     virtual Result setResolution(int width, int height) = 0;
 
-    // 标定参数
-    virtual Result loadCalibration(const std::string& jsonPath) = 0;
+    // 标定参数（注入式，08 设计 B3 修正）：app 从 01 CalibStore 取已解析内外参喂入——
+    // 08 不带 json 解析器、不做第二真相源（标定数据归属 01）
+    virtual Result setCalibration(const CameraIntrinsics& left,
+                                  const CameraIntrinsics& right,
+                                  const StereoExtrinsics& stereo) = 0;
     virtual CameraIntrinsics getLeftIntrinsics() const = 0;
     virtual CameraIntrinsics getRightIntrinsics() const = 0;
     virtual StereoExtrinsics getStereoExtrinsics() const = 0;
@@ -82,10 +85,6 @@ public:
 
     // 温度
     virtual double getTemperature() const = 0;
-
-    // 激光控制
-    virtual Result setLaserOn(bool on) = 0;
-    virtual Result setLaserPower(int level) = 0;
 
     // 平台
     virtual std::string getPlatform() const = 0;  // "Windows" / "Jetson"

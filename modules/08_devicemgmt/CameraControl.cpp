@@ -202,8 +202,28 @@ void CameraControl::applySideParams(int sideIndex) {
     }
 }
 
-Result CameraControl::setGain(double) { return Result::ok(); }
-Result CameraControl::setFrameRate(double) { return Result::ok(); }
+Result CameraControl::setGain(double dB) {
+    if (!m_isOpen) return Result::fail("设备未打开");
+    m_currentGain = dB;
+    // 按 GainRaw 原生单位传（Galaxy GainRaw 单位非严格 dB），dB 语义由上层换算
+    const int64_t raw = static_cast<int64_t>(dB);
+    for (int i = 0; i < 2; ++i) {
+        auto& fc = m_sides[i].featureControl;
+        if (fc.IsNull()) continue;
+        try {
+            fc->GetEnumFeature("GainAuto")->SetValue("Off");
+            fc->GetIntFeature("GainRaw")->SetValue(raw);
+        } catch (CGalaxyException& e) {
+            spdlog::error("[CameraControl] 增益设置异常(side={}): {}", i, e.what());
+        }
+    }
+    // 读回验证
+    try {
+        int64_t actual = m_sides[0].featureControl->GetIntFeature("GainRaw")->GetValue();
+        spdlog::info("[CameraControl] 增益设置: 请求={} 实际 GainRaw={}", dB, actual);
+    } catch (...) {}
+    return Result::ok();
+}
 
 Result CameraControl::setResolution(int width, int height) {
     if (!m_isOpen) return Result::fail("设备未打开");
@@ -251,12 +271,29 @@ Result CameraControl::setResolution(int width, int height) {
 }
 
 // ============================================================================
-// 标定（TODO）
+// 标定（注入式缓存——B3：app 从 01 CalibStore 喂入，08 不解析 json）
 // ============================================================================
-Result CameraControl::loadCalibration(const std::string&) { return Result::ok(); }
-hal::CameraIntrinsics CameraControl::getLeftIntrinsics() const { return {}; }
-hal::CameraIntrinsics CameraControl::getRightIntrinsics() const { return {}; }
-hal::StereoExtrinsics CameraControl::getStereoExtrinsics() const { return {}; }
+Result CameraControl::setCalibration(const hal::CameraIntrinsics& left,
+                                     const hal::CameraIntrinsics& right,
+                                     const hal::StereoExtrinsics& stereo) {
+    std::lock_guard<std::mutex> lock(m_calibMutex);
+    m_calibLeft = left;
+    m_calibRight = right;
+    m_calibStereo = stereo;
+    return Result::ok();
+}
+hal::CameraIntrinsics CameraControl::getLeftIntrinsics() const {
+    std::lock_guard<std::mutex> lock(m_calibMutex);
+    return m_calibLeft;
+}
+hal::CameraIntrinsics CameraControl::getRightIntrinsics() const {
+    std::lock_guard<std::mutex> lock(m_calibMutex);
+    return m_calibRight;
+}
+hal::StereoExtrinsics CameraControl::getStereoExtrinsics() const {
+    std::lock_guard<std::mutex> lock(m_calibMutex);
+    return m_calibStereo;
+}
 
 // ============================================================================
 // 单侧采集
@@ -407,7 +444,7 @@ Result CameraControl::stopAsyncCapture() {
 }
 
 // ============================================================================
-// 温度 / 激光
+// 温度
 // ============================================================================
 double CameraControl::getTemperature() const {
     if (!m_isOpen) return 0.0;
@@ -421,8 +458,5 @@ double CameraControl::getTemperature() const {
         return 0.0;
     }
 }
-
-Result CameraControl::setLaserOn(bool) { return Result::ok(); }
-Result CameraControl::setLaserPower(int) { return Result::ok(); }
 
 } // namespace Scanner::device
