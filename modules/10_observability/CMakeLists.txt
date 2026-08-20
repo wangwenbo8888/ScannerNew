@@ -4,6 +4,7 @@ add_library(mod_observability STATIC
     CrashHandler.cpp
     FaultHandler.cpp
     ObsLogger.cpp
+    PerfMonitor.cpp
     StateMachine.cpp
 )
 target_include_directories(mod_observability PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
