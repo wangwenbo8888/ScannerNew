@@ -62,7 +62,7 @@ JEAMMWARE260705/
 | 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology/PCoreBroker/GpuSlotService/IFrameSource/FrameResultQueue/SchedulerRuntime）+ 五流水线对象（pipelines/：A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）+ 装配公共件；命名空间 `Scanner::pipeline`。旧 `07_session` 已退役（StateMachine 迁 10、SessionService 随 D6/D7 定案撤销，会话记账归工作流自身） |
 | 08 | `devicemgmt` | ✅ | 库 `mod_devicemgmt`：IScannerCamera / IMCU 接口 + CameraControl / MCUDriver / HardwareMonitor |
 | **09** | **`operatorlib`** | **✅ 全部算子** | 单库 `mod_operatorlib`，命名空间 `calib::`（见下文专节）；GBA 含软先验扩展、marker_cloud_fuse 含 seed() |
-| 10 | `observability` | ✅ | 库 `mod_observability`：FaultHandler + StateMachine/IState（2026-08-20 自 07_session 迁入，D8 定案） |
+| 10 | `observability` | 部分实现 | 库 `mod_observability`：StateMachine/IState（7 态表驱动 CAS，2026-08-20 自 07_session 迁入并重写）+ CommandGate 统一命令通道（双口）+ FaultHandler 故障档案表 + ObsLogger/jmw_logging + CrashHandler + PerfMonitor。**待建/待接**：08 检测源与性能指标源（归 08）、PerfMonitor 定时轮询、日志宏全模块推广 |
 | 11 | `deploy` | 桩 | — |
 
 ---
