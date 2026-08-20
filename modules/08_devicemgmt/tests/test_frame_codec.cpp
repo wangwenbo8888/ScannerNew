@@ -150,3 +150,33 @@ TEST(FrameCodecEncode, ForbiddenPayloadChars) {
     EXPECT_EQ(v3.encode("T2$5", 1), "");
     EXPECT_EQ(v3.encode("T2;5", 1), "");
 }
+
+// —— 12. v2 空段不吐帧（裁定钉死）——
+TEST(FrameCodecV2, EmptySegmentNoFrame) {
+    FrameCodec c(FrameCodec::Version::V2);
+    std::vector<FrameCodec::Frame> out;
+    c.feed(";;T25.3;", out);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].payload, "T25.3");
+}
+
+// —— 13. v2 挂起同样受 50ms 半帧超时（裁定钉死）——
+TEST(FrameCodecV2, PendingTimeoutApplies) {
+    FrameCodec c(FrameCodec::Version::V2);
+    std::vector<FrameCodec::Frame> out;
+    c.feed("T25.3", out);                  // 无 ';' 挂起
+    EXPECT_TRUE(out.empty());
+    EXPECT_TRUE(c.advanceTimeout(60));     // 60ms ≥ 50 → 丢弃挂起
+    c.feed(";", out);                      // 尾巴不再成帧
+    EXPECT_TRUE(out.empty());
+}
+
+// —— 14. v2 无 32B 长度检查：超长段照常吐帧（与 v3 超长丢弃对照）——
+TEST(FrameCodecV2, NoLengthLimit) {
+    FrameCodec c(FrameCodec::Version::V2);
+    std::string seg = "T" + std::string(40, 'x') + ";";  // 42B 段
+    std::vector<FrameCodec::Frame> out;
+    c.feed(seg, out);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].payload, seg.substr(0, seg.size() - 1));
+}
