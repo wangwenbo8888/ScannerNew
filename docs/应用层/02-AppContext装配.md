@@ -38,7 +38,8 @@
 4. HAL     : CameraControl(camCfg) → MCUDriver(115200) → HardwareMonitor
              └ HardwareMonitor 注入 stateCache / eventBus / mcu / camera
 5. WfCtx   : WorkflowContext（app/ 本地）注入 10 项（frame/pointCloud/stateCache/calib/
-             stateMachine/param/session/camera/mcu + eventBus）
+             stateMachine/param/session/camera/mcu + eventBus；另带 publishProgress/
+             publishEvent 两个 EventBus 发布快捷方法，见 WorkflowContext.h:57-58）
 6. Workflow: ScanWorkflow(wfCtx) → CalibrationWorkflow(wfCtx) → PostProcessWorkflow(wfCtx)
 7. 启动监控: hwMonitor_->start(1000)   // 周期 1s 采设备状态
 ```

@@ -30,7 +30,7 @@ QMainWindow (FramelessWindowHint)
 | 127–158 | 构造函数（组装布局） |
 | 162–172 | `onIntegrateTestClicked()` — 打开集成测试对话框 |
 | 174–180 | `onReloadPointCloud()` — 重载点云（⚠ 硬编码 `D:/pointcloud_100M.ply`） |
-| 182–403 | `onCalibDeviceClicked()` — 标定流程（220 行，相机标定采集） |
+| 182–403 | `onCalibDeviceClicked()` — 标定流程（221 行，相机标定采集） |
 | 404–471 | `onScanClicked()` — 扫描流程 |
 | 472–491 | `closeEvent` |
 | 492–535 | 悬浮工具条 create/reposition |
@@ -67,6 +67,6 @@ QMainWindow (FramelessWindowHint)
 
 ## ⚠ 技术债（如实记录）
 1. **标定/扫描槽依赖空桩，未接真实算子链**：`onScanClicked` 用 `calibration::ScanWorkflow`、`onCalibDeviceClicked` 用 `calibration::{Camera,Laser}CalibWorkflow`，但这些类型现由 `app/stubs/*.h` 提供——均为返回 "not implemented" / 0 点的**空桩**，未接入 modules/09 算子库或真实标定/扫描流水线。（framework `Scanner::workflow::*` 已随 framework 退役删除，原"框架工作流层未被 UI 调用"之债随之失效，转化为"真实算子链尚未接入 UI"。）
-2. **LEADSCANSeries 桩 include（已补齐，现可构建）**：`app/stubs/` 下 5 个桩头（LEADSCANSeries.h / CameraControl.h / camera_calib_workflow.h / laser_calib_workflow.h / scan_workflow.h）已补齐，`MainWindow.cpp:9-13` 的 `#include "stubs/*.h"` 不再悬空，scan_demo 全量可构建（原"悬空无法编译 / WIP"状态已消除）。**残留设计气味**：`m_integrateTestDialog` 声明为 `QWidget*`（MainWindow.h:104），却同时承载 `ScannerWindow*` 与 `new LEADSCANSeries()` 两种**互不相关**的 QMainWindow 子类，槽内 `static_cast<LEADSCANSeries*>(m_integrateTestDialog)` 在实际持有 ScannerWindow 时仍为 UB。
-3. **硬编码路径**：`D:/pointcloud_100M.ply`、`E:/workfold/20260509intergrate/calib_debug.log`（调试日志直接 fopen）。
+2. **LEADSCANSeries 桩 include（已补齐，现可构建）**：`app/stubs/` 下 5 个桩头（LEADSCANSeries.h / CameraControl.h / camera_calib_workflow.h / laser_calib_workflow.h / scan_workflow.h）已补齐，`MainWindow.cpp:9-13` 的 `#include "stubs/*.h"` 不再悬空，scan_demo 全量可构建（原"悬空无法编译 / WIP"状态已消除）。**残留设计气味**：`m_integrateTestDialog` 声明为 `QWidget*`（MainWindow.h:104），槽内只赋过 `new ScannerWindow(...)`（:165），但标定/扫描槽在 6 处（:193/:198/:244/:249/:434/:437）将其 `static_cast<LEADSCANSeries*>` 使用——对话框存在时该 cast 恒为 UB；成员 `m_series`（MainWindow.h:106）声明后从未赋值使用（死成员）。
+3. **硬编码路径**（共 4 处）：`D:/pointcloud_100M.ply`（:179）、`E:/workfold/20260509intergrate/calib_debug.log`（:185）、`E:/workfold/framework/build/JEAMMSCAN.stl`（:300）、`E:/workfold/framework/build/import_debug.log`（:813）（后三者为调试日志/中间产物直接 fopen）。
 4. **单文件 1672 行**：UI 构建、槽逻辑、信息面板全堆一处，可考虑拆分（如 ui_builder / slots / info_panel）。
