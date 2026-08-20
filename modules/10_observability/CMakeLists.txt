@@ -1,5 +1,6 @@
 # Module 10_observability — 可观测性（Phase 6：FaultHandler 自 framework/service 迁入；StateMachine/IState 自 07_session 迁入，P6-T28）
 add_library(mod_observability STATIC
+    CommandGate.cpp
     FaultHandler.cpp
     StateMachine.cpp
 )
