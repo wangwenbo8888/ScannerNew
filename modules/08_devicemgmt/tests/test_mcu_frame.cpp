@@ -1,5 +1,5 @@
 // ============================================================================
-// test_mcu_frame.cpp — 上行载荷解析 + SpscRing 丢最旧/空读 单测（S-T1）
+// test_mcu_frame.cpp — 上行载荷解析 + SpscRing 满丢新/空读 单测（S-T1；D-T12a 口径）
 //
 // 解析用例基于 v3 默认口径（载荷已剥去 '$'/seq/crc/';'）；
 // 环的并发正确性由 T12 集成测覆盖，此处单线程验证语义。
@@ -91,16 +91,18 @@ TEST(McuFrameParse, AckIllegal) {
     EXPECT_FALSE(parseAckPayload("B0B", f));   // 前缀非 A
 }
 
-// —— SpscRing：满丢最旧 + 空读 false（浪费一格：N=4 稳态存 3）——
-TEST(SpscRing, FullDropsOldest) {
+// —— SpscRing：满丢新 + 空读 false（浪费一格：N=4 稳态存 3）——
+TEST(SpscRing, FullDropsNewest) {
     SpscRing<int, 4> ring;
-    for (int v = 1; v <= 5; ++v) ring.push(v);
-    EXPECT_EQ(ring.dropped(), 2u);            // 第 4/5 次入环各丢一个最旧
+    for (int v = 1; v <= 3; ++v) EXPECT_TRUE(ring.push(v));
+    EXPECT_FALSE(ring.push(4));                // 满环丢新：不入队
+    EXPECT_FALSE(ring.push(5));
+    EXPECT_EQ(ring.dropped(), 2u);             // 第 4/5 次各丢一个新帧
     int out = 0;
+    EXPECT_TRUE(ring.pop(out)); EXPECT_EQ(out, 1);   // 旧序 N-1 条
+    EXPECT_TRUE(ring.pop(out)); EXPECT_EQ(out, 2);
     EXPECT_TRUE(ring.pop(out)); EXPECT_EQ(out, 3);
-    EXPECT_TRUE(ring.pop(out)); EXPECT_EQ(out, 4);
-    EXPECT_TRUE(ring.pop(out)); EXPECT_EQ(out, 5);
-    EXPECT_FALSE(ring.pop(out));              // 取尽
+    EXPECT_FALSE(ring.pop(out));               // 取尽
 }
 
 TEST(SpscRing, PopEmptyReturnsFalse) {

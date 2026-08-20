@@ -84,6 +84,8 @@ private:
     };
 
     static constexpr size_t kKeyCount = 4;   // 与 serial::KeyId（Up/Left/Middle/Right）同步
+    static_assert(static_cast<uint8_t>(serial::KeyId::Right) + 1 == kKeyCount,
+                  "KeyId 与 kKeyCount 基数同步");
 
     KeyState& stOf(serial::KeyId k) { return keys_[static_cast<size_t>(k)]; }
     void processEvent(serial::KeyId k, bool pressed, uint32_t mcuMs, int64_t pcMs);

@@ -2,7 +2,7 @@
 // ============================================================================
 // McuFrame.h — MCU 上行帧类型 + 分流双有界环（设计方案 §2.4）
 //
-// 事件环（K/S/A，容量64，满丢最旧+计数）；遥测环（T，容量8，覆盖旧）。
+// 事件环（K/S/A，容量64，满丢新+计数）；遥测环（T，容量8，满丢新）。
 // SPSC：串口rx线程生产 / 逻辑线程消费。协议默认口径见 §8（未定稿，改只改这里）。
 // ============================================================================
 
@@ -29,12 +29,16 @@ bool parseKeyPayload(const std::string& payload, RawKeyEvent& out);
 bool parseStatusPayload(const std::string& payload, StatusFrame& out);
 bool parseAckPayload(const std::string& payload, AckFrame& out);
 
-// —— 丢最旧有界环（复用语义同 06 RingBuffer，但 08 自带轻量实现——分层铁律 C2）——
+// —— 满环丢新有界环（08 自带轻量实现——分层铁律 C2）——
+// 口径（D-T12a）：满环时生产者放弃本帧（不写槽不推 head_），dropCount_++，
+// push 返回 false。理由：① 生产者永不碰 head_——旧版满丢最旧需生产者推 head_，
+// 与消费者 pop 的 head_.store 竞争、还可能覆写消费者正在读的槽（竞态根除）；
+// ② 事件环 64 深下丢新=用户这一下没反应可重按（安全），丢旧=丢老事件。
 template <typename T, size_t N>
 class SpscRing {
 public:
-    bool push(T v) {               // 生产者：满则丢最旧（恒 true——丢最旧语义，保留 bool 兼容既有调用）
-        if (full()) { dropCount_.fetch_add(1, std::memory_order_relaxed); head_.store((head_+1)%N); }
+    bool push(T v) {               // 生产者：满则丢新（返回 false，未入队）
+        if (full()) { dropCount_.fetch_add(1, std::memory_order_relaxed); return false; }
         buf_[tail_] = std::move(v); tail_.store((tail_+1)%N); return true; }
     bool pop(T& out) {             // 消费者
         if (empty()) return false; out = std::move(buf_[head_]); head_.store((head_+1)%N); return true; }

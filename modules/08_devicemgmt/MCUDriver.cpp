@@ -136,25 +136,37 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
     switch (f.payload[0]) {
     case 'T': {
         serial::TempFrame t;
-        if (serial::parseTempPayload(f.payload, t)) { t.seq = f.seq; t.ts = now; tempRing_.push(t); }
+        if (serial::parseTempPayload(f.payload, t)) {
+            t.seq = f.seq; t.ts = now;
+            if (!tempRing_.push(t)) spdlog::debug("[MCUDriver] 遥测环满丢新(计{})", tempRing_.dropped());
+        }
         else onParseFail(f.payload);
         break;
     }
     case 'K': {
         serial::RawKeyEvent k;
-        if (serial::parseKeyPayload(f.payload, k)) { k.seq = f.seq; k.ts = now; keyRing_.push(k); }
+        if (serial::parseKeyPayload(f.payload, k)) {
+            k.seq = f.seq; k.ts = now;
+            if (!keyRing_.push(k)) spdlog::warn("[MCUDriver] 事件环满丢新(K,计{})", keyRing_.dropped());
+        }
         else onParseFail(f.payload);   // v2 匿名 K1;/K0; 落此（§2.5 按键链停用）
         break;
     }
     case 'S': {
         serial::StatusFrame s;
-        if (serial::parseStatusPayload(f.payload, s)) { s.seq = f.seq; s.ts = now; statusRing_.push(s); }
+        if (serial::parseStatusPayload(f.payload, s)) {
+            s.seq = f.seq; s.ts = now;
+            if (!statusRing_.push(s)) spdlog::debug("[MCUDriver] 事件环满丢新(S,计{})", statusRing_.dropped());
+        }
         else onParseFail(f.payload);
         break;
     }
     case 'A': {
         serial::AckFrame a;
-        if (serial::parseAckPayload(f.payload, a)) { a.seq = f.seq; ackRing_.push(a); }
+        if (serial::parseAckPayload(f.payload, a)) {
+            a.seq = f.seq;
+            if (!ackRing_.push(a)) spdlog::warn("[MCUDriver] 事件环满丢新(A,计{})", ackRing_.dropped());
+        }
         else onParseFail(f.payload);
         break;
     }
