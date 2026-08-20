@@ -108,6 +108,31 @@ void AppContext::initialize() {
                 return scanWf_->stop();
             };
         }
+        if (spec.name == "start_postprocess") {
+            // pre（§3.2 可选增强谓词「存在扫描产物」）：查 06 PointCloudBuffer
+            // 原子点计数（getTotalPointCount——读写锁外的原子读，微秒级）。
+            // 设计 §3.2 注：S6 进入前置=操作员全权，本谓词仅增强拦空跑；04
+            // start() 内 makeCloudData 有同判据（空点云 fail），前置拦在切态前
+            // 省一次 S2→S6→S2 失败往返
+            spec.pre = [this]() {
+                if (!wfCtx_ || !wfCtx_->pointCloudBuffer() ||
+                    wfCtx_->pointCloudBuffer()->getTotalPointCount() <= 0)
+                    return Scanner::Result::fail("无扫描产物——点云为空，请先完成扫描");
+                return Scanner::Result::ok();
+            };
+            // 点火语义：initialize + start——start() 内快照点云/装配 07 E 后即启
+            // postThread_ 阻塞批算，handler 毫秒级即返；同步失败（点云空/07 装配
+            // 失败）返回 fail 由 gate 回滚 S2（§3.3）。完成回报经 onFinished_
+            // 合账（下方 postWf_ 装配处注入）。
+            // finish_postprocess（触发型）handler 留空：后处理为离线批，跑完
+            // 自然回报切 S2；S6 内中途停止走 04 stop() → 线程尾合账
+            spec.handler = [this]() {
+                if (!postWf_) return Scanner::Result::fail("后处理工作流未装配");
+                auto r = postWf_->initialize();
+                if (!r.success) return r;
+                return postWf_->start();
+            };
+        }
         commandGate_->registerCommand(std::move(spec));
     }
 
@@ -155,6 +180,13 @@ void AppContext::initialize() {
         commandGate_->notifyCompleted("start_calibration", ok);
     });
     postWf_  = std::make_unique<Scanner::workflow::PostProcessWorkflow>(wfCtx_.get());
+    // P5-T16 完成回报注入（§9 04 行）：工作流 postThread_ 批算线程尾回调 →
+    // 合账切 S2；app 是组合根，可同时触达 04 工作流与 10 门禁（04 不依赖 10）。
+    // 现无 UI 入口触发后处理（04 为离线批，入口待 04 工作流产品化时接）——
+    // handler 已备好，05/04 UI 落地后 submit("start_postprocess") 即通
+    postWf_->setOnFinished([this](bool ok) {
+        commandGate_->notifyCompleted("start_postprocess", ok);
+    });
 
     spdlog::info("[AppContext] 全部组件装配完成");
 

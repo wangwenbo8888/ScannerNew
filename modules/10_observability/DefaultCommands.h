@@ -11,6 +11,11 @@
 //       "calibrating"/"postprocessing"（仅 S3/S6 放行，StateMachine::canOperate
 //       同步扩充）——"calibrate"/"postprocess" 仅 S2 放行，收尾命令在 S3/S6 态
 //       下会被误拒
+//   · 05 查询口登记（P5-T16，设计 §9 05 行）：05 编辑不走 gate 不占态
+//     （S2 内交互会话）——无命令注册、不占上方 7 命令目录；进入前置经
+//     canOperate("edit")（StateMachine 已有键，仅 S2 放行）+ 业务谓词
+//     『可编辑点云存在』由 05/app 侧自查（谓词注入同 02-① pre 模式，
+//     查 06 PointCloudBuffer）——05 落地时用
 // ============================================================================
 #include "CommandGate.h"
 #include <vector>

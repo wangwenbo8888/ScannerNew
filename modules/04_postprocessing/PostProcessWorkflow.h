@@ -23,6 +23,7 @@
 #include "WorkflowContext.h"
 #include "pipelines/postprocess/PostProcessPipeline.h"   // MeshData/CancelToken
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -45,6 +46,12 @@ public:
     void setOutputPath(const std::string& path) { outputPath_ = path; }
     /// 位掩码透传 07 E：bit0 法线 bit1 封装 bit2 补洞 bit3 光顺 bit4 边界
     void setSkipStages(uint32_t mask) { skipStages_ = mask; }
+
+    // —— 完成回报钩子（P5-T16 门禁接线，同 01-T14/02-T15 模式）——
+    /// 会话终态回报（postThread_ 批算线程尾调用，bool=ok）。
+    /// app 侧注入 lambda 调 CommandGate::notifyCompleted 合账切 S2——
+    /// 依赖方向 app→04/10，04 不 include 10 头（经回调反向解耦）。
+    void setOnFinished(std::function<void(bool)> cb) { onFinished_ = std::move(cb); }
 
     // IWorkflow
     std::string getName() const override { return "PostProcessWorkflow"; }
@@ -73,6 +80,7 @@ private:
 
     std::thread postThread_;
     std::atomic<bool> running_{false};
+    std::function<void(bool)> onFinished_;       // 完成回报（app 注入；可空）
 
     /// 点云快照 → MeshData（xyz；法线由阶段 0 重算）
     Scanner::Result makeCloudData(Scanner::pipeline::MeshData& out) const;

@@ -149,6 +149,18 @@ void PostProcessWorkflow::postProcessLoop(Scanner::pipeline::MeshData cloud) {
     spdlog::info("[PostProcess] 后处理结束: success={} degraded={} → {} (三角面 {}, {:.0f}ms)",
                  res.success, res.isDegraded(), outputPath_, result_.meshTriangles,
                  result_.smoothTimeMs);
+
+    // 合账钩子——app 侧注入调 gate->notifyCompleted 切 S2（§9 04 行）。
+    // 恰一次：线程体每 start() 会话恰执行一次（start 同步失败在 handler 内
+    // 已被 gate 回滚 S2 不经此处；stop 后重复 join 不重跑线程体）。
+    // 用户主动停止（令牌已取消）按 T15 口径报 ok=true——会话正常终止非故障。
+    // 04 不依赖 10：经 std::function 回调反向解耦（JMW_LOG 宏头在 10，
+    // 以下按其展开格式直写 spdlog——输出与 JMW_LOG_INFO 等价，§8.2 生命周期）
+    const bool userCancelled = cancelToken_ && cancelToken_->cancelled();
+    const bool ok = userCancelled ? true : res.success;
+    spdlog::info("[04-PostProcess] 后处理会话终止 ok={}（{}）", ok,
+                 userCancelled ? "用户停止" : (res.success ? "批算完成" : "阶段失败"));
+    if (onFinished_) onFinished_(ok);
 }
 
 Result PostProcessWorkflow::stop() {
