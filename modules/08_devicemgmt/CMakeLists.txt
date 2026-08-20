@@ -28,3 +28,18 @@ target_link_libraries(mod_devicemgmt
 
 # Galaxy SDK DLL 运行时路径（构建后复制）
 set(GALAXY_DLL_DIR "${GALAXY_SDK_DIR}/lib/x64" CACHE PATH "Galaxy DLL dir")
+
+# serial/ 协议子层（T5 起其余源文件陆续登记于此）
+target_sources(mod_devicemgmt PRIVATE serial/McuFrame.cpp)
+
+if(BUILD_TESTS)
+    file(GLOB DEV_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
+    foreach(t ${DEV_TESTS})
+        get_filename_component(tname ${t} NAME_WE)
+        add_executable(${tname} ${t})
+        target_link_libraries(${tname} PRIVATE mod_devicemgmt GTest::gtest_main)
+        target_include_directories(${tname} PRIVATE ${CMAKE_SOURCE_DIR})
+        add_test(NAME ${tname} COMMAND ${tname})
+        jmw_deploy_crt(${tname})
+    endforeach()
+endif()
