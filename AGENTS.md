@@ -9,7 +9,7 @@
 - **base 共享内核** → `docs/共享内核/README.md`（types.h + EventBus 通俗说明）
 - **禁区**：`factory_calib/` AI 只读保护区（见 `factory_calib/AGENTS.md`）
 
-> **阶段**：framework/ 已退役删除（2026-08，决策与归属迁移记录见 `framework优化.md`）——共享层职责落入 `base/`（公共类型+EventBus）与各业务模块；分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`（06/07/08 均只链 base；08 的 HardwareMonitor 源码 include 06 的 DeviceStateCache，链接符号由 app 侧汇聚解析；10 链 07）；`scan_demo.exe` 全量构建 + ctest 43/43 绿（43 用例已核）。`factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）。
+> **阶段**：framework/ 已退役删除（2026-08）——共享层职责落入 `base/` 与各业务模块；分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`（06/08 只链 base；07=mod_pipelinemgmt 链 base+mod_fileio+mod_operatorlib——五流水线对象消费容器与算子；08 的 HardwareMonitor 源码 include 06 的 DeviceStateCache，链接符号由 app 侧汇聚解析；10 链 base+spdlog，StateMachine 已自 07_session 迁入）；2026-08-20 模块 07 落地后 `scan_demo.exe` 全量构建 + ctest **68/68** 绿。`factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）。
 
 ---
 
