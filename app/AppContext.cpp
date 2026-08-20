@@ -36,9 +36,8 @@ void AppContext::initialize() {
     // === Service ===
     stateMachine_   = std::make_unique<Scanner::service::StateMachine>(eventBus_.get());
     paramManager_   = std::make_unique<Scanner::service::ParameterManager>();
-    faultHandler_   = std::make_unique<Scanner::service::FaultHandler>();
+    faultHandler_   = std::make_unique<Scanner::service::FaultHandler>(eventBus_.get());
 
-    faultHandler_->setEventBus(eventBus_.get());
     faultHandler_->setStateMachine(stateMachine_.get());
     faultHandler_->start();
 
