@@ -8,6 +8,7 @@
 
 #include "ScanWorkflow.h"
 
+#include "PointCloudBuffer.h"
 #include "pipelines/PipelineDeps.h"
 #include "pipelines/scan/ScanPipeline.h"
 
@@ -79,7 +80,7 @@ Result ScanWorkflow::assemblePipeline() {
         return Result::fail(
             "无标定参数——07 生产链须 attachCalib（TODO 接入期：06 出口查表供逐温档 K/D）");
     }
-    // 激光网格数据归 §8-1 协调项，接线批注入；A 模式（纯标记点）空表属正常配置
+    // TODO(接入期): 激光网格数据归 §8-1 协调项，接线批注入；A 模式（纯标记点）空表属正常配置
     pipeline_->attachCalib(calib_.cameraMatrixL, calib_.distCoeffsL,
                            calib_.cameraMatrixR, calib_.distCoeffsR,
                            calib_.imageSize.width, calib_.imageSize.height,

@@ -40,8 +40,8 @@ class SlotRing {
 public:
     enum class WriterMode { Overwrite, Backpressure };
 
-    explicit SlotRing(size_t slots, WriterMode mode = WriterMode::Overwrite)
-        : slots_(slots ? slots : 1), mode_(mode), buf_(slots ? slots : 1) {}
+    explicit SlotRing(size_t slotCount, WriterMode mode = WriterMode::Overwrite)
+        : slots_(slotCount ? slotCount : 1), mode_(mode), buf_(slotCount ? slotCount : 1) {}
     SlotRing(const SlotRing&) = delete;
     SlotRing& operator=(const SlotRing&) = delete;
 
