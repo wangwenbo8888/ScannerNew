@@ -8,9 +8,17 @@
 
 #include "IPointCloudSink.h"
 #include <atomic>
+#include <cstdint>
 #include <shared_mutex>
 
 namespace Scanner::data {
+
+// 续扫基准标志点（会话尾产物）：globalId 保真走内存通道，落盘格式只有坐标
+struct MarkerRecord {
+    uint32_t globalId = 0;
+    cv::Point3f pos;
+    cv::Vec3f normal;
+};
 
 class PointCloudBuffer : public IPointCloudSink {
 public:
@@ -24,12 +32,20 @@ public:
     int getTotalPointCount() const override;
     Result clear() override;
 
+    // marker 通道：独立锁＋独立版本号（与点云版本分家）
+    void setMarkers(const std::vector<MarkerRecord>& markers);
+    void snapshotMarkers(uint64_t& version, std::vector<MarkerRecord>& out) const;
+
 private:
     mutable std::shared_mutex rwlock_;
     std::vector<cv::Point3f> allPoints_;
     std::vector<cv::Vec3b>   allColors_;
     std::atomic<uint64_t>    version_{0};
     std::atomic<int>         totalPoints_{0};
+
+    mutable std::shared_mutex markerRwlock_;
+    std::vector<MarkerRecord> markers_;
+    std::atomic<uint64_t>     markerVersion_{0};
 };
 
 } // namespace Scanner::data

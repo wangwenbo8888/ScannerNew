@@ -48,4 +48,19 @@ Result PointCloudBuffer::clear() {
     return Result::ok();
 }
 
+void PointCloudBuffer::setMarkers(const std::vector<MarkerRecord>& markers) {
+    {
+        std::unique_lock lock(markerRwlock_);
+        markers_ = markers;
+    }
+    markerVersion_.fetch_add(1, std::memory_order_release);
+}
+
+void PointCloudBuffer::snapshotMarkers(uint64_t& version,
+                                       std::vector<MarkerRecord>& out) const {
+    std::shared_lock lock(markerRwlock_);
+    out = markers_;
+    version = markerVersion_.load(std::memory_order_acquire);
+}
+
 } // namespace Scanner::data
