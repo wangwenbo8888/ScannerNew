@@ -4,7 +4,6 @@ add_library(mod_fileio STATIC
     FrameBuffer.cpp
     PointCloudBuffer.cpp
     DeviceStateCache.cpp
-    Pipeline.cpp
     ParameterManager.cpp
     FrameEnricher.cpp
 )
