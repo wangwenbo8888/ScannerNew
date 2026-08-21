@@ -10,7 +10,7 @@
 - **base 共享内核** → `docs/共享内核/README.md`（types.h + EventBus 通俗说明）
 - **禁区**：`factory_calib/` AI 只读保护区（见 `factory_calib/AGENTS.md`）
 
-> **阶段**：framework/ 已退役删除（2026-08）——共享层职责落入 `base/` 与各业务模块；分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`（06/08 只链 base；07=mod_pipelinemgmt 链 base+mod_fileio+mod_operatorlib——五流水线对象消费容器与算子；08 的 HardwareMonitor 源码 include 06 的 DeviceStateCache，链接符号由 app 侧汇聚解析；10 链 base+spdlog，StateMachine 已自 07_session 迁入）；2026-08-20 模块 07 落地后 `scan_demo.exe` 全量构建 + ctest **68/68** 绿。`factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）。
+> **阶段**：framework/ 已退役删除（2026-08）——共享层职责落入 `base/` 与各业务模块；分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`（06/08 只链 base；07=mod_pipelinemgmt 链 base+mod_fileio+mod_operatorlib——五流水线对象消费容器与算子；08 的 HardwareMonitor 源码 include 06 的 DeviceStateCache，链接符号由 app 侧汇聚解析；10 链 base+spdlog，StateMachine 已自 07_session 迁入）；2026-08-21 模块 08 落地后 `scan_demo.exe` 全量构建 + ctest **90/90** 绿（分支 feat/mod07-pipelinemgmt，含 07+08，待人工验收合并）。`factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）。
 
 ---
 
@@ -61,9 +61,9 @@ JEAMMWARE260705/
 | 05 | `editing` | 桩 | — |
 | **06** | **`fileio`** | **✅ 承重** | 库 `mod_fileio`：运行时容器 FrameBuffer / PointCloudBuffer / DeviceStateCache / RingBuffer / SlotRing（原子槽位环）/ EnhancedFrame / CycleUnit / FrameEnricher（出口查表） + Sink 契约（IFrameSink/IPointCloudSink/IDeviceStateSink）+ IWorkflow/Pipeline(Stage) 工作流框架 + ParameterManager + file_io |
 | 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology/PCoreBroker/GpuSlotService/IFrameSource/FrameResultQueue/SchedulerRuntime）+ 五流水线对象（pipelines/：A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）+ 装配公共件；命名空间 `Scanner::pipeline`。旧 `07_session` 已退役（StateMachine 迁 10、SessionService 随 D6/D7 定案撤销，会话记账归工作流自身） |
-| 08 | `devicemgmt` | 部分实现 | 库 `mod_devicemgmt`：IScannerCamera / IMCU 接口 + CameraControl / MCUDriver / HardwareMonitor。**未造**：DeviceManager 总门面 / KeyManager 手势分类（app 现直连三零件）；MCU 命令号与协议表待对齐、温度仅 1 路（详见 08 文档 §3 差距清单） |
+| 08 | `devicemgmt` | ✅（真机联调待做） | 库 `mod_devicemgmt`：**serial/ 协议层三小层**（SerialPort 纯 IO / FrameCodec v2·v3 开关+CRC16+半帧超时 / CommandChannel 非阻塞 ACK 对账+重传+命令组步链 + McuFrame 上行分流 SPSC 环）+ **DeviceManager 总门面**（逻辑线程 post 编队 / 故障 8 码 / ParamStore 参数账本确认更新制 / WarmupSequence 预热 / ModeController 模式黑板）+ **按键链**（KeyManager PC 手势判定 / MenuLogic 显式账本弃奇偶 / KeySemantics 转移表裁判）+ CameraControl（只设参数收敛：setGain 实装/注入式标定）+ MCUDriver（typed N10–N16）+ HardwareMonitor（三件套+HealthMetrics 快照）+ SelfCheckCollector（PDH/NVML 动态加载）。**待做**：真机联调 / v3 协议定稿跟进（14 项待协议方，定稿后删 v2 开关）/ 许可证（预留）/ 故障完整链 app 桥（见 10 文档 §3） |
 | **09** | **`operatorlib`** | **✅ 全部算子** | 单库 `mod_operatorlib`，命名空间 `calib::`（见下文专节）；GBA 含软先验扩展、marker_cloud_fuse 含 seed()。**待建**：网格四族算子（封装/补洞/光顺/边界，07-E 后处理消费） |
-| 10 | `observability` | 部分实现 | 库 `mod_observability`：StateMachine/IState（7 态表驱动 CAS，2026-08-20 自 07_session 迁入并重写）+ CommandGate 统一命令通道（双口）+ FaultHandler 故障档案表 + ObsLogger/jmw_logging + CrashHandler + PerfMonitor。**待建/待接**：08 检测源与性能指标源（归 08）、PerfMonitor 定时轮询、日志宏全模块推广 |
+| 10 | `observability` | 部分实现 | 库 `mod_observability`：StateMachine/IState（7 态表驱动 CAS，2026-08-20 自 07_session 迁入并重写）+ CommandGate 统一命令通道（双口）+ FaultHandler 故障档案表 + ObsLogger/jmw_logging + CrashHandler + PerfMonitor。**待建/待接**：08 故障桥两待办（param1 语义对齐+Error 级完整链 reportFault——见 10 文档 §3 保留表）、UI 状态图标、日志宏全模块推广（指标源/poll 已接通 2026-08-21） |
 | 11 | `deploy` | 桩 | — |
 
 ---
@@ -221,8 +221,10 @@ docs/
 ├── 应用层/            # app/ 核心要点 5 份（README / 01-入口与启动 / 02-AppContext装配 /
 │                        #   03-MainWindow-UI / 04-构建与依赖）
 ├── 共享内核/          # base/ 通俗说明（README）
-├── plans/             # 设计/实施方案存档 3 份：2026-08-18 DeviceManager-design、
-│                        #   2026-08-19 流水线管理模块07 设计方案+实施计划
+├── plans/             # 设计/实施方案存档 6 份：2026-08-18 DeviceManager-design、
+│                        #   2026-08-19 流水线管理模块07 设计方案+实施计划、
+│                        #   2026-08-20 可观测性模块10 设计方案+实施计划、
+│                        #   2026-08-20 设备管理模块08 设计方案+实施计划（已实施）
 └── 开发需要的信息/     # 大恒 Galaxy SDK 文档（C++接口为核心）+ 相机(VE2S-301-125U3MC-S)数据手册
                          #   + 下位机和按键/（协议/按键资料）
 ```
@@ -246,7 +248,7 @@ cmake --build build-rel --config Release
 ctest --test-dir build-rel -C Release --output-on-failure
 ```
 
-**Debug**（现有 build/，实测 43/43 绿）：
+**Debug**（现有 build/，实测 90/90 绿）：
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -DOpenCV_DIR=C:/opencv-cuda-4.13.0-debug/x64/vc17/lib `
