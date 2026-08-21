@@ -785,8 +785,8 @@ QWidget *MainWindow::createToolBar()
                     QString path = QFileDialog::getOpenFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9"), "", "Marker Files (*.json *.txt)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
-                    std::vector<osg::Vec3> markers;
-                    if (file_io::importMarkers(spath, markers))
+                    std::vector<cv::Point3f> markers;
+                    if (Scanner::data::fileio::importMarkers(spath, markers))
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9 %1 \xe4\xb8\xaa").arg(markers.size()));
                     else
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe5\xa4\xb1\xe8\xb4\xa5"));
@@ -807,8 +807,11 @@ QWidget *MainWindow::createToolBar()
                     progress.show();
                     QApplication::processEvents();
 
-                    std::vector<osg::Vec3> points;
-                    bool ok = file_io::importPointCloud(spath, points);
+                    std::vector<cv::Point3f> rawPts;
+                    bool ok = Scanner::data::fileio::importPointCloud(spath, rawPts);
+                    std::vector<osg::Vec3> points;   // UI 容器仍用 osg::Vec3，就地转换
+                    points.reserve(rawPts.size());
+                    for (const auto& p : rawPts) points.emplace_back(p.x, p.y, p.z);
 
                     // 诊断日志写文件
                     FILE* logf = fopen("E:/workfold/framework/build/import_debug.log", "a");
@@ -885,8 +888,8 @@ QWidget *MainWindow::createToolBar()
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9"), "markers.json", "Marker Files (*.json *.txt)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
-                    std::vector<osg::Vec3> markers;  // TODO: 从扫描数据获取
-                    if (file_io::exportMarkers(spath, markers))
+                    std::vector<cv::Point3f> markers;  // TODO: 从扫描数据获取
+                    if (Scanner::data::fileio::exportMarkers(spath, markers))
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9\xe6\x88\x90\xe5\x8a\x9f"));
                     else
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xa4\xb1\xe8\xb4\xa5"));
@@ -895,8 +898,8 @@ QWidget *MainWindow::createToolBar()
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\x82\xb9\xe4\xba\x91"), "pointcloud.ply", "Point Cloud (*.ply *.pcd *.xyz)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
-                    std::vector<osg::Vec3> points;  // TODO: 从扫描数据获取
-                    if (file_io::exportPointCloud(spath, points))
+                    std::vector<cv::Point3f> points;  // TODO: 从扫描数据获取
+                    if (Scanner::data::fileio::exportPointCloud(spath, points))
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\x82\xb9\xe4\xba\x91\xe6\x88\x90\xe5\x8a\x9f"));
                     else
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xa4\xb1\xe8\xb4\xa5"));
@@ -905,8 +908,8 @@ QWidget *MainWindow::createToolBar()
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc"), "mesh.stl", "Mesh (*.stl *.obj)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
-                    file_io::MeshData mesh;  // TODO: 从后处理结果获取
-                    if (file_io::exportMesh(spath, mesh))
+                    Scanner::data::fileio::MeshData mesh;  // TODO: 从后处理结果获取
+                    if (Scanner::data::fileio::exportMesh(spath, mesh))
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc\xe6\x88\x90\xe5\x8a\x9f"));
                     else
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xa4\xb1\xe8\xb4\xa5"));

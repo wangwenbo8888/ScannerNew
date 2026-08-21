@@ -1545,39 +1545,47 @@ bool OSGWidget::loadMesh(const QString& filepath)
     if (lf) fprintf(lf, "loadMesh: %s\n", cpath);
 
     // 用 file_io 解析
-    file_io::MeshData mesh;
+    Scanner::data::fileio::MeshData mesh;
     std::string spath(cpath);
-    if (!file_io::importMesh(spath, mesh) || mesh.vertices.empty()) {
+    if (!Scanner::data::fileio::importMesh(spath, mesh) || mesh.vertices.empty()) {
         if (lf) { fprintf(lf, "  importMesh failed\n"); fclose(lf); }
         return false;
     }
 
     if (lf) { fprintf(lf, "  verts=%zu indices=%zu\n", mesh.vertices.size(), mesh.indices.size()); fclose(lf); }
 
+    // file_io 点类型为 cv::Point3f——就地转 osg::Vec3 供渲染
+    std::vector<osg::Vec3> mv(mesh.vertices.size());
+    for (size_t i = 0; i < mesh.vertices.size(); ++i)
+        mv[i].set(mesh.vertices[i].x, mesh.vertices[i].y, mesh.vertices[i].z);
+    std::vector<osg::Vec3> mn(mesh.normals.size());
+    for (size_t i = 0; i < mesh.normals.size(); ++i)
+        mn[i].set(mesh.normals[i].x, mesh.normals[i].y, mesh.normals[i].z);
+
     osg::ref_ptr<osg::Vec3Array> verts = new osg::Vec3Array;
     osg::ref_ptr<osg::Vec3Array> norms = new osg::Vec3Array;
-    verts->reserve(mesh.vertices.size());
-    norms->reserve(mesh.vertices.size());
+    verts->reserve(mv.size());
+    norms->reserve(mv.size());
 
     if (!mesh.indices.empty()) {
         // 平面法线：用 STL 原始面法线（参照 K2），无平滑
-        bool hasNormals = (mesh.normals.size() == mesh.vertices.size());
+        bool hasNormals = (mn.size() == mv.size());
         for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
-            const auto& p0 = mesh.vertices[mesh.indices[i]];
-            const auto& p1 = mesh.vertices[mesh.indices[i+1]];
-            const auto& p2 = mesh.vertices[mesh.indices[i+2]];
+            const auto& p0 = mv[mesh.indices[i]];
+            const auto& p1 = mv[mesh.indices[i+1]];
+            const auto& p2 = mv[mesh.indices[i+2]];
             verts->push_back(p0); verts->push_back(p1); verts->push_back(p2);
             if (hasNormals) {
-                norms->push_back(mesh.normals[mesh.indices[i]]);
-                norms->push_back(mesh.normals[mesh.indices[i+1]]);
-                norms->push_back(mesh.normals[mesh.indices[i+2]]);
+                norms->push_back(mn[mesh.indices[i]]);
+                norms->push_back(mn[mesh.indices[i+1]]);
+                norms->push_back(mn[mesh.indices[i+2]]);
             } else {
                 osg::Vec3 nm = (p1 - p0) ^ (p2 - p0); nm.normalize();
                 norms->push_back(nm); norms->push_back(nm); norms->push_back(nm);
             }
         }
     } else {
-        for (const auto& p : mesh.vertices) verts->push_back(p);
+        for (const auto& p : mv) verts->push_back(p);
     }
 
     if (verts->empty()) return false;

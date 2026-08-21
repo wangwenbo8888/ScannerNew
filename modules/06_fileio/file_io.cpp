@@ -1,21 +1,20 @@
 #include "file_io.h"
 
-#include <osg/Vec3>
 #include <fstream>
 #include <sstream>
 #include <cstring>
 #include <cstdio>
 #include <cmath>
 
-namespace file_io {
+namespace Scanner::data::fileio {
 
 // ============================================================================
 // 点云
 // ============================================================================
 
 bool importPointCloud(const std::string& filepath,
-                     std::vector<osg::Vec3>& points,
-                     std::vector<osg::Vec3>* normals)
+                     std::vector<cv::Point3f>& points,
+                     std::vector<cv::Point3f>* normals)
 {
     if (filepath.empty()) return false;
     // 根据扩展名分派
@@ -29,8 +28,8 @@ bool importPointCloud(const std::string& filepath,
 }
 
 bool exportPointCloud(const std::string& filepath,
-                      const std::vector<osg::Vec3>& points,
-                      const std::vector<osg::Vec3>* normals)
+                      const std::vector<cv::Point3f>& points,
+                      const std::vector<cv::Point3f>* normals)
 {
     size_t dotPos = filepath.find_last_of('.');
     auto ext = (dotPos != std::string::npos) ? filepath.substr(dotPos + 1) : std::string();
@@ -42,8 +41,8 @@ bool exportPointCloud(const std::string& filepath,
 
 // --- XYZ/TXT ---
 bool importXYZ(const std::string& filepath,
-               std::vector<osg::Vec3>& points,
-               std::vector<osg::Vec3>* normals)
+               std::vector<cv::Point3f>& points,
+               std::vector<cv::Point3f>* normals)
 {
     FILE* f = fopen(filepath.c_str(), "r");
     if (!f) return false;
@@ -55,11 +54,11 @@ bool importXYZ(const std::string& filepath,
         float x, y, z;
         int n = sscanf(line, "%f %f %f", &x, &y, &z);
         if (n >= 3) {
-            points.push_back(osg::Vec3(x, y, z));
+            points.push_back(cv::Point3f(x, y, z));
             if (normals) {
                 float nx, ny, nz;
                 if (sscanf(line, "%*f %*f %*f %f %f %f", &nx, &ny, &nz) == 3)
-                    normals->push_back(osg::Vec3(nx, ny, nz));
+                    normals->push_back(cv::Point3f(nx, ny, nz));
             }
         }
     }
@@ -68,17 +67,17 @@ bool importXYZ(const std::string& filepath,
 }
 
 bool exportXYZ(const std::string& filepath,
-               const std::vector<osg::Vec3>& points,
-               const std::vector<osg::Vec3>* normals)
+               const std::vector<cv::Point3f>& points,
+               const std::vector<cv::Point3f>* normals)
 {
     std::ofstream f(filepath);
     if (!f.is_open()) return false;
     f << std::fixed;
     f.precision(5);
     for (size_t i = 0; i < points.size(); ++i) {
-        f << points[i].x() << " " << points[i].y() << " " << points[i].z();
+        f << points[i].x << " " << points[i].y << " " << points[i].z;
         if (normals && i < normals->size())
-            f << " " << (*normals)[i].x() << " " << (*normals)[i].y() << " " << (*normals)[i].z();
+            f << " " << (*normals)[i].x << " " << (*normals)[i].y << " " << (*normals)[i].z;
         f << "\n";
     }
     return true;
@@ -86,8 +85,8 @@ bool exportXYZ(const std::string& filepath,
 
 // --- PLY ---
 bool importPLY(const std::string& filepath,
-               std::vector<osg::Vec3>& points,
-               std::vector<osg::Vec3>* normals)
+               std::vector<cv::Point3f>& points,
+               std::vector<cv::Point3f>* normals)
 {
     std::ifstream f(filepath, std::ios::binary);
     if (!f.is_open()) return false;
@@ -157,8 +156,8 @@ bool importPLY(const std::string& filepath,
 }
 
 bool exportPLY(const std::string& filepath,
-               const std::vector<osg::Vec3>& points,
-               const std::vector<osg::Vec3>* normals)
+               const std::vector<cv::Point3f>& points,
+               const std::vector<cv::Point3f>* normals)
 {
     std::ofstream f(filepath, std::ios::binary);
     if (!f.is_open()) return false;
@@ -175,9 +174,9 @@ bool exportPLY(const std::string& filepath,
     f << std::fixed;
     f.precision(5);
     for (size_t i = 0; i < points.size(); ++i) {
-        f << points[i].x() << " " << points[i].y() << " " << points[i].z();
+        f << points[i].x << " " << points[i].y << " " << points[i].z;
         if (hasN)
-            f << " " << (*normals)[i].x() << " " << (*normals)[i].y() << " " << (*normals)[i].z();
+            f << " " << (*normals)[i].x << " " << (*normals)[i].y << " " << (*normals)[i].z;
         f << "\n";
     }
     return true;
@@ -185,8 +184,8 @@ bool exportPLY(const std::string& filepath,
 
 // --- PCD ---
 bool importPCD(const std::string& filepath,
-               std::vector<osg::Vec3>& points,
-               std::vector<osg::Vec3>* normals)
+               std::vector<cv::Point3f>& points,
+               std::vector<cv::Point3f>* normals)
 {
     std::ifstream f(filepath, std::ios::binary);
     if (!f.is_open()) return false;
@@ -223,8 +222,8 @@ bool importPCD(const std::string& filepath,
 }
 
 bool exportPCD(const std::string& filepath,
-               const std::vector<osg::Vec3>& points,
-               const std::vector<osg::Vec3>* normals)
+               const std::vector<cv::Point3f>& points,
+               const std::vector<cv::Point3f>* normals)
 {
     std::ofstream f(filepath);
     if (!f.is_open()) return false;
@@ -242,7 +241,7 @@ bool exportPCD(const std::string& filepath,
     f << std::fixed;
     f.precision(5);
     for (const auto& p : points)
-        f << p.x() << " " << p.y() << " " << p.z() << "\n";
+        f << p.x << " " << p.y << " " << p.z << "\n";
     return true;
 }
 
@@ -294,13 +293,13 @@ bool importSTL(const std::string& filepath, MeshData& mesh)
         mesh.vertices.clear();
         mesh.indices.clear();
         mesh.normals.clear();
-        osg::Vec3 curN(0, 0, 1);
+        cv::Point3f curN(0, 0, 1);
         std::string tok;
         while (ifs >> tok) {
             if (tok == "facet") {
                 std::string nkw; float nx, ny, nz;
                 ifs >> nkw >> nx >> ny >> nz;
-                curN.set(nx, ny, nz);
+                curN = cv::Point3f(nx, ny, nz);
             } else if (tok == "vertex") {
                 float x, y, z;
                 ifs >> x >> y >> z;
@@ -371,17 +370,18 @@ bool exportSTL(const std::string& filepath, const MeshData& mesh)
         const auto& v2 = mesh.vertices[mesh.indices[i * 3 + 2]];
 
         // 面法线
-        osg::Vec3 e1 = v1 - v0;
-        osg::Vec3 e2 = v2 - v0;
-        osg::Vec3 n = e1 ^ e2;
-        n.normalize();
-        float fn[3] = { n.x(), n.y(), n.z() };
+        cv::Point3f e1 = v1 - v0;
+        cv::Point3f e2 = v2 - v0;
+        cv::Point3f n = e1.cross(e2);
+        float nlen = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (nlen > 0.f) n *= 1.0f / nlen;
+        float fn[3] = { n.x, n.y, n.z };
         fwrite(fn, 4, 3, f);
 
         float v[9] = {
-            v0.x(), v0.y(), v0.z(),
-            v1.x(), v1.y(), v1.z(),
-            v2.x(), v2.y(), v2.z()
+            v0.x, v0.y, v0.z,
+            v1.x, v1.y, v1.z,
+            v2.x, v2.y, v2.z
         };
         fwrite(v, 4, 9, f);
 
@@ -433,7 +433,7 @@ bool exportOBJ(const std::string& filepath, const MeshData& mesh)
     f << std::fixed;
     f.precision(5);
     for (const auto& v : mesh.vertices)
-        f << "v " << v.x() << " " << v.y() << " " << v.z() << "\n";
+        f << "v " << v.x << " " << v.y << " " << v.z << "\n";
     for (size_t i = 0; i < mesh.indices.size(); i += 3)
         f << "f " << mesh.indices[i] + 1 << " " << mesh.indices[i + 1] + 1 << " " << mesh.indices[i + 2] + 1 << "\n";
     return true;
@@ -443,7 +443,7 @@ bool exportOBJ(const std::string& filepath, const MeshData& mesh)
 // 标志点 (JSON)
 // ============================================================================
 
-bool importMarkers(const std::string& filepath, std::vector<osg::Vec3>& markers)
+bool importMarkers(const std::string& filepath, std::vector<cv::Point3f>& markers)
 {
     std::ifstream f(filepath);
     if (!f.is_open()) return false;
@@ -465,7 +465,7 @@ bool importMarkers(const std::string& filepath, std::vector<osg::Vec3>& markers)
     return !markers.empty();
 }
 
-bool exportMarkers(const std::string& filepath, const std::vector<osg::Vec3>& markers)
+bool exportMarkers(const std::string& filepath, const std::vector<cv::Point3f>& markers)
 {
     std::ofstream f(filepath);
     if (!f.is_open()) return false;
@@ -473,7 +473,7 @@ bool exportMarkers(const std::string& filepath, const std::vector<osg::Vec3>& ma
     f << std::fixed;
     f.precision(5);
     for (size_t i = 0; i < markers.size(); ++i) {
-        f << "  [" << markers[i].x() << ", " << markers[i].y() << ", " << markers[i].z() << "]";
+        f << "  [" << markers[i].x << ", " << markers[i].y << ", " << markers[i].z << "]";
         if (i + 1 < markers.size()) f << ",";
         f << "\n";
     }
@@ -481,4 +481,4 @@ bool exportMarkers(const std::string& filepath, const std::vector<osg::Vec3>& ma
     return true;
 }
 
-} // namespace file_io
+} // namespace Scanner::data::fileio

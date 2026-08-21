@@ -57,11 +57,6 @@ set(MOD_RENDERING
     ${CMAKE_SOURCE_DIR}/modules/03_rendering/OSGWidget.h
 )
 
-set(MOD_FILEIO
-    ${CMAKE_SOURCE_DIR}/modules/06_fileio/file_io.cpp
-    ${CMAKE_SOURCE_DIR}/modules/06_fileio/file_io.h
-)
-
 set(GENERATED_QRC_CPP ${CMAKE_CURRENT_BINARY_DIR}/qrc_resources.cpp)
 add_custom_command(
     OUTPUT ${GENERATED_QRC_CPP}
@@ -78,7 +73,6 @@ add_executable(scan_demo
     ${MOD_SCANNING}
     ${MOD_WORKFLOWS}
     ${MOD_RENDERING}
-    ${MOD_FILEIO}
     ${GENERATED_QRC_CPP}
 )
 

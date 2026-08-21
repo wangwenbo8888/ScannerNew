@@ -4,17 +4,15 @@
 // P6-T29c：旧七阶段（GBA/重融合/法线/封装/补洞/光顺/边界）sleep 空壳删除
 // （GBA/重融合 Q5 定案归 02）——本类装配 07 PostProcessPipeline 阻塞 run：
 // 进度回调透传 UI、STL 导出经 StlExportFn 适配 06 file_io exportSTL
-// （file_io.cpp 编入 app 且依赖 OSG——07 库不链 OSG，适配须在本 app 编译
-// 单元内完成，见 exportStlViaFileIo）。
+// （B-T3 file_io 已收库 mod_fileio，适配不再受 app 编译单元限制）。
 // ============================================================================
 
 #include "PostProcessWorkflow.h"
 #include "PointCloudBuffer.h"
-#include "file_io.h"            // 06 STL 导出（app 编译单元内适配）
+#include "file_io.h"            // 06 STL 导出
 
 #include "pipelines/PipelineDeps.h"
 
-#include <osg/Vec3>
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <utility>
@@ -26,11 +24,10 @@ namespace {
 // exportStlViaFileIo — StlExportFn → 06 file_io::exportSTL 适配
 //
 // 07 的 MeshData（float xyz/normals + uint32 三角索引）→ file_io::MeshData
-// （osg::Vec3 顶点/法线 + 索引）。真导出接线（T27 占位注释的兑现）：
-// file_io.cpp 与 OSG 均属 app 侧——本函数只能在 app 编译单元内存在。
+// （cv::Point3f 顶点/法线 + 索引）。真导出接线（T27 占位注释的兑现）。
 // ============================================================================
 bool exportStlViaFileIo(const std::string& path, const Scanner::pipeline::MeshData& mesh) {
-    file_io::MeshData out;
+    Scanner::data::fileio::MeshData out;
     out.vertices.reserve(mesh.pointCount());
     for (size_t i = 0; i + 2 < mesh.xyz.size(); i += 3) {
         out.vertices.emplace_back(mesh.xyz[i], mesh.xyz[i + 1], mesh.xyz[i + 2]);
@@ -42,7 +39,7 @@ bool exportStlViaFileIo(const std::string& path, const Scanner::pipeline::MeshDa
         }
     }
     out.indices.assign(mesh.triangles.begin(), mesh.triangles.end());
-    return file_io::exportSTL(path, out);
+    return Scanner::data::fileio::exportSTL(path, out);
 }
 
 } // namespace
