@@ -4,11 +4,12 @@
 // P6-T29b：旧棋盘格 6 步链（findChessboardCorners/内参/外参/矫正/温度表）
 // 整体删除——A 姿态采集（PosturePipeline）集齐 25 后 completionHook 异步
 // 移交本类，B 标定批算（CalibComputePipeline：相机链‖激光链 PJC+质量门禁）
-// 阻塞 run，进度回调透传 UI；run 尾经 ICalibRepoWriter 适配落 CalibStore。
+// 阻塞 run，进度回调透传 UI；run 尾经 ICalibRepoWriter 适配（RepositoryWriter）
+// 直写 06 标定仓库。
 // ============================================================================
 
 #include "CalibrationWorkflow.h"
-#include "CalibStore.h"
+#include "CalibrationRepository.h"
 
 #include "pipelines/PipelineDeps.h"
 #include "pipelines/calibcompute/CalibComputePipeline.h"
@@ -18,62 +19,62 @@
 #include "core/common/json_utils.h"     // calib::jsonToMatAuto
 
 #include <spdlog/spdlog.h>
-#include <fstream>
 #include <utility>
 
 namespace Scanner::workflow {
 namespace {
 
-constexpr const char* kCalibStorePath = "calibration.yml";   // 现状语义：CalibStore+save
-constexpr const char* kCalibJsonPath  = "calibration_b.json";// B 全量输出原文（三温度表/PJC/门禁）
+constexpr const char* kCalibSessionPath = "calib_session.json";   // 06 会话档三键
 
 // ============================================================================
-// CalibStoreRepoWriter — ICalibRepoWriter 适配（B run 尾自动写）
+// RepositoryWriter — ICalibRepoWriter 适配（B run 尾自动写 06 标定仓库）
 //
-// 保持"结果写 CalibStore"现状语义：解析 serializeCalib JSON 的 stereo 半区
-// → CalibStore setters + save；同时 B 全量 JSON 原文落盘（CalibStore 现不
-// 承载三温度表/PJC——接入期 06 标定仓库扩展后由其接管）。
+// 07 serializeCalib 载荷原文 + imageSize 一次入仓：解析→校验→填内存→
+// 临时文件+原子改名落盘（calibration.json）；app 存活件，扫描门禁/转接同源读。
 // ============================================================================
-class CalibStoreRepoWriter final : public Scanner::pipeline::ICalibRepoWriter {
+class RepositoryWriter final : public Scanner::pipeline::ICalibRepoWriter {
 public:
-    CalibStoreRepoWriter(WorkflowContext* ctx, cv::Size imageSize)
+    RepositoryWriter(WorkflowContext* ctx, cv::Size imageSize)
         : ctx_(ctx), imageSize_(imageSize) {}
 
     bool write(const std::string& json) override {
-        auto* store = ctx_ ? ctx_->calibStore() : nullptr;
-        if (!store) return false;
-        try {
-            const auto j = nlohmann::json::parse(json);
-            const auto& st = j.at("stereo");
-            store->setCameraMatrixL(calib::jsonToMatAuto(st.at("cameraMatrixL")));
-            store->setCameraMatrixR(calib::jsonToMatAuto(st.at("cameraMatrixR")));
-            store->setDistCoeffsL(calib::jsonToMatAuto(st.at("distCoeffsL")));
-            store->setDistCoeffsR(calib::jsonToMatAuto(st.at("distCoeffsR")));
-            store->setExtrinsicR(calib::jsonToMatAuto(st.at("R")));
-            store->setExtrinsicT(calib::jsonToMatAuto(st.at("T")));
-            store->setR1(calib::jsonToMatAuto(st.at("R1")));
-            store->setR2(calib::jsonToMatAuto(st.at("R2")));
-            store->setP1(calib::jsonToMatAuto(st.at("P1")));
-            store->setP2(calib::jsonToMatAuto(st.at("P2")));
-            store->setQ(calib::jsonToMatAuto(st.at("Q")));
-            if (imageSize_.width > 0 && imageSize_.height > 0)
-                store->setImageSize(imageSize_);
-
-            std::ofstream(kCalibJsonPath) << json << '\n';   // B 全量输出原文
-            return store->save(kCalibStorePath);
-        } catch (const std::exception& e) {
-            spdlog::error("[CalibWorkflow] CalibStore 适配写失败: {}", e.what());
-            return false;
-        } catch (...) {
-            spdlog::error("[CalibWorkflow] CalibStore 适配写未知异常");
+        auto* repo = ctx_ ? ctx_->calibRepo() : nullptr;
+        if (!repo) return false;
+        const auto r = repo->write(json, imageSize_);
+        if (!r.success) {
+            spdlog::error("[CalibWorkflow] 标定仓库写入失败: {}", r.message);
             return false;
         }
+        return true;
     }
 
 private:
     WorkflowContext* ctx_;
     cv::Size imageSize_;
 };
+
+// ============================================================================
+// applyInitialParamsJson — 会话档 initialParams 原文→PostureInitialParams
+// （字段照 PosturePipeline.h：九 Mat + imageWidth/imageHeight/maskRatioThreshold；
+//   缺键/坏值跳过该字段保默认——paramsReady 兜底拦截）
+// ============================================================================
+void applyInitialParamsJson(const nlohmann::json& j,
+                            Scanner::pipeline::PostureInitialParams& p) {
+    if (!j.is_object()) return;
+    auto mat = [&j](const char* key, cv::Mat& dst) {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_array() || it->empty()) return;
+        try { dst = calib::jsonToMatAuto(*it); } catch (...) {}   // 坏值保默认
+    };
+    mat("K1", p.K1); mat("D1", p.D1); mat("K2", p.K2); mat("D2", p.D2);
+    mat("R1", p.R1); mat("R2", p.R2); mat("P1", p.P1); mat("P2", p.P2); mat("Q", p.Q);
+    if (j.contains("imageWidth") && j["imageWidth"].is_number_integer())
+        p.imageWidth = j["imageWidth"].get<int>();
+    if (j.contains("imageHeight") && j["imageHeight"].is_number_integer())
+        p.imageHeight = j["imageHeight"].get<int>();
+    if (j.contains("maskRatioThreshold") && j["maskRatioThreshold"].is_number())
+        p.maskRatioThreshold = j["maskRatioThreshold"].get<double>();
+}
 
 } // namespace
 
@@ -94,6 +95,20 @@ bool CalibrationWorkflow::paramsReady() const {
 
 Result CalibrationWorkflow::initialize() {
     if (!ctx_) return Result::fail("无 WorkflowContext");
+
+    // 配置装载（06 会话件）：缺档/坏档不崩——保持空参防言语义（paramsReady 拦截）
+    Scanner::data::CalibSessionConfig cfg;
+    const auto lr = calibSession_.load(kCalibSessionPath, cfg);
+    if (lr.success) {
+        setTargets(std::move(cfg.targets));
+        setBoardPoints(std::move(cfg.boardPoints));
+        applyInitialParamsJson(cfg.initialParams, initialParams_);
+        spdlog::info("[CalibWorkflow] 会话档已装载: 目标 {} / 板点 {}",
+                     targets_.size(), boardPoints_.size());
+    } else {
+        spdlog::info("[CalibWorkflow] 未装载会话档（{}）——空参防言语义", lr.message);
+    }
+
     if (!paramsReady()) {
         state_ = WorkflowState::Error;
         const std::string msg =
@@ -138,9 +153,9 @@ Result CalibrationWorkflow::startPosture() {
     namespace sp = Scanner::pipeline;
 
     posture_ = std::make_unique<sp::PosturePipeline>();   // 确认表阈值默认（联调标定）
-    // TODO(接入期): 08 采集侧写 CycleUnit 进 cycleRing_（Backpressure 反压）；
+    // TODO(接入期): 08 采集侧写 CycleUnit 进姿态环（Backpressure 反压）；
     //   当前无真帧源——A 空转等周期（07 防御路径保留）
-    posture_->attachRing(cycleRing_);
+    posture_->attachRing(calibSession_.cycleRing());
     using TargetRow = const double[16];                    // std::array<double,16> 布局对齐 double[16]
     posture_->attachTargets(reinterpret_cast<TargetRow*>(targets_.data()),
                              static_cast<int>(targets_.size()));
@@ -209,12 +224,12 @@ void CalibrationWorkflow::runCompute(Scanner::pipeline::PostureSessionData sessi
     compute_->attachInitialParams(std::move(init));
     compute_->attachBoardPoints(boardPoints_);
 
-    calibRepo_ = std::make_unique<CalibStoreRepoWriter>(
+    calibRepo_ = std::make_unique<RepositoryWriter>(
         ctx_, cv::Size(initialParams_.imageWidth, initialParams_.imageHeight));
 
     sp::PipelineDeps deps;
     deps.eventBus = ctx_ ? ctx_->eventBus() : nullptr;
-    deps.calibRepo = calibRepo_.get();          // run 尾自动写 CalibStore+save
+    deps.calibRepo = calibRepo_.get();          // run 尾自动写 06 标定仓库
     compute_->configure(deps);
 
     auto res = compute_->run(
@@ -235,10 +250,6 @@ void CalibrationWorkflow::runCompute(Scanner::pipeline::PostureSessionData sessi
     spdlog::info("[CalibWorkflow] B 批算结束: success={} rmsL={:.4f} rmsR={:.4f} stereo={:.4f}",
                  res.success, result_.reprojErrorLeft, result_.reprojErrorRight,
                  result_.stereoError);
-    if (res.success) {
-        spdlog::info("[CalibWorkflow] 标定参数已写 CalibStore（{}）+ 全量 JSON（{}）",
-                     kCalibStorePath, kCalibJsonPath);
-    }
 
     // 完成回报（P5-T14）：合账钩子——app 侧注入调 gate->notifyCompleted 切 S2。
     // 01 不依赖 10：此处经 std::function 回调反向解耦（JMW_LOG 宏头在 10，

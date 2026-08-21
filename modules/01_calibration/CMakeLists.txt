@@ -3,4 +3,4 @@ add_library(mod_calibration STATIC
     CalibStore.cpp
 )
 target_include_directories(mod_calibration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(mod_calibration PUBLIC base spdlog::spdlog ${OpenCV_LIBS})
+target_link_libraries(mod_calibration PUBLIC base spdlog::spdlog ${OpenCV_LIBS} mod_fileio)

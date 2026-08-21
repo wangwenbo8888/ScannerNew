@@ -10,14 +10,14 @@
 //     质量门禁；run 尾经 ICalibRepoWriter 自动写
 // 本类只留 IWorkflow 生命周期编排 + 进度回调透传 UI + 结果记账。
 //
-// 结果落盘：本类内定义小适配器实现 ICalibRepoWriter（.cpp）——write 落
-// CalibStore + save（保持"结果写 CalibStore"现状语义），并原文存 B 全量
-// JSON（含三温度表/PJC/门禁报告）。
+// 结果落盘：本类内定义小适配器 RepositoryWriter 实现 ICalibRepoWriter
+// （.cpp）——write 直写 06 标定仓库（载荷原文 + imageSize，内存+原子落盘）。
+//
+// 参数来源：initialize 装载 06 会话档 calib_session.json 三键（initialParams
+// 原文/targets/boardPoints）；缺档保持空参防言语义（paramsReady 拦截）。
 //
 // TODO(接入期接线)：
-//   - 真实参数来源（现状没有——缺参 initialize 返回 fail 并回调错误消息，
-//     不崩）：初始参数组/25 目标表/板点（06 参数管理或标定文件装载）。
-//   - 08 采集侧：周期帧组 CycleUnit 写入 cycleRing_（Backpressure 反压；
+//   - 08 采集侧：周期帧组 CycleUnit 写入姿态环（Backpressure 反压；
 //     当前无真帧源——A 空转等周期，07 防御路径保留）。
 //   - 08 采集控制门面：PipelineDeps.acquisition（集齐收口自动停采；现空）。
 //   - 03 渲染：PipelineDeps.sceneFeed（实时姿态/标志点检出推送；现空）。
@@ -25,7 +25,7 @@
 
 #include "IWorkflow.h"
 #include "WorkflowContext.h"
-#include "SlotRing.h"
+#include "CalibSessionData.h"
 #include "pipelines/posture/PosturePipeline.h"   // PostureInitialParams/PostureSessionData
 #include <array>
 #include <atomic>
@@ -93,13 +93,10 @@ private:
     // —— 07 A/B 对象（会话私有件：start 建、stop 收）——
     std::unique_ptr<Scanner::pipeline::PosturePipeline> posture_;
     std::unique_ptr<Scanner::pipeline::CalibComputePipeline> compute_;
-    std::unique_ptr<Scanner::pipeline::ICalibRepoWriter> calibRepo_;  // CalibStore 适配（.cpp 定义）
+    std::unique_ptr<Scanner::pipeline::ICalibRepoWriter> calibRepo_;  // 06 标定仓库适配（.cpp 定义）
 
-    // —— 输入环（本类持有的 06 会话件；08 采集侧写入——TODO 接入期）——
-    static constexpr size_t kCycleRingSlots = 8;
-    Scanner::data::SlotRing<Scanner::data::CycleUnit> cycleRing_{
-        kCycleRingSlots,
-        Scanner::data::SlotRing<Scanner::data::CycleUnit>::WriterMode::Backpressure};
+    // —— 06 会话件（会话档装载 + 姿态环 8 槽 Backpressure；08 采集侧写入——TODO 接入期）——
+    Scanner::data::CalibSessionData calibSession_;
 
     std::unique_ptr<Scanner::pipeline::CancelToken> cancelToken_;   // B 批算取消令牌（stop 触发）
 

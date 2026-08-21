@@ -10,7 +10,7 @@
 #include <string>
 #include <functional>
 
-namespace Scanner::data   { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibStore; }
+namespace Scanner::data   { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibStore; class CalibrationRepository; }
 namespace Scanner::service{ class StateMachine; class ParameterManager; }
 namespace Scanner::infra  { class EventBus; }
 
@@ -25,12 +25,14 @@ public:
     void setFrameBuffer(data::FrameBuffer* fb) { frameBuffer_ = fb; }
     void setPointCloudBuffer(data::PointCloudBuffer* pcb) { pointCloudBuffer_ = pcb; }
     void setDeviceStateCache(data::DeviceStateCache* dsc) { deviceStateCache_ = dsc; }
-    void setCalibStore(data::CalibStore* cs) { calibStore_ = cs; }
+    void setCalibStore(data::CalibStore* cs) { calibStore_ = cs; }            // 旧口（T15 删）
+    void setCalibRepo(data::CalibrationRepository* cr) { calibRepo_ = cr; }   // 06 标定仓库
 
     data::FrameBuffer* frameBuffer() { return frameBuffer_; }
     data::PointCloudBuffer* pointCloudBuffer() { return pointCloudBuffer_; }
     data::DeviceStateCache* deviceStateCache() { return deviceStateCache_; }
-    data::CalibStore* calibStore() { return calibStore_; }
+    data::CalibStore* calibStore() { return calibStore_; }                    // 旧口（T15 删）
+    data::CalibrationRepository* calibRepo() { return calibRepo_; }
 
     // === Service 层 ===
     void setStateMachine(service::StateMachine* sm) { stateMachine_ = sm; }
@@ -54,7 +56,8 @@ private:
     data::FrameBuffer*       frameBuffer_ = nullptr;
     data::PointCloudBuffer*  pointCloudBuffer_ = nullptr;
     data::DeviceStateCache*  deviceStateCache_ = nullptr;
-    data::CalibStore*        calibStore_ = nullptr;
+    data::CalibStore*        calibStore_ = nullptr;   // 旧口（T15 删）
+    data::CalibrationRepository* calibRepo_ = nullptr;
 
     service::StateMachine*    stateMachine_ = nullptr;
     service::ParameterManager* paramManager_ = nullptr;
