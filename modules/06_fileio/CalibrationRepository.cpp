@@ -4,6 +4,7 @@
 // ============================================================================
 #include "CalibrationRepository.h"
 
+#include <algorithm>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +41,57 @@ std::string makeCalibId() {
     std::ostringstream oss;
     oss << stamp << '-' << std::hex << (std::random_device{}() & 0xffff);
     return oss.str();
+}
+
+const nlohmann::json kNullJson;
+
+// 09 jsonToMatAuto 等价（06 不链 09）：二维嵌套数组 → CV_64F 行主序
+cv::Mat matFromJson(const nlohmann::json& j) {
+    if (!j.is_array() || j.empty() || !j[0].is_array()) return {};
+    const int rows = static_cast<int>(j.size());
+    const int cols = static_cast<int>(j[0].size());
+    cv::Mat mat(rows, cols, CV_64F);
+    for (int r = 0; r < rows; ++r) {
+        if (!j[r].is_array() || static_cast<int>(j[r].size()) != cols) return {};
+        for (int c = 0; c < cols; ++c) {
+            mat.at<double>(r, c) = j[r][c].get<double>();
+        }
+    }
+    return mat;
+}
+
+// 二维数组 → Matx 逐元素（形状不符返全零默认并置错误）
+template <typename MatxT>
+MatxT matxFromJson(const nlohmann::json& j, bool& ok) {
+    constexpr int kRows = MatxT::rows;
+    constexpr int kCols = MatxT::cols;
+    MatxT m = MatxT::zeros();
+    if (!j.is_array() || static_cast<int>(j.size()) != kRows) {
+        ok = false;
+        return m;
+    }
+    for (int r = 0; r < kRows; ++r) {
+        if (!j[r].is_array() || static_cast<int>(j[r].size()) != kCols) {
+            ok = false;
+            return m;
+        }
+        for (int c = 0; c < kCols; ++c) {
+            m(r, c) = j[r][c].get<double>();
+        }
+    }
+    return m;
+}
+
+// 逐层下钻取子树（任一层缺失返 nullptr）
+const nlohmann::json* findNested(const nlohmann::json& root, std::initializer_list<const char*> keys) {
+    const nlohmann::json* cur = &root;
+    for (const char* key : keys) {
+        if (!cur->is_object()) return nullptr;
+        const auto it = cur->find(key);
+        if (it == cur->end()) return nullptr;
+        cur = &*it;
+    }
+    return cur;
 }
 
 } // namespace
@@ -127,6 +179,89 @@ void CalibrationRepository::clear() {
     std::lock_guard<std::mutex> lock(mtx_);
     doc_ = nlohmann::json::object();
     hasData_ = false;
+}
+
+StereoData CalibrationRepository::stereo() const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    StereoData data;
+    const nlohmann::json* st = findNested(doc_, {"stereo"});
+    if (st) {
+        auto fill = [st](const char* key, cv::Mat& dst) {
+            const auto it = st->find(key);
+            if (it != st->end()) dst = matFromJson(*it);
+        };
+        fill("cameraMatrixL", data.cameraMatrixL);
+        fill("cameraMatrixR", data.cameraMatrixR);
+        fill("distCoeffsL", data.distCoeffsL);
+        fill("distCoeffsR", data.distCoeffsR);
+        fill("R", data.R);
+        fill("T", data.T);
+        fill("R1", data.R1);
+        fill("R2", data.R2);
+        fill("P1", data.P1);
+        fill("P2", data.P2);
+        fill("Q", data.Q);
+    }
+    if (const nlohmann::json* size = findNested(doc_, {"meta", "imageSize"}); size && size->is_object()) {
+        data.imageSize = cv::Size(size->value("width", 0), size->value("height", 0));
+    }
+    return data;
+}
+
+StereoTempTable CalibrationRepository::stereoTempTable() const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    StereoTempTable table;
+    const nlohmann::json* tab = findNested(doc_, {"tempTables", "rectify", "table"});
+    if (!tab || !tab->is_array()) return table;
+    for (const auto& entry : *tab) {
+        if (!entry.is_object() || !entry.contains("temperature") || !entry["temperature"].is_number()) {
+            continue;
+        }
+        StereoTempTier tier;
+        tier.tempC = entry["temperature"].get<double>();
+        bool ok = true;
+        auto field = [&entry](const char* key) -> const nlohmann::json& {
+            const auto it = entry.find(key);
+            return it == entry.end() ? kNullJson : *it;
+        };
+        tier.R1 = matxFromJson<cv::Matx33d>(field("R1"), ok);
+        tier.R2 = matxFromJson<cv::Matx33d>(field("R2"), ok);
+        tier.P1 = matxFromJson<cv::Matx34d>(field("P1"), ok);
+        tier.P2 = matxFromJson<cv::Matx34d>(field("P2"), ok);
+        tier.Q = matxFromJson<cv::Matx44d>(field("Q"), ok);
+        if (!ok) continue;  // 档内形状不符整档弃用（防御）
+        table.tiers.push_back(tier);
+    }
+    std::sort(table.tiers.begin(), table.tiers.end(),
+              [](const StereoTempTier& a, const StereoTempTier& b) { return a.tempC < b.tempC; });
+    return table;
+}
+
+PlaneMapTempTableRef CalibrationRepository::planeMapTiers() const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    PlaneMapTempTableRef ref;
+    const nlohmann::json* tab = findNested(doc_, {"planeMap", "tempTable", "table"});
+    if (!tab || !tab->is_array()) return ref;
+    for (const auto& entry : *tab) {
+        if (entry.is_object() && entry.contains("temperature") && entry["temperature"].is_number()) {
+            ref.tiers.push_back(PlaneMapTempTierRef{entry["temperature"].get<double>()});
+        }
+    }
+    std::sort(ref.tiers.begin(), ref.tiers.end(),
+              [](const PlaneMapTempTierRef& a, const PlaneMapTempTierRef& b) { return a.tempC < b.tempC; });
+    return ref;
+}
+
+nlohmann::json CalibrationRepository::planeMapTempTableRaw() const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    const nlohmann::json* sub = findNested(doc_, {"planeMap", "tempTable"});
+    return sub ? *sub : nlohmann::json();
+}
+
+nlohmann::json CalibrationRepository::tempTablesRaw() const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    const nlohmann::json* sub = findNested(doc_, {"tempTables"});
+    return sub ? *sub : nlohmann::json();
 }
 
 } // namespace Scanner::data

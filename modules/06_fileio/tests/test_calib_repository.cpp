@@ -20,7 +20,7 @@
 
 namespace fs = std::filesystem;
 
-using Scanner::data::CalibrationRepository;
+using namespace Scanner::data;
 
 namespace {
 
@@ -96,8 +96,8 @@ TEST(CalibRepository, WriteLoadRoundtrip) {
     CalibrationRepository repo2;
     ASSERT_TRUE(repo2.load(path).success);
     EXPECT_EQ(repo2.lastPath(), path);
-    // T7 实现后解开：EXPECT_EQ(repo2.stereo().imageSize, cv::Size(2560, 1440));
-    // T7 实现后解开：EXPECT_EQ(repo2.stereoTempTable().tiers.size(), 1u);
+    EXPECT_EQ(repo2.stereo().imageSize, cv::Size(2560, 1440));
+    EXPECT_EQ(repo2.stereoTempTable().tiers.size(), 1u);
     fs::remove(path);
 }
 
@@ -124,4 +124,60 @@ TEST(CalibRepository, AtomicWriteNoHalfFile) {
     EXPECT_FALSE(fs::exists(path + ".tmp"));                 // tmp 已被改名消费
     ifs.close();
     fs::remove(path);
+}
+
+// —— T7：typed getters ——
+TEST(CalibRepository, StereoGettersRoundtrip) {
+    CalibrationRepository repo;
+    ASSERT_TRUE(loadSample(repo, "t07_stereo.json"));
+
+    const StereoData st = repo.stereo();
+    EXPECT_EQ(st.cameraMatrixL.at<double>(0, 0), 1000);
+    EXPECT_EQ(st.cameraMatrixR.at<double>(0, 0), 1001);
+    EXPECT_EQ(st.R.at<double>(0, 0), 1);
+    EXPECT_EQ(st.T.at<double>(0, 0), 10);
+    ASSERT_EQ(st.P1.rows, 3);
+    ASSERT_EQ(st.P1.cols, 4);
+    EXPECT_EQ(st.P1.at<double>(0, 0), 1);
+    ASSERT_EQ(st.Q.rows, 4);
+    ASSERT_EQ(st.Q.cols, 4);
+    EXPECT_EQ(st.imageSize, cv::Size(2560, 1440));
+    fs::remove(tmpPath("t07_stereo.json"));
+}
+
+TEST(CalibRepository, StereoTempTableTiers) {
+    CalibrationRepository repo;
+    ASSERT_TRUE(loadSample(repo, "t07_rectify.json"));
+
+    const StereoTempTable table = repo.stereoTempTable();
+    ASSERT_EQ(table.tiers.size(), 1u);
+    const StereoTempTier& tier = table.tiers[0];
+    EXPECT_DOUBLE_EQ(tier.tempC, 25.0);
+    EXPECT_DOUBLE_EQ(tier.R1(0, 0), 1);
+    EXPECT_DOUBLE_EQ(tier.R2(0, 0), 1);
+    EXPECT_DOUBLE_EQ(tier.P1(0, 0), 1);
+    EXPECT_DOUBLE_EQ(tier.P2(0, 0), 1);
+    EXPECT_DOUBLE_EQ(tier.Q(3, 3), 1);
+    fs::remove(tmpPath("t07_rectify.json"));
+}
+
+TEST(CalibRepository, PlaneMapTiersAndRawSubtrees) {
+    CalibrationRepository repo;
+    ASSERT_TRUE(loadSample(repo, "t07_pm.json"));
+
+    const PlaneMapTempTableRef ref = repo.planeMapTiers();
+    ASSERT_EQ(ref.tiers.size(), 1u);
+    EXPECT_DOUBLE_EQ(ref.tiers[0].tempC, 25.0);
+
+    const nlohmann::json pmRaw = repo.planeMapTempTableRaw();
+    ASSERT_TRUE(pmRaw.contains("table"));
+    ASSERT_TRUE(pmRaw["table"].is_array() && !pmRaw["table"].empty());
+    EXPECT_TRUE(pmRaw["table"][0].contains("deltaT"));
+
+    const nlohmann::json ttRaw = repo.tempTablesRaw();
+    EXPECT_TRUE(ttRaw.contains("intrinsic"));
+    EXPECT_TRUE(ttRaw.contains("extrinsic"));
+    EXPECT_TRUE(ttRaw.contains("rectify"));
+    EXPECT_TRUE(ttRaw.contains("laserExtrinsic"));
+    fs::remove(tmpPath("t07_pm.json"));
 }
