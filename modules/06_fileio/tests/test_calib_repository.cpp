@@ -181,3 +181,103 @@ TEST(CalibRepository, PlaneMapTiersAndRawSubtrees) {
     EXPECT_TRUE(ttRaw.contains("laserExtrinsic"));
     fs::remove(tmpPath("t07_pm.json"));
 }
+
+// —— T8：readyForScan 五样门禁（内参/外参/立体温度表/激光档表/imageSize）——
+namespace {
+
+bool missingHas(const ReadyReport& rep, const char* sub) {
+    for (const auto& m : rep.missing) {
+        if (m.find(sub) != std::string::npos) return true;
+    }
+    return false;
+}
+
+bool writeMutatedReadyCheck(const char* tmpName, void (*mutate)(nlohmann::json&),
+                            ReadyReport& rep) {
+    nlohmann::json j = samplePayloadJson();
+    mutate(j);
+    CalibrationRepository repo;
+    if (!repo.write(j.dump(), cv::Size(2560, 1440), tmpPath(tmpName)).success) return false;
+    repo.readyForScan(rep);
+    fs::remove(tmpPath(tmpName));
+    return true;
+}
+
+} // namespace
+
+TEST(CalibRepository, ReadyForScanMissingIntrinsicL) {
+    ReadyReport rep;
+    ASSERT_TRUE(writeMutatedReadyCheck("t08_no_kl.json", [](nlohmann::json& j) {
+        j["stereo"].erase("cameraMatrixL");
+    }, rep));
+    EXPECT_FALSE(rep.ready);
+    EXPECT_TRUE(missingHas(rep, "内参 L"));
+}
+
+TEST(CalibRepository, ReadyForScanMissingExtrinsic) {
+    ReadyReport rep;
+    ASSERT_TRUE(writeMutatedReadyCheck("t08_no_rt.json", [](nlohmann::json& j) {
+        j["stereo"].erase("R");
+        j["stereo"].erase("T");
+    }, rep));
+    EXPECT_FALSE(rep.ready);
+    EXPECT_TRUE(missingHas(rep, "外参"));
+}
+
+TEST(CalibRepository, ReadyForScanEmptyRectifyTable) {
+    ReadyReport rep;
+    ASSERT_TRUE(writeMutatedReadyCheck("t08_empty_rect.json", [](nlohmann::json& j) {
+        j["tempTables"]["rectify"]["table"] = nlohmann::json::array();
+    }, rep));
+    EXPECT_FALSE(rep.ready);
+    EXPECT_TRUE(missingHas(rep, "立体温度表"));
+}
+
+TEST(CalibRepository, ReadyForScanEmptyPlaneMapTable) {
+    ReadyReport rep;
+    ASSERT_TRUE(writeMutatedReadyCheck("t08_empty_pm.json", [](nlohmann::json& j) {
+        j["planeMap"]["tempTable"]["table"] = nlohmann::json::array();
+    }, rep));
+    EXPECT_FALSE(rep.ready);
+    EXPECT_TRUE(missingHas(rep, "激光档表"));
+}
+
+TEST(CalibRepository, ReadyForScanMissingImageSize) {
+    // 手工构造去掉 meta.imageSize 的仓库档（load 路径绕过 write 组 meta）
+    nlohmann::json doc = samplePayloadJson();
+    doc["meta"] = {{"version", 1}};
+    const std::string path = tmpPath("t08_no_size.json");
+    {
+        std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+        ofs << doc.dump();
+    }
+    CalibrationRepository repo;
+    ASSERT_TRUE(repo.load(path).success);
+    ReadyReport rep;
+    repo.readyForScan(rep);
+    EXPECT_FALSE(rep.ready);
+    EXPECT_TRUE(missingHas(rep, "imageSize"));
+    fs::remove(path);
+}
+
+TEST(CalibRepository, ReadyForScanFullPayloadReady) {
+    CalibrationRepository repo;
+    ASSERT_TRUE(loadSample(repo, "t08_full.json"));
+    ReadyReport rep;
+    EXPECT_TRUE(repo.readyForScan(rep).success);
+    EXPECT_TRUE(rep.ready);
+    EXPECT_TRUE(rep.missing.empty());
+    fs::remove(tmpPath("t08_full.json"));
+}
+
+TEST(CalibRepository, ClearMakesNotReady) {
+    CalibrationRepository repo;
+    ASSERT_TRUE(loadSample(repo, "t08_clear.json"));
+    ReadyReport rep;
+    repo.readyForScan(rep);
+    EXPECT_TRUE(rep.ready);
+    repo.clear();
+    repo.readyForScan(rep);
+    EXPECT_FALSE(rep.ready);
+    fs::remove(tmpPath("t08_clear.json"));
+}

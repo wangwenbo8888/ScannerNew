@@ -264,4 +264,34 @@ nlohmann::json CalibrationRepository::tempTablesRaw() const {
     return sub ? *sub : nlohmann::json();
 }
 
+Scanner::Result CalibrationRepository::readyForScan(ReadyReport& out) const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    out.ready = false;
+    out.missing.clear();
+
+    auto hasMat = [](const nlohmann::json* obj, const char* key) {
+        if (!obj || !obj->is_object()) return false;
+        const auto it = obj->find(key);
+        return it != obj->end() && it->is_array() && !it->empty();
+    };
+    const nlohmann::json* st = findNested(doc_, {"stereo"});
+    if (!hasMat(st, "cameraMatrixL")) out.missing.push_back("相机内参 L");
+    if (!hasMat(st, "cameraMatrixR")) out.missing.push_back("相机内参 R");
+    if (!hasMat(st, "R") || !hasMat(st, "T")) out.missing.push_back("外参 R/T");
+
+    const nlohmann::json* rectTab = findNested(doc_, {"tempTables", "rectify", "table"});
+    if (!rectTab || !rectTab->is_array() || rectTab->empty()) out.missing.push_back("立体温度表(rectify)");
+
+    const nlohmann::json* pmTab = findNested(doc_, {"planeMap", "tempTable", "table"});
+    if (!pmTab || !pmTab->is_array() || pmTab->empty()) out.missing.push_back("激光档表(planeMap)");
+
+    const nlohmann::json* size = findNested(doc_, {"meta", "imageSize"});
+    if (!size || !size->is_object() || size->value("width", 0) <= 0 || size->value("height", 0) <= 0) {
+        out.missing.push_back("meta.imageSize");
+    }
+
+    out.ready = out.missing.empty();
+    return Scanner::Result::ok();
+}
+
 } // namespace Scanner::data
