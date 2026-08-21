@@ -30,7 +30,7 @@ JEAMMWARE260705/
 ```
 
 ### 历史注记（framework 退役，2026-08）
-- `framework/` 整树已删：types.h+EventBus → `base/`；data 容器+Sink 契约、IWorkflow/Pipeline(Stage)、ParameterManager → `06_fileio`；CalibStore → `01_calibration`；hal 接口（IScannerCamera/IMCU）→ `08_devicemgmt`；service（StateMachine/SessionService/IState）→ `07_session`（**该目录 2026-08-20 亦退役**：StateMachine/IState 迁 10、SessionService 撤销，07 编号现归 mod_pipelinemgmt）；FaultHandler → `10_observability`；工作流+WorkflowContext+ScannerWindow → `app/`。详见 `framework优化.md`。
+- `framework/` 整树已删：types.h+EventBus → `base/`；data 容器+Sink 契约、IWorkflow/Pipeline(Stage)、ParameterManager → `06_fileio`（其中 Pipeline/Stage 原语 2026-08-21 零消费者删除，IWorkflow 留 06）；CalibStore → `01_calibration`（2026-08-21 并入 06 CalibrationRepository 后退役）；hal 接口（IScannerCamera/IMCU）→ `08_devicemgmt`；service（StateMachine/SessionService/IState）→ `07_session`（**该目录 2026-08-20 亦退役**：StateMachine/IState 迁 10、SessionService 撤销，07 编号现归 mod_pipelinemgmt）；FaultHandler → `10_observability`；工作流+WorkflowContext+ScannerWindow → `app/`。详见 `framework优化.md`。
 - `sdk/`（接入端 B 契约桩）已删；旧根文档 `架构设计-简洁版.md` / `工程目录地图.md` 已删，导航职责归本文件。
 
 ---
@@ -221,10 +221,11 @@ docs/
 ├── 应用层/            # app/ 核心要点 5 份（README / 01-入口与启动 / 02-AppContext装配 /
 │                        #   03-MainWindow-UI / 04-构建与依赖）
 ├── 共享内核/          # base/ 通俗说明（README）
-├── plans/             # 设计/实施方案存档 7 份：2026-08-18 DeviceManager-design、
+├── plans/             # 设计/实施方案存档 9 份：2026-08-18 DeviceManager-design、
 │                        #   2026-08-19 流水线管理模块07 设计方案+实施计划、
 │                        #   2026-08-20 可观测性模块10 设计方案+实施计划、
-│                        #   2026-08-20 设备管理模块08 设计方案+实施计划（已实施）
+│                        #   2026-08-20 设备管理模块08 设计方案+实施计划（已实施）、
+│                        #   2026-08-21 文件管理模块06 设计方案+实施计划（已实施）
 └── 开发需要的信息/     # 大恒 Galaxy SDK 文档（C++接口为核心）+ 相机(VE2S-301-125U3MC-S)数据手册
                          #   + 下位机和按键/（协议/按键资料）
 ```
@@ -248,7 +249,7 @@ cmake --build build-rel --config Release
 ctest --test-dir build-rel -C Release --output-on-failure
 ```
 
-**Debug**（现有 build/，实测 90/90 绿）：
+**Debug**（现有 build/，2026-08-21 06 落地后实测 95/95 绿）：
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -DOpenCV_DIR=C:/opencv-cuda-4.13.0-debug/x64/vc17/lib `
