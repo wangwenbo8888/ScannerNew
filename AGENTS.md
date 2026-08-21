@@ -41,7 +41,7 @@ JEAMMWARE260705/
 
 | 文件 | 职责 |
 |---|---|
-| `types.h` | 公共类型：`Result`（ok/fail/degraded/warning 工厂）、`QualityFlag`、`Pose`、`Event`/`EventType`、`DeviceState`、`ScanMode`、`UPtr`/`SPtr` |
+| `types.h` | 公共类型：`Result`（ok/fail/degraded/warning 工厂）、`QualityFlag`、`Pose`、`Event`/`EventType`、`DeviceState`、`ScanMode`、`HealthMetrics`（08 采集/10 消费健康快照）、`UPtr`/`SPtr` |
 | `EventBus.h/.cpp` | 线程安全事件总线（订阅/发布），编入 STATIC lib `base` |
 
 通俗说明：`docs/共享内核/README.md`。
@@ -61,7 +61,7 @@ JEAMMWARE260705/
 | 05 | `editing` | 桩 | — |
 | **06** | **`fileio`** | **✅ 承重** | 库 `mod_fileio`：运行时容器 FrameBuffer / PointCloudBuffer / DeviceStateCache / RingBuffer / SlotRing（原子槽位环）/ EnhancedFrame / CycleUnit / FrameEnricher（出口查表） + Sink 契约（IFrameSink/IPointCloudSink/IDeviceStateSink）+ IWorkflow/Pipeline(Stage) 工作流框架 + ParameterManager + file_io |
 | 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology/PCoreBroker/GpuSlotService/IFrameSource/FrameResultQueue/SchedulerRuntime）+ 五流水线对象（pipelines/：A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）+ 装配公共件；命名空间 `Scanner::pipeline`。旧 `07_session` 已退役（StateMachine 迁 10、SessionService 随 D6/D7 定案撤销，会话记账归工作流自身） |
-| 08 | `devicemgmt` | ✅（真机联调待做） | 库 `mod_devicemgmt`：**serial/ 协议层三小层**（SerialPort 纯 IO / FrameCodec v2·v3 开关+CRC16+半帧超时 / CommandChannel 非阻塞 ACK 对账+重传+命令组步链 + McuFrame 上行分流 SPSC 环）+ **DeviceManager 总门面**（逻辑线程 post 编队 / 故障 8 码 / ParamStore 参数账本确认更新制 / WarmupSequence 预热 / ModeController 模式黑板）+ **按键链**（KeyManager PC 手势判定 / MenuLogic 显式账本弃奇偶 / KeySemantics 转移表裁判）+ CameraControl（只设参数收敛：setGain 实装/注入式标定）+ MCUDriver（typed N10–N16）+ HardwareMonitor（三件套+HealthMetrics 快照）+ SelfCheckCollector（PDH/NVML 动态加载）。**待做**：真机联调 / v3 协议定稿跟进（14 项待协议方，定稿后删 v2 开关）/ 许可证（预留）/ 故障完整链 app 桥（见 10 文档 §3） |
+| 08 | `devicemgmt` | ✅（真机联调待做） | 库 `mod_devicemgmt`：**serial/ 协议层三小层**（SerialPort 纯 IO / FrameCodec v2·v3 开关+CRC16+半帧超时 / CommandChannel 非阻塞 ACK 对账+重传+命令组步链 + McuFrame 上行分流 SPSC 环）+ **DeviceManager 总门面**（逻辑线程 post 编队 / 故障 8 码 / ParamStore 参数账本确认更新制 / WarmupSequence 预热 / ModeController 模式黑板）+ **按键链**（KeyManager PC 手势判定 / MenuLogic 显式账本弃奇偶 / KeySemantics 转移表裁判）+ CameraControl（只设参数收敛：setGain 实装/注入式标定）+ MCUDriver（typed N10–N16）+ HardwareMonitor（三件套+HealthMetrics 快照）+ SelfCheckCollector（PDH/NVML 动态加载）。**待做**：真机联调 / v3 协议定稿跟进（14 项待协议方，定稿后删 v2 开关）/ 许可证（预留）/ 故障桥两待办（param1 语义对齐 + Error 级完整链——见 10 文档 §3 保留表） |
 | **09** | **`operatorlib`** | **✅ 全部算子** | 单库 `mod_operatorlib`，命名空间 `calib::`（见下文专节）；GBA 含软先验扩展、marker_cloud_fuse 含 seed()。**待建**：网格四族算子（封装/补洞/光顺/边界，07-E 后处理消费） |
 | 10 | `observability` | 部分实现 | 库 `mod_observability`：StateMachine/IState（7 态表驱动 CAS，2026-08-20 自 07_session 迁入并重写）+ CommandGate 统一命令通道（双口）+ FaultHandler 故障档案表 + ObsLogger/jmw_logging + CrashHandler + PerfMonitor。**待建/待接**：08 故障桥两待办（param1 语义对齐+Error 级完整链 reportFault——见 10 文档 §3 保留表）、UI 状态图标、日志宏全模块推广（指标源/poll 已接通 2026-08-21） |
 | 11 | `deploy` | 桩 | — |
@@ -221,7 +221,7 @@ docs/
 ├── 应用层/            # app/ 核心要点 5 份（README / 01-入口与启动 / 02-AppContext装配 /
 │                        #   03-MainWindow-UI / 04-构建与依赖）
 ├── 共享内核/          # base/ 通俗说明（README）
-├── plans/             # 设计/实施方案存档 6 份：2026-08-18 DeviceManager-design、
+├── plans/             # 设计/实施方案存档 7 份：2026-08-18 DeviceManager-design、
 │                        #   2026-08-19 流水线管理模块07 设计方案+实施计划、
 │                        #   2026-08-20 可观测性模块10 设计方案+实施计划、
 │                        #   2026-08-20 设备管理模块08 设计方案+实施计划（已实施）
@@ -241,7 +241,7 @@ docs/
 
 > ⚠ 现有 `build/` 是 **Debug-only**（`CMAKE_CONFIGURATION_TYPES=Debug` + Debug OpenCV）。直接在 `build/` 跑 Release 会报 `MSB8013`。Release 请用独立目录 `build-rel`。
 
-**Release**（独立目录，实测 43/43 绿）：
+**Release**（独立目录；43/43 为 2026-08 framework 时代旧基线，07/08 落地后未重跑——验收前建议重跑）：
 ```powershell
 cmake -S . -B build-rel -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES=Release
 cmake --build build-rel --config Release
