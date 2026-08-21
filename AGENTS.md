@@ -10,7 +10,7 @@
 - **base 共享内核** → `docs/共享内核/README.md`（types.h + EventBus 通俗说明）
 - **禁区**：`factory_calib/` AI 只读保护区（见 `factory_calib/AGENTS.md`）
 
-> **阶段**：framework/ 已退役删除（2026-08）——共享层职责落入 `base/` 与各业务模块；分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`（06/08 只链 base；07=mod_pipelinemgmt 链 base+mod_fileio+mod_operatorlib——五流水线对象消费容器与算子；08 的 HardwareMonitor 源码 include 06 的 DeviceStateCache，链接符号由 app 侧汇聚解析；10 链 base+spdlog，StateMachine 已自 07_session 迁入）；2026-08-21 模块 08 落地后 `scan_demo.exe` 全量构建 + ctest **90/90** 绿（分支 feat/mod07-pipelinemgmt，含 07+08，待人工验收合并）。`factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）。
+> **阶段**：framework/ 已退役删除（2026-08）——共享层职责落入 `base/` 与各业务模块；分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`（06 只链 base＋nlohmann_json；07=mod_pipelinemgmt 链 base+mod_fileio+mod_operatorlib——五流水线对象消费容器与算子；08 的 HardwareMonitor 源码 include 06 的 DeviceStateCache，链接符号由 app 侧汇聚解析；10 链 base+spdlog，StateMachine 已自 07_session 迁入）；2026-08-21 模块 08 落地后 `scan_demo.exe` 全量构建 + ctest 90/90 绿；同日 **06 批 A/B/C 落地后 Debug 95/95 ＋ Release 95/95**（分支 feat/mod06-fileio，含 07+08+06，待人工验收合并）。`factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）。
 
 ---
 
@@ -50,16 +50,16 @@ JEAMMWARE260705/
 
 ## modules/ — 11 业务模块
 
-> ⚠ **编译归属注意**：`01` 的 UI 类、`02/04` 工作流、`03` OSGWidget、`06` file_io **物理在 modules/ 下但直接编入 app 的 scan_demo**（见 `app/CMakeLists.txt`）；`01(部分)/06/07/08/09/10` 另编为 `mod_*` **静态库**。`02/03/04/05/11` 各有同名 INTERFACE 占位库（mod_scanning / mod_rendering / mod_postprocessing / mod_editing / mod_deploy，无源码，仅保目标名）。
+> ⚠ **编译归属注意**：`01` 的 UI/工作流类、`02/04` 工作流、`03` OSGWidget **物理在 modules/ 下但直接编入 app 的 scan_demo**（见 `app/CMakeLists.txt`；01 的 mod_calibration 已退役）；`06/07/08/09/10` 另编为 `mod_*` **静态库**（file_io 已收编 mod_fileio）。`02/03/04/05/11` 各有同名 INTERFACE 占位库（mod_scanning / mod_rendering / mod_postprocessing / mod_editing / mod_deploy，无源码，仅保目标名）。
 
 | 编号 | 模块 | 状态 | 内容 |
 |---|---|---|---|
-| 01 | `calibration` | 部分实现 | 库 `mod_calibration`=CalibStore；另有 CalibrationWorkflow / calib_workflow / CalibDialog / CalibDisplay / IntegrateTestDialog（编入 scan_demo；工作流帧处理已移交 07 A/B 对象，棋盘格链已退役） |
+| 01 | `calibration` | 部分实现 | `mod_calibration` 已退役（CalibStore 并入 06 CalibrationRepository，2026-08-21）；CalibrationWorkflow / calib_workflow / CalibDialog / CalibDisplay / IntegrateTestDialog 编入 scan_demo（工作流帧处理已移交 07 A/B 对象，棋盘格链已退役；仓库写入走 06 RepoWriter 直写） |
 | 02 | `scanning` | 部分实现 | ScanWorkflow（编入 scan_demo；scanLoop 五 Stage 已移交 07 ScanPipeline，自身只留编排/记账） |
 | 03 | `rendering` | 部分实现 | OSGWidget（编入 scan_demo）；`mod_rendering` 为 INTERFACE 占位（旧 display 渲染组件源码已退场，说明文档仍在 `docs/算子说明文档/display/`） |
 | 04 | `postprocessing` | 部分实现 | PostProcessWorkflow（编入 scan_demo；旧七阶段 sleep 壳已移交 07 PostProcessPipeline 五阶段编排） |
 | 05 | `editing` | 桩 | — |
-| **06** | **`fileio`** | **✅ 承重** | 库 `mod_fileio`：运行时容器 FrameBuffer / PointCloudBuffer / DeviceStateCache / RingBuffer / SlotRing（原子槽位环）/ EnhancedFrame / CycleUnit / FrameEnricher（出口查表） + Sink 契约（IFrameSink/IPointCloudSink/IDeviceStateSink）+ IWorkflow/Pipeline(Stage) 工作流框架 + ParameterManager + file_io |
+| **06** | **`fileio`** | **✅ 承重** | 库 `mod_fileio`：运行时容器 FrameBuffer / PointCloudBuffer（点云仓库·三用途接线）/ DeviceStateCache / RingBuffer / SlotRing（原子槽位环）/ EnhancedFrame / CycleUnit / FrameEnricher（出口查表，ScanSessionData 接线） + **CalibrationRepository 标定结果仓库（JSON 单文件＋readyForScan 门禁）＋ ScanSessionData/CalibSessionData 会话件** + Sink 契约（IFrameSink/IPointCloudSink/IDeviceStateSink）+ IWorkflow 工作流框架（Pipeline/Stage 已删）+ ParameterManager + file_io（已入库解 OSG，`Scanner::data::fileio`） |
 | 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology/PCoreBroker/GpuSlotService/IFrameSource/FrameResultQueue/SchedulerRuntime）+ 五流水线对象（pipelines/：A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）+ 装配公共件；命名空间 `Scanner::pipeline`。旧 `07_session` 已退役（StateMachine 迁 10、SessionService 随 D6/D7 定案撤销，会话记账归工作流自身） |
 | 08 | `devicemgmt` | ✅（真机联调待做） | 库 `mod_devicemgmt`：**serial/ 协议层三小层**（SerialPort 纯 IO / FrameCodec v2·v3 开关+CRC16+半帧超时 / CommandChannel 非阻塞 ACK 对账+重传+命令组步链 + McuFrame 上行分流 SPSC 环）+ **DeviceManager 总门面**（逻辑线程 post 编队 / 故障 8 码 / ParamStore 参数账本确认更新制 / WarmupSequence 预热 / ModeController 模式黑板）+ **按键链**（KeyManager PC 手势判定 / MenuLogic 显式账本弃奇偶 / KeySemantics 转移表裁判）+ CameraControl（只设参数收敛：setGain 实装/注入式标定）+ MCUDriver（typed N10–N16）+ HardwareMonitor（三件套+HealthMetrics 快照）+ SelfCheckCollector（PDH/NVML 动态加载）。**待做**：真机联调 / v3 协议定稿跟进（14 项待协议方，定稿后删 v2 开关）/ 许可证（预留）/ 故障桥两待办（param1 语义对齐 + Error 级完整链——见 10 文档 §3 保留表） |
 | **09** | **`operatorlib`** | **✅ 全部算子** | 单库 `mod_operatorlib`，命名空间 `calib::`（见下文专节）；GBA 含软先验扩展、marker_cloud_fuse 含 seed()。**待建**：网格四族算子（封装/补洞/光顺/边界，07-E 后处理消费） |
@@ -241,7 +241,7 @@ docs/
 
 > ⚠ 现有 `build/` 是 **Debug-only**（`CMAKE_CONFIGURATION_TYPES=Debug` + Debug OpenCV）。直接在 `build/` 跑 Release 会报 `MSB8013`。Release 请用独立目录 `build-rel`。
 
-**Release**（独立目录；43/43 为 2026-08 framework 时代旧基线，07/08 落地后未重跑——验收前建议重跑）：
+**Release**（独立目录；2026-08-21 06 批 A/B/C 落地后实跑 **95/95 绿**——framework 时代旧基线 43/43 作废，以实跑为准）：
 ```powershell
 cmake -S . -B build-rel -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES=Release
 cmake --build build-rel --config Release
