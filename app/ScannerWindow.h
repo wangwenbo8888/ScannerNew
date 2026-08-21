@@ -2,16 +2,15 @@
 // ============================================================================
 // ScannerWindow.h — 扫描仪控制窗口（基于 LEADSCANSeries.ui）
 //
-// 使用 Scanner::device::CameraControl 管理相机，串口通信控制下位机。
+// A-T17 串口旁路收口：设备（相机/下位机）一律经 AppContext→DeviceManager 门面，
+// 本窗口不再私摸 QSerialPort/CameraControl（08 红线）。
 // ============================================================================
 
 #include <QMainWindow>
 #include <QTimer>
-#include <QSerialPort>
-#include <QSerialPortInfo>
 #include "ui_ScannerWindow.h"
 
-#include "modules/08_devicemgmt/CameraControl.h"
+#include "modules/08_devicemgmt/IScannerCamera.h"   // StereoFrame（帧出口签名）
 #include "FrameBuffer.h"
 
 class AppContext;
@@ -24,7 +23,6 @@ public:
     explicit ScannerWindow(AppContext* appCtx = nullptr, QWidget *parent = nullptr);
     ~ScannerWindow();
 
-    Scanner::device::CameraControl* getCameraControl();
     uint64_t getFrameCount() const { return m_frameCount; }
     uint64_t getCurrentFps() const { return m_currentFps; }
 
@@ -50,7 +48,6 @@ private:
     Ui::LEADSCANSeriesClass ui;
 
     AppContext* m_appCtx = nullptr;
-    Scanner::device::CameraControl* m_cam = nullptr;
     Scanner::data::FrameBuffer* m_frameBuffer = nullptr;
     QTimer* m_fpsTimer = nullptr;
     QTimer* m_consumerTimer = nullptr;
@@ -62,13 +59,6 @@ private:
     uint64_t m_prevFrameCount = 0;
     uint64_t m_currentFps = 0;
 
-    // 串口
-    QSerialPort* m_serialPort1 = nullptr;
-    QSerialPort* m_serialPort2 = nullptr;
-    QStringList m_portNameList;
-
-    void openPorts();
-    void sendData(QSerialPort* port, const QString& data);
-    QString buildStartCommand();
-    QString buildStopCommand();
+    // 帧出口（DeviceManager::startFrameStream 注册——计数+入队，最轻量）
+    void pushFrameToBuffer(const Scanner::hal::StereoFrame& frame);
 };

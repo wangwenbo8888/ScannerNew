@@ -5,8 +5,6 @@
 #include "StateMachine.h"
 #include "ParameterManager.h"
 #include "base/EventBus.h"
-#include "IScannerCamera.h"
-#include "IMCU.h"
 #include <chrono>
 
 namespace Scanner::workflow {

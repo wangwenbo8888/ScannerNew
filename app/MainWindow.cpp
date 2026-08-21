@@ -1538,6 +1538,12 @@ void MainWindow::updateInfoSection()
     static int updateCount = 0;
     ++updateCount;
 
+    // A-T17：PerfMonitor 1s 拉取驱动（10 设计 P3——挂既有 m_infoTimer；
+    // AppContext 无 Qt 依赖不持定时器，poll=provider 快照→阈值判定→双级告警）
+    if (m_appCtx && m_appCtx->perfMonitor()) {
+        m_appCtx->perfMonitor()->poll();
+    }
+
     // === 先更新 CPU 和内存（纯 Windows API，不依赖任何框架组件）===
     if (m_infoCpuLabel) {
         FILETIME idleTime, kernelTime, userTime;

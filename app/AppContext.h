@@ -15,7 +15,7 @@
 namespace Scanner::data    { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibStore; }
 namespace Scanner::service { class StateMachine; class ParameterManager; class FaultHandler; class CommandGate; class PerfMonitor; }
 namespace Scanner::infra   { class EventBus; }
-namespace Scanner::device  { class CameraControl; class MCUDriver; class HardwareMonitor; }
+namespace Scanner::device  { class DeviceManager; class HardwareMonitor; class SelfCheckCollector; }
 namespace Scanner::workflow{ class WorkflowContext; class ScanWorkflow; class CalibrationWorkflow; class PostProcessWorkflow; }
 
 class AppContext {
@@ -44,10 +44,10 @@ public:
     Scanner::service::CommandGate*     commandGate()     { return commandGate_.get(); }
     Scanner::service::PerfMonitor*     perfMonitor()     { return perfMonitor_.get(); }
 
-    // HAL 层
-    Scanner::device::CameraControl*   camera()    { return camera_.get(); }
-    Scanner::device::MCUDriver*       mcu()       { return mcu_.get(); }
-    Scanner::device::HardwareMonitor* hwMonitor() { return hwMonitor_.get(); }
+    // HAL 层（A-T17 三行收拢：相机+MCU 收进 DeviceManager 门面；HardwareMonitor
+    // 为巡检件独立保留——门面不管它）
+    Scanner::device::DeviceManager*    deviceManager() { return deviceManager_.get(); }
+    Scanner::device::HardwareMonitor*  hwMonitor()     { return hwMonitor_.get(); }
 
     // Infra
     Scanner::infra::EventBus* eventBus() { return eventBus_.get(); }
@@ -77,10 +77,11 @@ private:
     // Infra
     std::unique_ptr<Scanner::infra::EventBus> eventBus_;
 
-    // HAL
-    std::unique_ptr<Scanner::device::CameraControl>   camera_;
-    std::unique_ptr<Scanner::device::MCUDriver>       mcu_;
-    std::unique_ptr<Scanner::device::HardwareMonitor> hwMonitor_;
+    // HAL（deviceManager_ 声明于 selfCheckCollector_/hwMonitor_ 之前：析构逆序
+    // → 巡检件先亡——hwMonitor 经裸指针/回调触达门面与自检采集器）
+    std::unique_ptr<Scanner::device::DeviceManager>      deviceManager_;
+    std::unique_ptr<Scanner::device::SelfCheckCollector> selfCheckCollector_;
+    std::unique_ptr<Scanner::device::HardwareMonitor>    hwMonitor_;
 
     // Workflow
     std::unique_ptr<Scanner::workflow::WorkflowContext>     wfCtx_;

@@ -13,7 +13,6 @@
 namespace Scanner::data   { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibStore; }
 namespace Scanner::service{ class StateMachine; class ParameterManager; }
 namespace Scanner::infra  { class EventBus; }
-namespace Scanner::hal    { class IScannerCamera; class IMCU; }
 
 namespace Scanner::workflow {
 
@@ -40,12 +39,8 @@ public:
     service::StateMachine* stateMachine() { return stateMachine_; }
     service::ParameterManager* params() { return paramManager_; }
 
-    // === HAL 层 ===
-    void setCamera(hal::IScannerCamera* cam) { camera_ = cam; }
-    void setMCU(hal::IMCU* mcu) { mcu_ = mcu; }
-
-    hal::IScannerCamera* camera() { return camera_; }
-    hal::IMCU* mcu() { return mcu_; }
+    // === HAL 层 ===（A-T17 撤口：camera/mcu 收进 DeviceManager 门面——铁规不漏
+    // 零件指针，工作流经 app 组合根取门面薄转发；全库核实无消费者）
 
     // === Infra ===
     void setEventBus(infra::EventBus* bus) { eventBus_ = bus; }
@@ -63,9 +58,6 @@ private:
 
     service::StateMachine*    stateMachine_ = nullptr;
     service::ParameterManager* paramManager_ = nullptr;
-
-    hal::IScannerCamera* camera_ = nullptr;
-    hal::IMCU*           mcu_ = nullptr;
 
     infra::EventBus* eventBus_ = nullptr;
 };

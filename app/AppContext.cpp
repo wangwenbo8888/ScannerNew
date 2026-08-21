@@ -15,14 +15,26 @@
 #include "PerfMonitor.h"
 #include "jmw_logging.h"
 #include "base/EventBus.h"
-#include "modules/08_devicemgmt/CameraControl.h"
-#include "modules/08_devicemgmt/MCUDriver.h"
+#include "modules/08_devicemgmt/DeviceManager.h"
+#include "modules/08_devicemgmt/CameraControl.h"   // 门面相机工厂构造体（注入式）
 #include "modules/08_devicemgmt/HardwareMonitor.h"
+#include "modules/08_devicemgmt/SelfCheckCollector.h"
 #include "WorkflowContext.h"
 #include "ScanWorkflow.h"
 #include "CalibrationWorkflow.h"
 #include "PostProcessWorkflow.h"
 #include <spdlog/spdlog.h>
+
+namespace {
+// A-T17：08→10 健康桥（08 不链 10——app 组合根适配，10 设计 P3）。poll() 驱动
+// 挂 MainWindow 既有 m_infoTimer（1s；AppContext 无 Qt 依赖不持定时器）
+struct HealthAdapter final : Scanner::service::IHealthProvider {
+    Scanner::device::HardwareMonitor* hw = nullptr;
+    Scanner::HealthMetrics snapshot() const override {
+        return hw ? hw->snapshot() : Scanner::HealthMetrics{};
+    }
+};
+} // namespace
 
 AppContext::AppContext() {}
 AppContext::~AppContext() { shutdown(); }
@@ -43,7 +55,10 @@ void AppContext::initialize() {
     faultHandler_   = std::make_unique<Scanner::service::FaultHandler>(eventBus_.get());
 
     faultHandler_->setStateMachine(stateMachine_.get());
-    faultHandler_->setSafeStopCallback([] {});  // TODO: 08 落地后接 DeviceManager::toIdle()
+    // A-T17：安全停回调兑现 08 门面（:46 TODO）——FaultHandler 档案触发时设备回空闲
+    faultHandler_->setSafeStopCallback([this] {
+        if (deviceManager_) deviceManager_->toIdle();
+    });
     faultHandler_->start();
 
     commandGate_ = std::make_unique<Scanner::service::CommandGate>(stateMachine_.get(), eventBus_.get());
@@ -138,20 +153,56 @@ void AppContext::initialize() {
 
     monitorSourceId_ = faultHandler_->registerSource("Monitor");
     perfMonitor_ = std::make_unique<Scanner::service::PerfMonitor>(eventBus_.get(), faultHandler_.get(), monitorSourceId_);
-    // 08 落地后注入 IHealthProvider 并由巡检线程/app 定时器调 poll()
+    // IHealthProvider 注入移至 HAL 段之后（adapter 持 hwMonitor 裸指针——需其先在）
 
-    // === HAL ===
+    // === HAL ===（A-T17 三行门面：设备对象【相机+MCU】收进 DeviceManager；
+    // HardwareMonitor 为巡检件留本层——门面不管它）
     Scanner::device::StereoPairConfig camCfg;
     camCfg.deviceIndexLeft = 0;
     camCfg.deviceIndexRight = 1;
     camCfg.rotateRight180 = true;
-    camera_ = std::make_unique<Scanner::device::CameraControl>(camCfg);
-    mcu_    = std::make_unique<Scanner::device::MCUDriver>();   // 波特率/端口语义归 open(port)（S-T5）
+    Scanner::device::DeviceConfig devCfg;
+    devCfg.serialPort = "COM3";   // TODO(配置接入): 串口号自配置/设备枚选取；暂默认
+    // protocol 默认 V3、baud 115200（DeviceConfig 缺省即产线口径）
+    deviceManager_ = std::make_unique<Scanner::device::DeviceManager>(
+        devCfg,
+        [this](const std::string& op) -> Scanner::Result {
+            // 08 门禁回调 → 10 状态机映射（app=组合根；08 不反链 10）。
+            // 口径：enter_scan/enter_calibration 问 SM；其余 op 一律放行（记账）
+            if (!stateMachine_) return Scanner::Result::ok();
+            const bool allow = (op == "enter_scan")       ? stateMachine_->canOperate("scan")
+                             : (op == "enter_calibration") ? stateMachine_->canOperate("calibrate")
+                             : true;
+            return allow ? Scanner::Result::ok()
+                         : Scanner::Result::fail("状态门禁拒绝: " + op);
+        },
+        eventBus_.get(),
+        [camCfg]() -> std::unique_ptr<Scanner::hal::IScannerCamera> {
+            return std::make_unique<Scanner::device::CameraControl>(camCfg);
+        });
+    const auto devR = deviceManager_->open();   // 一条龙：相机→MCU→参数→N12Z1→逻辑线程
+    spdlog::info("[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
 
+    // S1 自检回填（A-T17 口径）：serialPort/camera 两项均由 open 结果定（open 含
+    // 相机步与串口步；失败倒序关——两项同假）。license 占位 true 不变
+    notifySelfCheckItem("serialPort", devR.success);
+    notifySelfCheckItem("camera", devR.success);
+
+    selfCheckCollector_ = std::make_unique<Scanner::device::SelfCheckCollector>();
     hwMonitor_ = std::make_unique<Scanner::device::HardwareMonitor>();
     hwMonitor_->setDeviceStateCache(deviceStateCache_.get());
     hwMonitor_->setEventBus(eventBus_.get());
-    hwMonitor_->setCamera(camera_.get());
+    // MCU 温度改门面快照注入（H-T16 口径）；相机行注入口无法保留——DeviceManager
+    // 铁规不漏相机指针（遗留：08 侧后续增相机状态快照口）
+    hwMonitor_->setLastTemps([this]() {
+        return deviceManager_ ? deviceManager_->getLastTemperatures() : serial::TempFrame{};
+    });
+    // setHeartbeatCheck 留空（A-T17 口径）：串口无声判定已在 DeviceManager logicTick
+    // 巡检（0x0802）——巡检件不重复判定
+    hwMonitor_->setSelfCheck(selfCheckCollector_.get());
+
+    // 10-PerfMonitor 健康源接线（hwMonitor 就绪后；poll 驱动在 MainWindow m_infoTimer）
+    perfMonitor_->setProvider(std::make_shared<HealthAdapter>(hwMonitor_.get()));
 
     // === WorkflowContext 装配 ===
     wfCtx_ = std::make_unique<Scanner::workflow::WorkflowContext>();
@@ -161,8 +212,6 @@ void AppContext::initialize() {
     wfCtx_->setCalibStore(calibStore_.get());
     wfCtx_->setStateMachine(stateMachine_.get());
     wfCtx_->setParameterManager(paramManager_.get());
-    wfCtx_->setCamera(camera_.get());
-    wfCtx_->setMCU(mcu_.get());
     wfCtx_->setEventBus(eventBus_.get());
 
     // === Workflow ===
@@ -200,8 +249,7 @@ void AppContext::shutdown() {
     if (calibWf_)   calibWf_->stop();
     if (postWf_)    postWf_->stop();
     if (faultHandler_) faultHandler_->stop();
-    if (camera_)    { camera_->stopAsyncCapture(); camera_->close(); }
-    if (mcu_)       mcu_->close();
+    if (deviceManager_) deviceManager_->close();   // 相机+MCU 收口（门面倒序关）
     spdlog::info("[AppContext] 全部组件已关闭");
 }
 
