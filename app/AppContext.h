@@ -12,7 +12,7 @@
 #include <mutex>
 #include <string>
 
-namespace Scanner::data    { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibStore; }
+namespace Scanner::data    { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibrationRepository; }
 namespace Scanner::service { class StateMachine; class ParameterManager; class FaultHandler; class CommandGate; class PerfMonitor; }
 namespace Scanner::infra   { class EventBus; }
 namespace Scanner::device  { class DeviceManager; class HardwareMonitor; class SelfCheckCollector; }
@@ -35,7 +35,7 @@ public:
     Scanner::data::FrameBuffer*      frameBuffer()     { return frameBuffer_.get(); }
     Scanner::data::PointCloudBuffer* pointCloudBuffer(){ return pointCloudBuffer_.get(); }
     Scanner::data::DeviceStateCache* deviceStateCache(){ return deviceStateCache_.get(); }
-    Scanner::data::CalibStore*       calibStore()      { return calibStore_.get(); }
+    Scanner::data::CalibrationRepository* calibRepo()      { return calibRepo_.get(); }
 
     // Service 层
     Scanner::service::StateMachine*    stateMachine()    { return stateMachine_.get(); }
@@ -63,7 +63,7 @@ private:
     std::unique_ptr<Scanner::data::FrameBuffer>       frameBuffer_;
     std::unique_ptr<Scanner::data::PointCloudBuffer>  pointCloudBuffer_;
     std::unique_ptr<Scanner::data::DeviceStateCache>  deviceStateCache_;
-    std::unique_ptr<Scanner::data::CalibStore>        calibStore_;
+    std::unique_ptr<Scanner::data::CalibrationRepository> calibRepo_;
 
     // Service（commandGate_/perfMonitor_ 声明于 faultHandler_/stateMachine_ 之后：
     // 析构逆序 → gate/perf 先亡——两者持 SM/FH 裸指针）

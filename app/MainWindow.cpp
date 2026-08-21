@@ -888,8 +888,8 @@ QWidget *MainWindow::createToolBar()
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9"), "markers.json", "Marker Files (*.json *.txt)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
-                    std::vector<cv::Point3f> markers;  // TODO: 从扫描数据获取
-                    if (Scanner::data::fileio::exportMarkers(spath, markers))
+                    auto* pcb = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;   // 仓库内存直导（02-D5 唯一出口）
+                    if (pcb && pcb->exportMarkers(spath))
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9\xe6\x88\x90\xe5\x8a\x9f"));
                     else
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xa4\xb1\xe8\xb4\xa5"));
@@ -898,8 +898,8 @@ QWidget *MainWindow::createToolBar()
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\x82\xb9\xe4\xba\x91"), "pointcloud.ply", "Point Cloud (*.ply *.pcd *.xyz)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
-                    std::vector<cv::Point3f> points;  // TODO: 从扫描数据获取
-                    if (Scanner::data::fileio::exportPointCloud(spath, points))
+                    auto* pcb = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;   // 仓库内存直导（02-D5 唯一出口）
+                    if (pcb && pcb->exportCloud(spath))
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\x82\xb9\xe4\xba\x91\xe6\x88\x90\xe5\x8a\x9f"));
                     else
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xa4\xb1\xe8\xb4\xa5"));

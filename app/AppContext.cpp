@@ -6,7 +6,7 @@
 #include "FrameBuffer.h"
 #include "PointCloudBuffer.h"
 #include "DeviceStateCache.h"
-#include "CalibStore.h"
+#include "CalibrationRepository.h"
 #include "StateMachine.h"
 #include "ParameterManager.h"
 #include "FaultHandler.h"
@@ -48,7 +48,9 @@ void AppContext::initialize() {
     frameBuffer_      = std::make_unique<Scanner::data::FrameBuffer>(60);
     pointCloudBuffer_ = std::make_unique<Scanner::data::PointCloudBuffer>();
     deviceStateCache_ = std::make_unique<Scanner::data::DeviceStateCache>();
-    calibStore_       = std::make_unique<Scanner::data::CalibStore>();
+    calibRepo_ = std::make_unique<Scanner::data::CalibrationRepository>();
+    if (const auto lr = calibRepo_->load("calibration.json"); !lr.success)
+        spdlog::info("[AppContext] 启动未装载标定仓库档（{}）——首次标定后生成", lr.message);
 
     // === Service ===
     stateMachine_   = std::make_unique<Scanner::service::StateMachine>(eventBus_.get());
@@ -80,15 +82,24 @@ void AppContext::initialize() {
             };
         }
         if (spec.name == "start_scan") {
-            // pre（§9 02-①）：参数就绪谓词——查 06 CalibStore（T14 后 01 已写入）。
+            // pre（§9 02-①）：参数就绪谓词——查 06 标定仓库 readyForScan（缺哪样报哪样）。
             // TODO(06 差距): 出口查表（逐温档 K/D + 激光温度表）接入后由 02 侧升级判据
             spec.pre = [this]() {
-                if (!wfCtx_ || !wfCtx_->calibStore() || !wfCtx_->calibStore()->hasData())
-                    return Scanner::Result::fail("标定参数未就绪——请先完成标定");
+                auto* repo = wfCtx_ ? wfCtx_->calibRepo() : nullptr;
+                if (!repo)
+                    return Scanner::Result::fail("标定参数未就绪——标定仓库未装配");
+                Scanner::data::ReadyReport rr;
+                repo->readyForScan(rr);
+                if (!rr.ready) {
+                    std::string miss;
+                    for (const auto& m : rr.missing)
+                        miss += miss.empty() ? m : "/" + m;
+                    return Scanner::Result::fail("标定参数未就绪——缺: " + miss);
+                }
                 return Scanner::Result::ok();
             };
-            // 点火语义：CalibStore→ScanCalibration 静态转接（app=组合根做注入，
-            // CalibStore 本身注释「供 CalibrationWorkflow 写入、ScanWorkflow 读取」；
+            // 点火语义：标定仓库→ScanCalibration 静态转接（app=组合根做注入：
+            // repo->stereo() 一次取结构体逐字段赋——01 写入/02 读取同源；
             // TODO 06 出口查表后逐温档 K/D/激光温度表归 02 侧自查）+ initialize +
             // start——帧处理归 07 内部线程，handler 毫秒级即返；同步失败（07 装配
             // 失败等）返回 fail 由 gate 回滚 S2（§3.3）。
@@ -96,16 +107,17 @@ void AppContext::initialize() {
             // S4/S5 判别）——UI 入口先 setScanMode 设进工作流（见 ScannerWindow）
             spec.handler = [this]() {
                 if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
-                auto* cs = wfCtx_ ? wfCtx_->calibStore() : nullptr;
-                if (cs && cs->hasData()) {
+                auto* repo = wfCtx_ ? wfCtx_->calibRepo() : nullptr;
+                if (repo) {
+                    const auto st = repo->stereo();
                     Scanner::workflow::ScanCalibration c;
-                    c.cameraMatrixL = cs->cameraMatrixL();
-                    c.cameraMatrixR = cs->cameraMatrixR();
-                    c.distCoeffsL   = cs->distCoeffsL();
-                    c.distCoeffsR   = cs->distCoeffsR();
-                    c.R1 = cs->R1();  c.R2 = cs->R2();
-                    c.P1 = cs->P1();  c.P2 = cs->P2();  c.Q = cs->Q();
-                    c.imageSize = cs->imageSize();
+                    c.cameraMatrixL = st.cameraMatrixL;
+                    c.cameraMatrixR = st.cameraMatrixR;
+                    c.distCoeffsL   = st.distCoeffsL;
+                    c.distCoeffsR   = st.distCoeffsR;
+                    c.R1 = st.R1;  c.R2 = st.R2;
+                    c.P1 = st.P1;  c.P2 = st.P2;  c.Q = st.Q;
+                    c.imageSize = st.imageSize;
                     c.valid = true;
                     scanWf_->setCalibration(c);
                 }
@@ -211,7 +223,7 @@ void AppContext::initialize() {
     wfCtx_->setFrameBuffer(frameBuffer_.get());
     wfCtx_->setPointCloudBuffer(pointCloudBuffer_.get());
     wfCtx_->setDeviceStateCache(deviceStateCache_.get());
-    wfCtx_->setCalibStore(calibStore_.get());
+    wfCtx_->setCalibRepo(calibRepo_.get());
     wfCtx_->setStateMachine(stateMachine_.get());
     wfCtx_->setParameterManager(paramManager_.get());
     wfCtx_->setEventBus(eventBus_.get());
