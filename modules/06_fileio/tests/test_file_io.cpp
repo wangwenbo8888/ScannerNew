@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <opencv2/core.hpp>
 
+#include "WorkflowArtifactStore.h"
 #include "file_io.h"
 
 #include <filesystem>
