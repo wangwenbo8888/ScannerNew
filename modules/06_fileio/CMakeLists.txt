@@ -7,6 +7,7 @@ add_library(mod_fileio STATIC
     DeviceStateCache.cpp
     ParameterManager.cpp
     FrameEnricher.cpp
+    ScanSessionData.cpp
     file_io.cpp
     CalibrationRepository.cpp
 )
