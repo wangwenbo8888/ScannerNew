@@ -129,9 +129,20 @@ TEST(CalibSession, BadFileFails) {
     EXPECT_TRUE(cfg.initialParams.is_object());
     EXPECT_TRUE(cfg.initialParams.empty());
 
+    doc = sampleSessionDoc();
+    doc["targets"][0][1] = "x";                                          // 元素类型损坏（审查 M1）
+    writeTmp("t11_bad_elem.json", doc.dump());
+    EXPECT_FALSE(s.load(tmpPath("t11_bad_elem.json"), cfg).success);     // 不抛异常、fail 返回
+
+    doc = sampleSessionDoc();
+    doc["boardPoints"][0][2] = nullptr;
+    writeTmp("t11_bad_elem2.json", doc.dump());
+    EXPECT_FALSE(s.load(tmpPath("t11_bad_elem2.json"), cfg).success);
+
     for (const char* n : {"t11_garbage.json", "t11_no_targets.json",
                           "t11_empty_targets.json", "t11_empty_board.json",
-                          "t11_no_params.json"})
+                          "t11_no_params.json", "t11_bad_elem.json",
+                          "t11_bad_elem2.json"})
         fs::remove(tmpPath(n));
 }
 

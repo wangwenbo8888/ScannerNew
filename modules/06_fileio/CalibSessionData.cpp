@@ -26,10 +26,14 @@ Scanner::Result CalibSessionData::load(const std::string& path,
     std::vector<std::array<double, 16>> targets;
     targets.reserve(doc["targets"].size());
     for (const auto& row : doc["targets"]) {
-        if (!row.is_array() || row.size() != 16 || !row[0].is_number())
+        if (!row.is_array() || row.size() != 16)
             return Result::fail("标定会话档 targets 条目非 16 数数组");
         std::array<double, 16> a{};
-        for (size_t i = 0; i < 16; ++i) a[i] = row[i].get<double>();
+        for (size_t i = 0; i < 16; ++i) {
+            if (!row[i].is_number())                       // 逐元素类型校验（防坏档抛异常）
+                return Result::fail("标定会话档 targets 条目含非数值元素");
+            a[i] = row[i].get<double>();
+        }
         targets.push_back(a);
     }
 
@@ -40,8 +44,11 @@ Scanner::Result CalibSessionData::load(const std::string& path,
     std::vector<cv::Point3f> board;
     board.reserve(doc["boardPoints"].size());
     for (const auto& p : doc["boardPoints"]) {
-        if (!p.is_array() || p.size() != 3 || !p[0].is_number())
+        if (!p.is_array() || p.size() != 3)
             return Result::fail("标定会话档 boardPoints 条目非 [x,y,z]");
+        for (const auto& v : p)
+            if (!v.is_number())
+                return Result::fail("标定会话档 boardPoints 条目含非数值元素");
         board.emplace_back(p[0].get<float>(), p[1].get<float>(), p[2].get<float>());
     }
 
