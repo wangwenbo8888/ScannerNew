@@ -110,16 +110,20 @@ void AppContext::initialize() {
                 auto* repo = wfCtx_ ? wfCtx_->calibRepo() : nullptr;
                 if (repo) {
                     const auto st = repo->stereo();
-                    Scanner::workflow::ScanCalibration c;
-                    c.cameraMatrixL = st.cameraMatrixL;
-                    c.cameraMatrixR = st.cameraMatrixR;
-                    c.distCoeffsL   = st.distCoeffsL;
-                    c.distCoeffsR   = st.distCoeffsR;
-                    c.R1 = st.R1;  c.R2 = st.R2;
-                    c.P1 = st.P1;  c.P2 = st.P2;  c.Q = st.Q;
-                    c.imageSize = st.imageSize;
-                    c.valid = true;
-                    scanWf_->setCalibration(c);
+                    if (!st.cameraMatrixL.empty() && !st.cameraMatrixR.empty()) {
+                        Scanner::workflow::ScanCalibration c;
+                        c.cameraMatrixL = st.cameraMatrixL;
+                        c.cameraMatrixR = st.cameraMatrixR;
+                        c.distCoeffsL   = st.distCoeffsL;
+                        c.distCoeffsR   = st.distCoeffsR;
+                        c.R1 = st.R1;  c.R2 = st.R2;
+                        c.P1 = st.P1;  c.P2 = st.P2;  c.Q = st.Q;
+                        c.imageSize = st.imageSize;
+                        c.valid = true;
+                        scanWf_->setCalibration(c);
+                    } else {
+                        return Scanner::Result::fail("标定仓库数据为空——请先完成标定");
+                    }
                 }
                 auto r = scanWf_->initialize();
                 if (!r.success) return r;
