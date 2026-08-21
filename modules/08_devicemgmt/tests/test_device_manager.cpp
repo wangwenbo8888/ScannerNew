@@ -315,6 +315,7 @@ TEST(DeviceManager, T4_WarmupTimeoutCallbackOnceNoStopHeat) {
 }
 
 // —— T5：中键短按启停（N11 H1/H0 按黑板）+ 直调幂等（连按同值不乱）——
+//      A-T17 修复后启采集=命令组 [N10(账本)→N11H1]：幂等断言同时覆盖 N10 ——
 TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -328,25 +329,51 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    kit.shortPress('M');                                       // 主层中键短按 → 启采集
+    kit.shortPress('M');                                       // 主层中键短按 → 启采集（组：N10→N11H1）
     EXPECT_EQ(mock.count("N11H1"), 1);
+    EXPECT_EQ(mock.count("N10H60B80T1V1L120"), 1);             // 每次启采集先 N10（账本默认全参）
     EXPECT_TRUE(dm.isCapturing());
-    kit.shortPress('M');                                       // 再按 → 停采集
+    kit.shortPress('M');                                       // 再按 → 停采集（单发 N11H0）
     EXPECT_EQ(mock.count("N11H0"), 1);
     EXPECT_FALSE(dm.isCapturing());
 
     dm.startCapture();                                         // 直调重复启：幂等无新帧
     dm.logicTick();
-    dm.startCapture();
+    EXPECT_EQ(mock.count("N11H1"), 2);                         // 组链一拍内完成（ACK 泵链推进）
+    EXPECT_EQ(mock.count("N10H60B80T1V1L120"), 2);
+    EXPECT_TRUE(dm.isCapturing());
+    dm.startCapture();                                         // 采集已开：幂等无新 N10/N11
     dm.logicTick();
     EXPECT_EQ(mock.count("N11H1"), 2);
-    EXPECT_TRUE(dm.isCapturing());
+    EXPECT_EQ(mock.count("N10H60B80T1V1L120"), 2);
     dm.stopCapture();                                          // 直调重复停：幂等无新帧
     dm.logicTick();
     dm.stopCapture();
     dm.logicTick();
     EXPECT_EQ(mock.count("N11H0"), 2);
     EXPECT_FALSE(dm.isCapturing());
+}
+
+// —— T5b（A-T17 N10 断链修复钉死）：setParam 改账后 startCapture →
+//      N10 全参自 ParamStore 账本组帧（非 MCU 默认参数）——
+TEST(DeviceManager, T5b_StartCaptureN10FromParamAccount) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.setParam("freqHz", 90.0, ParamEntry::Source::Ui);       // 空闲改账（纯记账）
+    dm.logicTick();
+    dm.startCapture();
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N10H90B80T1V1L120"), 1);              // N10 帧含 H90（账本值）
+    EXPECT_EQ(mock.count("N11H1"), 1);
+    EXPECT_TRUE(dm.isCapturing());
 }
 
 // —— T6：菜单全遍历（4 键×3 手势）—— layer2/游标环绕/调节上下文/模式光标可达性 ——
@@ -436,9 +463,14 @@ TEST(DeviceManager, T7_KeyFlood100NoCrash) {
     }
     dm.logicTick();                                            // 环容量 64：仅前 64 事件入环
     sleepMs(90);                                               // 末对静默窗到期
-    dm.logicTick();
-    // 每消化一对产生一帧 N11H1：≥30 组 ⇔ ≥60 原始事件处理，且全程无崩溃
-    EXPECT_GE(mock.count("N11H1"), 30);
+    dm.logicTick();                                            // 手势 drain → 各组手势派发拍同步发 N10
+    dm.logicTick();                                            // A-T17 组链：ACK 泵消化 → 链发 N11H1
+    // 每消化一对手势产生一组 [N10→N11H1]：N10 在派发拍同步落帧（≥30 ⇔ ≥60 原始
+    // 事件处理）；N11H1 经 ACK 泵链推进——洪峰下 CommandChannel 挂表容量有限，
+    // 部分 N10 在链前被逐出判超时（容量策略「满：最旧先判超时」），只证链路活
+    // （≥1），且全程无崩溃
+    EXPECT_GE(mock.count("N10"), 30);
+    EXPECT_GE(mock.count("N11H1"), 1);
     EXPECT_FALSE(dm.isCapturing());
 }
 

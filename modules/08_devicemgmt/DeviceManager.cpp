@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iterator>
 #include <utility>
 
 namespace Scanner::device {
@@ -347,6 +348,16 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
     });
 }
 
+// 采集组公共步链（A-T17 N10 断链修复抽取）：N10(ParamStore 账本全参)→N11H1。
+// startCapture 与 enterScan 共用——app 层采集走 startCapture（enterScan 零调用），
+// 若组链缺 N10 则真机 MCU 以默认参数跑、UI 滑条成死控件
+std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
+    return {{"N10", [this](McuDone cb) {
+                mcu_->setCaptureParams(captureParamsFromAccount(*params_), std::move(cb));
+            }},
+            {"N11H1", [this](McuDone cb) { mcu_->startScan(std::move(cb)); }}};
+}
+
 void DeviceManager::enterScanOnLogic() {
     std::vector<SeqStep> seq;
     if (standbyActive_) {
@@ -357,10 +368,9 @@ void DeviceManager::enterScanOnLogic() {
                            });
                        }});
     }
-    seq.push_back({"N10", [this](McuDone cb) {
-                       mcu_->setCaptureParams(captureParamsFromAccount(*params_), std::move(cb));
-                   }});
-    seq.push_back({"N11H1", [this](McuDone cb) { mcu_->startScan(std::move(cb)); }});
+    auto cap = captureSeqSteps();                              // 待机退出→采集组（复用）
+    seq.insert(seq.end(), std::make_move_iterator(cap.begin()),
+               std::make_move_iterator(cap.end()));
     sendSeq(std::move(seq), [this](bool ok) {
         if (!ok) return;                         // Fault 已在 sendSeq 内报
         standbyActive_ = false;
@@ -398,7 +408,7 @@ void DeviceManager::toIdleOnLogic() {
 }
 
 // ============================================================================
-// 采集启停（N11 H1/H0 + 相机开停流；不切模式；幂等；编队执行）
+// 采集启停（N10(账本)→N11H1→开流 / N11H0；不切模式；幂等；编队执行）
 // ============================================================================
 
 void DeviceManager::startCapture() {
@@ -411,11 +421,10 @@ void DeviceManager::stopCapture() {
 
 void DeviceManager::startCaptureOnLogic() {
     if (mode_->isCapturing()) return;            // 幂等：黑板同值直返
-    mcu_->startScan([this](bool ok, const std::string& p) {
-        if (!ok) {
-            publishFault(code(DevFault::CmdNoAck), "N11H1 " + p);   // 3 败=无应答（#7≡#8）
-            return;
-        }
+    // 命令组 [N10(账本全参)→N11H1]（A-T17 修复：原仅发 N11H1，N10 断链）——
+    // 组成功回调才擦板+开流；任一步 3 败由 sendSeq 短路+Fault
+    sendSeq(captureSeqSteps(), [this](bool ok) {
+        if (!ok) return;
         mode_->setCapturing(true);
         startStreamIfReady();
     });

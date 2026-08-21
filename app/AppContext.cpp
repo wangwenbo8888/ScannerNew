@@ -30,6 +30,7 @@ namespace {
 // 挂 MainWindow 既有 m_infoTimer（1s；AppContext 无 Qt 依赖不持定时器）
 struct HealthAdapter final : Scanner::service::IHealthProvider {
     Scanner::device::HardwareMonitor* hw = nullptr;
+    explicit HealthAdapter(Scanner::device::HardwareMonitor* h) : hw(h) {}
     Scanner::HealthMetrics snapshot() const override {
         return hw ? hw->snapshot() : Scanner::HealthMetrics{};
     }
@@ -195,7 +196,8 @@ void AppContext::initialize() {
     // MCU 温度改门面快照注入（H-T16 口径）；相机行注入口无法保留——DeviceManager
     // 铁规不漏相机指针（遗留：08 侧后续增相机状态快照口）
     hwMonitor_->setLastTemps([this]() {
-        return deviceManager_ ? deviceManager_->getLastTemperatures() : serial::TempFrame{};
+        return deviceManager_ ? deviceManager_->getLastTemperatures()
+                              : Scanner::device::serial::TempFrame{};
     });
     // setHeartbeatCheck 留空（A-T17 口径）：串口无声判定已在 DeviceManager logicTick
     // 巡检（0x0802）——巡检件不重复判定

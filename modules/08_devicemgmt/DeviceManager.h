@@ -46,8 +46,9 @@
 //     登记序号，sourceId=8 标 08 来源）；
 //   - 按键门禁（KeySemantics gate）= !isCapturing（M1：采集态菜单/模式/调节键
 //     丢弃；启停键不问门禁）；
-//   - N10 组参 Dispatch：采集中全参重发；空闲仅记账 done(true,false)（enterScan
-//     时自账本组帧下发）；exposure 相机直设，无相机=纯记账 done(true,true)；
+//   - N10 组参 Dispatch：采集中全参重发；空闲仅记账 done(true,false)（采集
+//     组链 enterScan/startCapture 时自账本组帧下发）；exposure 相机直设，
+//     无相机=纯记账 done(true,true)；
 //   - v2 温度兜底周期 1200ms（发后重臂），首个 T 帧到达后才武装。
 // ============================================================================
 
@@ -156,8 +157,9 @@ public:
     Result startFrameStream(hal::FrameCallback cb);
     Result stopFrameStream();
 
-    // —— 采集启停（N11 H1/H0 + 相机开停流；不切模式；幂等：黑板同值直返；
-    //    编队执行——调用后需一拍 logicTick 落地下行帧）——
+    // —— 采集启停（N10(账本全参)→N11H1→开流 / N11H0；不切模式；幂等：黑板同值
+    //    直返；编队执行——调用后需一拍 logicTick 落地下行帧。A-T17 修复：采集链
+    //    编排改命令组补 N10（原仅 N11H1——真机 MCU 以默认参数跑、UI 滑条死控件）——
     void startCapture();
     void stopCapture();
 
@@ -190,6 +192,7 @@ private:
     void startStreamIfReady();
     void refreshParamSnapshot();                // 全参数拷入互斥快照（≤6 项）
     // 切模式/启停的命令组主体（逻辑线程执行——门禁已在调用方线程过）
+    std::vector<SeqStep> captureSeqSteps();      // 采集组公共步链：N10(账本)→N11H1
     void enterScanOnLogic();
     void enterCalibrationOnLogic();
     void toIdleOnLogic();

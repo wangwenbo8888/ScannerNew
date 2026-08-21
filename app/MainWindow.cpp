@@ -12,6 +12,7 @@
 #include "stubs/laser_calib_workflow.h"
 #include "stubs/scan_workflow.h"
 #include "file_io.h"
+#include "PerfMonitor.h"   // A-T17：updateInfoSection 内 perfMonitor()->poll() 需完整类型
 #include <osg/Vec3>
 #include <osg/Matrix>
 #include <osgGA/TrackballManipulator>

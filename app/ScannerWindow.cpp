@@ -3,7 +3,12 @@
 #include "IWorkflow.h"
 #include "ScanWorkflow.h"
 #include "CalibrationWorkflow.h"
+// KeyManager.h 的 emit() 方法名与 Qt 的 emit 宏冲突（本 TU Qt 头先入）——
+// 包含 DeviceManager.h 链前临时摘宏、事后还原（下方 Qt emit 发信号不受影响）
+#pragma push_macro("emit")
+#undef emit
 #include "modules/08_devicemgmt/DeviceManager.h"
+#pragma pop_macro("emit")
 #include "modules/08_devicemgmt/HardwareMonitor.h"
 #include "StateMachine.h"
 #include "CommandGate.h"
@@ -76,6 +81,21 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
     connect(ui.horizontalSlider_Background_Lighting, &QSlider::valueChanged, this, &ScannerWindow::onSliderBackgroundChanged);
     connect(ui.horizontalSlider_Laser_Lighting, &QSlider::valueChanged, this, &ScannerWindow::onSliderLaserChanged);
     connect(ui.horizontalSlider_ExposeTime, &QSlider::valueChanged, this, &ScannerWindow::onSliderExposeChanged);
+
+    // A-T17 修复（运行时钳，.ui 不动）：三滑条范围对齐 ParamStore spec
+    // （freq 20-120 默认 60 / bg 0-255 默认 80 / laser 0-255 默认 120），初值自
+    // 账本快照同步——setValue 触发 valueChanged→setParam 同值记账（无副作用）
+    if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
+        ui.horizontalSlider_Freq->setRange(20, 120);
+        ui.horizontalSlider_Background_Lighting->setRange(0, 255);
+        ui.horizontalSlider_Laser_Lighting->setRange(0, 255);
+        ui.horizontalSlider_Freq->setValue(
+            static_cast<int>(dm->getParam("freqHz").value));
+        ui.horizontalSlider_Background_Lighting->setValue(
+            static_cast<int>(dm->getParam("bgLight").value));
+        ui.horizontalSlider_Laser_Lighting->setValue(
+            static_cast<int>(dm->getParam("laserLevel").value));
+    }
 
     // FPS 定时器
     m_fpsTimer = new QTimer(this);
@@ -191,8 +211,9 @@ void ScannerWindow::onStartScanner()
         return;
     }
 
-    // A-T17 串口旁路收口：原 N10/N11 手拼串口命令删除——曝光经参数账本
-    // （setParam=相机直设+记账；N10 组参自账本组帧，门面 enterScan/采集链下发）
+    // A-T17 串口旁路收口：原 N10/N11 手拼串口命令删除——采集参数经 ParamStore
+    // 账本（startCapture 命令组 [N10 账本全参→N11H1] 下发+相机开流；滑条改值
+    // 经 setParam 记账，采集中变更即全参重发）
     const int expose = ui.horizontalSlider_ExposeTime->value();
     dm->setParam("exposure", expose, Scanner::device::ParamEntry::Source::Ui);
 
@@ -266,6 +287,8 @@ void ScannerWindow::onStopScanner()
 // ============================================================================
 void ScannerWindow::onCalibrateClicked()
 {
+    // 标定采集=采集链全编排（N10+N11+开流）——2026-08-21 实施裁定：标定需补光
+    // 与触发时序，与扫描同构（不走 enterCalibration 的 N16 路径）
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!m_appCtx || !m_appCtx->calibWorkflow()) {
         ui.textEdit_Info->append("标定工作流不可用");
@@ -304,21 +327,31 @@ void ScannerWindow::onCalibrateClicked()
 }
 
 // ============================================================================
-// 滑块
+// 滑块（A-T17 修复：freq/bg/laser 三滑条接 ParamStore 账本——原死控件复活；
+// 采集中变更经 Dispatch 全参重发 N10，空闲记账 enterScan/startCapture 组链下发）
 // ============================================================================
 void ScannerWindow::onSliderFreqChanged(int v)
 {
     ui.label_Freq_Value->setText(QString::number(v));
+    if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr)
+        dm->setParam("freqHz", static_cast<double>(v),
+                     Scanner::device::ParamEntry::Source::Ui);
 }
 
 void ScannerWindow::onSliderBackgroundChanged(int v)
 {
     ui.label_Background_Value->setText(QString::number(v));
+    if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr)
+        dm->setParam("bgLight", static_cast<double>(v),
+                     Scanner::device::ParamEntry::Source::Ui);
 }
 
 void ScannerWindow::onSliderLaserChanged(int v)
 {
     ui.label_Laser_Lighting_Value->setText(QString::number(v));
+    if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr)
+        dm->setParam("laserLevel", static_cast<double>(v),
+                     Scanner::device::ParamEntry::Source::Ui);
 }
 
 void ScannerWindow::onSliderExposeChanged(int v)
