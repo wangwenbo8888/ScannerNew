@@ -10,10 +10,9 @@
 // 默认内置桩返回 degraded("operator pending")（09 落地后由 04/09 经
 // setStageOp 替换实现，编排不变；法线阶段 T27 实接 laser_cloud_normal 适配）。
 //
-// STL 导出：06 file_io 有真能力（file_io.h exportSTL），但 file_io.cpp 现编入
-// app 的 scan_demo 且依赖 OSG（osg::Vec3）——07 库不链 OSG 不可直调。故以
-// StlExportFn 注入点占位（默认空=产物占位+Degraded 1902）；T27/接入期由
-// app 侧（同拥 file_io.cpp 与 OSG）适配接线。
+// STL 导出：06 fileio::exportSTL（B-T3 收库 mod_fileio，cv::Point3f 解 OSG）。
+// 07 编排引擎经 StlExportFn 注入保持与文件 IO 解耦（默认空=产物占位+
+// Degraded 1902）；适配接线在 04 工作流（app 编译单元）。
 //
 // 事件码（07 E 后处理族，19xx）：
 //   1900 完成（reportCompletion：Normal→Info 也发）
@@ -69,7 +68,7 @@ public:
         std::string outputPath = "output.stl";
     };
 
-    /// STL 导出函数（T27/接入期接 06 file_io::exportSTL 适配；空=产物占位+Degraded）
+    /// STL 导出函数（04 已接 06 fileio::exportSTL 适配；空=产物占位+Degraded）
     using StlExportFn = std::function<bool(const std::string& path, const MeshData& mesh)>;
 
     explicit PostProcessPipeline(Config cfg = {});

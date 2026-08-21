@@ -78,7 +78,7 @@ public:
     /// 输入源：06 SlotRing（Overwrite，扫描面孔）由外部（02/06 会话件）持有，注入指针
     void attachRing(Scanner::data::SlotRing<Scanner::data::EnhancedFrame>& ring,
                     size_t dropThreshold);
-    /// 静态 K/D（过渡契约——逐温档 K/D 待 06 表契约扩展，见设计方案 §5.2）与
+    /// 静态 K/D（过渡契约——逐温档 K/D 待 06 CalibrationRepository 表契约扩展）与
     /// 激光温度表（laser_match_scan 整表 shared_ptr 注入；A 模式可空）
     void attachCalib(const cv::Mat& K1, const cv::Mat& D1, const cv::Mat& K2,
                      const cv::Mat& D2, int imageWidth, int imageHeight,

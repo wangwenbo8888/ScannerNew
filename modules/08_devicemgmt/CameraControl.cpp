@@ -271,7 +271,7 @@ Result CameraControl::setResolution(int width, int height) {
 }
 
 // ============================================================================
-// 标定（注入式缓存——B3：app 从 01 CalibStore 喂入，08 不解析 json）
+// 标定（注入式缓存——B3：app 从 06 标定结果仓库喂入，08 不解析 json）
 // ============================================================================
 Result CameraControl::setCalibration(const hal::CameraIntrinsics& left,
                                      const hal::CameraIntrinsics& right,

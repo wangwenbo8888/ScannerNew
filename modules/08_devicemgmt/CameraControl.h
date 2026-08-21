@@ -98,7 +98,7 @@ private:
     std::atomic<double> m_currentExposureMs{10.0};
     std::atomic<double> m_currentGain{0.0};      // 按 GainRaw 原生单位传，dB 语义由上层换算
 
-    // 标定缓存（注入式 B3：app 从 01 CalibStore 喂入，08 不做第二真相源）
+    // 标定缓存（注入式 B3：app 从 06 标定结果仓库喂入，08 不做第二真相源）
     mutable std::mutex m_calibMutex;
     hal::CameraIntrinsics m_calibLeft;
     hal::CameraIntrinsics m_calibRight;

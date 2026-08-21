@@ -54,10 +54,6 @@ struct CameraCalibResult {
 CameraCalibResult runCameraCalibration(const CameraCalibInput& input,
     std::function<void(int, const std::string&)> progress = nullptr);
 
-// 保存到硬盘 / 从硬盘加载
-bool saveCalibResult(const std::string& filepath, const CameraCalibResult& result);
-bool loadCalibResult(const std::string& filepath, CameraCalibResult& result);
-
 // ============================================================================
 // 激光标定（依赖相机标定结果）
 // ============================================================================

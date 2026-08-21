@@ -62,8 +62,8 @@ public:
     virtual Result setGain(double dB) = 0;
     virtual Result setResolution(int width, int height) = 0;
 
-    // 标定参数（注入式，08 设计 B3 修正）：app 从 01 CalibStore 取已解析内外参喂入——
-    // 08 不带 json 解析器、不做第二真相源（标定数据归属 01）
+    // 标定参数（注入式，08 设计 B3 修正）：app 从 06 标定结果仓库取已解析内外参喂入——
+    // 08 不带 json 解析器、不做第二真相源（标定数据归属 06）
     virtual Result setCalibration(const CameraIntrinsics& left,
                                   const CameraIntrinsics& right,
                                   const StereoExtrinsics& stereo) = 0;
