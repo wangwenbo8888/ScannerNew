@@ -8,6 +8,7 @@ add_library(mod_fileio STATIC
     ParameterManager.cpp
     FrameEnricher.cpp
     ScanSessionData.cpp
+    CalibSessionData.cpp
     file_io.cpp
     CalibrationRepository.cpp
 )
