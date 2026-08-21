@@ -33,30 +33,53 @@ Result ScanWorkflow::initialize() {
     spdlog::info("[ScanWorkflow] 初始化 (模式={}, 标定={})",
                  scanMode_ == ScanMode::MarkerOnly ? "纯标记点" : "标记点+激光",
                  calib_.valid ? "已加载" : "未加载");
-    // TODO(接入期): 06 出口查表接线后，此处改为从标定结果仓库装载逐温档
-    // K/D + 激光温度表（现经 setCalibration 静态注入转接 attachCalib）
+    // 出口查表（逐温档 K/D）经 session_.assemble 并行生效（EnhancedFrame.snapshot
+    // 供算子）；attachCalib 静态 K/D 仍供 GPU 链初始化——两者数据源同为标定仓库
     return Result::ok();
 }
 
 Result ScanWorkflow::assemblePipeline() {
     namespace sp = Scanner::pipeline;
 
+    // 出口查表装表（06）。A 模式（纯标记点）两表皆空会被此处挡下——裁决：app
+    // pre 谓词已挡无参启动，能走到这里必有过参标定（两表至少一档），照 fail 返回
+    const auto* repo = ctx_ ? ctx_->calibRepo() : nullptr;
+    if (!repo) return Result::fail("出口查表装表失败：无标定仓库");
+    if (const auto tblR = session_.assemble(*repo); !tblR.success)
+        return Result::fail("出口查表装表失败: " + tblR.message);
+
     sp::ScanConfig cfg;
     cfg.enableLaser = (scanMode_ == ScanMode::MarkerPlusLaser);
-    // TODO(接入期): existingMarkers（app 点云仓库高精度先验）此处注入 cfg
+
+    // 续扫基准注入：点云仓库快照 → 09 MarkerCloudPoint（globalId 语义在 obs 层，
+    // 07 按下标 0..n-1 对接 hpGlobalIds——见 ScanPipeline.h seed 时序）
+    uint64_t markerVer = 0;
+    std::vector<Scanner::data::MarkerRecord> markerRecs;
+    if (ctx_ && ctx_->pointCloudBuffer())
+        ctx_->pointCloudBuffer()->snapshotMarkers(markerVer, markerRecs);
+    if (!markerRecs.empty()) {
+        cfg.existingMarkers.reserve(markerRecs.size());
+        for (const auto& r : markerRecs)
+            cfg.existingMarkers.push_back(
+                calib::MarkerCloudPoint{r.pos.x, r.pos.y, r.pos.z,
+                                        r.normal[0], r.normal[1], r.normal[2]});
+        spdlog::info("[ScanWorkflow] 续扫基准 {} 点", markerRecs.size());
+    } else {
+        spdlog::warn("[ScanWorkflow] 无续扫基准（新扫描或上次未留存）");
+    }
     pipeline_ = std::make_unique<sp::ScanPipeline>(cfg);
 
-    // TODO(接入期): 08 采集侧写 EnhancedFrame 进 ring_（FrameBuffer 扫描路径
-    // 退役）；当前无真帧源——ring_ 空转，流水线各线程等帧（07 防御路径保留）
-    pipeline_->attachRing(ring_, /*dropThreshold=*/0);   // 0=自动（2*lanes）
+    // TODO(接入期): 08 采集回调 session_.pushFrame(grayL, grayR, tempC, frameId)
+    // （enrich 出口查表→ring；fail 丢帧计数）；当前无真帧源——ring 空转，
+    // 流水线各线程等帧（07 防御路径保留）
+    pipeline_->attachRing(session_.ring(), /*dropThreshold=*/0);   // 0=自动（2*lanes）
 
     if (!calib_.valid || calib_.cameraMatrixL.empty() || calib_.cameraMatrixR.empty()) {
         pipeline_.reset();
         return Result::fail(
             "无标定参数——07 生产链须 attachCalib（TODO 接入期：06 出口查表供逐温档 K/D）");
     }
-    // TODO(接入期): 激光温度表（calib::LaserPlaneMapTempTable）经 06 标定结果
-    // 仓库整表注入；A 模式（纯标记点）空表属正常配置
+    // 激光网格数据归 §8-1 协调项，接线批注入；A 模式（纯标记点）空表属正常配置
     pipeline_->attachCalib(calib_.cameraMatrixL, calib_.distCoeffsL,
                            calib_.cameraMatrixR, calib_.distCoeffsR,
                            calib_.imageSize.width, calib_.imageSize.height,
