@@ -38,7 +38,7 @@ public:
     nlohmann::json tempTablesRaw() const;            // 相机四表原文
     Scanner::Result readyForScan(ReadyReport& out) const;
     void clear();
-    const std::string& lastPath() const { return lastPath_; }
+    std::string lastPath() const;            // 锁内返回拷贝（write/load 并发改写安全）
 private:
     mutable std::mutex mtx_;
     nlohmann::json doc_;                   // 载荷+meta 全量内存态

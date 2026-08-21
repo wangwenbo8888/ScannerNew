@@ -106,6 +106,15 @@ TEST(CalibRepository, BadJsonFailsNotCrash) {
     EXPECT_FALSE(repo.write("{ not json", cv::Size(1, 1)).success);
 }
 
+TEST(CalibRepository, LoadBadFileFailsNotCrash) {
+    CalibrationRepository repo;
+    EXPECT_FALSE(repo.load("Z:/no/such/calib.json").success);   // 打不开
+    const auto p = tmpPath("t06_bad_repo.json");
+    { std::ofstream ofs(p); ofs << "{ not json"; }
+    EXPECT_FALSE(repo.load(p).success);                          // 坏档不崩
+    fs::remove(p);
+}
+
 TEST(CalibRepository, AtomicWriteNoHalfFile) {
     CalibrationRepository repo;
     const std::string path = tmpPath("t06_atomic.json");
@@ -212,6 +221,15 @@ TEST(CalibRepository, ReadyForScanMissingIntrinsicL) {
     }, rep));
     EXPECT_FALSE(rep.ready);
     EXPECT_TRUE(missingHas(rep, "内参 L"));
+}
+
+TEST(CalibRepository, ReadyForScanMissingIntrinsicR) {
+    ReadyReport rep;
+    ASSERT_TRUE(writeMutatedReadyCheck("t08_no_kr.json", [](nlohmann::json& j) {
+        j["stereo"].erase("cameraMatrixR");
+    }, rep));
+    EXPECT_FALSE(rep.ready);
+    EXPECT_TRUE(missingHas(rep, "内参 R"));
 }
 
 TEST(CalibRepository, ReadyForScanMissingExtrinsic) {

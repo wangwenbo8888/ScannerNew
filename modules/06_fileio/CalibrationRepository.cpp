@@ -143,7 +143,7 @@ Scanner::Result CalibrationRepository::write(const std::string& payloadJson, cv:
     std::filesystem::remove(path, ec);           // 目标不存在时忽略
     std::filesystem::rename(tmpPath, path, ec);
     if (ec) {
-        return Scanner::Result::fail("原子改名失败: " + ec.message());
+        return Scanner::Result::fail("原子改名失败(数据保留于 " + tmpPath + "): " + ec.message());
     }
 
     std::lock_guard<std::mutex> lock(mtx_);
@@ -179,6 +179,11 @@ void CalibrationRepository::clear() {
     std::lock_guard<std::mutex> lock(mtx_);
     doc_ = nlohmann::json::object();
     hasData_ = false;
+}
+
+std::string CalibrationRepository::lastPath() const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    return lastPath_;
 }
 
 StereoData CalibrationRepository::stereo() const {
