@@ -115,3 +115,51 @@ TEST(CloudWarehouse, ConcurrentMarkerWriteRead) {
     reader.join();
     EXPECT_GT(reads.load(), 0u);
 }
+
+// —— 4. 点云按需导出：pushPointCloud → exportCloud(.ply) → fileio 读回点数一致 ——
+TEST(CloudWarehouse, ExportCloudRoundtrip) {
+    PointCloudBuffer buf;
+    Scanner::data::PointCloudFrame frame;
+    frame.points = {{1.5f, 2.5f, 3.5f}, {-4.f, 5.f, -6.f}, {0.f, 100.f, 0.25f}, {7.f, 8.f, 9.f}};
+    frame.pointCount = static_cast<int>(frame.points.size());
+    ASSERT_TRUE(buf.pushPointCloud(frame).success);
+
+    auto path = tempFile("jmw_cloud_warehouse.ply").string();
+    ASSERT_TRUE(buf.exportCloud(path));
+
+    std::vector<cv::Point3f> out;
+    ASSERT_TRUE(fio::importPLY(path, out));
+    EXPECT_EQ(out.size(), frame.points.size());
+    fs::remove(path);
+}
+
+// —— 5. 标志点按需导出：setMarkers → exportMarkers(.json) → fileio 读回数量一致 ——
+TEST(CloudWarehouse, ExportMarkersRoundtrip) {
+    PointCloudBuffer buf;
+    std::vector<MarkerRecord> ms(3);
+    for (size_t i = 0; i < ms.size(); ++i) {
+        ms[i].globalId = static_cast<uint32_t>(i);
+        ms[i].pos = cv::Point3f(1.f * i, 2.f * i, 3.f * i);
+        ms[i].normal = cv::Vec3f(0.f, 0.f, 1.f);
+    }
+    buf.setMarkers(ms);
+
+    auto path = tempFile("jmw_cloud_warehouse_markers.json").string();
+    ASSERT_TRUE(buf.exportMarkers(path));
+
+    std::vector<cv::Point3f> out;
+    ASSERT_TRUE(fio::importMarkers(path, out));
+    EXPECT_EQ(out.size(), ms.size());
+    fs::remove(path);
+}
+
+// —— 6. 空仓库导出：返回 true（空文件），不崩 ——
+TEST(CloudWarehouse, ExportEmptyOk) {
+    PointCloudBuffer buf;
+    auto ply = tempFile("jmw_cloud_warehouse_empty.ply").string();
+    auto json = tempFile("jmw_cloud_warehouse_empty.json").string();
+    EXPECT_TRUE(buf.exportCloud(ply));
+    EXPECT_TRUE(buf.exportMarkers(json));
+    fs::remove(ply);
+    fs::remove(json);
+}

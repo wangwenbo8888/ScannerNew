@@ -36,6 +36,11 @@ public:
     void setMarkers(const std::vector<MarkerRecord>& markers);
     void snapshotMarkers(uint64_t& version, std::vector<MarkerRecord>& out) const;
 
+    // 人工按需导出（02-D5 唯一出口）：锁内拷贝后走 fileio，扩展名分派 ply/pcd/xyz
+    // markers 导出 globalId 不落盘（标志点格式只有坐标），续扫基准走内存通道
+    bool exportCloud(const std::string& path);
+    bool exportMarkers(const std::string& path);
+
 private:
     mutable std::shared_mutex rwlock_;
     std::vector<cv::Point3f> allPoints_;

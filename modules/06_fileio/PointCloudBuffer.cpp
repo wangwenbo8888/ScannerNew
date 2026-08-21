@@ -1,5 +1,7 @@
 #include "PointCloudBuffer.h"
 
+#include "file_io.h"
+
 namespace Scanner::data {
 
 PointCloudBuffer::PointCloudBuffer() {}
@@ -61,6 +63,27 @@ void PointCloudBuffer::snapshotMarkers(uint64_t& version,
     std::shared_lock lock(markerRwlock_);
     out = markers_;
     version = markerVersion_.load(std::memory_order_acquire);
+}
+
+bool PointCloudBuffer::exportCloud(const std::string& path) {
+    std::vector<cv::Point3f> points;
+    {
+        std::shared_lock lock(rwlock_);
+        points = allPoints_;
+    }
+    return fileio::exportPointCloud(path, points);
+}
+
+bool PointCloudBuffer::exportMarkers(const std::string& path) {
+    std::vector<MarkerRecord> markers;
+    {
+        std::shared_lock lock(markerRwlock_);
+        markers = markers_;
+    }
+    std::vector<cv::Point3f> pts;
+    pts.reserve(markers.size());
+    for (const auto& m : markers) pts.push_back(m.pos);
+    return fileio::exportMarkers(path, pts);
 }
 
 } // namespace Scanner::data
