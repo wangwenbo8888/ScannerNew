@@ -865,7 +865,15 @@ TEST_F(RegionAnalyzerTest, LabeledMaskDownloadCorrect) {
     EXPECT_EQ(min_val, 0);
     EXPECT_EQ(max_val, 2);
 
-    EXPECT_EQ(h_labeled.at<int>(10, 10), 1);
+    // 稠密标签由 GPU atomicAdd 分配（buildRemapKernel），无光栅顺序保证，
+    // 不同 GPU 架构调度序不同；仅断言：两连通域标签非零、互异，背景为 0
+    int label_a = h_labeled.at<int>(10, 10);
+    int label_b = h_labeled.at<int>(35, 35);
+    EXPECT_GE(label_a, 1);
+    EXPECT_LE(label_a, 2);
+    EXPECT_GE(label_b, 1);
+    EXPECT_LE(label_b, 2);
+    EXPECT_NE(label_a, label_b);
     EXPECT_EQ(h_labeled.at<int>(0, 0), 0);
 }
 

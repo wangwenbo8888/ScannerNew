@@ -4,6 +4,7 @@
 
 #include "CameraControl.h"
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <cstring>
 
 namespace Scanner::device {
@@ -121,11 +122,15 @@ int CameraControl::enumerateDevices() {
 // ============================================================================
 Result CameraControl::open() {
     if (m_isOpen) return Result::ok("设备已打开");
+    const auto t0 = std::chrono::steady_clock::now();
+    auto el = [t0]() { return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count(); };
 
     IGXFactory::GetInstance().Init();
 
     GxIAPICPP::gxdeviceinfo_vector deviceList;
-    IGXFactory::GetInstance().UpdateDeviceList(1000, deviceList);
+    IGXFactory::GetInstance().UpdateDeviceList(300, deviceList);   // 枚举完成即返（原 1000ms 等满）
+    spdlog::info("[CameraControl] open 计时: Init+枚举 {}ms（{} 台）", el(), deviceList.size());
 
     if (static_cast<int>(deviceList.size()) <= m_config.deviceIndexRight) {
         IGXFactory::GetInstance().Uninit();
@@ -139,9 +144,24 @@ Result CameraControl::open() {
         spdlog::info("[CameraControl] 打开设备 {}: {} (SN: {})", idx,
             (const char*)deviceList[idx].GetDisplayName(), (const char*)sn);
 
-        side.device = IGXFactory::GetInstance().OpenDeviceBySN(sn, GX_ACCESS_EXCLUSIVE);
-        side.featureControl = side.device->GetRemoteFeatureControl();
-        side.isOpen = true;
+        try {
+            side.device = IGXFactory::GetInstance().OpenDeviceBySN(sn, GX_ACCESS_EXCLUSIVE);
+            side.featureControl = side.device->GetRemoteFeatureControl();
+            side.isOpen = true;
+            spdlog::info("[CameraControl] open 计时: 设备 {} 打开完成 {}ms", idx, el());
+        } catch (CGalaxyException& e) {
+            spdlog::error("[CameraControl] 打开设备 {} 异常: {}", idx, e.what());
+            for (int j = i - 1; j >= 0; --j) {   // 倒序关已开侧，避免半开残留
+                if (m_sides[j].isOpen) {
+                    m_sides[j].device->Close();
+                    m_sides[j].device = CGXDevicePointer();
+                    m_sides[j].featureControl = CGXFeatureControlPointer();
+                    m_sides[j].isOpen = false;
+                }
+            }
+            IGXFactory::GetInstance().Uninit();
+            return Result::fail(-1, std::string("相机打开异常: ") + e.what());
+        }
     }
 
     m_isOpen = true;

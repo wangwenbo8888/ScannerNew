@@ -1548,6 +1548,28 @@ void MainWindow::updateInfoSection()
         m_appCtx->perfMonitor()->poll();
     }
 
+    // 启动自检横幅（1s 轮询快照；完成后继续显示终态 10s 再撤，常态零占用）
+    if (m_appCtx) {
+        static int selfCheckHoldSecs = 0;
+        const auto items = m_appCtx->selfCheckSnapshot();
+        if (!items.empty()) {
+            const bool done = items.back().second;   // "完成" 项
+            if (done) ++selfCheckHoldSecs;
+            if (done && selfCheckHoldSecs > 10) {
+                statusBar()->showMessage(QString());
+            } else {
+                QString msg = done ? QStringLiteral("自检完成 ") : QStringLiteral("自检中… ");
+                for (const auto& it : items) {
+                    const QString name = QString::fromStdString(it.first);
+                    if (name == QStringLiteral("完成")) continue;
+                    msg += (it.second ? QStringLiteral("✓%1 ").arg(name)
+                                      : QStringLiteral("✗%1 ").arg(name));
+                }
+                statusBar()->showMessage(msg.trimmed());
+            }
+        }
+    }
+
     // === 先更新 CPU 和内存（纯 Windows API，不依赖任何框架组件）===
     if (m_infoCpuLabel) {
         FILETIME idleTime, kernelTime, userTime;

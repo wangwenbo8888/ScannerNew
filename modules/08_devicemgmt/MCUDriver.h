@@ -17,7 +17,10 @@
 #include "serial/SerialPort.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -62,6 +65,16 @@ public:
     void pump() override;                                         // 逻辑线程调（含 A→onAck/T→seq 对账）
 
     // —— D-T12b 增补（门面驱动用）——
+    void lightsOff();             // 熄灯收口：N10 B0/L0 fire-and-forget（固件无独立灯控命令——
+                                  // N10 参数即灯态；close 场景调，写权已随逻辑线程 join 交接）
+    void resetSerialWriteOwner(); // 写权交还：open 调用线程末次直写（探测/N12Z1 自检）后、
+                                  // 逻辑线程首发前调（R2-A1 登记复位；否则逻辑线程首写被拒）
+    bool probeDidSelfCheck() const;  // auto 搜口是否已发过 N12Z1（幂等省略口径；open 查）
+    // 回环验证（启动自检用）：发 payload → timeoutMs 内收到固件回显同载荷帧即 true。
+    // v2 固件对每条命令整帧回显——链路级"MCU 真收到"凭据。调用线程=逻辑线程（已持写权）
+    bool sendEchoProbe(const std::string& payload, int timeoutMs = 400);
+    // 最近回显载荷快照（非阻塞轮询用——自检状态机逐 tick 查；线程安全）
+    std::string lastEchoPayload() const;
     void channelTick();          // CommandChannel 对账 tick 出口（S-T5 口径：pump 不调
                                  // tick——重传/3 败收口归 DeviceManager 逻辑线程驱动）
     void setAckTimeoutMs(int ms);  // ACK 超时注入（open 前配；钳 ≥1；测试缩短重传周期用）
@@ -74,11 +87,13 @@ public:
 private:
     void rxLoop();                // rx 线程主体：read→feed→dispatch（含半帧超时推进）
     void dispatchFrame(const serial::FrameCodec::Frame& f);       // 单帧按首字符入环（rx/测试共用）
+    void feedTextLine(const std::string& line);                   // v2 固件裸文本行（数值=温度上报；任何行=链路活）
     void onParseFail(const std::string& payload);                 // 载荷弃帧：warn+计数
     void accountTempSeq(uint16_t seq);                            // T seq 跳变对账（pump 内；v2 不对账）
     bool writeFrame(const std::string& frame);                    // CommandChannel 写出口
     serial::CommandChannel::Deps makeDeps();                      // 组装 channel 依赖（写口/时钟/可靠开关）
     void applyVersion();                                          // version_ → codec_/channel_ 重建（须未 open）
+    std::string probeAutoPort(int baud);                          // 自动搜口：探测命中返回口名，全败返回空
 
     static constexpr int kDefaultBaud = 115200;   // 协议现状固定波特率（旧构造参已删）
     int ackTimeoutMs_ = 100;                      // CommandChannel Deps 默认口径（可注入）
@@ -97,6 +112,25 @@ private:
     serial::SpscRing<serial::TempFrame, 8> tempRing_;
 
     hal::McuUplink uplink_;                      // 逻辑线程设置/回调
+    std::string lineBuf_;                        // v2 行缓冲（rx 线程私有；';'→codec 帧路径，'\n'→文本行）
+    std::atomic<bool> probeHit_{false};          // 自动搜口命中凭据：数值行（温度上报；回显/纯回环不算）
+    std::atomic<bool> probeN12Sent_{false};      // 搜口探测已发 N12Z1（open 幂等省略口径）
+    mutable std::mutex echoMtx_;                 // lastEcho_ 保护（rx 写 / lastEchoPayload const 读）
+    std::string lastEcho_;                       // 最近一次回显载荷（v2 固件整帧回显下行命令）
+
+    // —— 串口写线程（实测 WriteFile 被 USB 驱动偶发阻塞 2~2.5s——相机 USB 流量挤占
+    //    总线；直写会堵死 open/逻辑线程。全部下行帧入队即返，阻塞只落在写线程）——
+    struct WriteItem { std::string frame; };
+    std::deque<WriteItem> writeQueue_;
+    std::mutex writeMtx_;
+    std::condition_variable writeCv_;            // 入队唤醒 / 排空通知（lightsOff 收口用）
+    std::condition_variable drainCv_;
+    std::thread writeThread_;
+    std::atomic<bool> writeRunning_{false};
+    void writeLoop();                            // 写线程主体：出队→WriteFile（唯一写者）
+    void enqueueWrite(const std::string& frame); // 入队（任何线程）
+    void waitWriteDrained(int timeoutMs);        // 等队列排空（close/lightsOff 收口）
+    void stopWriteThread();                      // 排空+停写线程+清队（open 失败/close 收口）
     std::atomic<bool> open_{false};
     std::atomic<bool> rxRunning_{false};
     std::thread rxThread_;

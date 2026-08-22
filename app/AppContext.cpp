@@ -179,7 +179,7 @@ void AppContext::initialize() {
     camCfg.deviceIndexRight = 1;
     camCfg.rotateRight180 = true;
     Scanner::device::DeviceConfig devCfg;
-    devCfg.serialPort = "COM3";   // TODO(配置接入): 串口号自配置/设备枚选取；暂默认
+    devCfg.serialPort = "auto";   // 串口自动搜（MCUDriver 逐口发 N12Z1 探测应答认定）；固定口填 "COMx"
     // protocol 默认 V3、baud 115200（DeviceConfig 缺省即产线口径）
     deviceManager_ = std::make_unique<Scanner::device::DeviceManager>(
         devCfg,
@@ -197,13 +197,9 @@ void AppContext::initialize() {
         [camCfg]() -> std::unique_ptr<Scanner::hal::IScannerCamera> {
             return std::make_unique<Scanner::device::CameraControl>(camCfg);
         });
-    const auto devR = deviceManager_->open();   // 一条龙：相机→MCU→参数→N12Z1→逻辑线程
-    spdlog::info("[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
-
-    // S1 自检回填（A-T17 口径）：serialPort/camera 两项均由 open 结果定（open 含
-    // 相机步与串口步；失败倒序关——两项同假）。license 占位 true 不变
-    notifySelfCheckItem("serialPort", devR.success);
-    notifySelfCheckItem("camera", devR.success);
+    // 设备启动（open+自检）后台化：此处不再阻塞主窗口——main 在 window.show() 后
+    // 调 startDevicesAsync()（相机枚举+自动搜口实测 ~5s，同步跑=白屏等）
+    spdlog::info("[AppContext] 组件装配完成（设备启动转后台 startDevicesAsync）");
 
     selfCheckCollector_ = std::make_unique<Scanner::device::SelfCheckCollector>();
     hwMonitor_ = std::make_unique<Scanner::device::HardwareMonitor>();
@@ -255,13 +251,45 @@ void AppContext::initialize() {
     });
 
     spdlog::info("[AppContext] 全部组件装配完成");
+    // 灯态策略：启动/开门面不亮灯；startCapture（开始扫描）亮（N10 账本全参）、
+    // stopCapture（停扫描）熄（B0/L0）。UI 滑条空闲仅记账，采集中改值随全参重发。
 
     // 启动 HardwareMonitor（始终运行，周期采集设备状态）
     hwMonitor_->start(1000);
     spdlog::info("[AppContext] HardwareMonitor 已启动");
 }
 
+void AppContext::startDevicesAsync() {
+    if (devStartThread_.joinable()) return;     // 已起（幂等）
+    devStartThread_ = std::thread([this] {
+        const auto devR = deviceManager_->open();   // 相机枚举→MCU 自动搜口→N12Z1→逻辑线程
+        spdlog::info("[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
+
+        notifySelfCheckItem("serialPort", devR.success);
+        notifySelfCheckItem("license", true);   // 占位（狗到货接实检）
+
+        if (devR.success) {
+            // 启动自检序列：mcuLink/bgLight/laser 闪灯回环 + 相机收帧（无阻塞状态机，
+            // 逻辑线程 tick 驱动）。report 回调直投 notifySelfCheckItem（mutex+submit 线程安全）
+            deviceManager_->startupSelfCheck([this](const std::string& key, bool ok) {
+                notifySelfCheckItem(key, ok);
+                std::lock_guard<std::mutex> lock(selfCheckMtx_);
+                if (selfCheck_.reportedCount >= 6) selfCheck_.done = true;
+            });
+        } else {
+            // 设备没开成功：余项判失败收尾（S1 卡住原因状态栏可见）
+            notifySelfCheckItem("mcuLink", false);
+            notifySelfCheckItem("bgLight", false);
+            notifySelfCheckItem("laser", false);
+            notifySelfCheckItem("camera", false);
+            std::lock_guard<std::mutex> lock(selfCheckMtx_);
+            selfCheck_.done = true;
+        }
+    });
+}
+
 void AppContext::shutdown() {
+    if (devStartThread_.joinable()) devStartThread_.join();   // 设备启动收尾再关（防竞态）
     if (hwMonitor_) hwMonitor_->stop();
     if (scanWf_)    scanWf_->stop();
     if (calibWf_)   calibWf_->stop();
@@ -277,7 +305,11 @@ void AppContext::notifySelfCheckItem(const std::string& item, bool ok) {
         if      (item == "camera")     selfCheck_.camera     = ok;
         else if (item == "serialPort") selfCheck_.serialPort = ok;
         else if (item == "license")    selfCheck_.license    = ok;
+        else if (item == "mcuLink")    selfCheck_.mcuLink    = ok;
+        else if (item == "bgLight")    selfCheck_.bgLight    = ok;
+        else if (item == "laser")      selfCheck_.laser      = ok;
         else return;
+        ++selfCheck_.reportedCount;
     }
     JMW_LOG_INFO("app", "自检项 {}: {}", item, ok ? "通过" : "失败");
     // 全过且仍处 S1 → 经命令通道切 S2（恰一次：submit 成功即离 S1，重复调用幂等失败）
@@ -289,5 +321,21 @@ void AppContext::notifySelfCheckItem(const std::string& item, bool ok) {
 
 bool AppContext::selfCheckAllPassed() const {
     std::lock_guard<std::mutex> lock(selfCheckMtx_);
-    return selfCheck_.camera && selfCheck_.serialPort && selfCheck_.license;
+    return selfCheck_.camera && selfCheck_.serialPort && selfCheck_.mcuLink &&
+           selfCheck_.bgLight && selfCheck_.laser && selfCheck_.license;
+}
+
+std::vector<std::pair<std::string, bool>> AppContext::selfCheckSnapshot() const {
+    std::lock_guard<std::mutex> lock(selfCheckMtx_);
+    return {{"通讯",   selfCheck_.serialPort && selfCheck_.mcuLink},
+            {"加密狗", selfCheck_.license},
+            {"补光灯", selfCheck_.bgLight},
+            {"激光器", selfCheck_.laser},
+            {"相机",   selfCheck_.camera},
+            {"完成",   selfCheck_.done}};
+}
+
+bool AppContext::selfCheckDone() const {
+    std::lock_guard<std::mutex> lock(selfCheckMtx_);
+    return selfCheck_.done;
 }

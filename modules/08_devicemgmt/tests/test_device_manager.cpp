@@ -331,7 +331,7 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
 
     kit.shortPress('M');                                       // 主层中键短按 → 启采集（组：N10→N11H1）
     EXPECT_EQ(mock.count("N11H1"), 1);
-    EXPECT_EQ(mock.count("N10H60B80T1V1L120"), 1);             // 每次启采集先 N10（账本默认全参）
+    EXPECT_EQ(mock.count("N10H50B60T1V1L60"), 1);             // 每次启采集先 N10（账本默认全参）
     EXPECT_TRUE(dm.isCapturing());
     kit.shortPress('M');                                       // 再按 → 停采集（单发 N11H0）
     EXPECT_EQ(mock.count("N11H0"), 1);
@@ -340,12 +340,12 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     dm.startCapture();                                         // 直调重复启：幂等无新帧
     dm.logicTick();
     EXPECT_EQ(mock.count("N11H1"), 2);                         // 组链一拍内完成（ACK 泵链推进）
-    EXPECT_EQ(mock.count("N10H60B80T1V1L120"), 2);
+    EXPECT_EQ(mock.count("N10H50B60T1V1L60"), 2);
     EXPECT_TRUE(dm.isCapturing());
     dm.startCapture();                                         // 采集已开：幂等无新 N10/N11
     dm.logicTick();
     EXPECT_EQ(mock.count("N11H1"), 2);
-    EXPECT_EQ(mock.count("N10H60B80T1V1L120"), 2);
+    EXPECT_EQ(mock.count("N10H50B60T1V1L60"), 2);
     dm.stopCapture();                                          // 直调重复停：幂等无新帧
     dm.logicTick();
     dm.stopCapture();
@@ -371,7 +371,7 @@ TEST(DeviceManager, T5b_StartCaptureN10FromParamAccount) {
     dm.logicTick();
     dm.startCapture();
     dm.logicTick();
-    EXPECT_EQ(mock.count("N10H90B80T1V1L120"), 1);              // N10 帧含 H90（账本值）
+    EXPECT_EQ(mock.count("N10H90B60T1V1L60"), 1);              // N10 帧含 H90（账本值）
     EXPECT_EQ(mock.count("N11H1"), 1);
     EXPECT_TRUE(dm.isCapturing());
 }
@@ -463,14 +463,13 @@ TEST(DeviceManager, T7_KeyFlood100NoCrash) {
     }
     dm.logicTick();                                            // 环容量 64：仅前 64 事件入环
     sleepMs(90);                                               // 末对静默窗到期
-    dm.logicTick();                                            // 手势 drain → 各组手势派发拍同步发 N10
-    dm.logicTick();                                            // A-T17 组链：ACK 泵消化 → 链发 N11H1
-    // 每消化一对手势产生一组 [N10→N11H1]：N10 在派发拍同步落帧（≥30 ⇔ ≥60 原始
-    // 事件处理）；N11H1 经 ACK 泵链推进——洪峰下 CommandChannel 挂表容量有限，
-    // 部分 N10 在链前被逐出判超时（容量策略「满：最旧先判超时」），只证链路活
-    // （≥1），且全程无崩溃
-    EXPECT_GE(mock.count("N10"), 30);
-    EXPECT_GE(mock.count("N11H1"), 1);
+    dm.logicTick();                                            // 手势 drain → 各组手势派发拍同步发 N11H1
+    dm.logicTick();                                            // A-T17 组链：ACK 泵消化 → 链发 N10
+    // 每消化一对手势产生一组 [N11H1→N10]（2026-08-22 真机裁定序：N11H1"按上次参数"
+    // 会重置灯态，N10 必须在后）：N11H1 在派发拍同步落帧（≥30 ⇔ ≥60 原始事件处理）；
+    // N10 经 ACK 泵链推进——洪峰下 CommandChannel 挂表容量有限，组基本在链前被
+    // 逐出判超时（容量策略「满：最旧先判超时」），N10 可为 0——本测只证洪峰不崩
+    EXPECT_GE(mock.count("N11H1"), 30);
     EXPECT_FALSE(dm.isCapturing());
 }
 
@@ -614,7 +613,7 @@ TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
     DeviceManager dm(cfg, gateOk, &bus, nullptr,
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
-    mock.noAck = {"N10"};                                      // N10 ACK 丢失 → 组中段 3 败
+    mock.noAck = {"N11H1"};                                    // N11H1 ACK 丢失 → 组中段 3 败
     ASSERT_TRUE(dm.open().success);
 
     dm.toIdle();                                               // N13E1 全 ACK → 落板待机
@@ -622,14 +621,14 @@ TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
     ASSERT_EQ(dm.mode(), DeviceMode::Idle);
     EXPECT_EQ(mock.count("N13E1"), 1);
 
-    dm.enterScan();                                            // 组：N13E0→N10(3败)→N11 短路
-    for (int i = 0; i < 80 && mock.count("N10") < 4; ++i) {
+    dm.enterScan();                                            // 组：N13E0→N11H1(3败)→N10 短路
+    for (int i = 0; i < 80 && mock.count("N11H1") < 4; ++i) {
         sleepMs(5);
         dm.logicTick();
     }
-    EXPECT_EQ(mock.count("N10"), 4);                           // N10 首发+重传×3
+    EXPECT_EQ(mock.count("N11H1"), 4);                         // N11H1 首发+重传×3
     EXPECT_EQ(mock.count("N13E0"), 1);
-    EXPECT_EQ(mock.count("N11H1"), 0);                         // 组短路：N11 未发
+    EXPECT_EQ(mock.count("N10"), 0);                           // 组短路：N10 未发
     EXPECT_EQ(dm.mode(), DeviceMode::Idle);                    // 黑板不落 Scanning
     EXPECT_FALSE(dm.isCapturing());
     EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
@@ -638,8 +637,8 @@ TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
     mock.noAck.clear();                                        // 对照：全 ACK 路径
     dm.enterScan();
     for (int i = 0; i < 10; ++i) dm.logicTick();
-    EXPECT_EQ(mock.count("N10H60B80T1V1L120"), 5);             // N10 全参自 ParamStore 账本（前段 4 + 本段 1）
-    EXPECT_EQ(mock.count("N11H1"), 1);
+    EXPECT_EQ(mock.count("N10H50B60T1V1L60"), 1);             // N10 全参自 ParamStore 账本（首段短路 0 + 本段 1）
+    EXPECT_EQ(mock.count("N11H1"), 5);                         // 首段 4（3 败）+ 本段 1（全 ACK）
     EXPECT_EQ(dm.mode(), DeviceMode::Scanning);
     EXPECT_TRUE(dm.isCapturing());
     EXPECT_EQ(rec.count(EventType::StateChanged), 1);          // commit(Scanning) 落板广播恰一次

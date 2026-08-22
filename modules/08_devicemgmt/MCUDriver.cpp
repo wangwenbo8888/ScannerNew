@@ -5,6 +5,7 @@
 #include "MCUDriver.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <cstdlib>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -61,8 +62,85 @@ void MCUDriver::applyVersion() {
 bool MCUDriver::writeFrame(const std::string& frame) {
     if (writeOverride_) return writeOverride_(frame);           // 测试模式
     if (!open_.load(std::memory_order_acquire)) return false;
-    return serial_.write(frame).success;
+    enqueueWrite(frame);                                        // 写线程异步落串口
+    return true;                                                // v2 即发语义；写失败由写线程记档
 }
+
+// —— 写线程：唯一串口写者（R2-A1 属主天然落此线程）——
+void MCUDriver::enqueueWrite(const std::string& frame) {
+    {
+        std::lock_guard<std::mutex> lock(writeMtx_);
+        writeQueue_.push_back(WriteItem{frame});
+    }
+    writeCv_.notify_one();
+}
+
+void MCUDriver::writeLoop() {
+    // USB 保活：实测 CH343 串口 TX 空闲超阈（介于 100~500ms）即挂起，唤醒首写卡
+    // ~2.1s（注册表禁挂起无效；RX 流量不保活）。空闲 150ms 补一笔 "\r\n"（固件回
+    // 空行——行层静默丢弃），TX 间隙压进安全窗，业务帧恒快
+    constexpr auto kKeepaliveInterval = std::chrono::milliseconds(150);
+    auto lastWrite = std::chrono::steady_clock::now();
+    while (writeRunning_.load(std::memory_order_acquire)) {
+        std::string frame;
+        {
+            std::unique_lock<std::mutex> lock(writeMtx_);
+            writeCv_.wait_for(lock, kKeepaliveInterval, [this] {
+                return !writeQueue_.empty() || !writeRunning_.load(std::memory_order_acquire);
+            });
+            if (!writeRunning_.load(std::memory_order_acquire) && writeQueue_.empty()) return;
+            if (!writeQueue_.empty()) {
+                frame = std::move(writeQueue_.front().frame);
+                writeQueue_.pop_front();
+            }
+        }
+        if (frame.empty()) {                    // 空闲超时：保活写（不占队列计）
+            if (std::chrono::steady_clock::now() - lastWrite < kKeepaliveInterval) continue;
+            serial_.writeKeepalive("\r\n");     // 写线程=唯一写者；空行回显被行层静默消化
+            lastWrite = std::chrono::steady_clock::now();
+            continue;
+        }
+        const auto r = serial_.write(frame);    // 阻塞只落在本线程（实测驱动可卡 2~2.5s）
+        lastWrite = std::chrono::steady_clock::now();
+        if (!r.success)
+            spdlog::warn("[MCUDriver] 串口写失败: {}（帧 '{}'）", r.message, frame);
+        {
+            std::lock_guard<std::mutex> lock(writeMtx_);
+            if (writeQueue_.empty()) drainCv_.notify_all();     // 排空通知（收口等待用）
+        }
+    }
+}
+
+void MCUDriver::waitWriteDrained(int timeoutMs) {
+    std::unique_lock<std::mutex> lock(writeMtx_);
+    drainCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                      [this] { return writeQueue_.empty(); });
+}
+
+void MCUDriver::resetSerialWriteOwner() { serial_.resetWriteOwner(); }
+
+// 回环验证（启动自检用，逻辑线程调）：发 payload→轮询回显（rx 线程记档 lastEcho_）
+bool MCUDriver::sendEchoProbe(const std::string& payload, int timeoutMs) {
+    if (!open_.load(std::memory_order_acquire) || writeOverride_) return false;
+    {
+        std::lock_guard<std::mutex> lock(echoMtx_);
+        lastEcho_.clear();
+    }
+    channel_.sendFireAndForget(payload);
+    for (int waited = 0; waited < timeoutMs; waited += 10) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::lock_guard<std::mutex> lock(echoMtx_);
+        if (lastEcho_ == payload) return true;
+    }
+    return false;
+}
+
+std::string MCUDriver::lastEchoPayload() const {
+    std::lock_guard<std::mutex> lock(echoMtx_);
+    return lastEcho_;
+}
+
+bool MCUDriver::probeDidSelfCheck() const { return probeN12Sent_.load(std::memory_order_acquire); }
 
 // ============================================================================
 // open/close（close 倒序：停 rx 线程 → 关串口）
@@ -82,18 +160,82 @@ Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     hasTSeq_ = false;
     lastTSeq_ = 0;
     lastRx_.store(0, std::memory_order_release);
+    probeN12Sent_.store(false, std::memory_order_release);
     if (writeOverride_) {                 // 测试模式：不开真串口、不起 rx 线程
         open_.store(true);
         return Scanner::Result::ok();
     }
-    auto r = serial_.open(port, baud);
-    if (!r.success) return r;
-    open_.store(true);
-    rxRunning_.store(true);
-    rxThread_ = std::thread(&MCUDriver::rxLoop, this);
-    spdlog::info("[MCUDriver] 串口已打开: {} @ {} baud (v{})", port, baud,
+    std::string target = port;
+    // 写线程先起（探测帧也走队列——WriteFile 实测可被 USB 驱动卡 2~2.5s，直写会
+    // 把 open/逻辑线程一起堵死；写线程=唯一写者，R2-A1 属主天然落此）
+    writeRunning_.store(true);
+    writeThread_ = std::thread(&MCUDriver::writeLoop, this);
+    if (target.empty() || target == "auto" || target == "AUTO") {
+        target = probeAutoPort(baud);     // 自动搜口：逐口探测命中（含开串口+起 rx 线程）
+        if (target.empty()) {
+            stopWriteThread();
+            return Scanner::Result::fail(-1, "MCU 自动搜口失败（无口应答 N12Z1 探测）");
+        }
+    } else {
+        auto r = serial_.open(target, baud);
+        if (!r.success) {
+            stopWriteThread();
+            return r;
+        }
+        open_.store(true);
+        rxRunning_.store(true);
+        rxThread_ = std::thread(&MCUDriver::rxLoop, this);
+    }
+    spdlog::info("[MCUDriver] 串口已打开: {} @ {} baud (v{})", target, baud,
                  version_ == serial::FrameCodec::Version::V3 ? 3 : 2);
     return Scanner::Result::ok();
+}
+
+void MCUDriver::stopWriteThread() {
+    if (writeThread_.joinable()) {
+        waitWriteDrained(3000);           // 队列排空（灯熄帧收口；慢写上限兜底 3s）
+        writeRunning_.store(false, std::memory_order_release);
+        writeCv_.notify_all();
+        writeThread_.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(writeMtx_);
+        writeQueue_.clear();
+    }
+}
+
+// 自动搜口（open 前置，调用线程执行）：逐口 开→发 N12Z1 探测→300ms 内收到
+// 数值行（温度上报）即认定 MCU（v2 固件口径：回显是「载荷;」帧不算凭据——纯
+// 回环线只会回显，不误命中）。半途收 rx 线程+关串口再试下一口。探测写在调用
+// 线程——测毕 resetWriteOwner 归还写权给逻辑线程（R2-A1 单写者纪律）。
+// 注：探测的 N12Z1 与 open 后 DeviceManager 的 enterSelfCheck 重复——Z1 幂等，无害。
+std::string MCUDriver::probeAutoPort(int baud) {
+    const auto ports = serial::SerialPort::listPorts();
+    if (ports.empty()) spdlog::warn("[MCUDriver] 自动搜口：本机未枚举到任何 COM 口");
+    for (const auto& port : ports) {
+        if (!serial_.open(port, baud).success) continue;
+        open_.store(true);
+        rxRunning_.store(true);
+        rxThread_ = std::thread(&MCUDriver::rxLoop, this);
+        lastRx_.store(0, std::memory_order_release);
+        probeHit_.store(false, std::memory_order_release);
+        probeN12Sent_.store(true, std::memory_order_release);   // 探测即 N12Z1（open ⑦ 幂等省略）
+        channel_.sendFireAndForget("N12Z1");     // v2 组帧 "N12Z1;"；真机回显+文本应答
+        for (int waited = 0; waited < 300 && !probeHit_.load(std::memory_order_acquire);
+             waited += 10) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (probeHit_.load(std::memory_order_acquire)) {
+            spdlog::info("[MCUDriver] 自动搜口命中: {}（{} 口中）", port, ports.size());
+            // 退出自检：探测的 N12Z1 会令固件进自检模式（实测回 "Self check begins"）
+            // ——不退则固件卡自检态：不回显后续命令、灯/采集行为异常（灯闪一下被复位）
+            channel_.sendFireAndForget("N12Z0");
+            return port;
+        }
+        spdlog::debug("[MCUDriver] 自动搜口: {} 无应答，试下一口", port);
+        close();                           // 停 rx 线程+关串口+open_ 复位（幂等）
+    }
+    return {};
 }
 
 Scanner::Result MCUDriver::close() {
@@ -101,6 +243,7 @@ Scanner::Result MCUDriver::close() {
         rxRunning_.store(false);
         rxThread_.join();
     }
+    stopWriteThread();                    // 写线程先收（队列排空后）——再关串口防截断
     serial_.close();                      // rx 靠 rxRunning_ 退出：read 受 COMMTIMEOUTS 50ms 解堵，join 有界
     if (open_.exchange(false)) spdlog::info("[MCUDriver] 串口已关闭");
     return Scanner::Result::ok();
@@ -119,7 +262,29 @@ void MCUDriver::rxLoop() {
     while (rxRunning_.load()) {
         const int n = serial_.read(buf, static_cast<int>(sizeof buf));
         if (n > 0) {
-            codec_.feed(std::string(buf, buf + n), frames);
+            if (version_ == serial::FrameCodec::Version::V2) {
+                // v2 调试口径（实测固件）：下行回显=「载荷;」帧；上行=裸文本行（\r\n 切行，
+                // 数值行≈7Hz 温度上报）。行层先切：';' 段喂 codec 走帧路径，其余按文本行
+                // 处理——防数值行字节污染 codec pending_ 缓冲串坏后续帧。
+                for (int i = 0; i < n; ++i) {
+                    const char ch = buf[i];
+                    if (ch == ';') {
+                        lineBuf_.push_back(';');
+                        codec_.feed(lineBuf_, frames);
+                        lineBuf_.clear();
+                    } else if (ch == '\n') {
+                        // 空行也喂：保活 "\r\n" 的回显=双向链路活证据（刷 lastRx_——
+                        // 固件停发原生温度行后 0x0802 判据的唯一持续来源）
+                        feedTextLine(lineBuf_);
+                        lineBuf_.clear();
+                    } else if (ch != '\r') {      // '\r' 丢弃
+                        lineBuf_.push_back(ch);
+                        if (lineBuf_.size() > 96) lineBuf_.clear();   // 无界行守卫
+                    }
+                }
+            } else {
+                codec_.feed(std::string(buf, buf + n), frames);
+            }
             for (const auto& f : frames) dispatchFrame(f);
             frames.clear();
         } else if (n < 0) {
@@ -176,9 +341,14 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
         break;
     }
     case 'E':
-        onParseFail(f.payload);   // v2 旧 E1; 急停牌已删——忽略+warn（§2.2 删净）
+        onParseFail(f.payload);   // v2 旧 E1; 急停牌已删——忽略+warn（§2.2 列净）
         break;
     default:
+        // v2 固件对下行命令整帧回显（实测）——'N' 打头载荷即回显，记档供 sendEchoProbe
+        if (!f.payload.empty() && f.payload[0] == 'N') {
+            std::lock_guard<std::mutex> lock(echoMtx_);
+            lastEcho_ = f.payload;
+        }
         onParseFail(f.payload);
         break;
     }
@@ -187,6 +357,23 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
 void MCUDriver::onParseFail(const std::string& payload) {
     const uint64_t n = parseFailCount_.fetch_add(1, std::memory_order_relaxed) + 1;
     spdlog::warn("[MCUDriver] 上行载荷丢弃(计{}): '{}'", n, payload);
+}
+
+// v2 固件裸文本行（rx 线程）：数值行=温度上报（实测 ~133，单位待定——非合理 ℃，
+// 暂不入 TempFrame：防 tempMaxC=60 的 0x0803 量纲误判 + Warmup 吃脏数据；单位
+// 与固件方确认后再接）；其余为状态文本（如 "Self check begins"）。任何行=链路
+// 活：刷 lastRx_（0x0802 心跳口径）。数值行兼作自动搜口命中凭据（回显/纯回环
+// 线不产数值行，不会误命中）。
+void MCUDriver::feedTextLine(const std::string& line) {
+    lastRx_.store(systemNowMs(), std::memory_order_release);
+    char* endp = nullptr;
+    const double v = std::strtod(line.c_str(), &endp);
+    if (endp != line.c_str() && *endp == '\0') {
+        probeHit_.store(true, std::memory_order_release);
+        spdlog::debug("[MCUDriver] v2 数值行: {}", v);
+    } else {
+        spdlog::debug("[MCUDriver] v2 文本行: '{}'", line);
+    }
 }
 
 // ============================================================================
@@ -229,6 +416,16 @@ void MCUDriver::setCaptureParams(const hal::CaptureParams& p, DoneCb cb) {
 }
 void MCUDriver::startScan(DoneCb cb)        { channel_.send("N11H1", std::move(cb)); }
 void MCUDriver::stopScan(DoneCb cb)         { channel_.send("N11H0", std::move(cb)); }
+
+// 熄灯收口：固件无独立灯控命令——N10 的 B/L 即灯态（协议命令表：B0-255 补光 /
+// L0-255 激光亮度）。H/T/V 取合法下限，B0/L0 熄灯。帧入写队列（写线程异步落串口，
+// 阻塞不落调用线程）；close 场景由 stopWriteThread 等排空后再关串口，无截断风险。
+void MCUDriver::lightsOff() {
+    if (!open_.load() || writeOverride_) return;  // 未开/测试模式直跳
+    hal::CaptureParams p;
+    p.freqHz = 20; p.bgLight = 0; p.laserSelectA = 1; p.laserSelectB = 1; p.laserLevel = 0;
+    setCaptureParams(p, nullptr);
+}
 void MCUDriver::enterSelfCheck(DoneCb cb)   { channel_.send("N12Z1", std::move(cb)); }
 void MCUDriver::exitSelfCheck(DoneCb cb)    { channel_.send("N12Z0", std::move(cb)); }
 void MCUDriver::enterStandby(DoneCb cb)     { channel_.send("N13E1", std::move(cb)); }

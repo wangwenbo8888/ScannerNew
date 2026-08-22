@@ -103,7 +103,9 @@ enum class DevFault : int64_t {
 struct DeviceConfig {
     std::string serialPort;
     int baud = 115200;
-    serial::FrameCodec::Version protocol = serial::FrameCodec::Version::V3;
+    // v2=固件现状（v3 仅为 PC 侧方案定案，固件未实现——串口通讯可靠约定.md §实施路径）；
+    // 固件升 v3 后改回 V3（reliable/ACK/CRC 链路自动启用）
+    serial::FrameCodec::Version protocol = serial::FrameCodec::Version::V2;
     int ackTimeoutMs = 100;
     GestureThresholds keys{};
     WarmupConfig warmup{};
@@ -144,6 +146,12 @@ public:
     //    线程触发；超时不停加热——停止机制待协议方 §8-13）——
     void startWarmup(int targetC, std::function<void(bool stable)> done);
 
+    // 启动自检（软件开起跑一次，open 成功后由 app 调）：下位机回环（N10 闪灯验证）
+    // + 相机开流收帧验证。全程 post 编队跑逻辑线程（已持串口写权）；report 每项
+    // 回投（逻辑线程回调——app 侧自行转发 UI 线程）。灯验证=亮(账本值)→等回显→
+    // 闪亮 800ms→熄(B0/L0)。key："mcuLink" / "bgLight" / "laser" / "camera"
+    void startupSelfCheck(std::function<void(const std::string&, bool)> report);
+
     // —— 观测 ——
     bool isDeviceReady() const;                 // 相机开+MCU 开（无相机工厂=只看 MCU）
     serial::TempFrame getLastTemperatures() const;
@@ -180,6 +188,20 @@ private:
 
     void logicLoop();                           // 10ms 循环调 logicTick
     void post(std::function<void()> task);      // 跨线程编队（容量 64 满丢新+warn）
+
+    // —— 启动自检状态机（逻辑线程私有；logicTick 每 10ms 驱动，无阻塞等待——
+    //    原 sleep 版堵逻辑线程 ~2.7s，用户按钮全排队=“点了没反应”）——
+    struct SelfCheckSm {
+        int stage = -1;                          // -1 闲 / 0 等N10回显 / 1 闪亮保持 / 2 相机收帧
+        int64_t stageStartMs = 0;
+        std::string expectEcho;                  // 期望回显载荷（N10 全参帧）
+        std::function<void(const std::string&, bool)> report;
+        std::atomic<int>  frames{0};             // 相机验证帧计数（相机回调线程写）
+        std::atomic<bool> frameValid{false};     // 双目图非空凭据
+    } selfCheck_;
+    void selfCheckTick(int64_t nowMs_);       // logicTick 末驱动（单次 µs 级；名避让 nowMs()）
+    std::mutex openMtx_;                         // open/close 串行化（启动后台线程与
+                                                // ScannerWindow 设备线程可能并发 open）
     void drainPosts();                          // logicTick 开头排空（逻辑线程属主）
     void checkTempFaults(const serial::TempFrame& t);  // 温度双警 0x0803/0x0804（onTemp 内）
     void publishFault(int64_t code, const std::string& detail);

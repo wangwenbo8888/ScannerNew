@@ -5,6 +5,12 @@
 #include "SerialPort.h"
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <cstdlib>
+#include <utility>
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -94,6 +100,39 @@ Scanner::Result SerialPort::close() {
 
 bool SerialPort::isOpen() const { return hSerial_ != nullptr; }
 
+void SerialPort::resetWriteOwner() { owner_.store(0, std::memory_order_release); }
+
+// ============================================================================
+// 枚举 COM 口（QueryDosDevice 符号链接名，不开句柄；口号升序）
+// ============================================================================
+std::vector<std::string> SerialPort::listPorts() {
+    std::vector<std::pair<int, std::string>> found;
+    DWORD need = 8192;
+    std::vector<char> buf(need);
+    for (;;) {                                  // 缓冲不够按需翻倍重试（上限防炸）
+        const DWORD n = QueryDosDeviceA(nullptr, buf.data(), need);
+        if (n > 0) break;
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || need >= 1 << 20) return {};
+        need *= 2;
+        buf.assign(need, '\0');
+    }
+    for (const char* p = buf.data(); *p; p += std::strlen(p) + 1) {
+        if (std::strncmp(p, "COM", 3) != 0) continue;
+        const char* d = p + 3;
+        if (!*d) continue;                      // 裸 "COM" 别名跳过
+        bool digits = true;
+        for (const char* q = d; *q; ++q)
+            if (*q < '0' || *q > '9') { digits = false; break; }
+        if (digits) found.emplace_back(std::atoi(d), p);
+    }
+    std::sort(found.begin(), found.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<std::string> ports;
+    ports.reserve(found.size());
+    for (auto& f : found) ports.push_back(std::move(f.second));
+    return ports;
+}
+
 // ============================================================================
 // 读（串口rx线程）
 // ============================================================================
@@ -121,6 +160,24 @@ Scanner::Result SerialPort::write(const std::string& bytes) {
         return Scanner::Result::fail(kErrWriteOwner, "串口并发写拒绝");
     }
 
+    const auto t0 = std::chrono::steady_clock::now();   // 慢写探针：USB 串口驱动偶发
+    DWORD written = 0;                                   // 长阻塞（流控/IRP 排队）——记档定位
+    if (!WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()),
+                   &written, nullptr)) {
+        return Scanner::Result::fail(kErrWriteFail, "串口写失败");
+    }
+    const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    if (el > 50) spdlog::warn("[SerialPort] 慢写 {}ms（{} 字节）", el, bytes.size());
+    if (written != bytes.size()) {
+        return Scanner::Result::fail(kErrWritePartial, "串口写不完整");
+    }
+    return Scanner::Result::ok();
+}
+
+Scanner::Result SerialPort::writeKeepalive(const std::string& bytes) {
+    HANDLE h = static_cast<HANDLE>(hSerial_);
+    if (!h) return Scanner::Result::fail(kErrWriteNotOpen, "串口未打开");
     DWORD written = 0;
     if (!WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()),
                    &written, nullptr)) {

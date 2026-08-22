@@ -82,13 +82,14 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
     connect(ui.horizontalSlider_Laser_Lighting, &QSlider::valueChanged, this, &ScannerWindow::onSliderLaserChanged);
     connect(ui.horizontalSlider_ExposeTime, &QSlider::valueChanged, this, &ScannerWindow::onSliderExposeChanged);
 
-    // A-T17 修复（运行时钳，.ui 不动）：三滑条范围对齐 ParamStore spec
-    // （freq 20-120 默认 60 / bg 0-255 默认 80 / laser 0-255 默认 120），初值自
-    // 账本快照同步——setValue 触发 valueChanged→setParam 同值记账（无副作用）
+    // A-T17 修复（运行时钳，.ui 不动）：滑条范围对齐 ParamStore spec
+    // （freq 20-120 默认 50 / bg 0-100 默认 60 / laser 0-100 默认 60——灯控量程实测
+    // 0-100），初值自账本快照同步——setValue 触发 valueChanged→setParam 同值记账
+    //（无副作用）
     if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
         ui.horizontalSlider_Freq->setRange(20, 120);
-        ui.horizontalSlider_Background_Lighting->setRange(0, 255);
-        ui.horizontalSlider_Laser_Lighting->setRange(0, 255);
+        ui.horizontalSlider_Background_Lighting->setRange(0, 100);
+        ui.horizontalSlider_Laser_Lighting->setRange(0, 100);
         ui.horizontalSlider_Freq->setValue(
             static_cast<int>(dm->getParam("freqHz").value));
         ui.horizontalSlider_Background_Lighting->setValue(
@@ -158,6 +159,7 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
 ScannerWindow::~ScannerWindow()
 {
     if (m_consumerTimer) m_consumerTimer->stop();
+    if (m_devThread.joinable()) m_devThread.join();   // 窗口销毁前收设备操作线程
     // AppContext 拥有的组件不在此销毁（设备归 DeviceManager 门面——A-T17 收口）
     if (!m_appCtx) {
         delete m_frameBuffer;
@@ -165,7 +167,47 @@ ScannerWindow::~ScannerWindow()
 }
 
 // ============================================================================
-// 设备操作（经 DeviceManager 门面——A-T17 串口旁路收口，相机+下位机统一走 08）
+// 设备开/关后台线程支撑
+// ============================================================================
+bool ScannerWindow::startDeviceOp()
+{
+    if (m_devBusy) {
+        ui.textEdit_Info->append("设备操作进行中，请稍候…");
+        return false;
+    }
+    m_devBusy = true;
+    setDeviceButtonsEnabled(false);
+    return true;
+}
+
+void ScannerWindow::endDeviceOp()
+{
+    if (m_devThread.joinable()) m_devThread.join();   // 回调到达时 worker 已至尾声，join 即回
+    m_devBusy = false;
+    setDeviceButtonsEnabled(true);
+}
+
+void ScannerWindow::setDeviceButtonsEnabled(bool on)
+{
+    ui.pushButton_OpenScannerCamera->setEnabled(on);
+    ui.pushButton_CloseScannerCamera->setEnabled(on);
+    ui.pushButton_Start_Scanner->setEnabled(on);
+    ui.pushButton_Stop_Scanner->setEnabled(on);
+}
+
+void ScannerWindow::resetPreviewUi(bool stopConsumer)
+{
+    if (stopConsumer && m_consumerTimer) m_consumerTimer->stop();
+    ui.label_LeftImage->setPixmap(QPixmap());
+    ui.label_RightImage->setPixmap(QPixmap());
+    m_frameCount = m_prevFrameCount = m_currentFps = 0;
+    ui.label_FrameRate_Value_Left->setText("0");
+    ui.label_FrameRate_Value_Right->setText("0");
+}
+
+// ============================================================================
+// 设备操作（经 DeviceManager 门面——A-T17 串口旁路收口，相机+下位机统一走 08；
+// open/close 后台线程执行——含自动搜口/join 逻辑线程/Galaxy 关闭，同步跑会冻 UI）
 // ============================================================================
 void ScannerWindow::onOpenScannerCamera()
 {
@@ -174,33 +216,55 @@ void ScannerWindow::onOpenScannerCamera()
         ui.textEdit_Info->append("设备门面不可用（无 AppContext）");
         return;
     }
-    // open 一条龙：相机→MCU→参数→N12Z1→逻辑线程（幂等：已开直返 ok）
-    auto r = dm->open();
-    ui.textEdit_Info->append(r.success ? "设备已打开（相机+下位机）" :
-        QString("打开失败: %1").arg(QString::fromStdString(r.message)));
-
-    // 自检清单回填（open 含相机步与串口步——两项同 r.success，AppContext 同口径）
-    if (m_appCtx) {
-        m_appCtx->notifySelfCheckItem("camera", r.success);
-        m_appCtx->notifySelfCheckItem("serialPort", r.success);
-    }
+    if (!startDeviceOp()) return;
+    ui.textEdit_Info->append("正在打开设备（相机+下位机）…");
+    m_devThread = std::thread([this, dm] {
+        // open 一条龙：相机→MCU（自动搜口）→参数→N12Z1→逻辑线程（幂等：已开直返 ok）
+        const auto r = dm->open();
+        QMetaObject::invokeMethod(this, [this, r] {
+            endDeviceOp();
+            ui.textEdit_Info->append(r.success ? "设备已打开（相机+下位机）" :
+                QString("打开失败: %1").arg(QString::fromStdString(r.message)));
+            if (m_appCtx) {
+                m_appCtx->notifySelfCheckItem("camera", r.success);
+                m_appCtx->notifySelfCheckItem("serialPort", r.success);
+            }
+            if (r.success) {
+                // 灯态策略：开相机不亮灯——点"开始扫描仪"（N10 账本全参+N11H1）才亮，
+                // 停扫描/关相机即灭；启动自检的闪灯仅检测用
+                if (m_consumerTimer && !m_consumerTimer->isActive())
+                    m_consumerTimer->start(100);   // 预览定时器复活（关闭时停过）
+            }
+        });
+    });
 }
 
 void ScannerWindow::onCloseScannerCamera()
 {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
-    auto r = dm->close();
-    ui.textEdit_Info->append(r.success ? "设备已关闭（相机+下位机）" :
-        QString("关闭失败: %1").arg(QString::fromStdString(r.message)));
-
-    // 保留 transition 直连：断连→S1 是状态机矩阵合法边，属设备事件桥非命令通道写口（设计 §9）
-    if (r.success && m_appCtx && m_appCtx->stateMachine()) {
-        m_appCtx->stateMachine()->transition(Scanner::EventType::DeviceDisconnected);
-        // close 倒序关相机与串口——两项自检同时复位，重开后重新过自检
-        m_appCtx->notifySelfCheckItem("camera", false);
-        m_appCtx->notifySelfCheckItem("serialPort", false);
-    }
+    if (!startDeviceOp()) return;
+    ui.textEdit_Info->append("正在关闭设备（相机+下位机）…");
+    m_devThread = std::thread([this, dm] {
+        const auto r = dm->close();
+        QMetaObject::invokeMethod(this, [this, r] {
+            endDeviceOp();
+            ui.textEdit_Info->append(r.success ? "设备已关闭（相机+下位机）" :
+                QString("关闭失败: %1").arg(QString::fromStdString(r.message)));
+            // 预览/帧率复位（否则残影+旧数字滞留——观感即"没关掉"）
+            if (r.success) {
+                resetPreviewUi(true);
+                // 保留 transition 直连：断连→S1 是状态机矩阵合法边，属设备事件桥非命令通道写口（设计 §9）
+                if (m_appCtx && m_appCtx->stateMachine())
+                    m_appCtx->stateMachine()->transition(Scanner::EventType::DeviceDisconnected);
+                if (m_appCtx) {
+                    // close 倒序关相机与串口——两项自检同时复位，重开后重新过自检
+                    m_appCtx->notifySelfCheckItem("camera", false);
+                    m_appCtx->notifySelfCheckItem("serialPort", false);
+                }
+            }
+        });
+    });
 }
 
 void ScannerWindow::onStartScanner()
@@ -268,6 +332,10 @@ void ScannerWindow::onStopScanner()
                    ws == Scanner::workflow::WorkflowState::Paused) {
             m_appCtx->scanWorkflow()->stop();
             ui.textEdit_Info->append("扫描管线已停止（兜底直停——门禁已拒绝）");
+        } else {
+            // 未开扫即点停：此前零反馈——观感即"按钮没作用"
+            ui.textEdit_Info->append(QString("扫描未在运行（%1）")
+                .arg(QString::fromStdString(gr.message)));
         }
     }
 
@@ -279,6 +347,7 @@ void ScannerWindow::onStopScanner()
     if (dm) {
         dm->stopCapture();
         ui.textEdit_Info->append("采集已停止");
+        resetPreviewUi(false);          // 清残影+帧率清零（相机仍开——预览定时器保留）
     }
 }
 

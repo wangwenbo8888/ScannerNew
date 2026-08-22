@@ -11,6 +11,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace Scanner::data    { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibrationRepository; }
 namespace Scanner::service { class StateMachine; class ParameterManager; class FaultHandler; class CommandGate; class PerfMonitor; }
@@ -28,8 +31,14 @@ public:
     void shutdown();
 
     // 自检清单（S1→S2 唯一出口经 system_ready，设计 §2.4）
-    void notifySelfCheckItem(const std::string& item, bool ok);   // 自检项打勾/打叉（"camera"/"serialPort"/"license"）
+    void notifySelfCheckItem(const std::string& item, bool ok);   // 自检项打勾/打叉（"camera"/"serialPort"/"license"/"bgLight"/"laser"/"mcuLink"）
     bool selfCheckAllPassed() const;
+    // UI 状态栏拉取：自检结果摘要（"✓通讯 ✗补光 …" 风格由 UI 定；此处给原始项表）
+    std::vector<std::pair<std::string, bool>> selfCheckSnapshot() const;
+    bool selfCheckDone() const;                                    // 序列是否跑完（全部项已上报）
+    // 设备启动后台化（main 在 window.show() 后调）：设备 open（相机枚举+自动搜口
+    // ~5s）+ 启动自检序列移后台线程——主窗口秒开不再白屏等设备
+    void startDevicesAsync();
 
     // Data 层
     Scanner::data::FrameBuffer*      frameBuffer()     { return frameBuffer_.get(); }
@@ -91,11 +100,17 @@ private:
 
     // 自检清单（ScannerWindow 线程回调与查询并发防护）
     struct SelfCheck {
-        bool camera{false};        // 相机连接（ScannerWindow 设备连接事件置位）
-        bool serialPort{false};    // 串口连接（同上）
-        // 加密狗/授权：暂占位 true（TODO: 08/授权落地后接入实际检测）
+        bool camera{false};        // 相机连接+收帧验证（启动自检/设备事件置位）
+        bool serialPort{false};    // 串口连接（自动搜口+open 结果）
+        bool mcuLink{false};       // 下位机链路（回环验证口径=serialPort 同源；单列供 UI 展示）
+        bool bgLight{false};       // 补光灯（N10 闪灯回环验证）
+        bool laser{false};         // 激光器（同上——N10 一帧双灯同验）
+        // 加密狗/授权：暂占位 true（TODO: 狗到货后接 USB 枚举/厂商 SDK 实检）
         bool license{true};
+        int  reportedCount{0};     // 已上报项数（=6 时序列完成：camera/serialPort/mcuLink/bgLight/laser/license）
+        bool done{false};
     };
     SelfCheck selfCheck_;
     mutable std::mutex selfCheckMtx_;
+    std::thread devStartThread_;                // 设备启动后台线程（shutdown 先 join）
 };

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Scanner::device::serial {
 
@@ -18,6 +19,9 @@ public:
     ~SerialPort();
     SerialPort(const SerialPort&) = delete;
     SerialPort& operator=(const SerialPort&) = delete;
+
+    // 枚举本机 COM 口（QueryDosDevice，不开句柄）；按口号升序，如 {"COM3","COM8"}
+    static std::vector<std::string> listPorts();
 
     // port 如 "COM3"；open 内做：\\.\ 前缀补齐 + DCB 8N1 + COMMTIMEOUTS
     //（ReadIntervalTimeout=50/ReadTotalTimeoutConstant=50/ReadTotalTimeoutMultiplier=10，
@@ -35,6 +39,14 @@ public:
     // std::thread::id 可原子性争议），他线程调用返回 fail("串口并发写拒绝")；
     // 未 open 调用返回 fail("串口未打开")
     Scanner::Result write(const std::string& bytes);
+
+    // 保活专用写（CH343 TX 空闲挂起规避——MCUDriver 写线程 150ms 周期调）：
+    // 与 write 同径但不记慢写日志（保活若偶慢即其职责本身，日志会刷屏）
+    Scanner::Result writeKeepalive(const std::string& bytes);
+
+    // 复位 write 属主登记（0=未登记）：open 后跨线程交接写权用（如 MCU 自动搜口
+    // 在调用线程发探测帧，成功后写权交还逻辑线程）；不破坏 R2-A1 单写者纪律
+    void resetWriteOwner();
 
 private:
     void* hSerial_ = nullptr;                 // HANDLE（Win32 不进头）

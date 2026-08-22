@@ -2,8 +2,9 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC OFF)
 
-# Qt5（路径见 环境配置汇总.md §9）
-list(APPEND CMAKE_PREFIX_PATH "C:/devlibs/Qt-5.15.2-msvc2019_64/5.15.2/msvc2019_64")
+# Qt5（路径见 环境配置汇总.md §9；JMW_QT5_PREFIX 可 -D 覆盖）
+set(JMW_QT5_PREFIX "C:/Qt/Qt5.15.2/5.15.2/msvc2019_64" CACHE PATH "Qt5 安装前缀")
+list(APPEND CMAKE_PREFIX_PATH "${JMW_QT5_PREFIX}")
 find_package(Qt5 5.15 COMPONENTS Core Gui Widgets OpenGL Svg SerialPort)
 
 # OSG（路径见 环境配置汇总.md §10，直接 lib 路径，非 imported target）
@@ -60,7 +61,7 @@ set(MOD_RENDERING
 set(GENERATED_QRC_CPP ${CMAKE_CURRENT_BINARY_DIR}/qrc_resources.cpp)
 add_custom_command(
     OUTPUT ${GENERATED_QRC_CPP}
-    COMMAND "C:/devlibs/Qt-5.15.2-msvc2019_64/5.15.2/msvc2019_64/bin/rcc.exe" -name resources
+    COMMAND $<TARGET_FILE:Qt5::rcc> -name resources
             -o "${GENERATED_QRC_CPP}" "${CMAKE_CURRENT_SOURCE_DIR}/resources.qrc"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/resources.qrc"
     COMMENT "Generating qrc_resources.cpp"

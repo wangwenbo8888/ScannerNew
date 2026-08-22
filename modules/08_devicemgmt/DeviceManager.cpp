@@ -37,9 +37,9 @@ constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
     return {
         {"exposure", 10.0, 1.0, 100.0},        // 曝光 ms（相机直设）
-        {"freqHz", 60.0, 20.0, 120.0},         // N10 H 拍照频率
-        {"bgLight", 80.0, 0.0, 255.0},         // N10 B 补光
-        {"laserLevel", 120.0, 0.0, 255.0},     // N10 L 激光强度
+        {"freqHz", 50.0, 20.0, 120.0},         // N10 H 拍照频率（默认 50）
+        {"bgLight", 60.0, 0.0, 100.0},         // N10 B 补光（默认 60；实测灯控量程 0-100）
+        {"laserLevel", 60.0, 0.0, 100.0},      // N10 L 激光强度（默认 60；实测灯控量程 0-100）
         {"laserSelectA", 1.0, 1.0, 6.0},       // N10 T 交叉激光选择 A
         {"laserSelectB", 1.0, 1.0, 6.0},       // N10 V 交叉激光选择 B
     };
@@ -135,22 +135,36 @@ void DeviceManager::drainPosts() {
 // ============================================================================
 
 Result DeviceManager::open() {
+    std::lock_guard<std::mutex> openLock(openMtx_);
     if (opened_) return Result::ok("设备已打开");
-    // ① 相机（工厂缺省=不接相机：isCameraOpen 恒 false 但不算失败）
+    const auto t0 = std::chrono::steady_clock::now();
+    auto el = [t0]() { return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count(); };
+    // ① 相机（工厂缺省=不接相机）与 ② MCU 自动搜口并行——两链路无共享资源，
+    //    串行白等（相机枚举 ~0.5s + 搜口 ~0.05s → 并行取大者）
+    Result camR = Result::ok();
+    std::thread camThread;
     if (camFactory_) {
-        camera_ = camFactory_();
-        const Result r = camera_->open();
-        if (!r.success) {
-            camera_.reset();
-            publishFault(code(DevFault::CameraOpenFail), r.message);
-            return Result::fail("相机打开失败: " + r.message);
-        }
-        camWasOpen_ = true;                     // 0x0801 前置锚：open 成功即「曾开」
+        camThread = std::thread([this, &camR] {
+            camera_ = camFactory_();
+            const Result r = camera_->open();
+            if (!r.success) {
+                camera_.reset();
+                camR = Result::fail("相机打开失败: " + r.message);
+            }
+        });
     }
     // ② MCU（测试 writeOverride 模式=逻辑开，不开真串口不起 rx 线程）
     mcu_->setProtocolVersion(cfg_.protocol);
     mcu_->setAckTimeoutMs(cfg_.ackTimeoutMs);
     const Result rm = mcu_->open(cfg_.serialPort, cfg_.baud);
+    spdlog::info("[DeviceManager] open 计时: MCU 链路完成 {}ms（{}）", el(), rm.message);
+    if (camThread.joinable()) camThread.join();
+    if (!camR.success) {
+        publishFault(code(DevFault::CameraOpenFail), camR.message);
+        return camR;
+    }
+    if (rm.success && camera_) camWasOpen_ = true;              // 0x0801 前置锚
     if (!rm.success) {
         if (camera_) {
             camera_->close();
@@ -159,6 +173,7 @@ Result DeviceManager::open() {
         publishFault(code(DevFault::McuOpenFail), rm.message);
         return Result::fail("MCU 打开失败: " + rm.message);
     }
+    spdlog::info("[DeviceManager] open 计时: 相机+MCU 并行段 {}ms", el());
     // ③ 上行分流接线（onTemp 温度双警+记账+Warmup 喂入 / onKey→KeyManager / onStatus 记账）
     hal::McuUplink up;
     up.onTemp = [this](const serial::TempFrame& t) {
@@ -172,15 +187,23 @@ Result DeviceManager::open() {
         spdlog::warn("[DeviceManager] S 状态帧 code={:#x}（码表待协议 §8-8）", s.code);
     };
     mcu_->setUplink(up);
+    spdlog::info("[DeviceManager] open 计时: uplink 接线 {}ms", el());
     // ⑤ 参数装载（Load 空档=全默认值；逐参数广播）+ 快照立即可读（单线程时刻）
     params_->bootstrap([] { return ""; });
     refreshParamSnapshot();
+    spdlog::info("[DeviceManager] open 计时: bootstrap+快照 {}ms", el());
     // ⑦ 开机自检 N12 Z1——**起逻辑线程前**发（Critical #1：open 全程单线程；
-    //    ACK 经 rx 线程入环、逻辑线程 pump 消化，DoneCb 失败异步 Fault）
-    mcu_->enterSelfCheck([this](bool ok, const std::string& p) {
-        if (!ok) publishFault(code(DevFault::CmdNoAck), "N12Z1 " + p);   // 3 败=无应答（#7≡#8）
-    });
-    // ⑥ 逻辑线程（manualTick=true 测试跳过）
+    //    ACK 经 rx 线程入环、逻辑线程 pump 消化，DoneCb 失败异步 Fault）。
+    //    auto 搜口路径探测已发过 N12Z1（幂等）——省略：实测"相机配置后第一笔串口写"
+    //    必被 USB 驱动卡 ~2.5s，多这笔堵后续自检 N10 的回显窗口
+    if (!mcu_->probeDidSelfCheck()) {
+        mcu_->enterSelfCheck([this](bool ok, const std::string& p) {
+            if (!ok) publishFault(code(DevFault::CmdNoAck), "N12Z1 " + p);   // 3 败=无应答（#7≡#8）
+        });
+    }
+    // （写权交接已不需要：串口写者恒为 MCUDriver 写线程，open/逻辑线程只入队）
+    // ⑥ 逻辑线程（manualTick=true 测试跳过）。灯态策略：open 不发 N10（灯不亮）——
+    // 灯只在 startCapture（N10 账本全参+H1）时亮、stopCapture 熄灯收口
     if (!cfg_.manualTick) {
         running_.store(true);
         logicThread_ = std::thread(&DeviceManager::logicLoop, this);
@@ -188,10 +211,13 @@ Result DeviceManager::open() {
     // ⑧ 广播
     publishEvent(EventType::DeviceConnected, 0, 0);
     opened_ = true;
+    spdlog::info("[DeviceManager] open 计时: 逻辑线程+广播+总计 {}ms", el());
     return Result::ok();
 }
 
 Result DeviceManager::close() {
+    std::lock_guard<std::mutex> openLock(openMtx_);
+    selfCheck_.stage = -1;                       // 自检状态机随设备关停作废
     if (logicThread_.joinable()) {
         running_.store(false);
         logicThread_.join();
@@ -200,6 +226,8 @@ Result DeviceManager::close() {
         std::lock_guard<std::mutex> lock(postMutex_);
         postQueue_.clear();                     // 退出场景：余任务丢弃（不保送）
     }
+    // 灯光收口：熄灯 N10（B0/L0）后再关串口——否则固件保持末次灯态（关扫描仪灯残留）
+    if (mcu_->isOpen()) mcu_->lightsOff();
     mcu_->close();
     if (camera_) camera_->close();
     standbyActive_ = false;
@@ -289,6 +317,8 @@ void DeviceManager::logicTick() {
         std::lock_guard<std::mutex> lock(tempSnapMtx_);
         tempSnap_ = lastTemps_;
     }
+    // ⑫ 启动自检状态机推进（无阻塞；闲时 stage=-1 直返）
+    selfCheckTick(now);
 }
 
 void DeviceManager::testInjectRaw(const std::string& frameBytes) {
@@ -348,14 +378,15 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
     });
 }
 
-// 采集组公共步链（A-T17 N10 断链修复抽取）：N10(ParamStore 账本全参)→N11H1。
-// startCapture 与 enterScan 共用——app 层采集走 startCapture（enterScan 零调用），
-// 若组链缺 N10 则真机 MCU 以默认参数跑、UI 滑条成死控件
+// 采集组公共步链（A-T17 N10 断链修复抽取）：N11H1→N10。
+// 顺序依据实测固件行为（2026-08-22 真机）：N11H1"按照上次的采集参数执行"——
+// 若 N10 在前，N11H1 会用旧参数（如自检收尾的 B0/L0）重启采集，把刚点亮的灯
+// 重置熄灭（"激光闪一下就灭"根因）。先开扫描再设参，灯态以最新 N10 为准。
 std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
-    return {{"N10", [this](McuDone cb) {
+    return {{"N11H1", [this](McuDone cb) { mcu_->startScan(std::move(cb)); }},
+            {"N10", [this](McuDone cb) {
                 mcu_->setCaptureParams(captureParamsFromAccount(*params_), std::move(cb));
-            }},
-            {"N11H1", [this](McuDone cb) { mcu_->startScan(std::move(cb)); }}};
+            }}};
 }
 
 void DeviceManager::enterScanOnLogic() {
@@ -438,12 +469,95 @@ void DeviceManager::stopCaptureOnLogic() {
             return;
         }
         mode_->setCapturing(false);
+        // 灯态收口：停扫描即熄灯（B0/L0）——与 startCapture 亮灯对称；本回调在
+        // 逻辑线程，lightsOff 内 50ms 冲刷属可接受停顿
+        mcu_->lightsOff();
         if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
     });
 }
 
 void DeviceManager::startStreamIfReady() {
     if (camera_ && camera_->isOpen() && frameCb_) camera_->startAsyncCapture(frameCb_);
+}
+
+// ============================================================================
+// 启动自检（open 成功后由 app 调）——无阻塞状态机版：启动只发帧+置态，等待全由
+// logicTick 每 10ms 的 selfCheckTick 分摊（单次 µs 级），逻辑线程不再被 sleep 堵死
+// ============================================================================
+void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool)> report) {
+    post([this, report = std::move(report)]() mutable {
+        if (selfCheck_.stage != -1) return;      // 已在跑（幂等）
+        selfCheck_.report = std::move(report);
+        selfCheck_.frames.store(0, std::memory_order_relaxed);
+        selfCheck_.frameValid.store(false, std::memory_order_relaxed);
+        selfCheck_.stage = 0;
+        selfCheck_.stageStartMs = nowMs();
+        selfCheck_.report("mcuLink", mcu_->isOpen());
+
+        // N10 账本值亮灯（v2 即发即回显）；回显匹配判定归 selfCheckTick stage 0
+        const hal::CaptureParams on = captureParamsFromAccount(*params_);
+        selfCheck_.expectEcho = "N10H" + std::to_string(on.freqHz) +
+                                "B" + std::to_string(on.bgLight) +
+                                "T" + std::to_string(on.laserSelectA) +
+                                "V" + std::to_string(on.laserSelectB) +
+                                "L" + std::to_string(on.laserLevel);
+        mcu_->setCaptureParams(on, nullptr);
+    });
+}
+
+void DeviceManager::selfCheckTick(int64_t nowMs_) {
+    if (selfCheck_.stage < 0) return;
+    switch (selfCheck_.stage) {
+    case 0:  // 等 N10 回显——实测"相机配置后第一笔串口写"可被 USB 驱动卡 ~2.5s（写
+        // 线程内部消化，但回显延迟到）：窗口给足 3s；正常路径 <100ms 即过
+        if (mcu_->lastEchoPayload() == selfCheck_.expectEcho) {
+            selfCheck_.report("bgLight", true);
+            selfCheck_.report("laser", true);
+            selfCheck_.stage = 1;
+            selfCheck_.stageStartMs = nowMs_;      // 闪亮窗口起
+        } else if (nowMs_ - selfCheck_.stageStartMs > 3000) {
+            selfCheck_.report("bgLight", false);
+            selfCheck_.report("laser", false);
+            selfCheck_.stage = 1;                  // 仍走 stage1（闪亮窗缩短+相机启动不跳过
+            selfCheck_.stageStartMs = nowMs_;      // ——灯败与相机验证独立，原直跳 stage2
+        }                                          //   会漏 startAsyncCapture→相机恒 0 帧）
+        break;
+    case 1:  // 闪亮 500ms 后熄灯进入相机验证；用户已点"打开扫描仪"（capturing）
+        // 则不熄灯——竞态修复。灯验证失败路径灯本就没亮，统一 500ms 无害
+        if (nowMs_ - selfCheck_.stageStartMs >= 500) {
+            if (!mode_->isCapturing()) {
+                mcu_->lightsOff();                // 灯败路径 N10 未达固件，此帧仅防半亮残留
+                if (camera_ && camera_->isOpen()) {
+                    camera_->startAsyncCapture([this](const hal::StereoFrame& f) {
+                        selfCheck_.frames.fetch_add(1, std::memory_order_relaxed);
+                        if (!f.leftGray.empty() && !f.rightGray.empty())
+                            selfCheck_.frameValid.store(true, std::memory_order_relaxed);
+                    });
+                }
+            }
+            selfCheck_.stage = 2;
+            // 注意：startAsyncCapture（Galaxy 起流）实测阻塞 ~2s——窗口起点必须取
+            // 阻塞结束后的新鲜时刻，否则进本态即"超时"（相机验证恒 0 帧的根因）
+            selfCheck_.stageStartMs = nowMs();
+        }
+        break;
+    case 2: {  // 相机收帧验证（≤800ms 首帧即过；用户已开扫描=流已活，不打扰直判过）
+        if (mode_->isCapturing()) {
+            selfCheck_.report("camera", true);
+            selfCheck_.stage = -1;
+            break;
+        }
+        const bool ok = selfCheck_.frameValid.load(std::memory_order_relaxed);
+        if (ok || nowMs_ - selfCheck_.stageStartMs > 800) {
+            if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
+            selfCheck_.report("camera", ok);
+            spdlog::info("[DeviceManager] 启动自检完成（相机验证 {} 帧）",
+                         selfCheck_.frames.load(std::memory_order_relaxed));
+            selfCheck_.stage = -1;
+        }
+        break;
+    }
+    }
 }
 
 // ============================================================================
