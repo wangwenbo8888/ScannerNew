@@ -67,6 +67,8 @@ public:
     // —— D-T12b 增补（门面驱动用）——
     void lightsOff();             // 熄灯收口：N10 B0/L0 fire-and-forget（固件无独立灯控命令——
                                   // N10 参数即灯态；close 场景调，写权已随逻辑线程 join 交接）
+    void flushWrites(int timeoutMs = 300);  // 等写队列排空（有界）：停采集前用——熄灯帧
+                                  // 落线后再触发相机停流（其 USB 风暴会把串口写堵 2~2.5s）
     void resetSerialWriteOwner(); // 写权交还：open 调用线程末次直写（探测/N12Z1 自检）后、
                                   // 逻辑线程首发前调（R2-A1 登记复位；否则逻辑线程首写被拒）
     bool probeDidSelfCheck() const;  // auto 搜口是否已发过 N12Z1（幂等省略口径；open 查）

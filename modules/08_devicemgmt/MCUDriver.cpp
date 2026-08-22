@@ -426,6 +426,11 @@ void MCUDriver::lightsOff() {
     p.freqHz = 20; p.bgLight = 0; p.laserSelectA = 1; p.laserSelectB = 1; p.laserLevel = 0;
     setCaptureParams(p, nullptr);
 }
+
+void MCUDriver::flushWrites(int timeoutMs) {
+    if (writeOverride_) return;                  // 测试模式无队列
+    waitWriteDrained(timeoutMs);
+}
 void MCUDriver::enterSelfCheck(DoneCb cb)   { channel_.send("N12Z1", std::move(cb)); }
 void MCUDriver::exitSelfCheck(DoneCb cb)    { channel_.send("N12Z0", std::move(cb)); }
 void MCUDriver::enterStandby(DoneCb cb)     { channel_.send("N13E1", std::move(cb)); }

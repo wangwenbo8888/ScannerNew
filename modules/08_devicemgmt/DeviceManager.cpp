@@ -469,9 +469,11 @@ void DeviceManager::stopCaptureOnLogic() {
             return;
         }
         mode_->setCapturing(false);
-        // 灯态收口：停扫描即熄灯（B0/L0）——与 startCapture 亮灯对称；本回调在
-        // 逻辑线程，lightsOff 内 50ms 冲刷属可接受停顿
+        // 灯态收口：停扫描即熄灯（B0/L0）——与 startCapture 亮灯对称。熄灯帧先落线
+        // 再停相机流：实测相机停流瞬间的 USB 风暴会把串口 WriteFile 堵 2~2.5s，
+        // 灯迟灭即此（flush 有界 300ms，保活使 TX 通常 55ms 级落线）
         mcu_->lightsOff();
+        mcu_->flushWrites(300);
         if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
     });
 }
