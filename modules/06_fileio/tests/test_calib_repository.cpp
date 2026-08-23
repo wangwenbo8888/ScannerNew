@@ -288,6 +288,105 @@ TEST(CalibRepository, ReadyForScanFullPayloadReady) {
     fs::remove(tmpPath("t08_full.json"));
 }
 
+// —— 工厂档适配（方案 A）：factory_calib.camera_calib.v1 → 主工程内部档 ——
+TEST(CalibRepository, FactorySchemaAdaptReadyExceptLaser) {
+    // 独立子目录（laser_calib.json 是同目录自动合并约定——隔离防跨用例残留串扰）
+    const std::string dir = tmpPath("t09_fc_dir");
+    fs::create_directories(dir);
+    const std::string camPath = dir + "/camera_calib.json";
+    // 构造最小工厂档（键路径照抄 factory_calib module1_camera/calib_io.cpp assembleFull）
+    nlohmann::json fc = {
+        {"schema", "factory_calib.camera_calib.v1"},
+        {"imageSize", nlohmann::json::array({2048, 1536})},
+        {"intrinsic",
+         {{"left", {{"camera_matrix", mat3(1839)}, {"dist_coeffs", nlohmann::json::array({nlohmann::json::array({0, 0, 0, 0, 0})})}}},
+          {"right", {{"camera_matrix", mat3(1841)}, {"dist_coeffs", nlohmann::json::array({nlohmann::json::array({0, 0, 0, 0, 0})})}}}}},
+        {"extrinsic", {{"R", mat3(1)},
+                       {"T", nlohmann::json::array({nlohmann::json::array({-40}),
+                                                    nlohmann::json::array({0}),
+                                                    nlohmann::json::array({0})})}}},
+        {"rectify", {{"R1", mat3(1)}, {"R2", mat3(1)},
+                     {"P1", mat34(1)}, {"P2", mat34(1)}, {"Q", mat44(1)}}},
+        {"stereoRectifyTempTable",
+         {{"tableSize", 2},
+          {"table", nlohmann::json::array({
+              {{"temperature", 22.4}, {"R1", mat3(1)}, {"R2", mat3(1)},
+               {"P1", mat34(1)}, {"P2", mat34(1)}, {"Q", mat44(1)},
+               {"compensatedCameraMatrixL", mat3(1839)}},   // 工厂多余键——应被忽略
+               {{"temperature", 22.6}, {"R1", mat3(1)}, {"R2", mat3(1)},
+                {"P1", mat34(1)}, {"P2", mat34(1)}, {"Q", mat44(1)}}})}}}};
+    {
+        std::ofstream ofs(camPath, std::ios::binary | std::ios::trunc);
+        ofs << fc.dump();
+    }
+    // 无 laser_calib.json：相机侧五项过、激光档表如实报缺
+    CalibrationRepository repo;
+    ASSERT_TRUE(repo.load(camPath).success);
+    ReadyReport rep;
+    EXPECT_TRUE(repo.readyForScan(rep).success);
+    EXPECT_FALSE(rep.ready);
+    EXPECT_EQ(rep.missing.size(), 1u);
+    EXPECT_TRUE(missingHas(rep, "激光档表"));
+
+    // typed getters：适配后矩阵可取、尺寸正确、温补表 2 档
+    StereoData st = repo.stereo();
+    ASSERT_FALSE(st.cameraMatrixL.empty());
+    EXPECT_EQ(st.imageSize, cv::Size(2048, 1536));
+    StereoTempTable tt = repo.stereoTempTable();
+    ASSERT_EQ(tt.tiers.size(), 2u);
+    EXPECT_DOUBLE_EQ(tt.tiers[0].tempC, 22.4);
+    fs::remove_all(dir);
+}
+
+TEST(CalibRepository, FactorySchemaLaserMergeMakesReady) {
+    // 相机档＋同目录 laser_calib.json（含 tempTable.table）→ 六项全过
+    nlohmann::json fc = {
+        {"schema", "factory_calib.camera_calib.v1"},
+        {"imageSize", nlohmann::json::array({2048, 1536})},
+        {"intrinsic",
+         {{"left", {{"camera_matrix", mat3(1839)}, {"dist_coeffs", nlohmann::json::array({nlohmann::json::array({0, 0, 0, 0, 0})})}}},
+          {"right", {{"camera_matrix", mat3(1841)}, {"dist_coeffs", nlohmann::json::array({nlohmann::json::array({0, 0, 0, 0, 0})})}}}}},
+        {"extrinsic", {{"R", mat3(1)},
+                       {"T", nlohmann::json::array({nlohmann::json::array({-40}),
+                                                    nlohmann::json::array({0}),
+                                                    nlohmann::json::array({0})})}}},
+        {"rectify", {{"R1", mat3(1)}, {"R2", mat3(1)},
+                     {"P1", mat34(1)}, {"P2", mat34(1)}, {"Q", mat44(1)}}},
+        {"stereoRectifyTempTable",
+         {{"tableSize", 1},
+          {"table", nlohmann::json::array({
+              {{"temperature", 22.5}, {"R1", mat3(1)}, {"R2", mat3(1)},
+               {"P1", mat34(1)}, {"P2", mat34(1)}, {"Q", mat44(1)}}})}}}};
+    const std::string dir2 = tmpPath("t10_fc_dir");
+    fs::create_directories(dir2);
+    const std::string camPath = dir2 + "/camera_calib.json";
+    const std::string laserPath = dir2 + "/laser_calib.json";
+    {
+        std::ofstream ofs(camPath, std::ios::binary | std::ios::trunc);
+        ofs << fc.dump();
+        // 工厂激光档：顶层对象 tempTable.table（显式 put——避 nlohmann 花括号初始化
+        // 把单键内层解析成数组的歧义坑）
+        nlohmann::json laser = nlohmann::json::object();
+        nlohmann::json tier = nlohmann::json::object();
+        tier["temperature"] = 22.5;
+        tier["deltaT"] = 0.0;
+        tier["totalPairs"] = 128;
+        laser["tempTable"]["table"] = nlohmann::json::array({tier});
+        std::ofstream lfs(laserPath, std::ios::binary | std::ios::trunc);
+        lfs << laser.dump();
+    }
+    CalibrationRepository repo;
+    ASSERT_TRUE(repo.load(camPath).success);
+    ReadyReport rep;
+    EXPECT_TRUE(repo.readyForScan(rep).success);
+    EXPECT_TRUE(rep.ready);                     // 六项全过
+    EXPECT_TRUE(rep.missing.empty());
+    PlaneMapTempTableRef pm = repo.planeMapTiers();
+    ASSERT_EQ(pm.tiers.size(), 1u);
+    EXPECT_DOUBLE_EQ(pm.tiers[0].tempC, 22.5);
+    fs::remove_all(dir2);
+}
+
 TEST(CalibRepository, ClearMakesNotReady) {
     CalibrationRepository repo;
     ASSERT_TRUE(loadSample(repo, "t08_clear.json"));

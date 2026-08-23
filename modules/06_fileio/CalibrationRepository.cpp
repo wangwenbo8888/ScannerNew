@@ -4,6 +4,7 @@
 // ============================================================================
 #include "CalibrationRepository.h"
 
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <ctime>
 #include <filesystem>
@@ -94,6 +95,63 @@ const nlohmann::json* findNested(const nlohmann::json& root, std::initializer_li
     return cur;
 }
 
+// ============================================================================
+// 工厂标定档适配（方案 A：load 识别 factory_calib schema → 主工程内部档结构；
+// 数据零换算纯搬运——工厂 stereoRectifyTempTable 已按温度逐条产出矫正五件套）
+// ============================================================================
+nlohmann::json adaptFactoryCalib(const nlohmann::json& src) {
+    nlohmann::json doc;
+    // —— stereo：内参/畸变（intrinsic.left/right）＋外参（extrinsic.R/T）
+    //            ＋矫正五件套（rectify）——键路径映射，Mat 数组原样 ——
+    const auto* intr = findNested(src, {"intrinsic"});
+    const auto* extr = findNested(src, {"extrinsic"});
+    const auto* rec  = findNested(src, {"rectify"});
+    nlohmann::json stereo = nlohmann::json::object();
+    if (intr && intr->is_object()) {
+        if (const auto* L = findNested(*intr, {"left", "camera_matrix"}))  stereo["cameraMatrixL"] = *L;
+        if (const auto* L = findNested(*intr, {"left", "dist_coeffs"}))   stereo["distCoeffsL"] = *L;
+        if (const auto* R = findNested(*intr, {"right", "camera_matrix"})) stereo["cameraMatrixR"] = *R;
+        if (const auto* R = findNested(*intr, {"right", "dist_coeffs"}))  stereo["distCoeffsR"] = *R;
+    }
+    if (extr && extr->is_object()) {
+        if (const auto* m = findNested(*extr, {"R"})) stereo["R"] = *m;
+        if (const auto* m = findNested(*extr, {"T"})) stereo["T"] = *m;
+    }
+    if (rec && rec->is_object()) {
+        for (const char* k : {"R1", "R2", "P1", "P2", "Q"})
+            if (const auto* m = findNested(*rec, {k})) stereo[k] = *m;
+    }
+    doc["stereo"] = std::move(stereo);
+
+    // —— meta.imageSize：工厂档 imageSize=[W,H]（数组）→ 主工程 {width,height} ——
+    if (const auto* sz = findNested(src, {"imageSize"}); sz && sz->is_array() && sz->size() == 2) {
+        doc["meta"] = {{"imageSize", {{"width", (*sz)[0]},
+                                      {"height", (*sz)[1]}}}};
+    }
+
+    // —— tempTables.rectify.table：工厂 stereoRectifyTempTable.table 原样搬运
+    //    （条目已含 temperature+R1/R2/P1/P2/Q+validRoi——stereoTempTable() 按主工程
+    //    键取所需字段，多余键天然忽略；两表其余原文档透传 raw 口）——
+    if (const auto* tab = findNested(src, {"stereoRectifyTempTable"})) {
+        nlohmann::json tt = nlohmann::json::object();
+        tt["table"] = tab->is_object() && tab->contains("table") ? (*tab)["table"] : nlohmann::json::array();
+        doc["tempTables"] = {{"rectify", std::move(tt)}};
+    }
+    // laser_calib.json（工厂第二档）由 load 调用方另行合并：见 load 内 fcMerge 逻辑
+    return doc;
+}
+
+// 工厂激光档并入主工程档（planeMap.tempTable ← laser_calib.json 顶层 tempTable 子树；
+// 工厂 schema 现状无该子树时置空数组——readyForScan 报缺"激光档表"如实反映）
+void mergeFactoryLaser(nlohmann::json& doc, const nlohmann::json& laser) {
+    nlohmann::json pm = nlohmann::json::object();
+    pm["tempTable"] = nlohmann::json::object();
+    pm["tempTable"]["table"] = laser.contains("tempTable") && laser["tempTable"].contains("table")
+                                   ? laser["tempTable"]["table"]
+                                   : nlohmann::json::array();
+    doc["planeMap"] = std::move(pm);
+}
+
 } // namespace
 
 Scanner::Result CalibrationRepository::write(const std::string& payloadJson, cv::Size imageSize,
@@ -166,6 +224,28 @@ Scanner::Result CalibrationRepository::load(const std::string& path) {
     }
     if (!doc.is_object()) {
         return Scanner::Result::fail("仓库档不是 JSON 对象: " + path);
+    }
+
+    // 工厂档识别与适配（方案 A）：factory_calib.camera_calib.v1 → 主工程内部档
+    // 结构（纯键路径映射，数据零换算）；同目录 laser_calib.json 存在则合并激光档
+    if (doc.contains("schema") && doc["schema"].is_string() &&
+        doc["schema"].get<std::string>().rfind("factory_calib.", 0) == 0) {
+        nlohmann::json adapted = adaptFactoryCalib(doc);
+        // 激光第二档：与相机档同目录的 laser_calib.json（工厂产线约定）；
+        // 不存在/坏档＝激光档表缺（readyForScan 如实报缺，不阻塞相机侧）
+        std::filesystem::path p(path);
+        std::filesystem::path laserPath = p.parent_path() / "laser_calib.json";
+        std::error_code ec;
+        if (std::filesystem::exists(laserPath, ec)) {
+            try {
+                std::ifstream lfs(laserPath);
+                nlohmann::json laser = nlohmann::json::parse(lfs);
+                if (laser.is_object()) mergeFactoryLaser(adapted, laser);
+            } catch (const std::exception&) {
+                spdlog::warn("工厂激光档解析失败(忽略，激光档表将报缺): {}", laserPath.string());
+            }
+        }
+        doc = std::move(adapted);
     }
 
     std::lock_guard<std::mutex> lock(mtx_);
