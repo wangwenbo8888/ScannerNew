@@ -57,6 +57,13 @@
 
 namespace Scanner::pipeline::sched {
 
+/// 看门狗/lane 心跳共用时钟（steady 域 ms）——start 模板段与 laneLoop 内联用
+inline int64_t nowMsBeat() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 template<typename TFrame, typename TFront, typename TResult>
 struct LaneHooks {
     // GPU 段（已持 GpuSlotService::SlotGuard；返回 false=帧销毁，直接下一帧）。
@@ -111,6 +118,13 @@ public:
     /// 幂等；未 requestStop 直接调用也安全（内部先置停）
     void drainAndShutdown();
 
+    /// 限时变体（hang 恢复路径）：lane 未在限时内退出 → detach 余 lane（僵尸泄
+    /// 漏——进程级自愈兜底，正常路径不达）后照常收 broker/gpu。laneJoinTimeout<=0
+    /// ＝不限时（同无参重载）。detached lane 引用 source/hooks/front/this——对象
+    /// 生命周期须覆盖之（recover 同对象重建场景满足；析构场景由 1605 升级上报
+    /// 提示进程重启）
+    void drainAndShutdown(std::chrono::milliseconds laneJoinTimeout);
+
     /// 四计数快照
     Stats stats() const;
 
@@ -122,6 +136,9 @@ public:
     /// 异常即停均会置位；运行中 false。供上层（ScanPipeline）惰性发现 runtime 自灭
     bool lanesExited() const;
 
+    /// 本运行周期是否检出过 lane 心跳超时（start 时复位；hang 恢复判据之一）
+    bool hangDetected() const { return hangDetected_.load(std::memory_order_acquire); }
+
     bool isRunning() const;
 
     SchedulerRuntime(const SchedulerRuntime&) = delete;
@@ -132,7 +149,10 @@ private:
     void laneLoop(IFrameSource<TFrame>& source, bool sequential,
                   std::chrono::milliseconds gpuTimeout, const LaneHooks<TFrame, TFront, TResult>& hooks,
                   std::mutex& grabMutex, uint64_t& sharedCounter,
-                  const std::shared_ptr<TFront>& front);
+                  const std::shared_ptr<TFront>& front, int laneIdx);
+
+    /// 看门狗线程主体（start 起、drain 收；250ms 巡检一次 lane 心跳）
+    void watchdogLoop(int hangTimeoutMs);
 
     mutable std::mutex lifecycleMutex_;               // start / drainAndShutdown 互斥
     std::vector<std::thread> lanes_;
@@ -148,6 +168,19 @@ private:
     std::unique_ptr<GpuSlotService> gpu_;             // 一次性服务：每运行周期重建（支持 restart）
     GpuSlotService::StreamFactory gpuFactory_;        // 可注入（测试假工厂；空=生产默认）
     GpuSlotService::StreamDestroyer gpuDestroyer_;
+
+    // —— 看门狗（lane 心跳；帧边界打卡，watchdog 线程巡检静默时长）——
+    std::vector<std::unique_ptr<std::atomic<int64_t>>> laneBeats_;  // 每 lane 末次心跳(ms)
+    std::thread watchdog_;
+    std::atomic<bool> watchdogStop_{false};           // drain 时收看门狗
+    std::atomic<bool> hangLatched_{false};            // 本周期 hang 只报一次（防刷屏）
+    std::atomic<bool> hangDetected_{false};           // 本周期检出过（recover 判据；start 复位）
+
+public:
+    /// lane 心跳超时回调（watchdog 线程调；start 前注入，可空=只置标志不上报）。
+    /// 语义：laneIdx＋静默毫秒；已内置 requestStop（可停的 lane 会退；不可停的
+    /// 算子死循环须走 drainAndShutdown 限时变体＋进程级自愈）
+    std::function<void(int laneIdx, int64_t staleMs)> onHang;
 };
 
 // ---------------------------------------------------------------------------
@@ -203,6 +236,24 @@ Result SchedulerRuntime::start(const SchedConfig& cfg, IFrameSource<TFrame>& sou
     stopFlag_.store(false);
     running_.store(true);                             // 置位提前：线程创建前（失败路径回退）
 
+    // 看门狗：心跳数组复位＋起巡检线程（hangTimeoutMs<=0 不起）
+    hangLatched_.store(false);
+    hangDetected_.store(false);
+    watchdogStop_.store(false);
+    if (cfg.hangTimeoutMs > 0) {
+        laneBeats_.resize(lanes);
+        for (auto& b : laneBeats_)
+            b = std::make_unique<std::atomic<int64_t>>(0);   // lane 线程入口先打卡
+        try {
+            watchdog_ = std::thread([this, to = cfg.hangTimeoutMs] {
+                watchdogLoop(to);
+            });
+        } catch (const std::exception&) {
+            // 看门狗线程创建失败：降级为无看门狗（检测缺位不影响主流程），spdlog 记录
+            spdlog::warn("SchedulerRuntime: watchdog 线程创建失败，本周期无 hang 检测");
+        }
+    }
+
     // 抓帧互斥 + 共享计数器：每帧恰送一条 lane（顺序面孔下单 SequentialSource
     // 实例多 lane 也安全；跳最新面孔下多 lane 分工不重复消费）
     auto grabMutex = std::make_shared<std::mutex>();
@@ -212,12 +263,15 @@ Result SchedulerRuntime::start(const SchedConfig& cfg, IFrameSource<TFrame>& sou
     try {
         for (int i = 0; i < lanes; ++i) {
             lanes_.emplace_back([this, &source, sequential, timeout = cfg.gpuAcquireTimeout, hooksp,
-                                 grabMutex, sharedCounter] {
+                                 grabMutex, sharedCounter, i, laneCount = lanes] {
                 // front 每 lane 一份（跨帧复用；经 shared_ptr 与 P 任务共享所有权）
                 auto front = std::make_shared<TFront>();
+                if (i < static_cast<int>(laneBeats_.size()))
+                    laneBeats_[i]->store(nowMsBeat(), std::memory_order_release);  // 入口先打卡
                 laneLoop<TFrame, TFront, TResult>(source, sequential, timeout, *hooksp,
-                                                  *grabMutex, *sharedCounter, front);
+                                                  *grabMutex, *sharedCounter, front, i);
                 activeLanes_.fetch_sub(1, std::memory_order_release);   // 退出即减（异常停可被上层发现）
+                (void)laneCount;
             });
             auto& t = lanes_.back();
             // 绑 E 核 eMasks 轮转；无 E 核（非 hybrid）不绑；绑核（mask≠0）才提实时优先级
@@ -232,6 +286,8 @@ Result SchedulerRuntime::start(const SchedConfig& cfg, IFrameSource<TFrame>& sou
     } catch (...) {
         // 线程创建失败（资源耗尽等）：逆序回收已建部分
         stopFlag_.store(true);
+        watchdogStop_.store(true);
+        if (watchdog_.joinable()) watchdog_.join();
         for (auto& t : lanes_) {
             if (t.joinable()) t.join();
         }
@@ -251,8 +307,14 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
                                 std::chrono::milliseconds gpuTimeout,
                                 const LaneHooks<TFrame, TFront, TResult>& hooks,
                                 std::mutex& grabMutex, uint64_t& sharedCounter,
-                                const std::shared_ptr<TFront>& front) {
+                                const std::shared_ptr<TFront>& front, int laneIdx) {
+    // 心跳打卡（帧边界——含空转迭代）：看门狗据此判 lane 静默。steady 域 ms。
+    auto beat = [this, laneIdx] {
+        if (laneIdx >= 0 && laneIdx < static_cast<int>(laneBeats_.size()))
+            laneBeats_[static_cast<size_t>(laneIdx)]->store(nowMsBeat(), std::memory_order_release);
+    };
     while (!stopFlag_.load()) {                       // 帧边界检查点（抓帧前）
+        beat();                                       // 每轮打卡（无帧空转也打）
         try {                                         // 顶层异常捕获：钩子异常不蔓延到线程
             std::shared_ptr<const TFrame> frame;
             {
@@ -298,8 +360,14 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
             if (!gpuOk) {                             // false=帧销毁
                 gpuRejects_.fetch_add(1);
                 if (submitted.load()) {
-                    fut.wait();                       // 等孤儿 P 任务完成再进下一帧（防 TFront 并发）；
-                                                     // 无超时——依赖 pChain 正常返回，卡死属 Broker 层故障
+                    // 等孤儿 P 任务完成再进下一帧（防 TFront 并发）。有界等待：
+                    // stopFlag 可中断（看门狗 requestStop 后本 lane 不被 fut 拴死——
+                    // 真正卡死的算子属 Broker 层故障，由限时 drain＋进程级自愈兜底）
+                    while (fut.valid() &&
+                           fut.wait_for(std::chrono::milliseconds(100)) !=
+                               std::future_status::ready) {
+                        if (stopFlag_.load()) break;
+                    }
                 }
                 continue;                             // guard 归还槽；future 弃置（未 get 不抛）
             }

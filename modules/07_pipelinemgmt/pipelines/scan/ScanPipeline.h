@@ -114,6 +114,18 @@ public:
     void pause();                                  // lane 停+drain；consumer 保活，累积全保留
     Scanner::Result resume();                      // runtime 重启（restart 语义）
 
+    // —— 会话自愈（三件套：看门狗在 runtime 内建；此处 recover＋检查点）——
+    /// Faulted 原地恢复：限时 drain（2s；僵尸 lane detach 兜底）→ runtime 按水位
+    /// 重启。**consumer/obs/融合累积/prevState 锚全保留**——秒级满血续算。
+    /// 3 次上限（防恢复风暴；用尽=会话重建/进程重启）
+    Scanner::Result recover();
+    /// 会话检查点落盘：obs＋激光缓存（经 FrameObsAccumulator 检查点）＋配准锚
+    /// prevState＋消费水位。崩溃重启后新会话 restoreCheckpoint → D 仍可全量
+    /// GBA＋重放（C 线融合云不可序列化——由 D 重放重建最终产物）
+    Scanner::Result saveCheckpoint(const std::string& path);
+    /// 检查点恢复（替换语义）：要求非 Running 态（推荐 configure 后、start 前）
+    Scanner::Result restoreCheckpoint(const std::string& path);
+
 private:
     enum class State { Idle, Configured, Running, Paused, Faulted, Stopped };
 
@@ -156,6 +168,7 @@ private:
     std::unique_ptr<ScanChains> chains_;                     // 生产链（pause/resume 存续）
     std::unique_ptr<FuseConsumer> consumer_;
     std::vector<int> hpGlobalIds_;                           // seed 点高精度 id 集（0..n-1）
+    AtomicFrameStatePtr testPrevState_;                      // 测试模式配准锚兜底（chains_ 不建时）
 
     // —— 运行时组件（构造即有）——
     sched::FrameResultQueue<FrameResult> queue_;
@@ -166,6 +179,8 @@ private:
     std::atomic<int> fakeStreamSeq_{0};                      // 测试模式假流句柄序号
     bool seeded_ = false;                                    // seed 一次性守卫（start 重试不重复 seed）
     uint64_t pauseCounter_ = 0;                              // pause 时消费水位（resume 注入）
+    int recoverAttempts_ = 0;                                // recover 次数（上限 3，防恢复风暴）
+    static constexpr int kMaxRecoverAttempts = 3;
 };
 
 } // namespace Scanner::pipeline

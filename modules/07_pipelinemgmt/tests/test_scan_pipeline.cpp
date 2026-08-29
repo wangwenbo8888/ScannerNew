@@ -9,6 +9,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <memory>
@@ -527,4 +529,131 @@ TEST(ScanPipelineTest, RepeatStartFails) {
     EXPECT_FALSE(pipe.start().success);               // 已运行 → fail
     pipe.stop();
     EXPECT_FALSE(pipe.start().success);               // 已停止（会话私有件）→ fail
+}
+
+
+// ============================================================================
+// 会话自愈三件套：recover（Faulted 原地恢复）＋检查点（保存/恢复）
+// 看门狗检出路径由 test_sched_runtime W1/W2 覆盖（runtime 层）
+// ============================================================================
+
+// 假链变体：gpuChain 在 frameId>=faultAfter 抛异常 → runtime 异常即停 → Faulted
+static ScanPipeline::Hooks faultingHooks(sched::FrameResultQueue<FrameResult>* q,
+                                         uint64_t faultAfter, bool* armed) {
+    ScanPipeline::Hooks h;
+    h.gpuChain = [faultAfter, armed](sched::GpuSlotService::SlotGuard&,
+                                     const std::shared_ptr<const EnhancedFrame>& f, ScanFront&,
+                                     std::function<void()> frontReady) {
+        if (*armed && f->frameId >= faultAfter) throw std::runtime_error("注毒异常");
+        frontReady();
+        return true;
+    };
+    h.pChain = [](const std::shared_ptr<const EnhancedFrame>& frame, ScanFront&, FrameResult& r) {
+        r.frameId = frame->frameId;
+        r.R[0] = 1.0; r.R[4] = 1.0; r.R[8] = 1.0;
+        return Result::ok();
+    };
+    h.eFinalize = [q](const std::shared_ptr<const EnhancedFrame>&, ScanFront&,
+                      FrameResult& r, std::future<Result>& fut) {
+        if (!fut.get().success) return Result::fail("p fail");
+        q->push(std::move(r));
+        return Result::ok();
+    };
+    (void)armed;
+    return h;
+}
+
+// R：钩子注毒 → Faulted → recover() 原地满血 → 新帧续算（累积保留）
+TEST(ScanPipelineTest, RecoverAfterHookException) {
+    SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+    ScanPipeline pipe(baseCfg());
+    pipe.attachRing(ring, 64);
+    bool armed = true;
+    pipe.attachTestHooks(faultingHooks(&pipe.outputQueue(), /*faultAfter=*/4, &armed));
+    ASSERT_TRUE(pipe.configure(PipelineDeps{}).success);
+
+    writeFrames(ring, 0, 6);                       // 帧 4 起注毒 → runtime 自灭
+    ASSERT_TRUE(pipe.start().success);
+    ASSERT_TRUE(waitUntil([&] { return !pipe.isRunning(); }));   // syncState 惰性收敛 Faulted
+    const size_t obsBefore = pipe.obs().frameCount();
+    EXPECT_GE(obsBefore, 1u);                      // 毒前帧已入账
+
+    auto rc = pipe.recover();                      // ★原地恢复（累积全保留）
+    ASSERT_TRUE(rc.success) << rc.message;
+    EXPECT_TRUE(pipe.isRunning());
+
+    armed = false;                                 // 拔毒 → 续算新帧
+    writeFrames(ring, 20, 6);
+    ASSERT_TRUE(waitUntil([&] { return pipe.obs().frameCount() >= obsBefore + 6; }));
+    pipe.stop();
+    EXPECT_GT(pipe.obs().frameCount(), obsBefore); // 恢复后确实续算
+}
+
+// R2：非 Faulted 态 recover 拒绝；恢复上限 3 次
+TEST(ScanPipelineTest, RecoverGuardAndCap) {
+    SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+    ScanPipeline pipe(baseCfg());
+    pipe.attachRing(ring, 64);
+    bool armed = true;
+    pipe.attachTestHooks(faultingHooks(&pipe.outputQueue(), /*faultAfter=*/0, &armed));
+    ASSERT_TRUE(pipe.configure(PipelineDeps{}).success);
+    EXPECT_FALSE(pipe.recover().success);          // Configured 态不可 recover
+
+    writeFrames(ring, 0, 2);
+    ASSERT_TRUE(pipe.start().success);
+    ASSERT_TRUE(waitUntil([&] { return !pipe.isRunning(); }));
+    for (int i = 0; i < 3; ++i) {
+        auto r = pipe.recover();
+        if (!r.success) break;                     // 恢复失败（毒在 0 号帧：首帧即挂）也算次数
+    }
+    EXPECT_FALSE(pipe.recover().success);          // 第 4 次拒绝（上限 3）
+    pipe.stop();
+}
+
+// C：检查点——start 处理 8 帧 → stop 自动落盘（checkpointPath 配置）→ 新对象
+// configure+restore → obs 全量等值恢复（帧号/markerObs 配对）；坏档 fail 不崩
+TEST(ScanPipelineTest, CheckpointSaveRestore) {
+    const std::string ck = "./test_scan_checkpoint.bin";
+    SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+    ScanConfig cfg = baseCfg();
+    cfg.checkpointPath = ck;                       // stop 自动落点
+    {
+        ScanPipeline pipe(cfg);
+        pipe.attachRing(ring, 64);
+        pipe.attachTestHooks(passthroughHooks(&pipe.outputQueue()));
+        ASSERT_TRUE(pipe.configure(PipelineDeps{}).success);
+        writeFrames(ring, 0, 8);
+        ASSERT_TRUE(pipe.start().success);
+        ASSERT_TRUE(waitUntil([&] { return pipe.obs().frameCount() >= 8; }));
+        pipe.stop();                               // 自动 saveCheckpoint(ck)
+    }
+
+    // 新会话恢复（模拟崩溃重启）：新 ring/新对象 → restore → obs 等值
+    SlotRing<EnhancedFrame> ring2(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
+    ScanPipeline pipe2(baseCfg());
+    pipe2.attachRing(ring2, 64);
+    pipe2.attachTestHooks(passthroughHooks(&pipe2.outputQueue()));
+    ASSERT_TRUE(pipe2.configure(PipelineDeps{}).success);
+    auto rr = pipe2.restoreCheckpoint(ck);
+    ASSERT_TRUE(rr.success) << rr.message;
+
+    auto snapA = pipe2.obs().snapshot();           // 恢复后的
+    ASSERT_EQ(snapA.obs.size(), 8u);
+    for (size_t i = 0; i < snapA.obs.size(); ++i) {
+        EXPECT_EQ(snapA.obs[i].frameId, i);
+        ASSERT_EQ(snapA.obs[i].markerObs.size(), 4u);          // 假链 4 标记点
+        EXPECT_EQ(snapA.obs[i].markerObs[0].globalId, 0);
+        EXPECT_EQ(snapA.obs[i].markerObs[3].globalId, 99);
+        EXPECT_FALSE(snapA.obs[i].markerObs[3].isHighPrecision);
+    }
+
+    // 坏档容错：魔术字破坏 → fail 不崩
+    {
+        std::ofstream bad(ck + ".obs", std::ios::binary | std::ios::trunc);
+        bad << "garbage";
+    }
+    EXPECT_FALSE(pipe2.restoreCheckpoint(ck).success);
+
+    std::remove(ck.c_str());
+    std::remove((ck + ".obs").c_str());
 }

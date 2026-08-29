@@ -608,3 +608,95 @@ TEST(SchedRuntime, StartCounterAndLastCounter) {
     std::set<uint64_t> expect{5, 6, 7};
     EXPECT_EQ(ids, expect);                           // 帧号恰 5..7，无重扫
 }
+
+
+// ============================================================================
+// 看门狗（三件套之一）：lane 心跳静默检出；fut 停响应（有界等待不自杀锁）
+// ============================================================================
+
+// 用例 W1：gpuChain 卡死（长睡）→ 看门狗检出 hangDetected＋onHang 回调＋requestStop。
+// 卡死钩子不查 stopFlag——本用例只验证检出；恢复路径（限时 drain detach）见 W2 语义注释
+TEST(SchedRuntime, WatchdogDetectsStuckHook) {
+    SlotRing<Frame> ring(8, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src(ring, 64);
+    writeFrames(ring, 4);
+    std::atomic<int> live{0};
+    std::atomic<int> hangLane{-1};
+    std::atomic<int64_t> hangStaleMs{0};
+
+    LaneHooks<Frame, Front, Out> hooks;
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                        std::function<void()>) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(3000));  // 卡死（不查停）
+        return true;
+    };
+    hooks.pChain = [](const std::shared_ptr<const Frame>&, Front&, Out&) {
+        return Result::ok();
+    };
+    hooks.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&,
+                         std::future<Result>&) { return Result::ok(); };
+
+    SchedConfig cfg = baseCfg(1);
+    cfg.hangTimeoutMs = 300;                          // 300ms 静默即报（巡检周期 250ms 内见效）
+    SchedulerRuntime rt;
+    rt.setGpuStreamFactory(fakeFactory(live), fakeDestroyer(live));
+    rt.onHang = [&](int laneIdx, int64_t staleMs) {
+        hangLane.store(laneIdx);
+        hangStaleMs.store(staleMs);
+    };
+    ASSERT_TRUE(rt.start(cfg, src, /*sequential=*/false, noQueue(), hooks).success);
+    EXPECT_FALSE(rt.hangDetected());                  // 启动初始无 hang
+
+    ASSERT_TRUE(waitUntil([&] { return rt.hangDetected(); }))
+        << "卡死钩子 300ms+巡检周期内应检出心跳静默";
+    EXPECT_EQ(hangLane.load(), 0);                    // 单 lane：0 号
+    EXPECT_GE(hangStaleMs.load(), 300);
+
+    // 收尾：限时 drain——卡死 lane join 超时 → detach 僵尸（3000ms 睡满后自然消亡）
+    rt.drainAndShutdown(std::chrono::milliseconds(500));
+    EXPECT_FALSE(rt.isRunning());
+    // 等 detached 僵尸自然退出（睡满即亡；保 live 计数稳定供断言——此处只验证 drain 返回不挂死）
+}
+
+// 用例 W2：fut 有界等待——gpuChain false＋frontReady 已提交（孤儿 P 在飞），pChain
+// 慢（1s）；requestStop 后 lane 须能退出（不等待 fut 就绪）。旧实现 fut.wait() 无限
+// 阻塞会令 drain 永不返回（本用例超时即失败）
+TEST(SchedRuntime, StopBreaksOrphanFutureWait) {
+    SlotRing<Frame> ring(8, SlotRing<Frame>::WriterMode::Overwrite);
+    GrabLatestSource<Frame> src(ring, 64);
+    writeFrames(ring, 4);                             // 多帧：首帧孤儿等待后还有帧可抓
+    std::atomic<int> live{0};
+    std::atomic<bool> releaseP{false};
+
+    LaneHooks<Frame, Front, Out> hooks;
+    hooks.gpuChain = [](GpuSlotService::SlotGuard&, const std::shared_ptr<const Frame>&, Front&,
+                        std::function<void()> frontReady) {
+        frontReady();                                 // 提交 P（孤儿路径的前提）
+        return false;                                 // 帧销毁 → 进孤儿等待分支
+    };
+    hooks.pChain = [&](const std::shared_ptr<const Frame>&, Front&, Out&) {
+        // 慢 P：等 release（本用例不 release——模拟卡在途任务；stop 路径不依赖它）
+        for (int i = 0; i < 100 && !releaseP.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        return Result::ok();
+    };
+    hooks.eFinalize = [](const std::shared_ptr<const Frame>&, Front&, Out&,
+                         std::future<Result>&) { return Result::ok(); };
+
+    SchedulerRuntime rt;
+    rt.setGpuStreamFactory(fakeFactory(live), fakeDestroyer(live));
+    SchedConfig cfg = baseCfg(1);
+    cfg.hangTimeoutMs = 0;                            // 关看门狗：专测 fut 停响应
+    ASSERT_TRUE(rt.start(cfg, src, /*sequential=*/false, noQueue(), hooks).success);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // 让 lane 进入孤儿等待
+    rt.requestStop();
+
+    // 有界等待实现：lane 在 100ms 粒度查 stopFlag 中断 fut 等待退出（不等 P 完成）。
+    // 直接断言 lane 秒退——drain 总耗时另含 broker 排空（等在途 pChain），不可作判据
+    const bool laneExitedFast = waitUntil([&] { return rt.lanesExited(); });
+    releaseP.store(true);                             // 放行在途 pChain（broker 收尾用）
+    rt.drainAndShutdown(std::chrono::milliseconds(4000));
+    EXPECT_TRUE(laneExitedFast) << "lane 应经 stopFlag 中断 fut 等待及时退出（旧实现将永久阻塞）";
+    EXPECT_TRUE(rt.lanesExited());
+}

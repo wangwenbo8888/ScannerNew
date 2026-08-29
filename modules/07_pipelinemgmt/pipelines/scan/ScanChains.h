@@ -105,6 +105,10 @@ public:
     /// 三钩子（gpuChain/pChain/eFinalize）；装配期依赖非法时钩子恒 fail（见日志）
     Hooks assemble();
 
+    /// 全局配准快照锚（ prevState 原子读写出口——检查点保存/恢复消费；
+    /// 声明序即 deps_ 拷贝内 shared_ptr 本体，原子 load/store 直接操作）
+    AtomicFrameStatePtr& prevStateAnchor() { return deps_.prevState; }
+
 private:
     std::shared_ptr<ScanLaneOps> makeOps() const;
     bool runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& ops,

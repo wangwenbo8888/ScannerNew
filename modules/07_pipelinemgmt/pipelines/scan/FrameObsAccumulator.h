@@ -40,6 +40,16 @@ public:
 
     void clear();
 
+    // —— 会话检查点（崩溃恢复链；ScanPipeline::save/restoreCheckpoint 消费）——
+    /// 二进制落盘（obs 全量＋激光缓存全量＋降级标志；锁内直写）。格式：魔术字
+    /// "JMWFOBS1"＋版本＋逐段计数。obs 数 MB 级、激光缓存可达预算上限（GB 级）——
+    /// 写盘耗时与体积成正比，调方控制触发时机（stop/pause/周期）。
+    Scanner::Result saveCheckpoint(const std::string& path) const;
+    /// 读盘替换全量内容（清空后载入；预算仍用构造值）。坏档 fail 不崩。
+    Scanner::Result loadCheckpoint(const std::string& path);
+    /// 快照回填（restore 路径：替换 obsList_/laserFrames_/降级标志；预算不变）
+    void replace(Snapshot&& snap, bool degraded);
+
 private:
     mutable std::mutex mu_;                  // push(写) 与 snapshot(读) 互斥
     std::vector<FrameObs> obsList_;

@@ -26,6 +26,8 @@ struct ScanConfig {
     bool enableLaser = true;                 // A 模式 false：激光链整段跳过
     bool enableFinalBA = true;               // 恒 true（A/B 均必跑 GBA），保留显式
     size_t laserCacheBudgetMB = 2048;        // D 重融合激光帧缓存预算（开放项 6 待实测）
+    int hangTimeoutMs = 10000;               // 看门狗：lane 心跳静默阈值（0=关；传递 SchedConfig）
+    std::string checkpointPath;              // 非空=stop() 自动落检查点（崩溃恢复链）
     // existingMarkers：启动扫描时一次性检测装载（非空且仅标记点才加载）——数据形态：
     std::vector<calib::MarkerCloudPoint> existingMarkers;   // 已有点（globalId 语义在 obs 层）
 };
