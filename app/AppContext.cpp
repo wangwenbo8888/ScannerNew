@@ -293,6 +293,11 @@ void AppContext::startDevicesAsync() {
 }
 
 void AppContext::shutdown() {
+    // once 守卫：main 显式调用后，对象析构（及任何迟到路径）不再重复走关闭序列。
+    // 实证（jmw_2026-08-29 日志）：无守卫时退出链跑了 3+ 轮 shutdown，末轮
+    // DeviceManager::close 挂死致进程不退（cmd 窗口残留）——相机 SDK 的二次
+    // 关闭路径不可依赖。首轮在 main 线程、时序确定，一轮即止
+    if (shutdownDone_.exchange(true, std::memory_order_acq_rel)) return;
     if (devStartThread_.joinable()) devStartThread_.join();   // 设备启动收尾再关（防竞态）
     if (hwMonitor_) hwMonitor_->stop();
     if (scanWf_)    scanWf_->stop();

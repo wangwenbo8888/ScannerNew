@@ -8,6 +8,7 @@
 // ============================================================================
 
 #include "base/types.h"
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -121,4 +122,5 @@ private:
     SelfCheck selfCheck_;
     mutable std::mutex selfCheckMtx_;
     std::thread devStartThread_;                // 设备启动后台线程（shutdown 先 join）
+    std::atomic<bool> shutdownDone_{false};     // shutdown once 守卫（析构链防重复关）
 };
