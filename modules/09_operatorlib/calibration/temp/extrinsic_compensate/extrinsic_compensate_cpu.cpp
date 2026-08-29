@@ -35,7 +35,7 @@ CALIB_DEFINE_LOG_TAG(02, ExtrinsicCompensateCPU);
 ExtrinsicCompensateCPU::ExtrinsicCompensateCPU(const ExtrinsicCompensateCPUParams& params)
     : params_(params) {
     params_.validate();
-    spdlog::info("[{}] 初始化完成, CTE={:.2e} /°C, 步距={:.2f}°C, 范围=[{:.1f}, {:.1f}]°C",
+    CALIB_LOG_INFO("[{}] 初始化完成, CTE={:.2e} /°C, 步距={:.2f}°C, 范围=[{:.1f}, {:.1f}]°C",
                  kLogTag, params_.cte, params_.tempStep,
                  params_.tempRangeMin, params_.tempRangeMax);
 }
@@ -95,7 +95,7 @@ ExtrinsicCompensateCPUResult ExtrinsicCompensateCPU::Execute(const CameraExtrins
     result.baselineRef = baseline;
     result.referenceExtrinsics = extrinsics;
 
-    spdlog::info("[{}] 计算完成, 表大小={}, 温度范围=[{:.2f}, {:.2f}]°C, 参考基线={:.4f}",
+    CALIB_LOG_INFO("[{}] 计算完成, 表大小={}, 温度范围=[{:.2f}, {:.2f}]°C, 参考基线={:.4f}",
                  kLogTag, result.table.size(), tStart, tEnd, baseline);
 
     return result;
@@ -108,7 +108,7 @@ ExtrinsicCompensateCPUResult ExtrinsicCompensateCPU::Execute(const CameraExtrins
 void ExtrinsicCompensateCPU::SetParams(const ExtrinsicCompensateCPUParams& params) {
     params.validate();
     params_ = params;
-    spdlog::info("[{}] 参数已更新, CTE={:.2e} /°C, 步距={:.2f}°C",
+    CALIB_LOG_INFO("[{}] 参数已更新, CTE={:.2e} /°C, 步距={:.2f}°C",
                  kLogTag, params_.cte, params_.tempStep);
 }
 

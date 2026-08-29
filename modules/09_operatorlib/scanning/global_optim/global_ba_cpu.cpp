@@ -1,7 +1,7 @@
 #include "global_ba_cpu.h"
 #include "ba_residuals.h"
 #include "pose_graph_residuals.h"
-#include <spdlog/spdlog.h>
+#include "common/calib_logging.h"
 #include <ceres/ceres.h>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -14,6 +14,8 @@
 #include <algorithm>
 
 namespace calib {
+
+CALIB_DEFINE_LOG_TAG(0, GlobalBA);
 
 namespace {
 
@@ -278,7 +280,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             // I2: Kabsch 退化保护 — 共线/近平面点集返回任意旋转, 会污染 PGO(无鲁棒损失)。
             //     退化时直接跳过该边(不加入相对位姿残差),宁缺勿滥。
             if (!kabsch(zi, zk, Rik, tik)) {
-                spdlog::debug("[{}] PGO: skip degenerate Kabsch edge (i={},k={},shared={})",
+                CALIB_LOG_DEBUG("[{}] PGO: skip degenerate Kabsch edge (i={},k={},shared={})",
                               GlobalBundleAdjustmentCPU::kLogTag, i, k, zi.size());
                 continue;
             }
@@ -308,7 +310,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
                     if (rn > maxRotRes) maxRotRes = rn;
                 }
                 if (maxRotRes > 0.3) {
-                    spdlog::warn("[{}] PGO: max pre-solve rotation residual {:.4f} rad > 0.3 rad; "
+                    CALIB_LOG_WARN("[{}] PGO: max pre-solve rotation residual {:.4f} rad > 0.3 rad; "
                                  "vee-form rotation model may be inaccurate for this loop's drift "
                                  "(PGO proceeds, GBA does the precision)",
                                  GlobalBundleAdjustmentCPU::kLogTag, maxRotRes);
@@ -344,7 +346,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             ceres::Solve(opt, &pgoProblem, &sum);
             const bool hardFail = (sum.termination_type == ceres::FAILURE ||
                                    sum.termination_type == ceres::USER_FAILURE);
-            spdlog::info("[{}] PGO: {} edges, {} iters, term={}, cost {:.6e}->{:.6e}",
+            CALIB_LOG_INFO("[{}] PGO: {} edges, {} iters, term={}, cost {:.6e}->{:.6e}",
                          GlobalBundleAdjustmentCPU::kLogTag, edges.size(),
                          static_cast<int>(sum.iterations.size()),
                          ceres::TerminationTypeToString(sum.termination_type),
@@ -352,7 +354,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
 
             if (hardFail) {
                 // 回退: 还原初值位姿, 后续按"无 PGO"路径进 GBA
-                spdlog::warn("[{}] PGO hard-failed (term={}); revert to pre-PGO init poses",
+                CALIB_LOG_WARN("[{}] PGO hard-failed (term={}); revert to pre-PGO init poses",
                              GlobalBundleAdjustmentCPU::kLogTag,
                              ceres::TerminationTypeToString(sum.termination_type));
                 q = qSnap;
@@ -433,12 +435,12 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
         for (size_t i = 0; i < priorIds.size(); ++i) {
             auto it = idToIdx.find(priorIds[i]);
             if (it == idToIdx.end()) {
-                spdlog::warn("[{}] soft prior: globalId {} has no matching point in scene; ignored",
+                CALIB_LOG_WARN("[{}] soft prior: globalId {} has no matching point in scene; ignored",
                              GlobalBundleAdjustmentCPU::kLogTag, priorIds[i]);
                 continue;
             }
             if (xeAll.size() < 3 * (i + 1)) {
-                spdlog::warn("[{}] soft prior: X_existing too short ({} < 3*{}); globalId {} ignored",
+                CALIB_LOG_WARN("[{}] soft prior: X_existing too short ({} < 3*{}); globalId {} ignored",
                              GlobalBundleAdjustmentCPU::kLogTag, xeAll.size(), i + 1, priorIds[i]);
                 continue;
             }
@@ -446,7 +448,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             if (i < sgAll.size() && sgAll[i] > 0.0) {
                 sigma = sgAll[i];
             } else if (i < sgAll.size()) {
-                spdlog::warn("[{}] soft prior: priorSigma[{}] <= 0; fallback to default {}",
+                CALIB_LOG_WARN("[{}] soft prior: priorSigma[{}] <= 0; fallback to default {}",
                              GlobalBundleAdjustmentCPU::kLogTag, i,
                              pImpl_->params.defaultPriorSigma);
             }
@@ -457,7 +459,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
                 sigma});
         }
         if (!priorEntries.empty()) {
-            spdlog::info("[{}] soft prior: {} high-precision point(s) anchored",
+            CALIB_LOG_INFO("[{}] soft prior: {} high-precision point(s) anchored",
                          GlobalBundleAdjustmentCPU::kLogTag, priorEntries.size());
         }
     }
@@ -570,13 +572,13 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
         const bool ok = summary.termination_type == ceres::CONVERGENCE
                      || summary.termination_type == ceres::USER_SUCCESS;
         if (ok) {
-            spdlog::info("[{}] Ceres phase({}): {} iters, term={}, cost {:.6e}->{:.6e}",
+            CALIB_LOG_INFO("[{}] Ceres phase({}): {} iters, term={}, cost {:.6e}->{:.6e}",
                          GlobalBundleAdjustmentCPU::kLogTag, phase,
                          summary.iterations.size(),
                          ceres::TerminationTypeToString(summary.termination_type),
                          summary.initial_cost, summary.final_cost);
         } else {
-            spdlog::warn("[{}] Ceres phase({}): {} iters, term={}, cost {:.6e}->{:.6e}",
+            CALIB_LOG_WARN("[{}] Ceres phase({}): {} iters, term={}, cost {:.6e}->{:.6e}",
                          GlobalBundleAdjustmentCPU::kLogTag, phase,
                          summary.iterations.size(),
                          ceres::TerminationTypeToString(summary.termination_type),
@@ -611,7 +613,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             obsInfos[idx].culled = true;
             pImpl_->stats.outlierObsIds.push_back(static_cast<int>(idx));
             anyPre = true;
-            spdlog::info("[{}] pre-clean: cull obs #{} (frame{},obs{}) ||r||={:.4f}>{:.4f}mm",
+            CALIB_LOG_INFO("[{}] pre-clean: cull obs #{} (frame{},obs{}) ||r||={:.4f}>{:.4f}mm",
                          GlobalBundleAdjustmentCPU::kLogTag, idx,
                          obsInfos[idx].frameIdx, obsInfos[idx].obsIdx, nr, preCleanThresh);
         }
@@ -636,7 +638,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             pImpl_->stats.outlierObsIds.push_back(static_cast<int>(idx));
             obsInfos[idx].culled = true;
             anyCulled = true;
-            spdlog::info("[{}] chi2-cull: cull obs #{} (frame{},obs{}) chi2={:.3f}>{:.3f}",
+            CALIB_LOG_INFO("[{}] chi2-cull: cull obs #{} (frame{},obs{}) chi2={:.3f}>{:.3f}",
                          GlobalBundleAdjustmentCPU::kLogTag, idx,
                          obsInfos[idx].frameIdx, obsInfos[idx].obsIdx,
                          chi2, pImpl_->params.chiSquareGate);

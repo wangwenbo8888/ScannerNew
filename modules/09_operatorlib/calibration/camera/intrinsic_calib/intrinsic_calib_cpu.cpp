@@ -9,10 +9,12 @@
 #include <numeric>
 #include <utility>
 
-#include <spdlog/spdlog.h>
+#include "common/calib_logging.h"
 #include <sstream>
 
 namespace calib {
+
+CALIB_DEFINE_LOG_TAG(0, IntrinsicCalib);
 
 OperatorInfo getIntrinsicCalibCPUInfo() {
     return OperatorInfo{"IntrinsicCalibCPU", SCANNER_VERSION_MAJOR, SCANNER_VERSION_MINOR, OperatorType::CPU};
@@ -31,7 +33,7 @@ IntrinsicCalibParams IntrinsicCalibParams::fromJson(const std::string& json_path
     try {
         std::ifstream ifs(json_path);
         if (!ifs.is_open()) {
-            spdlog::warn("Cannot open params file: " + json_path + ", using defaults");
+            CALIB_LOG_WARN("Cannot open params file: " + json_path + ", using defaults");
             return params;
         }
         nlohmann::json j = nlohmann::json::parse(ifs);
@@ -47,9 +49,9 @@ IntrinsicCalibParams IntrinsicCalibParams::fromJson(const std::string& json_path
         if (j.contains("temperature_coeff"))      params.temperature_coeff = j.at("temperature_coeff").get<double>();
         if (j.contains("plate_temp"))             params.plate_temp = j.at("plate_temp").get<double>();
 
-        spdlog::info("Loaded params from " + json_path);
+        CALIB_LOG_INFO("Loaded params from " + json_path);
     } catch (const std::exception& e) {
-        spdlog::warn("Failed to parse params file " + json_path + ": " + e.what());
+        CALIB_LOG_WARN("Failed to parse params file " + json_path + ": " + e.what());
     }
     return params;
 }
@@ -85,13 +87,13 @@ public:
         IntrinsicCalibResult& result)
     {
         if (left_points.size() != right_points.size()) {
-            spdlog::error("Left/right frame count mismatch");
+            CALIB_LOG_ERROR("Left/right frame count mismatch");
             result.success = false;
             result.message = "Left/right frame count mismatch";
             return false;
         }
         if (left_points.empty()) {
-            spdlog::error("No input point data provided");
+            CALIB_LOG_ERROR("No input point data provided");
             result.success = false;
             result.message = "No input point data provided";
             return false;
@@ -110,20 +112,20 @@ public:
                           object_points, result.valid_frames_count);
 
         if (result.valid_frames_count == 0) {
-            spdlog::error("No valid frames with correct point count");
+            CALIB_LOG_ERROR("No valid frames with correct point count");
             result.success = false;
             result.message = "No valid frames with correct point count";
             return false;
         }
 
-        spdlog::info("Valid frames: " + std::to_string(result.valid_frames_count) + "/" + std::to_string(left_points.size()));
+        CALIB_LOG_INFO("Valid frames: " + std::to_string(result.valid_frames_count) + "/" + std::to_string(left_points.size()));
 
         calibrateMonocular(object_points, valid_left, result.left);
         calibrateMonocular(object_points, valid_right, result.right);
 
         computeQualityMetrics(result);
 
-        spdlog::info("Calibration complete.");
+        CALIB_LOG_INFO("Calibration complete.");
         result.success = true;
         result.qualityFlag = calib::QualityFlag::Normal;
         result.message.clear();
@@ -135,7 +137,7 @@ public:
         MonocularCalibResult& result)
     {
         if (image_points.empty()) {
-            spdlog::error("No input point data provided");
+            CALIB_LOG_ERROR("No input point data provided");
             result.success = false;
             result.message = "No input point data provided";
             return false;
@@ -149,7 +151,7 @@ public:
         filterValidFramesSingle(image_points, valid_points, object_points, valid_count);
 
         if (valid_count == 0) {
-            spdlog::error("No valid frames with correct point count");
+            CALIB_LOG_ERROR("No valid frames with correct point count");
             result.success = false;
             result.message = "No valid frames with correct point count";
             return false;
@@ -157,7 +159,7 @@ public:
 
         calibrateMonocular(object_points, valid_points, result);
 
-        spdlog::info("Single camera calibration complete.");
+        CALIB_LOG_INFO("Single camera calibration complete.");
         return true;
     }
 
@@ -197,11 +199,11 @@ private:
 
         for (size_t i = 0; i < left_points.size(); ++i) {
             if (static_cast<int>(left_points[i].size()) != expected) {
-                spdlog::warn("Frame: point count mismatch, skipping");
+                CALIB_LOG_WARN("Frame: point count mismatch, skipping");
                 continue;
             }
             if (static_cast<int>(right_points[i].size()) != expected) {
-                spdlog::warn("Frame: point count mismatch, skipping");
+                CALIB_LOG_WARN("Frame: point count mismatch, skipping");
                 continue;
             }
 
@@ -215,7 +217,7 @@ private:
                 }
             }
             if (has_nan) {
-                spdlog::warn("Frame: contains NaN points, skipping");
+                CALIB_LOG_WARN("Frame: contains NaN points, skipping");
                 continue;
             }
             valid_left.push_back(left_points[i]);
@@ -237,7 +239,7 @@ private:
 
         for (size_t i = 0; i < image_points.size(); ++i) {
             if (static_cast<int>(image_points[i].size()) != expected) {
-                spdlog::warn("Frame: point count mismatch, skipping");
+                CALIB_LOG_WARN("Frame: point count mismatch, skipping");
                 continue;
             }
 
@@ -246,7 +248,7 @@ private:
                 if (std::isnan(pt.x) || std::isnan(pt.y)) { has_nan = true; break; }
             }
             if (has_nan) {
-                spdlog::warn("Frame: contains NaN points, skipping");
+                CALIB_LOG_WARN("Frame: contains NaN points, skipping");
                 continue;
             }
             valid_points.push_back(image_points[i]);
@@ -288,9 +290,9 @@ private:
         result.qualityFlag = calib::QualityFlag::Normal;
         result.message.clear();
 
-        spdlog::info("Monocular calibration RMS done");
-        spdlog::info("Camera matrix computed");
-        spdlog::info("Distortion coefficients computed");
+        CALIB_LOG_INFO("Monocular calibration RMS done");
+        CALIB_LOG_INFO("Camera matrix computed");
+        CALIB_LOG_INFO("Distortion coefficients computed");
     }
 
     static std::vector<double> computePerViewErrors(
@@ -337,12 +339,12 @@ private:
         result.reproj_error_mean = stats.first;
         result.reproj_error_std = stats.second;
 
-        spdlog::info("Quality metrics computed");
+        CALIB_LOG_INFO("Quality metrics computed");
 
         if (result.reproj_error_mean <= params_.reproj_error_threshold) {
-            spdlog::info("Reprojection error within threshold");
+            CALIB_LOG_INFO("Reprojection error within threshold");
         } else {
-            spdlog::warn("Reprojection error exceeds threshold");
+            CALIB_LOG_WARN("Reprojection error exceeds threshold");
         }
     }
 };
@@ -350,7 +352,7 @@ private:
 IntrinsicCalibCPU::IntrinsicCalibCPU(const IntrinsicCalibParams& params)
     : pImpl_(std::make_unique<Impl>(params))
 {
-    spdlog::info("IntrinsicCalibCPU initialized");
+    CALIB_LOG_INFO("IntrinsicCalibCPU initialized");
 }
 
 IntrinsicCalibCPU::~IntrinsicCalibCPU() = default;
@@ -387,7 +389,7 @@ void IntrinsicCalibCPU::Destroy() {
 bool IntrinsicCalibCPU::SaveResult(const std::string& filepath, const IntrinsicCalibResult& result) {
     cv::FileStorage fs(filepath, cv::FileStorage::WRITE);
     if (!fs.isOpened()) {
-        spdlog::error("Cannot open file for writing: " + filepath);
+        CALIB_LOG_ERROR("Cannot open file for writing: " + filepath);
         return false;
     }
     saveMonoResultInternal(fs, "left", result.left);
@@ -396,14 +398,14 @@ bool IntrinsicCalibCPU::SaveResult(const std::string& filepath, const IntrinsicC
     fs << "reproj_error_std" << result.reproj_error_std;
     fs << "valid_frames_count" << result.valid_frames_count;
     fs << "total_frames_input" << result.total_frames_input;
-    spdlog::info("Calibration result saved to " + filepath);
+    CALIB_LOG_INFO("Calibration result saved to " + filepath);
     return true;
 }
 
 bool IntrinsicCalibCPU::LoadResult(const std::string& filepath, IntrinsicCalibResult& result) {
     cv::FileStorage fs(filepath, cv::FileStorage::READ);
     if (!fs.isOpened()) {
-        spdlog::error("Cannot open file for reading: " + filepath);
+        CALIB_LOG_ERROR("Cannot open file for reading: " + filepath);
         return false;
     }
     loadMonoResultInternal(fs, "left", result.left);
@@ -417,7 +419,7 @@ bool IntrinsicCalibCPU::LoadResult(const std::string& filepath, IntrinsicCalibRe
     result.success = true;
     result.qualityFlag = calib::QualityFlag::Normal;
     result.message.clear();
-    spdlog::info("Calibration result loaded from " + filepath);
+    CALIB_LOG_INFO("Calibration result loaded from " + filepath);
     return true;
 }
 
@@ -572,14 +574,14 @@ bool IntrinsicCalibCPU::SaveResultJson(const std::string& filepath, const Intrin
         nlohmann::json j = result.toJson();
         std::ofstream ofs(filepath);
         if (!ofs.is_open()) {
-            spdlog::error("Cannot open file for writing: " + filepath);
+            CALIB_LOG_ERROR("Cannot open file for writing: " + filepath);
             return false;
         }
         ofs << j.dump(2);
-        spdlog::info("Calibration result saved as JSON to " + filepath);
+        CALIB_LOG_INFO("Calibration result saved as JSON to " + filepath);
         return true;
     } catch (const std::exception& e) {
-        spdlog::error("Failed to save JSON result: " + std::string(e.what()));
+        CALIB_LOG_ERROR("Failed to save JSON result: " + std::string(e.what()));
         return false;
     }
 }
@@ -588,15 +590,15 @@ bool IntrinsicCalibCPU::LoadResultJson(const std::string& filepath, IntrinsicCal
     try {
         std::ifstream ifs(filepath);
         if (!ifs.is_open()) {
-            spdlog::error("Cannot open file for reading: " + filepath);
+            CALIB_LOG_ERROR("Cannot open file for reading: " + filepath);
             return false;
         }
         nlohmann::json j = nlohmann::json::parse(ifs);
         result = IntrinsicCalibResult::fromJson(j);
-        spdlog::info("Calibration result loaded from JSON " + filepath);
+        CALIB_LOG_INFO("Calibration result loaded from JSON " + filepath);
         return true;
     } catch (const std::exception& e) {
-        spdlog::error("Failed to load JSON result: " + std::string(e.what()));
+        CALIB_LOG_ERROR("Failed to load JSON result: " + std::string(e.what()));
         return false;
     }
 }

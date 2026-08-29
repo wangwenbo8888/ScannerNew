@@ -8,6 +8,7 @@
 #include "MCUDriver.h"
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 #include <algorithm>
 #include <chrono>
@@ -86,7 +87,7 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
         for (size_t i = 0; i < paramKeys_.size(); ++i)
             if (paramKeys_[i] == key) idx = static_cast<int64_t>(i);
         publishEvent(EventType::UserDefined, idx, 0);   // base 暂无 ParamChanged——占位
-        spdlog::debug("[DeviceManager] 参数改账 {}={:.3f} confirmed={}", key, e.value,
+        JMW_LOG_DEBUG("08-DeviceManager", "[DeviceManager] 参数改账 {}={:.3f} confirmed={}", key, e.value,
                       e.confirmed);
     };
     mode_->onChange = [this](DeviceMode oldM, DeviceMode newM) {
@@ -115,7 +116,7 @@ void DeviceManager::post(std::function<void()> task) {
     if (!task) return;
     std::lock_guard<std::mutex> lock(postMutex_);
     if (postQueue_.size() >= kPostQueueCap) {   // 满丢新（调用方可重试）
-        spdlog::warn("[DeviceManager] 编队队列满(≥{})丢新", kPostQueueCap);
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 编队队列满(≥{})丢新", kPostQueueCap);
         return;
     }
     postQueue_.push_back(std::move(task));
@@ -140,6 +141,14 @@ Result DeviceManager::open() {
     const auto t0 = std::chrono::steady_clock::now();
     auto el = [t0]() { return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count(); };
+    // 配置快照（一次性）——串口/协议/门限的运行依据；真机排障第一落脚点
+    JMW_LOG_INFO("08-DeviceManager",
+        "[DeviceManager] open 配置: 串口={} 波特率={} 协议={} ack超时={}ms "
+        "心跳阈={}ms 温度上限={}℃ 乱跳={}℃/s seq警={}",
+        cfg_.serialPort, cfg_.baud,
+        cfg_.protocol == serial::FrameCodec::Version::V3 ? "v3" : "v2",
+        cfg_.ackTimeoutMs, cfg_.heartbeatTimeoutMs, cfg_.tempMaxC,
+        cfg_.tempSpikeC, cfg_.seqGapWarn);
     // ① 相机（工厂缺省=不接相机）与 ② MCU 自动搜口并行——两链路无共享资源，
     //    串行白等（相机枚举 ~0.5s + 搜口 ~0.05s → 并行取大者）
     Result camR = Result::ok();
@@ -158,7 +167,7 @@ Result DeviceManager::open() {
     mcu_->setProtocolVersion(cfg_.protocol);
     mcu_->setAckTimeoutMs(cfg_.ackTimeoutMs);
     const Result rm = mcu_->open(cfg_.serialPort, cfg_.baud);
-    spdlog::info("[DeviceManager] open 计时: MCU 链路完成 {}ms（{}）", el(), rm.message);
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: MCU 链路完成 {}ms（{}）", el(), rm.message);
     if (camThread.joinable()) camThread.join();
     if (!camR.success) {
         publishFault(code(DevFault::CameraOpenFail), camR.message);
@@ -173,7 +182,7 @@ Result DeviceManager::open() {
         publishFault(code(DevFault::McuOpenFail), rm.message);
         return Result::fail("MCU 打开失败: " + rm.message);
     }
-    spdlog::info("[DeviceManager] open 计时: 相机+MCU 并行段 {}ms", el());
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: 相机+MCU 并行段 {}ms", el());
     // ③ 上行分流接线（onTemp 温度双警+记账+Warmup 喂入 / onKey→KeyManager / onStatus 记账）
     hal::McuUplink up;
     up.onTemp = [this](const serial::TempFrame& t) {
@@ -184,14 +193,14 @@ Result DeviceManager::open() {
     };
     up.onKey = [this](const serial::RawKeyEvent& k) { keyMgr_->onRawEvent(k); };
     up.onStatus = [this](const serial::StatusFrame& s) {
-        spdlog::warn("[DeviceManager] S 状态帧 code={:#x}（码表待协议 §8-8）", s.code);
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] S 状态帧 code={:#x}（码表待协议 §8-8）", s.code);
     };
     mcu_->setUplink(up);
-    spdlog::info("[DeviceManager] open 计时: uplink 接线 {}ms", el());
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: uplink 接线 {}ms", el());
     // ⑤ 参数装载（Load 空档=全默认值；逐参数广播）+ 快照立即可读（单线程时刻）
     params_->bootstrap([] { return ""; });
     refreshParamSnapshot();
-    spdlog::info("[DeviceManager] open 计时: bootstrap+快照 {}ms", el());
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: bootstrap+快照 {}ms", el());
     // ⑦ 开机自检 N12 Z1——**起逻辑线程前**发（Critical #1：open 全程单线程；
     //    ACK 经 rx 线程入环、逻辑线程 pump 消化，DoneCb 失败异步 Fault）。
     //    auto 搜口路径探测已发过 N12Z1（幂等）——省略：实测"相机配置后第一笔串口写"
@@ -211,12 +220,14 @@ Result DeviceManager::open() {
     // ⑧ 广播
     publishEvent(EventType::DeviceConnected, 0, 0);
     opened_ = true;
-    spdlog::info("[DeviceManager] open 计时: 逻辑线程+广播+总计 {}ms", el());
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: 逻辑线程+广播+总计 {}ms", el());
     return Result::ok();
 }
 
 Result DeviceManager::close() {
     std::lock_guard<std::mutex> openLock(openMtx_);
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] close: 设备关闭开始（串口={}）",
+                 cfg_.serialPort);
     selfCheck_.stage = -1;                       // 自检状态机随设备关停作废
     if (logicThread_.joinable()) {
         running_.store(false);
@@ -332,7 +343,7 @@ void DeviceManager::testInjectRaw(const std::string& frameBytes) {
 Result DeviceManager::enterScan() {
     const Result g = mode_->request(DeviceMode::Scanning, "enter_scan");
     if (!g.success) {
-        spdlog::warn("[DeviceManager] enterScan 门禁拒绝: {}", g.message);
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] enterScan 门禁拒绝: {}", g.message);
         return g;                               // 拒→不入队，同步返回
     }
     post([this] { enterScanOnLogic(); });
@@ -342,7 +353,7 @@ Result DeviceManager::enterScan() {
 Result DeviceManager::enterCalibration() {
     const Result g = mode_->request(DeviceMode::Calibrating, "enter_calibration");
     if (!g.success) {
-        spdlog::warn("[DeviceManager] enterCalibration 门禁拒绝: {}", g.message);
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] enterCalibration 门禁拒绝: {}", g.message);
         return g;
     }
     post([this] { enterCalibrationOnLogic(); });
@@ -352,7 +363,7 @@ Result DeviceManager::enterCalibration() {
 Result DeviceManager::toIdle() {
     const Result g = mode_->request(DeviceMode::Idle, "to_idle");
     if (!g.success) {
-        spdlog::warn("[DeviceManager] toIdle 门禁拒绝: {}", g.message);
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] toIdle 门禁拒绝: {}", g.message);
         return g;
     }
     post([this] { toIdleOnLogic(); });
@@ -553,7 +564,7 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
         if (ok || nowMs_ - selfCheck_.stageStartMs > 800) {
             if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
             selfCheck_.report("camera", ok);
-            spdlog::info("[DeviceManager] 启动自检完成（相机验证 {} 帧）",
+            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 启动自检完成（相机验证 {} 帧）",
                          selfCheck_.frames.load(std::memory_order_relaxed));
             selfCheck_.stage = -1;
         }
@@ -590,13 +601,13 @@ void DeviceManager::buildKeyActions() {
     a.menuSelect = [this] {                      // 按 cursor 分叉（裁判只给信号）
         const int cur = menu_->state().cursor;
         if (cur == 1 || cur == 2) {
-            spdlog::info("[DeviceManager] 菜单选中①/②：视野模式设定（modeCursor={} 账本为准）",
+            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 菜单选中①/②：视野模式设定（modeCursor={} 账本为准）",
                          menu_->state().modeCursor);
         } else {
             // ③扫描完成/④开始后处理：派工作流归 app 订阅——门面只广播。
             // UserDefined+param1=3/4（Important #4：待 base 增专用事件类型，人工过会后改）
             publishEvent(EventType::UserDefined, cur, 0);
-            spdlog::warn("[DeviceManager] 菜单选中③/④：派发工作流事件 cursor={}", cur);
+            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 菜单选中③/④：派发工作流事件 cursor={}", cur);
         }
     };
     a.cycleMode = [this] { menu_->apply(MenuOp::CycleMode); };
@@ -613,7 +624,7 @@ void DeviceManager::buildKeyActions() {
     };
     a.adjustUp = [this] { applyAdjust(+1); };
     a.adjustDown = [this] { applyAdjust(-1); };
-    a.dropped = [](const char* why) { spdlog::info("[DeviceManager] 手势丢弃: {}", why); };
+    a.dropped = [](const char* why) { JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 手势丢弃: {}", why); };
     semantics_ = std::make_unique<KeySemantics>(                  // M1：采集态菜单键门禁
         [this] { return !mode_->isCapturing(); }, std::move(a));
 }
@@ -626,7 +637,7 @@ void DeviceManager::applyAdjust(int dir) {
         params_->setValue("exposure", params_->get("exposure").value + steps,
                           ParamEntry::Source::Key);
     } else {
-        spdlog::info("[DeviceManager] 调节步进 ctx={}（View 上下文暂仅记账）",
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 调节步进 ctx={}（View 上下文暂仅记账）",
                      static_cast<int>(ctx));
     }
 }
@@ -778,7 +789,7 @@ void DeviceManager::checkTempFaults(const serial::TempFrame& t) {
 // ============================================================================
 
 void DeviceManager::publishFault(int64_t code, const std::string& detail) {
-    spdlog::warn("[DeviceManager] Fault code={:#06x} {}", code, detail);
+    JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] Fault code={:#06x} {}", code, detail);
     if (!bus_) return;
     Event e;
     e.type = EventType::FaultOccurred;

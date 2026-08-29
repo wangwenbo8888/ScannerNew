@@ -1,9 +1,10 @@
-﻿#include "FaultHandler.h"
+#include "FaultHandler.h"
 #include "StateMachine.h"
 #include "base/EventBus.h"
 #include <algorithm>
 #include <chrono>
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 namespace Scanner::service {
 
@@ -43,7 +44,7 @@ void FaultHandler::clearFault(const std::string& faultId) {
                           [&faultId](const FaultRecord& r) { return r.id == faultId; }),
                       active_.end());
     }
-    spdlog::info("[FaultHandler] 故障已清除: {}", faultId);
+    JMW_LOG_INFO("10-FaultHandler", "[FaultHandler] 故障已清除: {}", faultId);
     if (eventBus_) {
         Event evt;
         evt.type = EventType::FaultCleared;
@@ -57,7 +58,7 @@ void FaultHandler::selfCheckPassed() {
     if (!stateMachine_) return;
     if (stateMachine_->getCurrentState() != SystemState::FaultSelfCheck) return;
     if (!stateMachine_->transition(EventType::SelfCheckPassed).success) return;  // 竞态下他者已离开 S7
-    spdlog::info("[FaultHandler] 自检通过，恢复 lastHealthy 态");
+    JMW_LOG_INFO("10-FaultHandler", "[FaultHandler] 自检通过，恢复 lastHealthy 态");
     if (eventBus_) {
         Event evt;
         evt.type = EventType::LedControl;
@@ -82,7 +83,7 @@ void FaultHandler::start() {
                         /*viaBus=*/true);
         });
     started_ = true;
-    spdlog::info("[FaultHandler] 已启动");
+    JMW_LOG_INFO("10-FaultHandler", "[FaultHandler] 已启动");
 }
 
 void FaultHandler::stop() {
@@ -114,7 +115,7 @@ void FaultHandler::handleFault(int sourceId, FaultSeverity severity,
                 ++hit->count;  // 防风暴：只计数——不发事件不转态
                 if (hit->count == 2) {  // 窗口内首次抑制打一条汇总（后续抑制不刷屏）
                     auto nit = sourceNames_.find(sourceId);  // 锁内直查（sourceName 会重入锁）
-                    spdlog::info("[FaultHandler] 同源同类故障 1s 窗口内聚合：source={}({}) severity={} count={}",
+                    JMW_LOG_INFO("10-FaultHandler", "[FaultHandler] 同源同类故障 1s 窗口内聚合：source={}({}) severity={} count={}",
                                  nit != sourceNames_.end() ? nit->second : std::to_string(sourceId),
                                  sourceId, static_cast<int>(severity), hit->count);
                 }
@@ -138,10 +139,10 @@ void FaultHandler::handleFault(int sourceId, FaultSeverity severity,
     // ── 日志层（锁外）：关键路径强制日志——Error 级以上 error，其余 info
     const std::string name = sourceName(sourceId);
     if (severity >= FaultSeverity::Error) {
-        spdlog::error("[FaultHandler] 故障 source={}({}) severity={} : {}",
+        JMW_LOG_ERROR("10-FaultHandler", "[FaultHandler] 故障 source={}({}) severity={} : {}",
                       name, sourceId, static_cast<int>(severity), message);
     } else {
-        spdlog::info("[FaultHandler] 故障 source={}({}) severity={} : {}",
+        JMW_LOG_INFO("10-FaultHandler", "[FaultHandler] 故障 source={}({}) severity={} : {}",
                      name, sourceId, static_cast<int>(severity), message);
     }
 
@@ -149,7 +150,7 @@ void FaultHandler::handleFault(int sourceId, FaultSeverity severity,
     // 订阅口不做故障链动作：EventBus 同步分发持总线锁，锁内 transition 会经
     // StateChanged publish 重入死锁——外部源按 §4.6 接 reportFault 注入口
     if (viaBus && severity >= FaultSeverity::Error) {
-        spdlog::warn("[FaultHandler] 外部 Error 级故障经总线通道仅记档——应接 reportFault 注入口走完整故障链");
+        JMW_LOG_WARN("10-FaultHandler", "[FaultHandler] 外部 Error 级故障经总线通道仅记档——应接 reportFault 注入口走完整故障链");
     }
     if (!viaBus && severity >= FaultSeverity::Error && stateMachine_) {
         const SystemState cur = stateMachine_->getCurrentState();

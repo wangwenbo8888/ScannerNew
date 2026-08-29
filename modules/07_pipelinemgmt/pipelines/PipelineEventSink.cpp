@@ -4,6 +4,7 @@
 #include "base/EventBus.h"
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 namespace Scanner::pipeline {
 
@@ -47,11 +48,11 @@ void EventBusEventSink::publish(Scanner::QualityFlag q, int32_t code,
 
     // EventBus 为控制通道不携带载荷，msg 落 spdlog 留存（防静默丢失）
     if (severity == Scanner::FaultSeverity::Error) {
-        spdlog::error("[pipemgmt] code={} msg={}", code, msg);
+        JMW_LOG_ERROR("07-EventSink", "[pipemgmt] code={} msg={}", code, msg);
     } else if (severity == Scanner::FaultSeverity::Info) {
-        spdlog::info("[pipemgmt] code={} msg={}", code, msg);
+        JMW_LOG_INFO("07-EventSink", "[pipemgmt] code={} msg={}", code, msg);
     } else {
-        spdlog::warn("[pipemgmt] code={} msg={}", code, msg);
+        JMW_LOG_WARN("07-EventSink", "[pipemgmt] code={} msg={}", code, msg);
     }
     bus_->publish(e);
 }

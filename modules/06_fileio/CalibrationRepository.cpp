@@ -5,6 +5,7 @@
 #include "CalibrationRepository.h"
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <algorithm>
 #include <ctime>
 #include <filesystem>
@@ -204,10 +205,29 @@ Scanner::Result CalibrationRepository::write(const std::string& payloadJson, cv:
         return Scanner::Result::fail("原子改名失败(数据保留于 " + tmpPath + "): " + ec.message());
     }
 
-    std::lock_guard<std::mutex> lock(mtx_);
-    doc_ = std::move(doc);
-    hasData_ = true;
-    lastPath_ = path;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        doc_ = std::move(doc);
+        hasData_ = true;
+        lastPath_ = path;
+    }
+    // 落盘快照（一次性）＋门禁自检：写完即验 readyForScan，缺项当场 warn——
+    // 02 门禁失败时日志里早有根因，不用等扫描期才发现（锁外调——readyForScan 自取锁）
+    {
+        ReadyReport rr;
+        const Scanner::Result rdy = readyForScan(rr);
+        std::string missing;
+        for (size_t i = 0; i < rr.missing.size(); ++i) {
+            if (i) missing += ",";
+            missing += rr.missing[i];
+        }
+        JMW_LOG_INFO("06-CalibRepo",
+            "[CalibRepo] 落盘: {} ({}x{}) readyForScan={} 缺项={}",
+            path, imageSize.width, imageSize.height,
+            rdy.success ? "ok" : "FAIL", missing.empty() ? "无" : missing);
+        if (!missing.empty())
+            JMW_LOG_WARN("06-CalibRepo", "[CalibRepo] 落盘后门禁缺项: {}", missing);
+    }
     return Scanner::Result::ok("标定仓库已落盘: " + path);
 }
 
@@ -242,16 +262,21 @@ Scanner::Result CalibrationRepository::load(const std::string& path) {
                 nlohmann::json laser = nlohmann::json::parse(lfs);
                 if (laser.is_object()) mergeFactoryLaser(adapted, laser);
             } catch (const std::exception&) {
-                spdlog::warn("工厂激光档解析失败(忽略，激光档表将报缺): {}", laserPath.string());
+                JMW_LOG_WARN("06-CalibRepo", "工厂激光档解析失败(忽略，激光档表将报缺): {}", laserPath.string());
             }
         }
         doc = std::move(adapted);
     }
 
-    std::lock_guard<std::mutex> lock(mtx_);
-    doc_ = std::move(doc);
-    hasData_ = true;
-    lastPath_ = path;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        doc_ = std::move(doc);
+        hasData_ = true;
+        lastPath_ = path;
+    }
+    // 装载快照（一次性）——表档数量即后续查表/门禁的运行依据
+    JMW_LOG_INFO("06-CalibRepo", "[CalibRepo] 装载: {} 立体档={}档 激光档={}档",
+                 path, stereoTempTable().tiers.size(), planeMapTiers().tiers.size());
     return Scanner::Result::ok();
 }
 

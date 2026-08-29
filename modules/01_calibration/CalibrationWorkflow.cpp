@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // CalibrationWorkflow.cpp — 标定工作流实现（编排壳；A/B 移交 07 对象）
 //
 // P6-T29b：旧棋盘格 6 步链（findChessboardCorners/内参/外参/矫正/温度表）
@@ -19,6 +19,7 @@
 #include "core/common/json_utils.h"     // calib::jsonToMatAuto
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <utility>
 
 namespace Scanner::workflow {
@@ -42,7 +43,7 @@ public:
         if (!repo) return false;
         const auto r = repo->write(json, imageSize_);
         if (!r.success) {
-            spdlog::error("[CalibWorkflow] 标定仓库写入失败: {}", r.message);
+            JMW_LOG_ERROR("01-CalibWorkflow", "[CalibWorkflow] 标定仓库写入失败: {}", r.message);
             return false;
         }
         return true;
@@ -103,21 +104,21 @@ Result CalibrationWorkflow::initialize() {
         setTargets(std::move(cfg.targets));
         setBoardPoints(std::move(cfg.boardPoints));
         applyInitialParamsJson(cfg.initialParams, initialParams_);
-        spdlog::info("[CalibWorkflow] 会话档已装载: 目标 {} / 板点 {}",
+        JMW_LOG_INFO("01-CalibWorkflow", "[CalibWorkflow] 会话档已装载: 目标 {} / 板点 {}",
                      targets_.size(), boardPoints_.size());
     } else {
-        spdlog::info("[CalibWorkflow] 未装载会话档（{}）——空参防言语义", lr.message);
+        JMW_LOG_INFO("01-CalibWorkflow", "[CalibWorkflow] 未装载会话档（{}）——空参防言语义", lr.message);
     }
 
     if (!paramsReady()) {
         state_ = WorkflowState::Error;
         const std::string msg =
             "标定装配参数不全（初始参数组/25 目标表/板点）——TODO 接入期：真实参数来源装载";
-        spdlog::error("[CalibWorkflow] {}", msg);
+        JMW_LOG_ERROR("01-CalibWorkflow", "[CalibWorkflow] {}", msg);
         notifyError(msg);
         return Result::fail(msg);
     }
-    spdlog::info("[CalibWorkflow] 初始化（A/B 参数齐备：目标 {} / 板点 {} / 分辨率 {}x{}）",
+    JMW_LOG_INFO("01-CalibWorkflow", "[CalibWorkflow] 初始化（A/B 参数齐备：目标 {} / 板点 {} / 分辨率 {}x{}）",
                  targets_.size(), boardPoints_.size(),
                  initialParams_.imageWidth, initialParams_.imageHeight);
     return Result::ok();
@@ -128,7 +129,7 @@ Result CalibrationWorkflow::start() {
     if (!paramsReady()) {                     // UI 未检 initialize 返回值亦不崩
         state_ = WorkflowState::Error;
         const std::string msg = "标定装配参数不全——先 initialize 校验（TODO 接入期：真实参数来源）";
-        spdlog::error("[CalibWorkflow] {}", msg);
+        JMW_LOG_ERROR("01-CalibWorkflow", "[CalibWorkflow] {}", msg);
         notifyError(msg);
         return Result::fail(msg);
     }
@@ -145,7 +146,7 @@ Result CalibrationWorkflow::start() {
     state_ = WorkflowState::Running;
     running_ = true;
     notifyProgress(0, Scanner::pipeline::PostureSessionData::kTargetCount, "姿态采集");
-    spdlog::info("[CalibWorkflow] 已启动（A 姿态采集移交 07 PosturePipeline）");
+    JMW_LOG_INFO("01-CalibWorkflow", "[CalibWorkflow] 已启动（A 姿态采集移交 07 PosturePipeline）");
     return Result::ok();
 }
 
@@ -169,12 +170,12 @@ Result CalibrationWorkflow::startPosture() {
             calibThread_ = std::thread(
                 [this, s = std::move(session)]() mutable { runCompute(std::move(s)); });
         } catch (const std::exception& e) {
-            spdlog::error("[CalibWorkflow] B 批算线程创建失败: {}", e.what());
+            JMW_LOG_ERROR("01-CalibWorkflow", "[CalibWorkflow] B 批算线程创建失败: {}", e.what());
             state_ = WorkflowState::Error;
             running_ = false;
             notifyError(std::string("标定计算线程创建失败: ") + e.what());
             // 异步失败同样合账（§3.3 不许悬死 S3——会话已终，回报 false）
-            spdlog::info("[01-CalibWorkflow] 标定完成 ok=false（B 线程创建失败）");
+            JMW_LOG_INFO("01-CalibWorkflow", "[01-CalibWorkflow] 标定完成 ok=false（B 线程创建失败）");
             if (onFinished_) onFinished_(false);
         }
     });
@@ -187,7 +188,7 @@ Result CalibrationWorkflow::startPosture() {
     if (!cr.success) {
         posture_.reset();
         const std::string msg = "PosturePipeline 装配失败: " + cr.message;
-        spdlog::error("[CalibWorkflow] {}", msg);
+        JMW_LOG_ERROR("01-CalibWorkflow", "[CalibWorkflow] {}", msg);
         notifyError(msg);
         return Result::fail(msg);
     }
@@ -196,7 +197,7 @@ Result CalibrationWorkflow::startPosture() {
     if (!sr.success) {
         posture_.reset();
         const std::string msg = "PosturePipeline 启动失败: " + sr.message;
-        spdlog::error("[CalibWorkflow] {}", msg);
+        JMW_LOG_ERROR("01-CalibWorkflow", "[CalibWorkflow] {}", msg);
         notifyError(msg);
         return Result::fail(msg);
     }
@@ -209,7 +210,7 @@ Result CalibrationWorkflow::startPosture() {
 void CalibrationWorkflow::runCompute(Scanner::pipeline::PostureSessionData session) {
     namespace sp = Scanner::pipeline;
 
-    spdlog::info("[CalibWorkflow] A 集齐 {} 姿态——B 标定批算启动", session.collectedCount);
+    JMW_LOG_INFO("01-CalibWorkflow", "[CalibWorkflow] A 集齐 {} 姿态——B 标定批算启动", session.collectedCount);
     notifyProgress(0, 100, "标定计算");
 
     compute_ = std::make_unique<sp::CalibComputePipeline>();   // PJC 初值/门禁阈值默认（T23 联调）
@@ -247,14 +248,14 @@ void CalibrationWorkflow::runCompute(Scanner::pipeline::PostureSessionData sessi
     state_ = res.success ? WorkflowState::Completed : WorkflowState::Error;
     running_ = false;
     notifyProgress(100, 100, res.success ? "标定完成" : "标定失败");
-    spdlog::info("[CalibWorkflow] B 批算结束: success={} rmsL={:.4f} rmsR={:.4f} stereo={:.4f}",
+    JMW_LOG_INFO("01-CalibWorkflow", "[CalibWorkflow] B 批算结束: success={} rmsL={:.4f} rmsR={:.4f} stereo={:.4f}",
                  res.success, result_.reprojErrorLeft, result_.reprojErrorRight,
                  result_.stereoError);
 
     // 完成回报（P5-T14）：合账钩子——app 侧注入调 gate->notifyCompleted 切 S2。
     // 01 不依赖 10：此处经 std::function 回调反向解耦（JMW_LOG 宏头在 10，
     // 以下按其展开格式直写 spdlog——输出与 JMW_LOG_INFO 等价，§8.2 生命周期）
-    spdlog::info("[01-CalibWorkflow] 标定完成 ok={}", res.success);
+    JMW_LOG_INFO("01-CalibWorkflow", "[01-CalibWorkflow] 标定完成 ok={}", res.success);
     if (onFinished_) onFinished_(res.success);
 }
 
@@ -277,7 +278,7 @@ Result CalibrationWorkflow::setProgressCallback(WorkflowCallback cb) {
 }
 
 void CalibrationWorkflow::notifyProgress(int current, int total, const std::string& stage) {
-    spdlog::debug("[CalibWorkflow] {} ({}/{})", stage, current, total);
+    JMW_LOG_DEBUG("01-CalibWorkflow", "[CalibWorkflow] {} ({}/{})", stage, current, total);
     if (!callback_) return;
     WorkflowProgress p;
     p.state = state_.load();

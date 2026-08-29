@@ -12,10 +12,12 @@
 #include <numeric>
 #include <utility>
 
-#include <spdlog/spdlog.h>
+#include "common/calib_logging.h"
 #include <nlohmann/json.hpp>
 
 namespace calib {
+
+CALIB_DEFINE_LOG_TAG(0, InverseDistort);
 
 OperatorInfo getInverseDistortCPUInfo() {
     return OperatorInfo{"InverseDistortCPU", SCANNER_VERSION_MAJOR, SCANNER_VERSION_MINOR, OperatorType::CPU};
@@ -135,7 +137,7 @@ InverseDistortParams InverseDistortParams::fromJson(const std::string& json_path
     try {
         std::ifstream ifs(json_path);
         if (!ifs.is_open()) {
-            spdlog::warn("Cannot open params file: " + json_path + ", using defaults");
+            CALIB_LOG_WARN("Cannot open params file: " + json_path + ", using defaults");
             return params;
         }
 
@@ -159,9 +161,9 @@ InverseDistortParams InverseDistortParams::fromJson(const std::string& json_path
         params.R1 = calib::jsonToMat(calib::getRequired<nlohmann::json>(j, "R1", ctx), 3, 3);
         params.P1 = calib::jsonToMat(calib::getRequired<nlohmann::json>(j, "P1", ctx), 3, 4);
 
-        spdlog::info(std::string("[01-InverseDistortCpu]") + " Loaded params from " + json_path);
+        CALIB_LOG_INFO(std::string("[01-InverseDistortCpu]") + " Loaded params from " + json_path);
     } catch (const std::exception& e) {
-        spdlog::warn("Failed to parse params file " + json_path + ": " + e.what());
+        CALIB_LOG_WARN("Failed to parse params file " + json_path + ": " + e.what());
     }
     return params;
 }
@@ -195,7 +197,7 @@ public:
 
         if (rectifiedPoints.empty()) {
             result.message = "Empty input points";
-            spdlog::warn(std::string(kLogTag) + " Empty input points");
+            CALIB_LOG_WARN(std::string(kLogTag) + " Empty input points");
             return false;
         }
 
@@ -245,7 +247,7 @@ public:
 
         result.success = true;
         result.message = "OK";
-        spdlog::info(std::string(kLogTag) + " Execute completed: "
+        CALIB_LOG_INFO(std::string(kLogTag) + " Execute completed: "
                      + std::to_string(rectifiedPoints.size()) + " points, max iters="
                      + std::to_string(result.maxIterationsUsed));
         return true;
@@ -256,7 +258,7 @@ public:
         std::vector<cv::Point2f>& distortedPixelPoints)
     {
         if (undistortedNormPoints.empty()) {
-            spdlog::warn(std::string(kLogTag) + " applyDistortion: empty input");
+            CALIB_LOG_WARN(std::string(kLogTag) + " applyDistortion: empty input");
             return false;
         }
 
@@ -282,7 +284,7 @@ public:
         std::vector<cv::Point2f>& unrectifiedNormPoints)
     {
         if (rectifiedPoints.empty()) {
-            spdlog::warn(std::string(kLogTag) + " inverseRectify: empty input");
+            CALIB_LOG_WARN(std::string(kLogTag) + " inverseRectify: empty input");
             return false;
         }
 
@@ -370,7 +372,7 @@ public:
         vr.message = vr.passed ? "PASS" : "FAIL: max error " + std::to_string(vr.maxError)
                      + " > threshold " + std::to_string(maxAllowableError);
 
-        spdlog::info(std::string(kLogTag) + " verifyRoundTrip: " + vr.message
+        CALIB_LOG_INFO(std::string(kLogTag) + " verifyRoundTrip: " + vr.message
                      + " mean=" + std::to_string(vr.meanError)
                      + " max=" + std::to_string(vr.maxError));
         return vr;
@@ -403,7 +405,7 @@ private:
 InverseDistortCPU::InverseDistortCPU(const InverseDistortParams& params)
     : pImpl_(std::make_unique<Impl>(params))
 {
-    spdlog::info(std::string(kLogTag) + " initialized");
+    CALIB_LOG_INFO(std::string(kLogTag) + " initialized");
 }
 
 InverseDistortCPU::~InverseDistortCPU() = default;

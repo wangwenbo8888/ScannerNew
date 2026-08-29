@@ -18,6 +18,7 @@
 #include <utility>
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 #include "pipelines/ISceneFeed.h"
 
@@ -178,7 +179,7 @@ void PosturePipeline::attachRing(Scanner::data::SlotRing<Scanner::data::CycleUni
 
 void PosturePipeline::attachTargets(const double (*targets)[16], int count) {
     if (count <= 0 || count > PostureSessionData::kTargetCount) {
-        spdlog::error("[PosturePipeline] attachTargets: count={} 非法（须 1..{}）",
+        JMW_LOG_ERROR("07-PosturePipeline", "[PosturePipeline] attachTargets: count={} 非法（须 1..{}）",
                       count, PostureSessionData::kTargetCount);
         return;                                   // 保持未附目标态 → configure fail
     }
@@ -256,7 +257,7 @@ Scanner::Result PosturePipeline::configure(const PipelineDeps& deps) {
     table_ = std::make_unique<PostureConfirmTable>(
         targets_, targetCount_, confirmCfg_,
         [](int poseIdx) {
-            spdlog::info("[PosturePipeline] 姿态 {} 确认（渲染切下一目标）", poseIdx);
+            JMW_LOG_INFO("07-PosturePipeline", "[PosturePipeline] 姿态 {} 确认（渲染切下一目标）", poseIdx);
         },
         [this]() {
             runtime_.requestStop();               // 停抓新周期（原子置位，lane 线程内安全）
@@ -321,6 +322,11 @@ Scanner::Result PosturePipeline::start() {
         return Result::fail(std::string("PosturePipeline::start: 收口 watcher 线程创建失败: ") +
                             e.what());
     }
+    // 会话参数快照（一次性——姿态判定口径的运行依据）
+    JMW_LOG_INFO("07-PosturePipeline",
+        "[PosturePipeline] 会话启动: 目标数={} 确认streak={:.0f} 平移阈={}mm 角度阈={}度",
+        targetCount_, static_cast<double>(confirmCfg_.confirmStreak),
+        confirmCfg_.transThresholdMm, confirmCfg_.angleThresholdDeg);
 
     return Result::ok();
 }
@@ -392,6 +398,14 @@ void PosturePipeline::watcherLoop() {
         completionFired_ = true;                  // 先标记（与 stop 迟到补发互斥）
     }
     state_.store(State::Stopped);                 // 先转停（completion 可见时 isRunning 已 false）
+    // 收口汇总（一次性——集齐路径的最终账本；含 runtime 四计数供丢帧排查）
+    {
+        const auto st = runtime_.stats();
+        JMW_LOG_INFO("07-PosturePipeline",
+            "[PosturePipeline] 集齐收口: 已确认={}/{} 已处理={} 跳帧={} GPU拒={} 钩子异常={}",
+            table_ ? table_->collectedCount() : 0, targetCount_,
+            st.processed, st.droppedSkips, st.gpuRejects, st.finalizeFails);
+    }
     if (continueWithB_ && table_) continueWithB_(table_->takeSessionData());
 }
 
@@ -452,7 +466,7 @@ std::shared_ptr<PostureLaneOps> PosturePipeline::makeOps() const {
         // 参数时算子 Execute 优雅失败 → eFinalize 沿用配准 R/T
         ops->poseEstimate = std::make_unique<calib::PoseEstimateCPU>();
     } catch (const std::exception& e) {
-        spdlog::error("[PosturePipeline] lane 算子集构造失败: {}", e.what());
+        JMW_LOG_ERROR("07-PosturePipeline", "[PosturePipeline] lane 算子集构造失败: {}", e.what());
         return nullptr;
     }
     return ops;
@@ -472,7 +486,7 @@ PosturePipeline::Hooks PosturePipeline::assembleChains() {
         (void)frontReady;                         // A 模式不用：runtime 兜底提交（天然串行）
 #ifndef JMW_BUILD_CUDA
         (void)guard; (void)frame; (void)front;
-        spdlog::error("[PosturePipeline] 无 CUDA 构建仅编译守卫，GPU 前段运行不支持");
+        JMW_LOG_ERROR("07-PosturePipeline", "[PosturePipeline] 无 CUDA 构建仅编译守卫，GPU 前段运行不支持");
         return false;
 #else
         if (!front.ops) {                         // 每 lane 首周期惰性建（先于 pChain）
@@ -490,22 +504,22 @@ PosturePipeline::Hooks PosturePipeline::assembleChains() {
                               std::vector<cv::Rect>& rois) -> bool {
             auto m = maskOp->Execute(gray, stream);
             if (!m.success) {
-                spdlog::warn("[PosturePipeline] mask_extract 失败: {}", m.message);
+                JMW_LOG_WARN("07-PosturePipeline", "[PosturePipeline] mask_extract 失败: {}", m.message);
                 return false;
             }
             auto f = filterOp->Execute(m.d_cleanedMask, stream);
             if (!f.success) {
-                spdlog::warn("[PosturePipeline] frame_filter 失败: {}", f.message);
+                JMW_LOG_WARN("07-PosturePipeline", "[PosturePipeline] frame_filter 失败: {}", f.message);
                 return false;
             }
             if (!f.isMarkerFrame) {               // maskRatio<阈=激光线帧：销毁整周期
-                spdlog::info("[PosturePipeline] cycle {} 激光线帧（maskRatio={:.4f}），"
+                JMW_LOG_INFO("07-PosturePipeline", "[PosturePipeline] cycle {} 激光线帧（maskRatio={:.4f}），"
                              "整周期销毁", frame->id, f.maskRatio);
                 return false;
             }
             auto c = cclOp->Execute(m.d_cleanedMask, stream);
             if (!c.success) {
-                spdlog::warn("[PosturePipeline] ccl 失败: {}", c.message);
+                JMW_LOG_WARN("07-PosturePipeline", "[PosturePipeline] ccl 失败: {}", c.message);
                 return false;
             }
             rois = c.toRectList();                // host 数据（算子内已同步下载）
@@ -520,7 +534,7 @@ PosturePipeline::Hooks PosturePipeline::assembleChains() {
                             front.roisR))
                 return false;
         } catch (const std::exception& e) {
-            spdlog::error("[PosturePipeline] GPU 前段异常: {}", e.what());
+            JMW_LOG_ERROR("07-PosturePipeline", "[PosturePipeline] GPU 前段异常: {}", e.what());
             return false;
         }
         return true;
@@ -538,7 +552,7 @@ PosturePipeline::Hooks PosturePipeline::assembleChains() {
             // false=本周期无有效标记点：正常降级（E 段沿用快照），不销毁周期
             runMarkerChain(*frame, *front.ops, front, result);
         } catch (const std::exception& e) {
-            spdlog::error("[PosturePipeline] pChain 异常: {}", e.what());
+            JMW_LOG_ERROR("07-PosturePipeline", "[PosturePipeline] pChain 异常: {}", e.what());
             return Result::fail(std::string("PosturePipeline pChain 异常: ") + e.what());
         }
         return Result::ok();
@@ -555,7 +569,7 @@ PosturePipeline::Hooks PosturePipeline::assembleChains() {
         try {
             pr = fut.get();                       // pChain Result/异常均在此消费
         } catch (const std::exception& e) {
-            spdlog::error("[PosturePipeline] pChain future 异常: {}", e.what());
+            JMW_LOG_ERROR("07-PosturePipeline", "[PosturePipeline] pChain future 异常: {}", e.what());
             return Result::fail(std::string("pChain future 异常: ") + e.what());
         }
         if (!pr.success) return pr;               // P 链失败=周期丢弃（不入表）
@@ -577,7 +591,7 @@ PosturePipeline::Hooks PosturePipeline::assembleChains() {
                 }
             }
         } catch (const std::exception& e) {
-            spdlog::warn("[PosturePipeline] pose_estimate 异常，沿用配准 R/T: {}",
+            JMW_LOG_WARN("07-PosturePipeline", "[PosturePipeline] pose_estimate 异常，沿用配准 R/T: {}",
                          e.what());
         }
 
@@ -587,7 +601,7 @@ PosturePipeline::Hooks PosturePipeline::assembleChains() {
             liveR, liveT, std::move(cycle),
             std::move(result.ellipseCentersL), std::move(result.ellipseCentersR));
         if (poseIdx >= 0)
-            spdlog::info("[PosturePipeline] cycle {} 确认姿态 {}/{}",
+            JMW_LOG_INFO("07-PosturePipeline", "[PosturePipeline] cycle {} 确认姿态 {}/{}",
                          frame->id, poseIdx + 1, table_->collectedCount());
 
         // 4) 每帧实时推送（实时姿态+标志点检出数；新确认时 confirmedCount 已递增）
@@ -697,7 +711,7 @@ void PosturePipeline::runRegistration(uint64_t cycleId, PostureLaneOps& ops,
         calib::AtomicFrameState::store(prevState_, std::move(st));
         return;
     }
-    spdlog::warn("[PosturePipeline] optical_flow_fuse 失败（{}），转 frame_fuse 兜底",
+    JMW_LOG_WARN("07-PosturePipeline", "[PosturePipeline] optical_flow_fuse 失败（{}），转 frame_fuse 兜底",
                  fr.message);
 
     // —— 兜底 frame_fuse（本周期 vs 快照点集；不回写快照保 globalId 链完整）——
@@ -708,7 +722,7 @@ void PosturePipeline::runRegistration(uint64_t cycleId, PostureLaneOps& ops,
         fill(ff.R, ff.T);
         return;
     }
-    spdlog::warn("[PosturePipeline] frame_fuse 兜底亦失败（{}），沿用快照 R/T", ff.message);
+    JMW_LOG_WARN("07-PosturePipeline", "[PosturePipeline] frame_fuse 兜底亦失败（{}），沿用快照 R/T", ff.message);
 
     // —— 再失败：沿用快照 R/T ——
     fill(matxFromArr9(prev->R), vec3FromArr3(prev->T));

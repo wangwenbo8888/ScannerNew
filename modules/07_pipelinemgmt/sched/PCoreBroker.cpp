@@ -4,6 +4,7 @@
 #include "sched/PCoreBroker.h"
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <windows.h>
 
 namespace Scanner::pipeline::sched {
@@ -26,13 +27,13 @@ Result PCoreBroker::start(int workers, const std::vector<uint64_t>& coreMasks) {
         const uint64_t mask = (static_cast<size_t>(i) < coreMasks.size()) ? coreMasks[i] : 0;
         if (mask != 0) {
             if (SetThreadAffinityMask(handle, static_cast<DWORD_PTR>(mask)) == 0) {
-                spdlog::warn("PCoreBroker: SetThreadAffinityMask(mask={:#x}) 失败, err={}",
+                JMW_LOG_WARN("07-PCoreBroker", "PCoreBroker: SetThreadAffinityMask(mask={:#x}) 失败, err={}",
                              mask, GetLastError());
             }
         }
         // P 核 worker 固定提一档优先级（后续 SchedConfig 接线再参数化）
         if (!SetThreadPriority(handle, THREAD_PRIORITY_ABOVE_NORMAL)) {
-            spdlog::warn("PCoreBroker: SetThreadPriority(AboveNormal) 失败, err={}", GetLastError());
+            JMW_LOG_WARN("07-PCoreBroker", "PCoreBroker: SetThreadPriority(AboveNormal) 失败, err={}", GetLastError());
         }
     }
     return Result::ok();

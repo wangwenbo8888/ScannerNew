@@ -4,6 +4,7 @@
 
 #include "MCUDriver.h"
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <chrono>
 #include <cstdlib>
 
@@ -103,7 +104,7 @@ void MCUDriver::writeLoop() {
         const auto r = serial_.write(frame);    // 阻塞只落在本线程（实测驱动可卡 2~2.5s）
         lastWrite = std::chrono::steady_clock::now();
         if (!r.success)
-            spdlog::warn("[MCUDriver] 串口写失败: {}（帧 '{}'）", r.message, frame);
+            JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 串口写失败: {}（帧 '{}'）", r.message, frame);
         {
             std::lock_guard<std::mutex> lock(writeMtx_);
             if (writeQueue_.empty()) drainCv_.notify_all();     // 排空通知（收口等待用）
@@ -186,7 +187,7 @@ Scanner::Result MCUDriver::open(const std::string& port, int baud) {
         rxRunning_.store(true);
         rxThread_ = std::thread(&MCUDriver::rxLoop, this);
     }
-    spdlog::info("[MCUDriver] 串口已打开: {} @ {} baud (v{})", target, baud,
+    JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 串口已打开: {} @ {} baud (v{})", target, baud,
                  version_ == serial::FrameCodec::Version::V3 ? 3 : 2);
     return Scanner::Result::ok();
 }
@@ -211,7 +212,7 @@ void MCUDriver::stopWriteThread() {
 // 注：探测的 N12Z1 与 open 后 DeviceManager 的 enterSelfCheck 重复——Z1 幂等，无害。
 std::string MCUDriver::probeAutoPort(int baud) {
     const auto ports = serial::SerialPort::listPorts();
-    if (ports.empty()) spdlog::warn("[MCUDriver] 自动搜口：本机未枚举到任何 COM 口");
+    if (ports.empty()) JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 自动搜口：本机未枚举到任何 COM 口");
     for (const auto& port : ports) {
         if (!serial_.open(port, baud).success) continue;
         open_.store(true);
@@ -226,13 +227,13 @@ std::string MCUDriver::probeAutoPort(int baud) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (probeHit_.load(std::memory_order_acquire)) {
-            spdlog::info("[MCUDriver] 自动搜口命中: {}（{} 口中）", port, ports.size());
+            JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 自动搜口命中: {}（{} 口中）", port, ports.size());
             // 退出自检：探测的 N12Z1 会令固件进自检模式（实测回 "Self check begins"）
             // ——不退则固件卡自检态：不回显后续命令、灯/采集行为异常（灯闪一下被复位）
             channel_.sendFireAndForget("N12Z0");
             return port;
         }
-        spdlog::debug("[MCUDriver] 自动搜口: {} 无应答，试下一口", port);
+        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 自动搜口: {} 无应答，试下一口", port);
         close();                           // 停 rx 线程+关串口+open_ 复位（幂等）
     }
     return {};
@@ -245,7 +246,7 @@ Scanner::Result MCUDriver::close() {
     }
     stopWriteThread();                    // 写线程先收（队列排空后）——再关串口防截断
     serial_.close();                      // rx 靠 rxRunning_ 退出：read 受 COMMTIMEOUTS 50ms 解堵，join 有界
-    if (open_.exchange(false)) spdlog::info("[MCUDriver] 串口已关闭");
+    if (open_.exchange(false)) JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 串口已关闭");
     return Scanner::Result::ok();
 }
 
@@ -308,7 +309,7 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
         serial::TempFrame t;
         if (serial::parseTempPayload(f.payload, t)) {
             t.seq = f.seq; t.ts = now;
-            if (!tempRing_.push(t)) spdlog::debug("[MCUDriver] 遥测环满丢新(计{})", tempRing_.dropped());
+            if (!tempRing_.push(t)) JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 遥测环满丢新(计{})", tempRing_.dropped());
         }
         else onParseFail(f.payload);
         break;
@@ -317,7 +318,7 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
         serial::RawKeyEvent k;
         if (serial::parseKeyPayload(f.payload, k)) {
             k.seq = f.seq; k.ts = now;
-            if (!keyRing_.push(k)) spdlog::warn("[MCUDriver] 事件环满丢新(K,计{})", keyRing_.dropped());
+            if (!keyRing_.push(k)) JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 事件环满丢新(K,计{})", keyRing_.dropped());
         }
         else onParseFail(f.payload);   // v2 匿名 K1;/K0; 落此（§2.5 按键链停用）
         break;
@@ -326,7 +327,7 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
         serial::StatusFrame s;
         if (serial::parseStatusPayload(f.payload, s)) {
             s.seq = f.seq; s.ts = now;
-            if (!statusRing_.push(s)) spdlog::debug("[MCUDriver] 事件环满丢新(S,计{})", statusRing_.dropped());
+            if (!statusRing_.push(s)) JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 事件环满丢新(S,计{})", statusRing_.dropped());
         }
         else onParseFail(f.payload);
         break;
@@ -335,7 +336,7 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
         serial::AckFrame a;
         if (serial::parseAckPayload(f.payload, a)) {
             a.seq = f.seq;
-            if (!ackRing_.push(a)) spdlog::warn("[MCUDriver] 事件环满丢新(A,计{})", ackRing_.dropped());
+            if (!ackRing_.push(a)) JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 事件环满丢新(A,计{})", ackRing_.dropped());
         }
         else onParseFail(f.payload);
         break;
@@ -356,7 +357,7 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
 
 void MCUDriver::onParseFail(const std::string& payload) {
     const uint64_t n = parseFailCount_.fetch_add(1, std::memory_order_relaxed) + 1;
-    spdlog::warn("[MCUDriver] 上行载荷丢弃(计{}): '{}'", n, payload);
+    JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 上行载荷丢弃(计{}): '{}'", n, payload);
 }
 
 // v2 固件裸文本行（rx 线程）：数值行=温度上报（实测 ~133，单位待定——非合理 ℃，
@@ -370,9 +371,9 @@ void MCUDriver::feedTextLine(const std::string& line) {
     const double v = std::strtod(line.c_str(), &endp);
     if (endp != line.c_str() && *endp == '\0') {
         probeHit_.store(true, std::memory_order_release);
-        spdlog::debug("[MCUDriver] v2 数值行: {}", v);
+        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] v2 数值行: {}", v);
     } else {
-        spdlog::debug("[MCUDriver] v2 文本行: '{}'", line);
+        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] v2 文本行: '{}'", line);
     }
 }
 
@@ -397,7 +398,7 @@ void MCUDriver::accountTempSeq(uint16_t seq) {
     if (version_ != serial::FrameCodec::Version::V3) return;   // v2 seq 恒 0——不对账
     if (hasTSeq_ && static_cast<uint8_t>(lastTSeq_ + 1) != static_cast<uint8_t>(seq)) {
         seqGapCount_.fetch_add(1, std::memory_order_relaxed);
-        spdlog::debug("[MCUDriver] T 帧 seq 跳变 {}→{}（丢帧对账计 {}）",
+        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] T 帧 seq 跳变 {}→{}（丢帧对账计 {}）",
                       lastTSeq_, seq, seqGapCount_.load());
     }
     hasTSeq_ = true;
@@ -451,7 +452,7 @@ void MCUDriver::setUplink(hal::McuUplink h) { uplink_ = std::move(h); }
 
 void MCUDriver::setProtocolVersion(serial::FrameCodec::Version v) {
     if (open_.load()) {
-        spdlog::warn("[MCUDriver] setProtocolVersion 开启中调用无效（重开串口才生效）");
+        JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] setProtocolVersion 开启中调用无效（重开串口才生效）");
         return;
     }
     version_ = v;
@@ -474,7 +475,7 @@ void MCUDriver::setAckTimeoutMs(int ms) {            // D-T12b：open 前注入�
     if (ms < 1) ms = 1;                              // 防 tick 活锁（与 Deps 构造防护同口径）
     ackTimeoutMs_ = ms;
     if (!open_.load()) applyVersion();               // 重建 channel 依赖
-    else spdlog::warn("[MCUDriver] setAckTimeoutMs 开启中调用不重建（重开才生效）");
+    else JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] setAckTimeoutMs 开启中调用不重建（重开才生效）");
 }
 
 void MCUDriver::testInjectRaw(const std::string& frameBytes) {

@@ -13,6 +13,7 @@
 #include "pipelines/scan/ScanChains.h"
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <utility>
 #include <vector>
 
@@ -131,7 +132,7 @@ ScanChains::ScanChains(ScanConfig cfg, ScanChainDeps deps)
         initError_ = std::string("依赖校验异常: ") + e.what();   // 如 K1 非 CV_64F
     }
     if (!initError_.empty()) {
-        spdlog::error("[ScanChains] 装配依赖非法，三钩子将恒 fail: {}", initError_);
+        JMW_LOG_ERROR("07-ScanChains", "[ScanChains] 装配依赖非法，三钩子将恒 fail: {}", initError_);
     }
 }
 
@@ -152,9 +153,9 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
         ops->matchScan = std::make_unique<calib::LaserMatchScanCuda>();
         if (deps_.laserTable) {
             if (!ops->matchScan->SetTempTable(deps_.laserTable))
-                spdlog::warn("[ScanChains] laser_match_scan 温度表注入失败（空表？）");
+                JMW_LOG_WARN("07-ScanChains", "[ScanChains] laser_match_scan 温度表注入失败（空表？）");
         } else if (cfg_.enableLaser) {
-            spdlog::warn("[ScanChains] 未注入温度表，激光匹配将失败");
+            JMW_LOG_WARN("07-ScanChains", "[ScanChains] 未注入温度表，激光匹配将失败");
         }                                        // A 模式无表属正常配置，不告警
         ops->recon = std::make_unique<calib::LaserReconstructCuda>();
 #endif
@@ -192,7 +193,7 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
         ops->flowFuse  = std::make_unique<calib::MarkerOpticalFlowFuseCPU>();
         ops->frameFuse = std::make_unique<calib::FrameFuseCPU>();
     } catch (const std::exception& e) {
-        spdlog::error("[ScanChains] lane 算子集构造失败: {}", e.what());
+        JMW_LOG_ERROR("07-ScanChains", "[ScanChains] lane 算子集构造失败: {}", e.what());
         return nullptr;
     }
     return ops;
@@ -209,7 +210,7 @@ ScanChains::Hooks ScanChains::assemble() {
                             ScanFront& front,
                             std::function<void()> frontReady) -> bool {
         if (!initError_.empty()) {
-            spdlog::error("[ScanChains] gpuChain: 装配错误 {}", initError_);
+            JMW_LOG_ERROR("07-ScanChains", "[ScanChains] gpuChain: 装配错误 {}", initError_);
             return false;
         }
         if (!front.ops) {                       // 每 lane 首帧惰性建（先于 frontReady）
@@ -218,7 +219,7 @@ ScanChains::Hooks ScanChains::assemble() {
         }
 #ifndef JMW_BUILD_CUDA
         (void)guard; (void)frame; (void)frontReady;
-        spdlog::error("[ScanChains] 无 CUDA 构建仅编译守卫，GPU 链运行不支持");
+        JMW_LOG_ERROR("07-ScanChains", "[ScanChains] 无 CUDA 构建仅编译守卫，GPU 链运行不支持");
         return false;
 #else
         ScanLaneOps& ops = *front.ops;
@@ -231,16 +232,16 @@ ScanChains::Hooks ScanChains::assemble() {
         try {
             sepL = ops.sep->Execute(frame->grayL, stream);
             if (!sepL.success) {
-                spdlog::warn("[ScanChains] mask_separation L 失败: {}", sepL.message);
+                JMW_LOG_WARN("07-ScanChains", "[ScanChains] mask_separation L 失败: {}", sepL.message);
                 return false;
             }
             sepR = ops.sep->Execute(frame->grayR, stream);
             if (!sepR.success) {
-                spdlog::warn("[ScanChains] mask_separation R 失败: {}", sepR.message);
+                JMW_LOG_WARN("07-ScanChains", "[ScanChains] mask_separation R 失败: {}", sepR.message);
                 return false;
             }
         } catch (const std::exception& e) {
-            spdlog::error("[ScanChains] mask_separation 异常: {}", e.what());
+            JMW_LOG_ERROR("07-ScanChains", "[ScanChains] mask_separation 异常: {}", e.what());
             return false;
         }
 
@@ -249,16 +250,16 @@ ScanChains::Hooks ScanChains::assemble() {
         try {
             cclL = ops.ccl->Execute(sepL.d_markingPointMask, stream);
             if (!cclL.success) {
-                spdlog::warn("[ScanChains] ccl L 失败: {}", cclL.message);
+                JMW_LOG_WARN("07-ScanChains", "[ScanChains] ccl L 失败: {}", cclL.message);
                 return false;
             }
             cclR = ops.ccl->Execute(sepR.d_markingPointMask, stream);
             if (!cclR.success) {
-                spdlog::warn("[ScanChains] ccl R 失败: {}", cclR.message);
+                JMW_LOG_WARN("07-ScanChains", "[ScanChains] ccl R 失败: {}", cclR.message);
                 return false;
             }
         } catch (const std::exception& e) {
-            spdlog::error("[ScanChains] ccl 异常: {}", e.what());
+            JMW_LOG_ERROR("07-ScanChains", "[ScanChains] ccl 异常: {}", e.what());
             return false;
         }
         front.roisL = cclL.toRectList();        // host 数据（ccl 内部已同步下载）
@@ -290,21 +291,21 @@ ScanChains::Hooks ScanChains::assemble() {
                 auto stL = ops.steger->Execute(ops.d_grayL, *sepL.d_laserMask, stream,
                                                calib::GroupMode::Flat);
                 if (!stL.success) {
-                    spdlog::warn("[ScanChains] steger L 失败: {}", stL.message);
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] steger L 失败: {}", stL.message);
                     return -1;
                 }
                 if (stL.totalPointCount == 0 || !hasPts(stL.d_centerPoints)) {
-                    spdlog::info("[ScanChains] steger L 无激光点，本帧无激光（降级）");
+                    JMW_LOG_INFO("07-ScanChains", "[ScanChains] steger L 无激光点，本帧无激光（降级）");
                     return 0;
                 }
                 auto stR = ops.steger->Execute(ops.d_grayR, *sepR.d_laserMask, stream,
                                                calib::GroupMode::Flat);
                 if (!stR.success) {
-                    spdlog::warn("[ScanChains] steger R 失败: {}", stR.message);
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] steger R 失败: {}", stR.message);
                     return -1;
                 }
                 if (stR.totalPointCount == 0 || !hasPts(stR.d_centerPoints)) {
-                    spdlog::info("[ScanChains] steger R 无激光点，本帧无激光（降级）");
+                    JMW_LOG_INFO("07-ScanChains", "[ScanChains] steger R 无激光点，本帧无激光（降级）");
                     return 0;
                 }
 
@@ -317,7 +318,7 @@ ScanChains::Hooks ScanChains::assemble() {
                 auto unL = ops.undistG->Execute(*stL.d_centerPoints, *stL.d_line_ids,
                                                  stream);
                 if (!unL.success) {
-                    spdlog::warn("[ScanChains] undistort_cuda L 失败: {}", unL.message);
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] undistort_cuda L 失败: {}", unL.message);
                     return -1;
                 }
                 if (!hasPts(unL.d_rectifiedPoints)) return 0;
@@ -325,7 +326,7 @@ ScanChains::Hooks ScanChains::assemble() {
                 auto unR = ops.undistG->Execute(*stR.d_centerPoints, *stR.d_line_ids,
                                                  stream);
                 if (!unR.success) {
-                    spdlog::warn("[ScanChains] undistort_cuda R 失败: {}", unR.message);
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] undistort_cuda R 失败: {}", unR.message);
                     return -1;
                 }
                 if (!hasPts(unR.d_rectifiedPoints)) return 0;
@@ -333,14 +334,14 @@ ScanChains::Hooks ScanChains::assemble() {
                 auto eiL = ops.epipolar->Execute(*unL.d_rectifiedPoints,
                                                  *unL.d_line_ids, stream);
                 if (!eiL.success) {
-                    spdlog::warn("[ScanChains] epipolar_interp L 失败: {}", eiL.message);
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] epipolar_interp L 失败: {}", eiL.message);
                     return -1;
                 }
                 if (eiL.interpCount == 0 || !hasPts(eiL.d_interpPoints)) return 0;
                 auto eiR = ops.epipolar->Execute(*unR.d_rectifiedPoints,
                                                  *unR.d_line_ids, stream);
                 if (!eiR.success) {
-                    spdlog::warn("[ScanChains] epipolar_interp R 失败: {}", eiR.message);
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] epipolar_interp R 失败: {}", eiR.message);
                     return -1;
                 }
                 if (eiR.interpCount == 0 || !hasPts(eiR.d_interpPoints)) return 0;
@@ -351,12 +352,12 @@ ScanChains::Hooks ScanChains::assemble() {
                                                  *eiR.d_interpPoints,
                                                  *eiR.d_interp_line_ids, stream);
                 if (!mr.success) {
-                    spdlog::warn("[ScanChains] laser_match_scan 失败: {}", mr.message);
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] laser_match_scan 失败: {}", mr.message);
                     return -1;
                 }
                 if (mr.matchedCount == 0 || !hasPts(mr.d_matched_left) ||
                     !hasPts(mr.d_matched_right)) {
-                    spdlog::info("[ScanChains] 激光匹配 0 点，本帧无激光（降级）");
+                    JMW_LOG_INFO("07-ScanChains", "[ScanChains] 激光匹配 0 点，本帧无激光（降级）");
                     return 0;
                 }
 
@@ -364,7 +365,7 @@ ScanChains::Hooks ScanChains::assemble() {
                                              *mr.d_matched_line_ids,
                                              cv::Mat(frame->snapshot.Q), stream);
                 if (!rc.success) {
-                    spdlog::warn("[ScanChains] laser_reconstruct 失败: {}", rc.message);
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] laser_reconstruct 失败: {}", rc.message);
                     return -1;
                 }
                 if (rc.validCount == 0 || !hasPts(rc.d_points3d)) return 0;
@@ -377,7 +378,7 @@ ScanChains::Hooks ScanChains::assemble() {
                         int n = std::min<int>(src.cols,
                                               blk->get()->points.cols);  // 池容量裁剪
                         if (n < src.cols) {
-                            spdlog::warn("[ScanChains] 激光点数 {} 超池块容量 {}，"
+                            JMW_LOG_WARN("07-ScanChains", "[ScanChains] 激光点数 {} 超池块容量 {}，"
                                          "截断至 {}（降级）",
                                          src.cols, blk->get()->points.cols, n);
                             front.laserTruncated = true;
@@ -391,12 +392,12 @@ ScanChains::Hooks ScanChains::assemble() {
                             return 1;
                         }
                     } else {
-                        spdlog::warn("[ScanChains] 激光块池取块超时，本帧无激光（降级）");
+                        JMW_LOG_WARN("07-ScanChains", "[ScanChains] 激光块池取块超时，本帧无激光（降级）");
                     }
                 }
                 return 0;
             } catch (const std::exception& e) {
-                spdlog::error("[ScanChains] 激光链异常: {}", e.what());
+                JMW_LOG_ERROR("07-ScanChains", "[ScanChains] 激光链异常: {}", e.what());
                 return -1;
             }
         }();
@@ -422,7 +423,7 @@ ScanChains::Hooks ScanChains::assemble() {
                 result.quality = Scanner::QualityFlag::Degraded;   // 空帧=正常降级
             runRegistration(*frame, *ops, positions, normals, result);
         } catch (const std::exception& e) {
-            spdlog::error("[ScanChains] pChain 异常: {}", e.what());
+            JMW_LOG_ERROR("07-ScanChains", "[ScanChains] pChain 异常: {}", e.what());
             return Result::fail(std::string("ScanChains pChain 异常: ") + e.what());
         }
         return Result::ok();
@@ -438,7 +439,7 @@ ScanChains::Hooks ScanChains::assemble() {
         try {
             pr = fut.get();                     // pChain Result/异常均在此消费
         } catch (const std::exception& e) {
-            spdlog::error("[ScanChains] pChain future 异常: {}", e.what());
+            JMW_LOG_ERROR("07-ScanChains", "[ScanChains] pChain future 异常: {}", e.what());
             return Result::fail(std::string("pChain future 异常: ") + e.what());
         }
         if (!pr.success) return pr;             // P 链失败=帧丢弃（不入队列）
@@ -638,7 +639,7 @@ void ScanChains::runRegistration(const data::EnhancedFrame& frame, ScanLaneOps& 
         calib::AtomicFrameState::store(deps_.prevState, std::move(st));
         return;
     }
-    spdlog::warn("[ScanChains] optical_flow_fuse 失败（{}），转 frame_fuse 兜底",
+    JMW_LOG_WARN("07-ScanChains", "[ScanChains] optical_flow_fuse 失败（{}），转 frame_fuse 兜底",
                  fr.message);
 
     // —— 兜底 frame_fuse（当前帧 vs 快照点集；不回写快照保 globalId 链完整）——
@@ -652,7 +653,7 @@ void ScanChains::runRegistration(const data::EnhancedFrame& frame, ScanLaneOps& 
         result.markers = toPoints(ids);
         return;
     }
-    spdlog::warn("[ScanChains] frame_fuse 兜底亦失败（{}），沿用快照 R/T", ff.message);
+    JMW_LOG_WARN("07-ScanChains", "[ScanChains] frame_fuse 兜底亦失败（{}），沿用快照 R/T", ff.message);
 
     // —— 再失败：沿用快照 R/T，降级 ——
     fillRT(result, matxFromArr9(prev->R), vec3FromArr3(prev->T));

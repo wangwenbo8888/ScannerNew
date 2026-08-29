@@ -2,9 +2,11 @@
 #include <opencv2/calib3d.hpp>
 #include <numeric>
 #include <sstream>
-#include <spdlog/spdlog.h>
+#include "common/calib_logging.h"
 
 namespace calib {
+
+CALIB_DEFINE_LOG_TAG(0, ExtrinsicCalib);
 
 OperatorInfo getExtrinsicCalibCpuInfo() {
     return OperatorInfo{"ExtrinsicCalibCpu", SCANNER_VERSION_MAJOR, SCANNER_VERSION_MINOR, OperatorType::CPU};
@@ -150,28 +152,28 @@ ExtrinsicCalibCpuMonoResult calibrateMonoSideImpl(
         if (warn) {
             result.qualityFlag = QualityFlag::Warning;
             result.message = warnMsg;
-            spdlog::warn(std::string(ExtrinsicCalibCpu::kLogTag) + " WARN: " + warnMsg);
+            CALIB_LOG_WARN(std::string(ExtrinsicCalibCpu::kLogTag) + " WARN: " + warnMsg);
         }
 
-        spdlog::info(std::string(ExtrinsicCalibCpu::kLogTag) + " INFO: " + sideName +
+        CALIB_LOG_INFO(std::string(ExtrinsicCalibCpu::kLogTag) + " INFO: " + sideName +
                      " mono calibration RMS: " + std::to_string(rms) + " pixels");
     }
     catch (const cv::Exception& e) {
         result.success = false;
         result.message = std::string(e.what());
-        spdlog::error(std::string(ExtrinsicCalibCpu::kLogTag) + " ERROR: " + sideName +
+        CALIB_LOG_ERROR(std::string(ExtrinsicCalibCpu::kLogTag) + " ERROR: " + sideName +
                       " mono calibrateCameraRO failed: " + e.what());
     }
     catch (const std::exception& e) {
         result.success = false;
         result.message = std::string(e.what());
-        spdlog::error(std::string(ExtrinsicCalibCpu::kLogTag) + " ERROR: " + sideName +
+        CALIB_LOG_ERROR(std::string(ExtrinsicCalibCpu::kLogTag) + " ERROR: " + sideName +
                       " mono calibration failed: " + e.what());
     }
     catch (...) {
         result.success = false;
         result.message = "memory allocation failed or unknown error";
-        spdlog::error(std::string(ExtrinsicCalibCpu::kLogTag) + " ERROR: " + sideName +
+        CALIB_LOG_ERROR(std::string(ExtrinsicCalibCpu::kLogTag) + " ERROR: " + sideName +
                       " mono calibration unknown error");
     }
 
@@ -530,7 +532,7 @@ ExtrinsicCalibCpuResult ExtrinsicCalibCpu::Impl::Execute(
     ExtrinsicCalibCpuResult result;
 
     if (params_.rotateRightImage180) {
-        spdlog::info(std::string(kLogTag) + " INFO: Right image 180 deg rotation noted (preprocessed by caller)");
+        CALIB_LOG_INFO(std::string(kLogTag) + " INFO: Right image 180 deg rotation noted (preprocessed by caller)");
     }
 
     bool warnL = false, warnR = false;
@@ -540,7 +542,7 @@ ExtrinsicCalibCpuResult ExtrinsicCalibCpu::Impl::Execute(
     if (warnL || warnR) {
         result.qualityFlag = QualityFlag::Warning;
         result.message = warnMsg;
-        spdlog::warn(std::string(kLogTag) + " WARN: " + warnMsg);
+        CALIB_LOG_WARN(std::string(kLogTag) + " WARN: " + warnMsg);
     }
 
     std::vector<std::vector<cv::Point3f>> objPointsPerView(
@@ -586,7 +588,7 @@ ExtrinsicCalibCpuResult ExtrinsicCalibCpu::Impl::Execute(
             result.qualityFlag = QualityFlag::Degraded;
             result.message = "Reprojection error " + std::to_string(rms) +
                              "px exceeds threshold " + std::to_string(params_.maxReprojError) + "px, result degraded";
-            spdlog::warn(std::string(kLogTag) + " WARN: " + result.message);
+            CALIB_LOG_WARN(std::string(kLogTag) + " WARN: " + result.message);
         }
 
         if (result.epipolarErrorMean > params_.maxEpipolarError) {
@@ -595,32 +597,32 @@ ExtrinsicCalibCpuResult ExtrinsicCalibCpu::Impl::Execute(
                                       "px exceeds threshold " + std::to_string(params_.maxEpipolarError) + "px";
             if (!result.message.empty()) result.message += "; ";
             result.message += epipolarMsg;
-            spdlog::warn(std::string(kLogTag) + " WARN: " + epipolarMsg);
+            CALIB_LOG_WARN(std::string(kLogTag) + " WARN: " + epipolarMsg);
         }
 
-        spdlog::info(std::string(kLogTag) + " INFO: Stereo calibration completed. RMS: " +
+        CALIB_LOG_INFO(std::string(kLogTag) + " INFO: Stereo calibration completed. RMS: " +
                      std::to_string(rms) + "px, Epipolar error mean: " +
                      std::to_string(result.epipolarErrorMean) + "px");
     }
     catch (const cv::Exception& e) {
         result.success = false;
         result.message = std::string("stereoCalibrate failed: ") + e.what();
-        spdlog::error(std::string(kLogTag) + " ERROR: " + result.message);
+        CALIB_LOG_ERROR(std::string(kLogTag) + " ERROR: " + result.message);
     }
     catch (const std::bad_alloc&) {
         result.success = false;
         result.message = "memory allocation failed";
-        spdlog::error(std::string(kLogTag) + " ERROR: memory allocation failed");
+        CALIB_LOG_ERROR(std::string(kLogTag) + " ERROR: memory allocation failed");
     }
     catch (const std::exception& e) {
         result.success = false;
         result.message = std::string(e.what());
-        spdlog::error(std::string(kLogTag) + " ERROR: " + result.message);
+        CALIB_LOG_ERROR(std::string(kLogTag) + " ERROR: " + result.message);
     }
     catch (...) {
         result.success = false;
         result.message = "unknown error";
-        spdlog::error(std::string(kLogTag) + " ERROR: unknown error");
+        CALIB_LOG_ERROR(std::string(kLogTag) + " ERROR: unknown error");
     }
 
     return result;

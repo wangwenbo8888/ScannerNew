@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <windows.h>
 
 namespace Scanner::pipeline::sched {
@@ -43,7 +44,7 @@ TopologyInfo CpuTopology::detect() {
     DWORD bytes = 0;
     GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
     if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytes == 0) {
-        spdlog::warn("CpuTopology::detect: 查询物理核信息失败, err={}, 按纯 P 核兜底", GetLastError());
+        JMW_LOG_WARN("07-CpuTopology", "CpuTopology::detect: 查询物理核信息失败, err={}, 按纯 P 核兜底", GetLastError());
         info.pCores = fallbackCoreEstimate();
         return info;
     }
@@ -54,7 +55,7 @@ TopologyInfo CpuTopology::detect() {
             RelationProcessorCore,
             reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data()),
             &bytes)) {
-        spdlog::warn("CpuTopology::detect: 枚举物理核失败, err={}, 按纯 P 核兜底", GetLastError());
+        JMW_LOG_WARN("07-CpuTopology", "CpuTopology::detect: 枚举物理核失败, err={}, 按纯 P 核兜底", GetLastError());
         info.pCores = fallbackCoreEstimate();
         return info;
     }
@@ -93,7 +94,7 @@ TopologyInfo CpuTopology::detect() {
         info.hybrid = false;
         info.pCores = total;
         info.eCores = 0;
-        spdlog::warn("CpuTopology::detect: 未区分出 P/E（物理核 {} 全为 EfficiencyClass 0），按纯 P 核处理", total);
+        JMW_LOG_WARN("07-CpuTopology", "CpuTopology::detect: 未区分出 P/E（物理核 {} 全为 EfficiencyClass 0），按纯 P 核处理", total);
     }
     return info;
 }
@@ -104,7 +105,7 @@ void CpuTopology::pinThread(std::thread& t, uint64_t mask) {
     }
     // 单 DWORD_PTR 不跨处理器组（目标机单组；>64 逻辑核需 group 扩展）
     if (SetThreadAffinityMask(t.native_handle(), static_cast<DWORD_PTR>(mask)) == 0) {
-        spdlog::warn("CpuTopology: SetThreadAffinityMask(mask={:#x}) 失败, err={}", mask, GetLastError());
+        JMW_LOG_WARN("07-CpuTopology", "CpuTopology: SetThreadAffinityMask(mask={:#x}) 失败, err={}", mask, GetLastError());
     }
 }
 
@@ -112,7 +113,7 @@ void CpuTopology::setRealtime(std::thread& t) {
     const HANDLE handle = t.native_handle();
     if (!SetThreadPriority(handle, THREAD_PRIORITY_TIME_CRITICAL)) {
         if (!SetThreadPriority(handle, THREAD_PRIORITY_HIGHEST)) {
-            spdlog::warn("CpuTopology: SetThreadPriority TIME_CRITICAL 与 HIGHEST 均失败, err={}", GetLastError());
+            JMW_LOG_WARN("07-CpuTopology", "CpuTopology: SetThreadPriority TIME_CRITICAL 与 HIGHEST 均失败, err={}", GetLastError());
         }
     }
 }

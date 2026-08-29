@@ -2,6 +2,7 @@
 // GpuPointCloudPool.cpp — GPU 点云显存块池实现
 // ============================================================================
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 #include "pipelines/scan/GpuPointCloudPool.h"
 
@@ -27,7 +28,7 @@ GpuPointCloudPool::GpuPointCloudPool(size_t blocks, size_t pointsPerBlock, Alloc
 
 GpuPointCloudPool::~GpuPointCloudPool() {
     if (size_t n = inUse(); n > 0) {
-        spdlog::warn("GpuPointCloudPool: 析构时 inUse={}（生命周期契约违反：池须长于所有在飞块，"
+        JMW_LOG_WARN("07-GpuPointCloudPool", "GpuPointCloudPool: 析构时 inUse={}（生命周期契约违反：池须长于所有在飞块，"
                      "在飞块回池将触碰已亡池）", n);
     }
 }

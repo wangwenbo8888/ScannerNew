@@ -32,7 +32,7 @@ LaserExtrinsicCompensateCPU::LaserExtrinsicCompensateCPU(const LaserExtrinsicCom
           params.cte, params.tempStep, params.tempRangeMin, params.tempRangeMax
       }) {
     params_.validate();
-    spdlog::info("[{}] 初始化完成, CTE={:.2e} /°C, 步距={:.2f}°C, 范围=[{:.1f}, {:.1f}]°C",
+    CALIB_LOG_INFO("[{}] 初始化完成, CTE={:.2e} /°C, 步距={:.2f}°C, 范围=[{:.1f}, {:.1f}]°C",
                  kLogTag, params_.cte, params_.tempStep,
                  params_.tempRangeMin, params_.tempRangeMax);
 }
@@ -53,7 +53,7 @@ LaserExtrinsicCompensateCPUResult LaserExtrinsicCompensateCPU::Execute(
     virtualToRight.validate();
     params_.validate();
 
-    spdlog::info("[{}] 开始计算, virtual-to-left 基线={:.4f} mm, virtual-to-right 基线={:.4f} mm",
+    CALIB_LOG_INFO("[{}] 开始计算, virtual-to-left 基线={:.4f} mm, virtual-to-right 基线={:.4f} mm",
                  kLogTag,
                  std::sqrt(virtualToLeft.T[0] * virtualToLeft.T[0] +
                            virtualToLeft.T[1] * virtualToLeft.T[1] +
@@ -76,7 +76,7 @@ LaserExtrinsicCompensateCPUResult LaserExtrinsicCompensateCPU::Execute(
     } catch (const std::exception& e) {
         result.success = false;
         result.message = std::string("virtual-to-left 补偿计算失败: ") + e.what();
-        spdlog::error("[{}] {}", kLogTag, result.message);
+        CALIB_LOG_ERROR("[{}] {}", kLogTag, result.message);
         return result;
     }
 
@@ -86,7 +86,7 @@ LaserExtrinsicCompensateCPUResult LaserExtrinsicCompensateCPU::Execute(
     } catch (const std::exception& e) {
         result.success = false;
         result.message = std::string("virtual-to-right 补偿计算失败: ") + e.what();
-        spdlog::error("[{}] {}", kLogTag, result.message);
+        CALIB_LOG_ERROR("[{}] {}", kLogTag, result.message);
         return result;
     }
 
@@ -96,7 +96,7 @@ LaserExtrinsicCompensateCPUResult LaserExtrinsicCompensateCPU::Execute(
     result.referenceTemp = virtualToLeft.referenceTemp;
     result.cte = params_.cte;
 
-    spdlog::info("[{}] 计算完成, left 表大小={}, right 表大小={}",
+    CALIB_LOG_INFO("[{}] 计算完成, left 表大小={}, right 表大小={}",
                  kLogTag, result.leftResult.table.size(), result.rightResult.table.size());
 
     return result;
@@ -117,7 +117,7 @@ void LaserExtrinsicCompensateCPU::SetParams(const LaserExtrinsicCompensateCPUPar
     innerParams.tempRangeMax = params.tempRangeMax;
     compensator_.SetParams(innerParams);
 
-    spdlog::info("[{}] 参数已更新, CTE={:.2e} /°C, 步距={:.2f}°C",
+    CALIB_LOG_INFO("[{}] 参数已更新, CTE={:.2e} /°C, 步距={:.2f}°C",
                  kLogTag, params_.cte, params_.tempStep);
 }
 

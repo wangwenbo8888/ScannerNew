@@ -16,6 +16,7 @@
 
 #include <opencv2/core.hpp>
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 #include "core/marker/marker_cloud_fuse_cpu/marker_cloud_fuse_cpu.h"
 #include "scanning/global_optim/global_ba_cpu.h"
@@ -65,15 +66,15 @@ public:
             dev.upload(host);                               // host→device（默认流同步）
             auto r = fuse_.Execute(dev, matxFromArr9(R), vec3FromArr3(T));
             if (!r.success) {
-                spdlog::warn("[GlobalOptim] 激光重放融合失败: {}", r.message);
+                JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] 激光重放融合失败: {}", r.message);
                 return false;
             }
             return true;
         } catch (const std::exception& e) {
-            spdlog::warn("[GlobalOptim] 激光重放上传/融合异常: {}", e.what());
+            JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] 激光重放上传/融合异常: {}", e.what());
             return false;
         } catch (...) {
-            spdlog::warn("[GlobalOptim] 激光重放上传/融合未知异常");
+            JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] 激光重放上传/融合未知异常");
             return false;
         }
     }
@@ -165,6 +166,12 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     if (snap.obs.empty())
         return Scanner::Result::fail("GlobalOptimObject::run: 逐帧观测为空（无扫描数据）");
 
+    // 批算输入快照（一次性——重放/降级排查的输入依据）
+    JMW_LOG_INFO("07-GlobalOptim",
+        "[GlobalOptim] 启动: 观测帧={} 激光缓存帧={} 缓存字节={} 已降级={} 先验点={}",
+        snap.obs.size(), snap.laserFrames.size(), obsAcc.laserBytesUsed(),
+        obsAcc.degradedLaser(), priorIds_.size());
+
     // —— 步骤 1：冻结渲染（批处理期间 display 保持末帧）——
     if (sceneFeed_) sceneFeed_->notifyFreeze(true);
     struct UnfreezeGuard {                       // 异常/取消/失败路径保证解冻
@@ -201,7 +208,7 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     in.priorSigma = priorSigma_;
     for (int id : obsHpIds)
         if (std::find(priorIds_.begin(), priorIds_.end(), id) == priorIds_.end())
-            spdlog::warn("[GlobalOptim] 高精度观测 id={} 无先验位置（setExistingPrior 未注入），"
+            JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] 高精度观测 id={} 无先验位置（setExistingPrior 未注入），"
                          "不加软先验", id);
 
     // —— 步骤 3：GBA 批算（位姿参数化在算子内：R_init/t_init 直喂，内部转四元数）——
@@ -284,7 +291,7 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
                                    vec3FromArr3(out_.poses[i].t));
             if (!r.success) {
                 ++markerFuseFails;
-                spdlog::warn("[GlobalOptim] marker 重放融合失败 frameId={}: {}",
+                JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] marker 重放融合失败 frameId={}: {}",
                              fo.frameId, r.message);
             }
         }
@@ -391,6 +398,15 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     } else {
         unfreeze.dismissed = true;          // sceneFeed 空 → 从未冻结（guard 空指针安全）
     }
+
+    // 批算结果汇总（一次性——质量定责的最终账本：GBA 成败/迭代/RMSE/重放/降级）
+    JMW_LOG_INFO("07-GlobalOptim",
+        "[GlobalOptim] 完成: GBA={} 迭代={} 初RMSE={:.4f} 末RMSE={:.4f} 帧数={} "
+        "marker云={} 激光重放={} 激光降级={} 取消={} 质量={}",
+        out_.gbaSuccess, out_.gbaStats.ceresIterations,
+        out_.gbaStats.initialRMSE, out_.gbaStats.finalRMSE, out_.frameCount,
+        out_.markerCloud.size(), out_.laserReplayed, out_.laserDegraded,
+        out_.cancelled, qualityName(quality));
 
     if (cb) cb(100, "global optim done");
     return quality == Scanner::QualityFlag::Normal

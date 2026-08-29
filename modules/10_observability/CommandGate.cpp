@@ -8,6 +8,7 @@
 #include "CommandGate.h"
 #include "base/EventBus.h"
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <exception>
 
 namespace Scanner::service {
@@ -38,7 +39,7 @@ Result CommandGate::registerCommand(Spec spec) {
 }
 
 void CommandGate::publishRejected(const std::string& name, const std::string& reason) {
-    spdlog::warn("[CommandGate] 拒绝命令: {} ({})", name, reason);
+    JMW_LOG_WARN("10-CommandGate", "[CommandGate] 拒绝命令: {} ({})", name, reason);
     if (bus_) {
         Event evt;
         evt.type = EventType::CommandRejected;
@@ -116,12 +117,12 @@ Result CommandGate::submit(const std::string& name, int64_t payload) {
             if (switched && spec.finishedEvent != kNoEvent) {
                 const Result rb = sm_->transition(spec.finishedEvent); // 回滚 S2（§3.3）
                 if (rb.success) {
-                    spdlog::info("[CommandGate] 已回滚至 {}", sm_->getStateName());
+                    JMW_LOG_INFO("10-CommandGate", "[CommandGate] 已回滚至 {}", sm_->getStateName());
                 } else {
-                    spdlog::warn("[CommandGate] 回滚失败（态已被并发迁走，落点合法）");
+                    JMW_LOG_WARN("10-CommandGate", "[CommandGate] 回滚失败（态已被并发迁走，落点合法）");
                 }
             }
-            spdlog::error("[CommandGate] handler 同步失败{}: {} - {}",
+            JMW_LOG_ERROR("10-CommandGate", "[CommandGate] handler 同步失败{}: {} - {}",
                           switched ? "（已尝试回滚）" : "", name, hr.message);
             publishRejected(name, hr.message);
             return Result::fail(hr.message);
@@ -154,7 +155,7 @@ Result CommandGate::notifyCompleted(const std::string& name, bool ok) {
     }
     if (!ok) {
         // 非设备类异步失败：仍切回 S2（不许悬死 S3–S6，§3.3），但记 ERROR
-        spdlog::error("[CommandGate] 命令以失败收尾，切回待机: {}", name);
+        JMW_LOG_ERROR("10-CommandGate", "[CommandGate] 命令以失败收尾，切回待机: {}", name);
     }
     return sm_->transition(spec.finishedEvent);
 }

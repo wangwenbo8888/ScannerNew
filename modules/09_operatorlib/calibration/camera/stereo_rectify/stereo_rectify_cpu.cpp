@@ -1,8 +1,10 @@
 #include "stereo_rectify_cpu.h"
 #include <opencv2/calib3d.hpp>
-#include <spdlog/spdlog.h>
+#include "common/calib_logging.h"
 
 namespace calib {
+
+CALIB_DEFINE_LOG_TAG(0, StereoRectify);
 
 OperatorInfo getStereoRectifyCpuInfo() {
     return OperatorInfo{"StereoRectifyCpu", SCANNER_VERSION_MAJOR, SCANNER_VERSION_MINOR, OperatorType::CPU};
@@ -171,10 +173,10 @@ public:
             if (validRoiLeft.area() == 0 || validRoiRight.area() == 0) {
                 result.qualityFlag = QualityFlag::Warning;
                 result.message = "validRoi has zero area";
-                spdlog::warn(std::string(kLogTag) + " WARN: " + result.message);
+                CALIB_LOG_WARN(std::string(kLogTag) + " WARN: " + result.message);
             }
 
-            spdlog::info(std::string(kLogTag) + " INFO: stereoRectify completed. "
+            CALIB_LOG_INFO(std::string(kLogTag) + " INFO: stereoRectify completed. "
                          "validRoiLeft=" + std::to_string(validRoiLeft.x) + "," +
                          std::to_string(validRoiLeft.y) + "," +
                          std::to_string(validRoiLeft.width) + "," +
@@ -187,22 +189,22 @@ public:
         catch (const cv::Exception& e) {
             result.success = false;
             result.message = std::string("stereoRectify failed: ") + e.what();
-            spdlog::error(std::string(kLogTag) + " ERROR: " + result.message);
+            CALIB_LOG_ERROR(std::string(kLogTag) + " ERROR: " + result.message);
         }
         catch (const std::bad_alloc&) {
             result.success = false;
             result.message = "memory allocation failed";
-            spdlog::error(std::string(kLogTag) + " ERROR: memory allocation failed");
+            CALIB_LOG_ERROR(std::string(kLogTag) + " ERROR: memory allocation failed");
         }
         catch (const std::exception& e) {
             result.success = false;
             result.message = std::string(e.what());
-            spdlog::error(std::string(kLogTag) + " ERROR: " + result.message);
+            CALIB_LOG_ERROR(std::string(kLogTag) + " ERROR: " + result.message);
         }
         catch (...) {
             result.success = false;
             result.message = "unknown error";
-            spdlog::error(std::string(kLogTag) + " ERROR: unknown error");
+            CALIB_LOG_ERROR(std::string(kLogTag) + " ERROR: unknown error");
         }
 
         return result;

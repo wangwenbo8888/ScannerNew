@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // HardwareMonitor.cpp — 硬件状态监控实现
 // ============================================================================
 
@@ -8,6 +8,7 @@
 #include "IScannerCamera.h"
 #include "SelfCheckCollector.h"
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <algorithm>
 #include <chrono>
 #include <string>
@@ -33,13 +34,13 @@ void HardwareMonitor::start(int intervalMs) {
     intervalMs_ = (intervalMs < 100) ? 100 : intervalMs;
     running_ = true;
     thread_ = std::thread(&HardwareMonitor::monitorLoop, this);
-    spdlog::info("[HardwareMonitor] 监控启动, 间隔 {}ms", intervalMs_);
+    JMW_LOG_INFO("08-HardwareMonitor", "[HardwareMonitor] 监控启动, 间隔 {}ms", intervalMs_);
 }
 
 void HardwareMonitor::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
-    spdlog::info("[HardwareMonitor] 监控停止");
+    JMW_LOG_INFO("08-HardwareMonitor", "[HardwareMonitor] 监控停止");
 }
 
 void HardwareMonitor::monitorLoop() {

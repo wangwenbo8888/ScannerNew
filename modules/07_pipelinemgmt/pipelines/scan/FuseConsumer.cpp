@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 #ifdef JMW_BUILD_CUDA
 #include <opencv2/core.hpp>
@@ -145,7 +146,7 @@ void FuseConsumer::processOne(FrameResult& fr) {
         }
     } catch (...) {
         // 单帧兜底：融合消费属持续服务——丢该帧续跑，不崩不退线程
-        spdlog::error("[FuseConsumer] 单帧处理异常 frameId={}，丢弃该帧续跑", fr.frameId);
+        JMW_LOG_ERROR("07-FuseConsumer", "[FuseConsumer] 单帧处理异常 frameId={}，丢弃该帧续跑", fr.frameId);
         if (deps_.sink) {
             deps_.sink->report(Scanner::QualityFlag::Fault, kEvtFuseFrameFault,
                                "融合消费单帧处理异常，丢帧续跑");

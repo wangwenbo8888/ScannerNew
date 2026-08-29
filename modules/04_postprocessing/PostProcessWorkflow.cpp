@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // PostProcessWorkflow.cpp — 后处理工作流实现（编排壳；五阶段移交 07 E 对象）
 //
 // P6-T29c：旧七阶段（GBA/重融合/法线/封装/补洞/光顺/边界）sleep 空壳删除
@@ -14,6 +14,7 @@
 #include "pipelines/PipelineDeps.h"
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <chrono>
 #include <utility>
 
@@ -50,7 +51,7 @@ PostProcessWorkflow::~PostProcessWorkflow() { stop(); }
 
 Result PostProcessWorkflow::initialize() {
     if (!ctx_) return Result::fail("无 WorkflowContext");
-    spdlog::info("[PostProcess] 初始化 (五阶段, skip=0x{:x}, 输出={})", skipStages_, outputPath_);
+    JMW_LOG_INFO("04-PostWorkflow", "[PostProcess] 初始化 (五阶段, skip=0x{:x}, 输出={})", skipStages_, outputPath_);
     return Result::ok();
 }
 
@@ -69,7 +70,7 @@ Result PostProcessWorkflow::makeCloudData(Scanner::pipeline::MeshData& out) cons
         out.xyz.push_back(p.y);
         out.xyz.push_back(p.z);
     }
-    spdlog::info("[PostProcess] 读入 {} 点 (version={})", points.size(), version);
+    JMW_LOG_INFO("04-PostWorkflow", "[PostProcess] 读入 {} 点 (version={})", points.size(), version);
     // TODO(接入期): 输入改 06 点云仓库（app 存活件）内存句柄——02 GBA 修正
     // 点云写入仓库后此处直取修正结果（现 PointCloudBuffer 快照即其内存形态）
     return Result::ok();
@@ -84,7 +85,7 @@ Result PostProcessWorkflow::start() {
         result_.success = false;
         result_.message = mr.message;
         state_ = WorkflowState::Error;
-        spdlog::error("[PostProcess] {}", mr.message);
+        JMW_LOG_ERROR("04-PostWorkflow", "[PostProcess] {}", mr.message);
         return Result::fail(mr.message);
     }
 
@@ -118,7 +119,7 @@ Result PostProcessWorkflow::start() {
 }
 
 void PostProcessWorkflow::postProcessLoop(Scanner::pipeline::MeshData cloud) {
-    spdlog::info("[PostProcess] 后处理启动（五阶段移交 07 PostProcessPipeline）");
+    JMW_LOG_INFO("04-PostWorkflow", "[PostProcess] 后处理启动（五阶段移交 07 PostProcessPipeline）");
     const auto t0 = std::chrono::steady_clock::now();
 
     auto res = pipeline_->run(
@@ -143,7 +144,7 @@ void PostProcessWorkflow::postProcessLoop(Scanner::pipeline::MeshData cloud) {
     state_ = res.success ? WorkflowState::Completed : WorkflowState::Error;
     running_ = false;
 
-    spdlog::info("[PostProcess] 后处理结束: success={} degraded={} → {} (三角面 {}, {:.0f}ms)",
+    JMW_LOG_INFO("04-PostWorkflow", "[PostProcess] 后处理结束: success={} degraded={} → {} (三角面 {}, {:.0f}ms)",
                  res.success, res.isDegraded(), outputPath_, result_.meshTriangles,
                  result_.smoothTimeMs);
 
@@ -155,7 +156,7 @@ void PostProcessWorkflow::postProcessLoop(Scanner::pipeline::MeshData cloud) {
     // 以下按其展开格式直写 spdlog——输出与 JMW_LOG_INFO 等价，§8.2 生命周期）
     const bool userCancelled = cancelToken_ && cancelToken_->cancelled();
     const bool ok = userCancelled ? true : res.success;
-    spdlog::info("[04-PostProcess] 后处理会话终止 ok={}（{}）", ok,
+    JMW_LOG_INFO("04-PostWorkflow", "[04-PostProcess] 后处理会话终止 ok={}（{}）", ok,
                  userCancelled ? "用户停止" : (res.success ? "批算完成" : "阶段失败"));
     if (onFinished_) onFinished_(ok);
 }

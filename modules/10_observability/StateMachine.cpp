@@ -1,5 +1,6 @@
 #include "StateMachine.h"
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 namespace Scanner::service {
 
@@ -86,7 +87,7 @@ Result StateMachine::transition(EventType event, int64_t param) {
     for (;;) {
         SystemState to;
         if (!resolveNext(from, event, param, to)) {
-            spdlog::warn("[StateMachine] 非法转换: {} + event {}", stateToString(from),
+            JMW_LOG_WARN("10-StateMachine", "[StateMachine] 非法转换: {} + event {}", stateToString(from),
                          static_cast<int>(event));
             return Result::fail("非法状态转换");
         }
@@ -105,7 +106,7 @@ Result StateMachine::transition(EventType event, int64_t param) {
                 evt.param2 = static_cast<int64_t>(to);
                 eventBus_->publish(evt);
             }
-            spdlog::info("[StateMachine] {} → {}", stateToString(from), stateToString(to));
+            JMW_LOG_INFO("10-StateMachine", "[StateMachine] {} → {}", stateToString(from), stateToString(to));
             return Result::ok();
         }
         // CAS 失败：from 已被 compare_exchange_weak 更新为最新态，重判

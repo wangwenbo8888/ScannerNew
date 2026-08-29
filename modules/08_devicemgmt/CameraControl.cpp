@@ -4,6 +4,7 @@
 
 #include "CameraControl.h"
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <chrono>
 #include <cstring>
 
@@ -108,9 +109,9 @@ int CameraControl::enumerateDevices() {
     IGXFactory::GetInstance().UpdateDeviceList(1000, deviceList);
     IGXFactory::GetInstance().Uninit();
 
-    spdlog::info("[CameraControl] 发现 {} 个设备", deviceList.size());
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] 发现 {} 个设备", deviceList.size());
     for (size_t i = 0; i < deviceList.size(); ++i) {
-        spdlog::info("  [{}] {} (SN: {})", i,
+        JMW_LOG_INFO("08-CameraControl", "  [{}] {} (SN: {})", i,
             (const char*)deviceList[i].GetDisplayName(),
             (const char*)deviceList[i].GetSN());
     }
@@ -130,7 +131,7 @@ Result CameraControl::open() {
 
     GxIAPICPP::gxdeviceinfo_vector deviceList;
     IGXFactory::GetInstance().UpdateDeviceList(300, deviceList);   // 枚举完成即返（原 1000ms 等满）
-    spdlog::info("[CameraControl] open 计时: Init+枚举 {}ms（{} 台）", el(), deviceList.size());
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] open 计时: Init+枚举 {}ms（{} 台）", el(), deviceList.size());
 
     if (static_cast<int>(deviceList.size()) <= m_config.deviceIndexRight) {
         IGXFactory::GetInstance().Uninit();
@@ -141,16 +142,16 @@ Result CameraControl::open() {
         int idx = (i == 0) ? m_config.deviceIndexLeft : m_config.deviceIndexRight;
         auto& side = m_sides[i];
         GxIAPICPP::gxstring sn = deviceList[idx].GetSN();
-        spdlog::info("[CameraControl] 打开设备 {}: {} (SN: {})", idx,
+        JMW_LOG_INFO("08-CameraControl", "[CameraControl] 打开设备 {}: {} (SN: {})", idx,
             (const char*)deviceList[idx].GetDisplayName(), (const char*)sn);
 
         try {
             side.device = IGXFactory::GetInstance().OpenDeviceBySN(sn, GX_ACCESS_EXCLUSIVE);
             side.featureControl = side.device->GetRemoteFeatureControl();
             side.isOpen = true;
-            spdlog::info("[CameraControl] open 计时: 设备 {} 打开完成 {}ms", idx, el());
+            JMW_LOG_INFO("08-CameraControl", "[CameraControl] open 计时: 设备 {} 打开完成 {}ms", idx, el());
         } catch (CGalaxyException& e) {
-            spdlog::error("[CameraControl] 打开设备 {} 异常: {}", idx, e.what());
+            JMW_LOG_ERROR("08-CameraControl", "[CameraControl] 打开设备 {} 异常: {}", idx, e.what());
             for (int j = i - 1; j >= 0; --j) {   // 倒序关已开侧，避免半开残留
                 if (m_sides[j].isOpen) {
                     m_sides[j].device->Close();
@@ -165,7 +166,7 @@ Result CameraControl::open() {
     }
 
     m_isOpen = true;
-    spdlog::info("[CameraControl] 双目相机已打开");
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] 双目相机已打开");
     return Result::ok();
 }
 
@@ -186,7 +187,7 @@ Result CameraControl::close() {
     IGXFactory::GetInstance().Uninit();
 
     m_isOpen = false;
-    spdlog::info("[CameraControl] 双目相机已关闭");
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] 双目相机已关闭");
     return Result::ok();
 }
 
@@ -203,7 +204,7 @@ Result CameraControl::setExposure(double ms) {
     // 读回验证
     try {
         double actual = m_sides[0].featureControl->GetFloatFeature("ExposureTime")->GetValue();
-        spdlog::info("[CameraControl] 曝光设置: 请求={}ms 实际={}µs ({:.3f}ms)", ms, actual, actual/1000.0);
+        JMW_LOG_INFO("08-CameraControl", "[CameraControl] 曝光设置: 请求={}ms 实际={}µs ({:.3f}ms)", ms, actual, actual/1000.0);
     } catch (...) {}
     return Result::ok();
 }
@@ -211,14 +212,14 @@ Result CameraControl::setExposure(double ms) {
 void CameraControl::applySideParams(int sideIndex) {
     auto& fc = m_sides[sideIndex].featureControl;
     if (fc.IsNull()) {
-        spdlog::warn("[CameraControl] applySideParams: featureControl 为空 (side={})", sideIndex);
+        JMW_LOG_WARN("08-CameraControl", "[CameraControl] applySideParams: featureControl 为空 (side={})", sideIndex);
         return;
     }
     try {
         fc->GetEnumFeature("ExposureAuto")->SetValue("Off");
         fc->GetFloatFeature("ExposureTime")->SetValue(m_currentExposureMs * 1000.0);
     } catch (CGalaxyException& e) {
-        spdlog::error("[CameraControl] 曝光设置异常(side={}): {}", sideIndex, e.what());
+        JMW_LOG_ERROR("08-CameraControl", "[CameraControl] 曝光设置异常(side={}): {}", sideIndex, e.what());
     }
 }
 
@@ -234,20 +235,20 @@ Result CameraControl::setGain(double dB) {
             fc->GetEnumFeature("GainAuto")->SetValue("Off");
             fc->GetIntFeature("GainRaw")->SetValue(raw);
         } catch (CGalaxyException& e) {
-            spdlog::error("[CameraControl] 增益设置异常(side={}): {}", i, e.what());
+            JMW_LOG_ERROR("08-CameraControl", "[CameraControl] 增益设置异常(side={}): {}", i, e.what());
         }
     }
     // 读回验证
     try {
         int64_t actual = m_sides[0].featureControl->GetIntFeature("GainRaw")->GetValue();
-        spdlog::info("[CameraControl] 增益设置: 请求={} 实际 GainRaw={}", dB, actual);
+        JMW_LOG_INFO("08-CameraControl", "[CameraControl] 增益设置: 请求={} 实际 GainRaw={}", dB, actual);
     } catch (...) {}
     return Result::ok();
 }
 
 Result CameraControl::setResolution(int width, int height) {
     if (!m_isOpen) return Result::fail("设备未打开");
-    spdlog::info("[CameraControl] setResolution: 请求 {}x{}", width, height);
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] setResolution: 请求 {}x{}", width, height);
 
     for (int i = 0; i < 2; ++i) {
         auto& fc = m_sides[i].featureControl;
@@ -258,7 +259,7 @@ Result CameraControl::setResolution(int width, int height) {
             int64_t hMax = fc->GetIntFeature("HeightMax")->GetValue();
             int64_t wInc = fc->GetIntFeature("Width")->GetInc();
             int64_t hInc = fc->GetIntFeature("Height")->GetInc();
-            spdlog::info("[CameraControl] side={} sensor max={}x{} inc={}x{}", i, wMax, hMax, wInc, hInc);
+            JMW_LOG_INFO("08-CameraControl", "[CameraControl] side={} sensor max={}x{} inc={}x{}", i, wMax, hMax, wInc, hInc);
 
             // 步进对齐 + 边界检查
             width = std::max((int)wInc, std::min(width, (int)wMax));
@@ -280,10 +281,10 @@ Result CameraControl::setResolution(int width, int height) {
             // 读回验证
             int64_t actW = fc->GetIntFeature("Width")->GetValue();
             int64_t actH = fc->GetIntFeature("Height")->GetValue();
-            spdlog::info("[CameraControl] side={} ROI 设置成功: {}x{} off=({},{})", i, actW, actH, offX, offY);
+            JMW_LOG_INFO("08-CameraControl", "[CameraControl] side={} ROI 设置成功: {}x{} off=({},{})", i, actW, actH, offX, offY);
 
         } catch (CGalaxyException& e) {
-            spdlog::error("[CameraControl] ROI 失败 side={}: {}", i, e.what());
+            JMW_LOG_ERROR("08-CameraControl", "[CameraControl] ROI 失败 side={}: {}", i, e.what());
             return Result::fail(e.what());
         }
     }
@@ -334,7 +335,7 @@ void CameraControl::startSideCapture(int sideIndex) {
     // 解除帧率上限限制
     try {
         side.featureControl->GetBoolFeature("AcquisitionFrameRateEnable")->SetValue(false);
-        spdlog::info("[CameraControl] side {} 已解除 AcquisitionFrameRate 上限", sideIndex);
+        JMW_LOG_INFO("08-CameraControl", "[CameraControl] side {} 已解除 AcquisitionFrameRate 上限", sideIndex);
     } catch (CGalaxyException&) {
         // 某些相机不支持此功能，忽略
     }
@@ -342,12 +343,12 @@ void CameraControl::startSideCapture(int sideIndex) {
     side.featureControl->GetEnumFeature("TriggerSelector")->SetValue("FrameStart");
     side.featureControl->GetEnumFeature("TriggerMode")->SetValue("On");
     side.featureControl->GetEnumFeature("TriggerSource")->SetValue(m_config.triggerSource.c_str());
-    spdlog::info("[CameraControl] side {} 硬件触发: {}", sideIndex, m_config.triggerSource);
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] side {} 硬件触发: {}", sideIndex, m_config.triggerSource);
 
     side.featureControl->GetCommandFeature("AcquisitionStart")->Execute();
     side.isCapturing = true;
 
-    spdlog::info("[CameraControl] 侧 {} 采集已启动", sideIndex);
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] 侧 {} 采集已启动", sideIndex);
 }
 
 void CameraControl::stopSideCapture(int sideIndex) {
@@ -359,7 +360,7 @@ void CameraControl::stopSideCapture(int sideIndex) {
         side.stream->StopGrab();
         side.stream->UnregisterCaptureCallback();
     } catch (CGalaxyException& e) {
-        spdlog::error("[CameraControl] 停止采集异常: {}", e.what());
+        JMW_LOG_ERROR("08-CameraControl", "[CameraControl] 停止采集异常: {}", e.what());
     }
 
     delete side.eventHandler;
@@ -387,7 +388,7 @@ Result CameraControl::startCapture() {
     }
 
     m_isCapturing = true;
-    spdlog::info("[CameraControl] 双目采集已启动");
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] 双目采集已启动");
     return Result::ok();
 }
 
@@ -398,7 +399,7 @@ Result CameraControl::stopCapture() {
     stopSideCapture(0);
 
     m_isCapturing = false;
-    spdlog::info("[CameraControl] 双目采集已停止");
+    JMW_LOG_INFO("08-CameraControl", "[CameraControl] 双目采集已停止");
     return Result::ok();
 }
 

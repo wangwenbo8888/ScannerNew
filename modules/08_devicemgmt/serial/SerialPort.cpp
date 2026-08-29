@@ -4,6 +4,7 @@
 
 #include "SerialPort.h"
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 #include <algorithm>
 #include <chrono>
@@ -81,9 +82,9 @@ Scanner::Result SerialPort::open(const std::string& port, int baud) {
 
     // 缓冲调大/清残留：非致命——失败仅 warn 继续，不 fail open（S-T5 前置清理）
     if (!SetupComm(h, 4096, 4096))
-        spdlog::warn("[SerialPort] SetupComm 失败（继续使用默认缓冲）: {}", port);
+        JMW_LOG_WARN("08-SerialPort", "[SerialPort] SetupComm 失败（继续使用默认缓冲）: {}", port);
     if (!PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR))
-        spdlog::warn("[SerialPort] PurgeComm 失败（继续打开）: {}", port);
+        JMW_LOG_WARN("08-SerialPort", "[SerialPort] PurgeComm 失败（继续打开）: {}", port);
 
     hSerial_ = h;
     owner_.store(0, std::memory_order_release);
@@ -168,7 +169,7 @@ Scanner::Result SerialPort::write(const std::string& bytes) {
     }
     const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
-    if (el > 50) spdlog::warn("[SerialPort] 慢写 {}ms（{} 字节）", el, bytes.size());
+    if (el > 50) JMW_LOG_WARN("08-SerialPort", "[SerialPort] 慢写 {}ms（{} 字节）", el, bytes.size());
     if (written != bytes.size()) {
         return Scanner::Result::fail(kErrWritePartial, "串口写不完整");
     }

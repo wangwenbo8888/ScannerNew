@@ -1,25 +1,28 @@
 // ============================================================================
 // ObsLogger.cpp — 统一日志装配实现（设计方案 §5）
 //
-//   · 双 sink（stdout_color + rotating_file）组 spdlog default logger；
+//   · 双 sink（stdout_color + daily_file）组 spdlog default logger；
 //     幂等 = init 内先 spdlog::shutdown() 拆旧装配（registry 无永久关闭
-//     标志，drop_all 后可重建；旧 sink 析构释放 jmw.log 句柄并落盘余量）
-//   · maxFiles 语义 = 含当前文件共保留 N 份：spdlog 侧传 maxFiles-1
-//     （spdlog max_files 指轮转副本数，N+1 才是实际文件数）
+//     标志，drop_all 后可重建；旧 sink 析构释放当日文件句柄并落盘余量）
+//   · daily_file_sink(base, 0, 0, false, maxFiles)：文件名 jmw_YYYY-MM-DD.log
+//     （日期插在扩展名前）；跨零点首次写入自动换新文件；maxFiles=保留份数
+//     （sink 构造与每次轮转时删最旧——ISO 日期字典序即时间序）
 //   · 排障包每步 std::error_code 容错（缺则跳过）；spdlog 以共享模式打开
 //     日志文件，sink 未关闭也能读走已 flush 部分
 // ============================================================================
 #include "ObsLogger.h"
 
-#include <spdlog/sinks/rotating_file_sink.h>
+#include <spdlog/sinks/daily_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <vector>
 
 // 工程版本（09 core/common/version.h 为头文件内联，取宏不引链接依赖；
 // 不可含则写 unknown——__has_include 守卫保证构建永不因缺它而断）
@@ -52,6 +55,36 @@ std::string timestampName() {
     return buf;
 }
 
+// 按日保留清理：扫 logDir 内 <baseName>_YYYY-MM-DD.log（ISO 日期字典序=时间序），
+// 超过 keepCount 份删最旧。sink 的 max_files 只在跨零点轮转时清——历史积压由
+// init 时主动清一次（确定性、不依赖 spdlog 版本行为）。
+void pruneOldDailyLogs(const fs::path& logDir, const std::string& baseName,
+                       size_t keepCount) {
+    std::error_code ec;
+    std::vector<fs::path> files;
+    for (fs::directory_iterator it(logDir, ec), end; it != end; it.increment(ec)) {
+        const fs::path& p = it->path();
+        if (it->is_regular_file(ec) && p.extension() == ".log" &&
+            p.stem().string().rfind(baseName + "_", 0) == 0)
+            files.push_back(p);
+    }
+    if (files.size() <= keepCount) return;
+    std::sort(files.begin(), files.end());          // 文件名字典序 = 日期时间序
+    const size_t removeCount = files.size() - keepCount;
+    for (size_t i = 0; i < removeCount; ++i)
+        fs::remove(files[i], ec);                   // 单个失败不中断（尽力而为）
+}
+
+std::string todayDateStr() {
+    const std::time_t t = std::chrono::system_clock::to_time_t(
+        std::chrono::system_clock::now());
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
+    return buf;
+}
+
 } // namespace
 
 void obsLoggerInit(const ObsLoggerConfig& cfg) {
@@ -60,18 +93,29 @@ void obsLoggerInit(const ObsLoggerConfig& cfg) {
 
     std::error_code ec;
     fs::create_directories(cfg.logDir, ec);
+    // 历史积压先清（sink 的 max_files 只管跨零点轮转时）：当日文件已存在（重启
+    // 场景）占一个槽位；尚未存在则多让出一格给即将新建的当日文件
+    const size_t keep = cfg.maxFiles > 0 ? cfg.maxFiles : 1;
+    const fs::path todayFile =
+        fs::path(cfg.logDir) / (cfg.baseName + "_" + todayDateStr() + ".log");
+    const size_t keepExisting =
+        fs::exists(todayFile, ec) ? keep : (keep > 0 ? keep - 1 : 0);
+    pruneOldDailyLogs(cfg.logDir, cfg.baseName, keepExisting);
 
     auto console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    auto file = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+    auto file = std::make_shared<spdlog::sinks::daily_file_sink_mt>(
         (fs::path(cfg.logDir) / (cfg.baseName + ".log")).string(),
-        cfg.maxBytes,
-        cfg.maxFiles > 0 ? cfg.maxFiles - 1 : 0);   // spdlog max_files=轮转副本数
+        /*rotation_hour=*/0, /*rotation_minute=*/0,
+        /*truncate=*/false,
+        static_cast<uint16_t>(cfg.maxFiles > 0xFFFF ? 0xFFFF : cfg.maxFiles));
 
     auto logger = std::make_shared<spdlog::logger>(
         "jmw", spdlog::sinks_init_list{console, file});
     logger->set_level(spdlog::level::info);
     logger->flush_on(spdlog::level::warn);          // warn+ 即时落盘（§7 崩溃留痕）
-    logger->set_pattern("[%H:%M:%S.%e][%l][%n] %v");
+    // %s/%# = 源文件名(仅 basename)/行号——由 JMW_LOG_*（SPDLOG 宏族）在调用点
+    // 自动捕获；散装 spdlog::info 等函数调用无 source_loc，显示为空段 [:0]
+    logger->set_pattern("[%H:%M:%S.%e][%l][%n][%s:%#] %v");
     spdlog::set_default_logger(logger);
 
     g_cfg = cfg;
@@ -83,7 +127,7 @@ void obsLoggerShutdown() {
     if (g_inited) {
         if (auto lg = spdlog::default_logger()) lg->flush();   // 落盘余量
     }
-    spdlog::shutdown();   // drop_all → 全部 sink 析构，释放 jmw.log 句柄
+    spdlog::shutdown();   // drop_all → 全部 sink 析构，释放当日日志文件句柄
     g_inited = false;
 }
 

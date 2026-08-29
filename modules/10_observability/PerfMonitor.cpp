@@ -3,6 +3,7 @@
 #include "base/EventBus.h"
 #include <chrono>
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 namespace Scanner::service {
 
@@ -101,13 +102,13 @@ void PerfMonitor::poll() {
 
     // HealthReport 边沿触发：进入降级（含预警级越限）发 1；全绿恢复发 0
     if (warn && !degraded_) {
-        spdlog::warn("[PerfMonitor] 性能降级：cpuTemp={}C mem={}%(anchor {}ms) disk={}GB captureFps={}",
+        JMW_LOG_WARN("10-PerfMonitor", "[PerfMonitor] 性能降级：cpuTemp={}C mem={}%(anchor {}ms) disk={}GB captureFps={}",
                      m.cpuTempC, m.memPercent,
                      mem_.sinceMs >= 0 ? now - mem_.sinceMs : -1,
                      m.diskFreeGB, m.captureFps);
         publishHealth(now, 1);
     } else if (!nowDegraded && degraded_) {
-        spdlog::info("[PerfMonitor] 性能恢复");
+        JMW_LOG_INFO("10-PerfMonitor", "[PerfMonitor] 性能恢复");
         publishHealth(now, 0);
     }
 
