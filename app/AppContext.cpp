@@ -1,8 +1,9 @@
-﻿// ============================================================================
+// ============================================================================
 // AppContext.cpp — 应用层装配实现
 // ============================================================================
 
 #include "AppContext.h"
+#include "SceneFeedAdapter.h"
 #include "FrameBuffer.h"
 #include "PointCloudBuffer.h"
 #include "DeviceStateCache.h"
@@ -50,7 +51,7 @@ void AppContext::initialize() {
     deviceStateCache_ = std::make_unique<Scanner::data::DeviceStateCache>();
     calibRepo_ = std::make_unique<Scanner::data::CalibrationRepository>();
     if (const auto lr = calibRepo_->load("calibration.json"); !lr.success)
-        spdlog::info("[AppContext] 启动未装载标定仓库档（{}）——首次标定后生成", lr.message);
+        JMW_LOG_INFO("app-AppContext", "[AppContext] 启动未装载标定仓库档（{}）——首次标定后生成", lr.message);
 
     // === Service ===
     stateMachine_   = std::make_unique<Scanner::service::StateMachine>(eventBus_.get());
@@ -199,7 +200,7 @@ void AppContext::initialize() {
         });
     // 设备启动（open+自检）后台化：此处不再阻塞主窗口——main 在 window.show() 后
     // 调 startDevicesAsync()（相机枚举+自动搜口实测 ~5s，同步跑=白屏等）
-    spdlog::info("[AppContext] 组件装配完成（设备启动转后台 startDevicesAsync）");
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 组件装配完成（设备启动转后台 startDevicesAsync）");
 
     selfCheckCollector_ = std::make_unique<Scanner::device::SelfCheckCollector>();
     hwMonitor_ = std::make_unique<Scanner::device::HardwareMonitor>();
@@ -227,6 +228,9 @@ void AppContext::initialize() {
     wfCtx_->setStateMachine(stateMachine_.get());
     wfCtx_->setParameterManager(paramManager_.get());
     wfCtx_->setEventBus(eventBus_.get());
+    // P2 渲染加固：SceneFeedAdapter（ISceneFeed 首个实现——流水线→渲染跨线程 marshal）
+    sceneFeed_ = std::make_unique<SceneFeedAdapter>();
+    wfCtx_->setSceneFeed(sceneFeed_.get());
 
     // === Workflow ===
     scanWf_  = std::make_unique<Scanner::workflow::ScanWorkflow>(wfCtx_.get());
@@ -250,20 +254,20 @@ void AppContext::initialize() {
         commandGate_->notifyCompleted("start_postprocess", ok);
     });
 
-    spdlog::info("[AppContext] 全部组件装配完成");
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 全部组件装配完成");
     // 灯态策略：启动/开门面不亮灯；startCapture（开始扫描）亮（N10 账本全参）、
     // stopCapture（停扫描）熄（B0/L0）。UI 滑条空闲仅记账，采集中改值随全参重发。
 
     // 启动 HardwareMonitor（始终运行，周期采集设备状态）
     hwMonitor_->start(1000);
-    spdlog::info("[AppContext] HardwareMonitor 已启动");
+    JMW_LOG_INFO("app-AppContext", "[AppContext] HardwareMonitor 已启动");
 }
 
 void AppContext::startDevicesAsync() {
     if (devStartThread_.joinable()) return;     // 已起（幂等）
     devStartThread_ = std::thread([this] {
         const auto devR = deviceManager_->open();   // 相机枚举→MCU 自动搜口→N12Z1→逻辑线程
-        spdlog::info("[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
+        JMW_LOG_INFO("app-AppContext", "[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
 
         notifySelfCheckItem("serialPort", devR.success);
         notifySelfCheckItem("license", true);   // 占位（狗到货接实检）
@@ -296,7 +300,7 @@ void AppContext::shutdown() {
     if (postWf_)    postWf_->stop();
     if (faultHandler_) faultHandler_->stop();
     if (deviceManager_) deviceManager_->close();   // 相机+MCU 收口（门面倒序关）
-    spdlog::info("[AppContext] 全部组件已关闭");
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 全部组件已关闭");
 }
 
 void AppContext::notifySelfCheckItem(const std::string& item, bool ok) {

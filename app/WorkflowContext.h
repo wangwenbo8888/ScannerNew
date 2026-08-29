@@ -13,6 +13,7 @@
 namespace Scanner::data   { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibrationRepository; }
 namespace Scanner::service{ class StateMachine; class ParameterManager; }
 namespace Scanner::infra  { class EventBus; }
+namespace Scanner::pipeline { class ISceneFeed; }
 
 namespace Scanner::workflow {
 
@@ -46,6 +47,10 @@ public:
     void setEventBus(infra::EventBus* bus) { eventBus_ = bus; }
     infra::EventBus* eventBus() { return eventBus_; }
 
+    // === 渲染推送（P2 渲染加固：app SceneFeedAdapter 实现 07 ISceneFeed）===
+    void setSceneFeed(class Scanner::pipeline::ISceneFeed* feed) { sceneFeed_ = feed; }
+    Scanner::pipeline::ISceneFeed* sceneFeed() { return sceneFeed_; }
+
     // === EventBus 发布快捷方法 ===
     void publishProgress(int currentStage, int totalStages, const std::string& stageName, float progress);
     void publishEvent(EventType type, int64_t param1 = 0, int64_t param2 = 0);
@@ -60,6 +65,7 @@ private:
     service::ParameterManager* paramManager_ = nullptr;
 
     infra::EventBus* eventBus_ = nullptr;
+    Scanner::pipeline::ISceneFeed* sceneFeed_ = nullptr;   // P2 渲染加固（app 注入，可空）
 };
 
 } // namespace Scanner::workflow

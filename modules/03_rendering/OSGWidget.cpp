@@ -1,6 +1,13 @@
-﻿#include "OSGWidget.h"
+#include "OSGWidget.h"
 #include "PointCloudBuffer.h"
 #include "file_io.h"
+#include "RenderSanity.h"
+
+#include <chrono>
+#include <cstring>
+
+#include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 #include <osg/Geode>
 #include <osg/Geometry>
@@ -25,6 +32,7 @@
 #include <limits>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <Eigen/Dense>
 
 #include <osgUtil/CullVisitor>
@@ -234,11 +242,11 @@ void OSGWidget::updateAxesView()
     m_axesCamera->setViewMatrix(vm);
 }
 
-void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points)
+osg::ref_ptr<osg::Geode> OSGWidget::buildCloudGeode(const std::vector<osg::Vec3>& points,
+                                                    const std::vector<osg::Vec4ub>* colors)
 {
-    if (points.empty()) return;
-
     // LeadScan 风格：Vec4Array(float 颜色) + VBO + DYNAMIC
+    // 分配集中于此——调用方在挂场景前构建（异常可弃，旧画面不动）
     osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
     osg::ref_ptr<osg::Vec4Array> c = new osg::Vec4Array();
     v->reserve(points.size());
@@ -246,7 +254,11 @@ void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points)
 
     for (size_t i = 0; i < points.size(); ++i) {
         v->push_back(points[i]);
-        c->push_back(osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));  // LeadScan 蓝
+        if (colors && i < colors->size())
+            c->push_back(osg::Vec4((*colors)[i].r() / 255.0f, (*colors)[i].g() / 255.0f,
+                                   (*colors)[i].b() / 255.0f, (*colors)[i].a() / 255.0f));
+        else
+            c->push_back(osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));  // LeadScan 蓝
     }
 
     osg::ref_ptr<osg::Geometry> geom = new osg::Geometry();
@@ -267,10 +279,12 @@ void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points)
     osg::ref_ptr<osg::Point> pointSize = new osg::Point;
     pointSize->setSize(3.0f);
     ss->setAttribute(pointSize);
+    return geode;
+}
 
-    m_root->addChild(geode.get());
-
-    // 相机定位到数据，并保留 manipulator 供旋转/缩放操作
+void OSGWidget::fitCameraToRoot()
+{
+    // 相机定位到数据，并保留 manipulator 供旋转/缩放操作（原 loadPointCloud 尾块）
     osg::BoundingSphere bs = m_root->getBound();
     if (bs.valid() && bs.radius() > 0 && m_viewer.valid()) {
         double r = bs.radius();
@@ -294,43 +308,26 @@ void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points)
     }
 }
 
+void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points)
+{
+    if (points.empty()) return;
+
+    osg::ref_ptr<osg::Geode> geode = buildCloudGeode(points, nullptr);
+    m_root->addChild(geode.get());
+    fitCameraToRoot();
+}
+
 void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points,
                                 const std::vector<osg::Vec4ub>& colors)
 {
     if (points.empty()) return;
 
-    osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
-    osg::ref_ptr<osg::Vec4Array> c = new osg::Vec4Array();
-    v->reserve(points.size());
-    c->reserve(points.size());
-    for (size_t i = 0; i < points.size(); ++i) {
-        v->push_back(points[i]);
-        if (i < colors.size())
-            c->push_back(osg::Vec4(colors[i].r()/255.0f, colors[i].g()/255.0f,
-                                    colors[i].b()/255.0f, colors[i].a()/255.0f));
-        else
-            c->push_back(osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));
-    }
-
-    osg::ref_ptr<osg::Geometry> geom = new osg::Geometry();
-    geom->setUseVertexBufferObjects(true);
-    geom->setUseDisplayList(false);
-    geom->setDataVariance(osg::Object::DYNAMIC);
-    geom->setVertexArray(v.get());
-    geom->setColorArray(c.get());
-    geom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
-    geom->addPrimitiveSet(new osg::DrawArrays(osg::PrimitiveSet::POINTS, 0, v->size()));
-
-    osg::ref_ptr<osg::Geode> geode = new osg::Geode();
-    geode->addDrawable(geom.get());
-    osg::ref_ptr<osg::StateSet> ss = geode->getOrCreateStateSet();
-    osg::ref_ptr<osg::Point> pointSize = new osg::Point;
-    pointSize->setSize(3.0f);
-    ss->setAttribute(pointSize);
+    osg::ref_ptr<osg::Geode> geode = buildCloudGeode(points, &colors);
     m_root->addChild(geode.get());
 }
 
 // ============================================================================
+// P1 摄入加固：四道闸（RenderSanity）→ 先建后换（原子替换）→ 版本记账
 // ============================================================================
 void OSGWidget::loadFromPointCloudBuffer(Scanner::data::PointCloudBuffer* pcb) {
     if (!pcb) return;
@@ -340,24 +337,67 @@ void OSGWidget::loadFromPointCloudBuffer(Scanner::data::PointCloudBuffer* pcb) {
     std::vector<cv::Vec3b> colors;
     pcb->getSnapshot(version, points, colors);
 
-    if (points.empty()) return;
-
-    clearScene();
-
-    std::vector<osg::Vec3> osgPoints;
-    osgPoints.reserve(points.size());
-    for (const auto& p : points)
-        osgPoints.emplace_back(p.x, p.y, p.z);
-
-    if (!colors.empty()) {
-        std::vector<osg::Vec4ub> osgColors;
-        osgColors.reserve(colors.size());
-        for (const auto& c : colors)
-            osgColors.emplace_back(c[0], c[1], c[2], 255);
-        loadPointCloud(osgPoints, osgColors);
-    } else {
-        loadPointCloud(osgPoints);
+    // ① 净化与判定（版本短路/空/NaN/尺寸不配/包围盒/超预算抽稀）
+    const auto d = Scanner::render::sanitizeSnapshot(
+        points, colors, version, m_lastIngestVersion,
+        m_maxIngestPoints, m_maxIngestExtentMm);
+    if (!d.accept) {
+        if (std::strcmp(d.reason, "unchanged") != 0)   // 版本未变=正常静默路径
+            reportFault(static_cast<int>(Scanner::render::RenderEvent::SnapshotRejected),
+                        std::string("快照拒绝: ") + d.reason);
+        return;                                        // 拒绝→保留现画面
     }
+
+    // ② 先建后换：构建完整才触碰场景（构建期异常→旧画面保留，0x0302）
+    osg::ref_ptr<osg::Geode> geode;
+    try {
+        std::vector<osg::Vec3> osgPoints;
+        osgPoints.reserve(points.size());
+        for (const auto& p : points)
+            osgPoints.emplace_back(p.x, p.y, p.z);
+
+        if (!colors.empty()) {
+            std::vector<osg::Vec4ub> osgColors;
+            osgColors.reserve(colors.size());
+            for (const auto& c : colors)
+                osgColors.emplace_back(c[0], c[1], c[2], 255);
+            geode = buildCloudGeode(osgPoints, &osgColors);
+        } else {
+            geode = buildCloudGeode(osgPoints, nullptr);
+        }
+    } catch (const std::bad_alloc&) {
+        reportFault(static_cast<int>(Scanner::render::RenderEvent::BuildDegraded),
+                    "场景构建内存不足，保留旧画面");
+        return;
+    } catch (const std::exception& e) {
+        reportFault(static_cast<int>(Scanner::render::RenderEvent::BuildDegraded),
+                    std::string("场景构建异常，保留旧画面: ") + e.what());
+        return;
+    } catch (...) {
+        reportFault(static_cast<int>(Scanner::render::RenderEvent::BuildDegraded),
+                    "场景构建未知异常，保留旧画面");
+        return;
+    }
+
+    // ③ 原子替换：clear＋addChild 之间无 paint 插入（UI 线程同步执行，皆不抛）
+    clearScene();
+    m_root->addChild(geode.get());
+    if (colors.empty())
+        fitCameraToRoot();                             // 保持原行为：无色路径才定位相机
+
+    m_lastIngestVersion = version;
+    ++m_ingestCount;
+    if (d.truncated) {
+        reportFault(static_cast<int>(Scanner::render::RenderEvent::DegradeChanged),
+                    "摄入点数超预算，已均匀抽稀至 " + std::to_string(d.keptCount) + " 点");
+    }
+}
+
+void OSGWidget::setIngestBudget(size_t maxPoints, double maxExtentMm) {
+    m_maxIngestPoints = maxPoints > 0 ? maxPoints : 1;
+    m_maxIngestExtentMm = maxExtentMm > 0.0 ? maxExtentMm : 1.0e6;
+    m_degradeLevel = 0;                    // 外部显式设预算＝退出自动降级阶梯
+    m_overBudgetStreak = 0;
 }
 
 bool OSGWidget::loadTestData(int numPoints)
@@ -470,6 +510,9 @@ bool OSGWidget::loadTestDataFromPLY(const std::string& filepath, int numPoints)
     m_streamFile.open(filepath, std::ios::binary);
     if (!m_streamFile.is_open())
         return false;
+    m_streamFileBuf = std::vector<char>(1 << 20, '\0');          // 1MB 大缓冲：
+    m_streamFile.rdbuf()->pubsetbuf(m_streamFileBuf.data(),      // 整批 read 少走 OS 页
+        static_cast<std::streamsize>(m_streamFileBuf.size()));   // 调用（方案 B）
 
     std::string line;
     int vertexCount = 0;
@@ -495,6 +538,7 @@ bool OSGWidget::loadTestDataFromPLY(const std::string& filepath, int numPoints)
     m_streamTotal = (numPoints > 0 && numPoints < vertexCount) ? numPoints : vertexCount;
     m_streamPath = filepath;
     m_streamBatch = 50000;
+    m_streamStart = std::chrono::steady_clock::now();   // 耗时打点起
 
     m_streamTimer->start(8);
 
@@ -586,6 +630,14 @@ void OSGWidget::streamNextBatch()
         return;
     }
 
+    // 批量整块读：一点 15B（3×f32 坐标+3×u8 颜色）——一次 read 拉整批到内存再解析，
+    // 消除原逐字节 6 次/点的流调用（2000 万点=1.2 亿次 ifstream 调用，加载主瓶颈）
+    static constexpr size_t kBytesPerPoint = 15;
+    m_streamReadBuf.assign(batch * kBytesPerPoint, '\0');
+    m_streamFile.read(m_streamReadBuf.data(), m_streamReadBuf.size());
+    const size_t got = static_cast<size_t>(m_streamFile.gcount());
+    const bool fileOk = m_streamFile.good() || got == m_streamReadBuf.size();
+
     osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
     osg::ref_ptr<osg::Vec4ubArray> c = new osg::Vec4ubArray();
     v->reserve(batch);
@@ -595,17 +647,16 @@ void OSGWidget::streamNextBatch()
     osg::Vec3 batchMax(-1e30f, -1e30f, -1e30f);
     int batchCount = 0;
 
-    for (int i = 0; i < batch; ++i)
+    const size_t nAvail = got / kBytesPerPoint;
+    for (size_t i = 0; i < nAvail; ++i)
     {
+        const char* p = m_streamReadBuf.data() + i * kBytesPerPoint;
         float x, y, z;
-        m_streamFile.read(reinterpret_cast<char*>(&x), 4);
-        m_streamFile.read(reinterpret_cast<char*>(&y), 4);
-        m_streamFile.read(reinterpret_cast<char*>(&z), 4);
-        unsigned char r = static_cast<unsigned char>(m_streamFile.get());
-        unsigned char g = static_cast<unsigned char>(m_streamFile.get());
-        unsigned char b = static_cast<unsigned char>(m_streamFile.get());
+        std::memcpy(&x, p, 4);
+        std::memcpy(&y, p + 4, 4);
+        std::memcpy(&z, p + 8, 4);
 
-        if (m_streamFile.good() && std::isfinite(x) && std::isfinite(y) && std::isfinite(z)
+        if (fileOk && std::isfinite(x) && std::isfinite(y) && std::isfinite(z)
             && std::fabs(x) < 1e5f && std::fabs(y) < 1e5f && std::fabs(z) < 1e5f)
         {
             v->push_back(osg::Vec3(x, y, z));
@@ -691,6 +742,12 @@ void OSGWidget::streamNextBatch()
         m_streamFile.close();
         m_streamDone = true;
         m_streamTimer->stop();
+        // 加载耗时打点（性能口径：批读优化后 2000 万点目标 <10s）
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - m_streamStart).count();
+        JMW_LOG_INFO("03-OSGWidget", "[OSGWidget] PLY 流式加载完成: {} 点 / {} ms（{} 点/秒）",
+                     m_streamLoaded, ms,
+                     ms > 0 ? static_cast<long long>(m_streamLoaded) * 1000 / ms : 0);
     }
 }
 
@@ -765,6 +822,8 @@ void OSGWidget::paintGL()
 {
     if (!m_viewer.valid())
         return;
+    if (m_renderSuspended)
+        return;                          // 挂起态：不画，保留末帧（timer 已停）
 
     if (m_gw.valid())
         m_gw->makeCurrent();
@@ -778,11 +837,82 @@ void OSGWidget::paintGL()
 
     updateAxesView();
 
-    m_viewer->frame();
+    // P1 渲染护栏：渲染无权弄死 App——frame() 异常→挂起循环＋上报，Qt 事件循环存活
+    // P2.2 帧耗时探针：连续 5 帧 >50ms → 预算降一级自动抽稀（0x0311）
+    const auto t0 = std::chrono::steady_clock::now();
+    try {
+        m_viewer->frame();
+        ++m_framesDrawn;
 
-    // Capture matrices that OSG actually used for this frame
-    m_camViewAfterFrame = m_viewer->getCamera()->getViewMatrix();
-    m_camProjAfterFrame = m_viewer->getCamera()->getProjectionMatrix();
+        // Capture matrices that OSG actually used for this frame
+        m_camViewAfterFrame = m_viewer->getCamera()->getViewMatrix();
+        m_camProjAfterFrame = m_viewer->getCamera()->getProjectionMatrix();
+    } catch (const std::exception& e) {
+        suspendRender(std::string("渲染帧异常: ") + e.what());
+    } catch (...) {
+        suspendRender("渲染帧未知异常");
+    }
+    m_lastFrameMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+    if (m_lastFrameMs > 50.0) {
+        if (++m_overBudgetStreak >= 5 && m_degradeLevel < 3) {
+            ++m_degradeLevel;
+            m_overBudgetStreak = 0;
+            m_maxIngestPoints = kDegradeBudgets[m_degradeLevel];
+            reportFault(static_cast<int>(Scanner::render::RenderEvent::FrameOverbudget),
+                        "渲染连续超 50ms，摄入预算降级至 level " +
+                            std::to_string(m_degradeLevel));
+        }
+    } else {
+        m_overBudgetStreak = 0;
+    }
+}
+
+// ============================================================================
+// P1 渲染加固实现件
+// ============================================================================
+const size_t OSGWidget::kDegradeBudgets[4] = {
+    size_t{8} << 20,   // level 0：8M（默认）
+    size_t{4} << 20,   // level 1：4M
+    size_t{1} << 20,   // level 2：1M
+    size_t{256} << 10, // level 3：256K
+};
+
+OSGWidget::RenderStats OSGWidget::renderStats() const {
+    RenderStats s;
+    s.framesDrawn = m_framesDrawn;
+    s.ingestCount = m_ingestCount;
+    s.lastFrameMs = m_lastFrameMs;
+    s.degradeLevel = m_degradeLevel;
+    s.suspended = m_renderSuspended;
+    return s;
+}
+
+void OSGWidget::reportFault(int code, const std::string& msg)
+{
+    if (m_faultSink)
+        m_faultSink(code, msg);          // app 装配桥接（EventBus/日志）
+    else
+        qWarning("[OSGWidget] render event 0x%04X: %s", code, msg.c_str());
+}
+
+void OSGWidget::suspendRender(const std::string& why)
+{
+    if (m_renderSuspended) return;       // 幂等（只报首个异常）
+    m_renderSuspended = true;
+    m_timer->stop();
+    reportFault(static_cast<int>(Scanner::render::RenderEvent::RenderSuspended),
+                why + "（循环已挂起，UI 存活；tryResumeRender 可恢复）");
+}
+
+bool OSGWidget::tryResumeRender()
+{
+    if (!m_renderSuspended) return true;
+    m_renderSuspended = false;
+    m_timer->start(16);                  // 与 ctor 同节拍
+    reportFault(static_cast<int>(Scanner::render::RenderEvent::RenderResumed),
+                "渲染循环恢复");
+    return true;
 }
 
 void OSGWidget::mouseMoveEvent(QMouseEvent *event)
@@ -1191,8 +1321,19 @@ void OSGWidget::highlightSelectedPoints()
         return;
 
     osg::Matrix mvp = computeRenderingMVP(m_hitTestProj, m_hitTestView);
-    int vpw = m_hitTestVpw;
-    int vph = m_hitTestVph;
+    const int vpw = m_hitTestVpw;
+    const int vph = m_hitTestVph;
+
+    // 命中预筛加速（同 deletePointsInPolyline：包围盒预筛+预取边数组）
+    double minX = 1e30, minY = 1e30, maxX = -1e30, maxY = -1e30;
+    const size_t nEdges = poly->size();
+    std::vector<double> px(nEdges), py(nEdges);
+    for (size_t i = 0; i < nEdges; ++i) {
+        const double x = (*poly)[i].x(), y = (*poly)[i].y();
+        px[i] = x; py[i] = y;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
 
     for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci)
     {
@@ -1218,32 +1359,32 @@ void OSGWidget::highlightSelectedPoints()
 
             HighlightEntry entry;
             entry.geom = geom;
+            entry.indices.reserve(verts->size() / 16 + 16);
+            entry.originalColors.reserve(verts->size() / 16 + 16);
 
-            for (unsigned int vi = 0; vi < verts->size(); ++vi)
+            const unsigned int nVerts = static_cast<unsigned int>(verts->size());
+            for (unsigned int vi = 0; vi < nVerts; ++vi)
             {
-                osg::Vec3 wp = (*verts)[vi];
-                osg::Vec4 clip = mvp * osg::Vec4(wp.x(), wp.y(), wp.z(), 1.0);
-                if (fabs(clip.w()) < 1e-10)
-                    continue;
+                const osg::Vec3& vp = (*verts)[vi];
+                float cx = mvp(0,0)*vp.x() + mvp(0,1)*vp.y() + mvp(0,2)*vp.z() + mvp(0,3);
+                float cy = mvp(1,0)*vp.x() + mvp(1,1)*vp.y() + mvp(1,2)*vp.z() + mvp(1,3);
+                float cw = mvp(3,0)*vp.x() + mvp(3,1)*vp.y() + mvp(3,2)*vp.z() + mvp(3,3);
+                if (cw < 1e-10f && cw > -1e-10f) continue;
+                if (cw < 0.0f) { cx = -cx; cy = -cy; cw = -cw; }
 
-                if (clip.w() < 0.0f)
-                {
-                    clip.x() = -clip.x();
-                    clip.y() = -clip.y();
-                    clip.z() = -clip.z();
-                    clip.w() = -clip.w();
+                const float sx = (cx / cw) * vpw * 0.5f;
+                const float sy = (cy / cw) * vph * 0.5f;
+
+                if (sx < minX || sx > maxX || sy < minY || sy > maxY)
+                    continue;                      // 包围盒外：一次淘汰
+
+                bool inside = false;
+                for (size_t i = 0, j = nEdges - 1; i < nEdges; j = i++) {
+                    if ((py[i] > sy) != (py[j] > sy) &&
+                        (sx < (px[j] - px[i]) * (sy - py[i]) / (py[j] - py[i]) + px[i]))
+                        inside = !inside;
                 }
-
-                float ndx = clip.x() / clip.w();
-                float ndy = clip.y() / clip.w();
-                if (ndx < -1.0f || ndx > 1.0f || ndy < -1.0f || ndy > 1.0f)
-                    continue;
-
-                float sx = ndx * vpw * 0.5f;
-                float sy = ndy * vph * 0.5f;
-
-                if (isPointInPolygon2D(osg::Vec2d(sx, sy), *poly))
-                {
+                if (inside) {
                     entry.indices.push_back(vi);
                     entry.originalColors.push_back((*colors)[vi]);
                 }
@@ -1316,7 +1457,6 @@ void OSGWidget::undoDelete()
     }
     m_deleteHistory.pop_back();
 }
-
 void OSGWidget::deletePointsInPolyline()
 {
     if (!m_viewer.valid() || m_selectedPolylines.empty())
@@ -1327,8 +1467,21 @@ void OSGWidget::deletePointsInPolyline()
         return;
 
     osg::Matrix mvp = computeRenderingMVP(m_hitTestProj, m_hitTestView);
-    int vpw = m_hitTestVpw;
-    int vph = m_hitTestVph;
+    const int vpw = m_hitTestVpw;
+    const int vph = m_hitTestVph;
+
+    // 命中预筛加速：①多边形屏幕包围盒（域外点一次比较淘汰——大点云场景淘汰
+    // 95%+ 顶点，免进 O(边数) 射线法）②预拷贝边数组到连续 vector<double>（消除
+    // ref_ptr 寻址与 float/double 混转）③命中容器 reserve（免反复扩容拷贝）
+    double minX = 1e30, minY = 1e30, maxX = -1e30, maxY = -1e30;
+    const size_t nEdges = poly->size();
+    std::vector<double> px(nEdges), py(nEdges);
+    for (size_t i = 0; i < nEdges; ++i) {
+        const double x = (*poly)[i].x(), y = (*poly)[i].y();
+        px[i] = x; py[i] = y;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
 
     for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci)
     {
@@ -1347,33 +1500,37 @@ void OSGWidget::deletePointsInPolyline()
 
             std::vector<unsigned int> delIndices;
             std::vector<osg::Vec4ub> delOrigColors;
+            delIndices.reserve(verts->size() / 16 + 16);
+            delOrigColors.reserve(verts->size() / 16 + 16);
 
-            for (unsigned int vi = 0; vi < verts->size(); ++vi)
+            const unsigned int nVerts = static_cast<unsigned int>(verts->size());
+            for (unsigned int vi = 0; vi < nVerts; ++vi)
             {
-                osg::Vec4 clip = mvp * osg::Vec4((*verts)[vi].x(), (*verts)[vi].y(), (*verts)[vi].z(), 1.0);
-                if (fabs(clip.w()) < 1e-10) continue;
+                const osg::Vec3& vp = (*verts)[vi];
+                float cx = mvp(0,0)*vp.x() + mvp(0,1)*vp.y() + mvp(0,2)*vp.z() + mvp(0,3);
+                float cy = mvp(1,0)*vp.x() + mvp(1,1)*vp.y() + mvp(1,2)*vp.z() + mvp(1,3);
+                float cw = mvp(3,0)*vp.x() + mvp(3,1)*vp.y() + mvp(3,2)*vp.z() + mvp(3,3);
+                if (cw < 1e-10f && cw > -1e-10f) continue;
+                if (cw < 0.0f) { cx = -cx; cy = -cy; cw = -cw; }
 
-                if (clip.w() < 0.0f)
-                {
-                    clip.x() = -clip.x(); clip.y() = -clip.y();
-                    clip.z() = -clip.z(); clip.w() = -clip.w();
+                const float sx = (cx / cw) * vpw * 0.5f;
+                const float sy = (cy / cw) * vph * 0.5f;
+
+                if (sx < minX || sx > maxX || sy < minY || sy > maxY)
+                    continue;                      // 包围盒外：一次淘汰（原逐边射线法的主开销）
+
+                // 内联射线法（原 isPointInPolygon2D——语义不变，去函数调用/寻址开销）
+                bool inside = false;
+                for (size_t i = 0, j = nEdges - 1; i < nEdges; j = i++) {
+                    if ((py[i] > sy) != (py[j] > sy) &&
+                        (sx < (px[j] - px[i]) * (sy - py[i]) / (py[j] - py[i]) + px[i]))
+                        inside = !inside;
                 }
-
-                float ndx = clip.x() / clip.w();
-                float ndy = clip.y() / clip.w();
-                if (ndx < -1.0f || ndx > 1.0f || ndy < -1.0f || ndy > 1.0f)
-                    continue;
-
-                float sx = ndx * vpw * 0.5f;
-                float sy = ndy * vph * 0.5f;
-
-                if (isPointInPolygon2D(osg::Vec2d(sx, sy), *poly))
-                {
+                if (inside) {
                     delIndices.push_back(vi);
                     delOrigColors.push_back((*colors)[vi]);
                 }
             }
-
             if (!delIndices.empty())
             {
                 pushDeleteUndo(geom, delIndices, delOrigColors);

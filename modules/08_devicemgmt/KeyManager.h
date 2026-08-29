@@ -91,7 +91,8 @@ private:
     void processEvent(serial::KeyId k, bool pressed, uint32_t mcuMs, int64_t pcMs);
     void sweepMcu(uint32_t nowMcu);          // 事件优先：MCU 域全局扫（H 达阈 / S 窗到期）
     void sweepPc(int64_t nowPc);             // tick 兜底：PC 域全局扫（同一套判定）
-    void emit(serial::KeyId k, KeyGesture::G g, uint32_t mcuMs);
+    // 注：命名避开 Qt 的 emit 宏（scan_demo 内 Qt 头先入即冲突——P2 渲染加固时暴露）
+    void emitGesture(serial::KeyId k, KeyGesture::G g, uint32_t mcuMs);
 
     GestureThresholds th_;
     PcClock pcNow_;                          // 空=steady 毫秒（ctor 内包装兜底）

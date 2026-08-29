@@ -14,7 +14,12 @@
 #include <osg/ShapeDrawable>
 #include <osg/Camera>
 
+#include <chrono>
 #include <fstream>
+#include <functional>
+#include <string>
+#include <vector>
+#include <cstdint>
 
 namespace Scanner::data { class PointCloudBuffer; }
 
@@ -55,6 +60,26 @@ public:
     void loadFromPointCloudBuffer(class Scanner::data::PointCloudBuffer* pcb);
     void clearScene();
 
+    // —— P1 渲染加固（docs/plans/2026-08-25-渲染模块加固计划.md）——
+    // 轻量事件出口：03 不直接依赖 base/EventBus，app 装配桥接（码表 RenderSanity.h RenderEvent）
+    using RenderFaultSink = std::function<void(int code, const std::string& msg)>;
+    void setFaultSink(RenderFaultSink sink) { m_faultSink = std::move(sink); }
+    // 摄入预算：点数上限（超限均匀抽稀＋0x0312 上报）与包围盒半径上限（mm，越界拒绝）
+    void setIngestBudget(size_t maxPoints, double maxExtentMm);
+    bool isRenderSuspended() const { return m_renderSuspended; }
+    bool tryResumeRender();                  // 挂起后恢复（外部按钮/定时重试）
+    uint64_t lastIngestedVersion() const { return m_lastIngestVersion; }
+
+    // 渲染观测（P3）：只读快照——app 装配喂 HardwareMonitor（processFps 等）
+    struct RenderStats {
+        uint64_t framesDrawn = 0;    // 成功执行的 frame() 次数
+        uint64_t ingestCount = 0;    // 已摄入的快照份数（过闸计入）
+        double   lastFrameMs = 0.0;  // 最近一帧渲染耗时
+        int      degradeLevel = 0;   // 自动降级级别（0=未降级；帧超时阶梯加一）
+        bool     suspended = false;  // 渲染循环挂起标志
+    };
+    RenderStats renderStats() const;
+
     void setCameraManipulator(osgGA::CameraManipulator* manipulator);
     void home();
 
@@ -87,6 +112,14 @@ private:
     void pushDeleteUndo(osg::Geometry* geom, const std::vector<unsigned int>& indices,
                         const std::vector<osg::Vec4ub>& origColors);
 
+    // —— P1 渲染加固实现件 ——
+    void reportFault(int code, const std::string& msg);   // m_faultSink 出口（无 sink 仅 qWarning）
+    void suspendRender(const std::string& why);           // 挂起渲染循环（保 UI 存活）
+    // 构建点云 Geode（VBO+DYNAMIC；分配集中于此——异常可弃，场景未动）
+    osg::ref_ptr<osg::Geode> buildCloudGeode(const std::vector<osg::Vec3>& points,
+                                             const std::vector<osg::Vec4ub>* colors);
+    void fitCameraToRoot();                               // 相机定位到场景包围球（原 loadPointCloud 尾块）
+
 
 protected:
     void initializeGL() override;
@@ -118,10 +151,13 @@ private:
     bool m_firstMouse;
 
     std::ifstream m_streamFile;
+    std::vector<char> m_streamFileBuf;   // 流文件 1MB 缓冲（pubsetbuf——须存活于读全程）
     std::string m_streamPath;
+    std::chrono::steady_clock::time_point m_streamStart;   // 加载耗时打点
+    std::vector<char> m_streamReadBuf;   // 批量整块读缓冲（批×15B，成员复用免每批分配）
     int m_streamTotal = 0;
     int m_streamLoaded = 0;
-    int m_streamBatch = 50000;
+    int m_streamBatch = 500000;
     bool m_streamDone = false;
 
     osg::Vec3 m_streamBBoxMin;
@@ -251,4 +287,19 @@ private:
 
     // 坐标轴
     osg::ref_ptr<osg::Geode> m_axesGeode;
+
+    // —— P1 渲染加固状态（UI 线程属主）——
+    RenderFaultSink m_faultSink;                    // 可空（app 装配期注入）
+    uint64_t m_lastIngestVersion = 0;               // 版本短路记账（上次已摄入版本）
+    size_t m_maxIngestPoints = (size_t{8} << 20);   // 摄入点数预算（默认 8M）
+    double m_maxIngestExtentMm = 1.0e6;             // 包围盒半径上限（mm）
+    bool m_renderSuspended = false;                 // 渲染循环挂起标志（paintGL 短路）
+
+    // —— P2.2 帧耗时探针＋自动降级（UI 线程属主）——
+    uint64_t m_framesDrawn = 0;                     // 成功 frame() 计数
+    uint64_t m_ingestCount = 0;                     // 摄入计数
+    double m_lastFrameMs = 0.0;                     // 最近帧耗时
+    int m_overBudgetStreak = 0;                     // 连续超阈帧计数（5 触发降级）
+    int m_degradeLevel = 0;                         // 降级级别（0..3——预算阶梯索引）
+    static const size_t kDegradeBudgets[4];         // 8M/4M/1M/256K（cpp 定义）
 };

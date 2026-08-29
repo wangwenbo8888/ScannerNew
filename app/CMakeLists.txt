@@ -19,6 +19,8 @@ set(APP_SOURCES
     main.cpp
     AppContext.cpp
     AppContext.h
+    SceneFeedAdapter.cpp
+    SceneFeedAdapter.h
     MainWindow.cpp
     MainWindow.h
     WorkflowContext.cpp

@@ -102,7 +102,7 @@ void KeyManager::processEvent(serial::KeyId k, bool pressed, uint32_t t, int64_t
     }
     ks.lastWasRelease = true;
     if (ks.second) {                                        // 第二次松开即判 D（时长不设上限，
-        emit(k, KeyGesture::G::Double, t);                  //   ≥holdMs 已被 sweep 判 H）
+        emitGesture(k, KeyGesture::G::Double, t);                  //   ≥holdMs 已被 sweep 判 H）
         ks.st = St::Idle;
         return;
     }
@@ -119,11 +119,11 @@ void KeyManager::sweepMcu(uint32_t nowMcu) {
     for (size_t i = 0; i < kKeyCount; ++i) {
         KeyState& ks = keys_[i];
         if (ks.st == St::Down && diffMs(nowMcu, ks.anchorMcu) >= th_.holdMs) {
-            emit(static_cast<serial::KeyId>(i), KeyGesture::G::Hold,
+            emitGesture(static_cast<serial::KeyId>(i), KeyGesture::G::Hold,
                  ks.anchorMcu + static_cast<uint32_t>(th_.holdMs));
             ks.st = St::PostHold;
         } else if (ks.st == St::ShortPending && diffMs(nowMcu, ks.anchorMcu) >= th_.doubleWindowMs) {
-            emit(static_cast<serial::KeyId>(i), KeyGesture::G::Short, ks.anchorMcu);
+            emitGesture(static_cast<serial::KeyId>(i), KeyGesture::G::Short, ks.anchorMcu);
             ks.st = St::Idle;
         }
     }
@@ -133,17 +133,17 @@ void KeyManager::sweepPc(int64_t nowPc) {
     for (size_t i = 0; i < kKeyCount; ++i) {
         KeyState& ks = keys_[i];
         if (ks.st == St::Down && nowPc - ks.anchorPc >= th_.holdMs) {
-            emit(static_cast<serial::KeyId>(i), KeyGesture::G::Hold,
+            emitGesture(static_cast<serial::KeyId>(i), KeyGesture::G::Hold,
                  ks.anchorMcu + static_cast<uint32_t>(th_.holdMs));
             ks.st = St::PostHold;
         } else if (ks.st == St::ShortPending && nowPc - ks.anchorPc >= th_.doubleWindowMs) {
-            emit(static_cast<serial::KeyId>(i), KeyGesture::G::Short, ks.anchorMcu);
+            emitGesture(static_cast<serial::KeyId>(i), KeyGesture::G::Short, ks.anchorMcu);
             ks.st = St::Idle;
         }
     }
 }
 
-void KeyManager::emit(serial::KeyId k, KeyGesture::G g, uint32_t mcuMs) {
+void KeyManager::emitGesture(serial::KeyId k, KeyGesture::G g, uint32_t mcuMs) {
     pending_.push_back(KeyGesture{k, g, mcuMs});
 }
 

@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // ScanWorkflow.cpp — 扫描工作流实现（编排/记账壳；帧处理移交 07 ScanPipeline）
 //
 // P6-T29a：旧 scanLoop 五 Stage（CPU 手搓掩码/标记点链/激光空壳/CPU 融合）
@@ -13,6 +13,7 @@
 #include "pipelines/scan/ScanPipeline.h"
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <chrono>
 #include <utility>
 
@@ -31,7 +32,7 @@ void ScanWorkflow::setCalibration(const ScanCalibration& calib) {
 
 Result ScanWorkflow::initialize() {
     if (!ctx_) return Result::fail("无 WorkflowContext");
-    spdlog::info("[ScanWorkflow] 初始化 (模式={}, 标定={})",
+    JMW_LOG_INFO("02-ScanWorkflow", "[ScanWorkflow] 初始化 (模式={}, 标定={})",
                  scanMode_ == ScanMode::MarkerOnly ? "纯标记点" : "标记点+激光",
                  calib_.valid ? "已加载" : "未加载");
     // 出口查表（逐温档 K/D）经 session_.assemble 并行生效（EnhancedFrame.snapshot
@@ -64,9 +65,9 @@ Result ScanWorkflow::assemblePipeline() {
             cfg.existingMarkers.push_back(
                 calib::MarkerCloudPoint{r.pos.x, r.pos.y, r.pos.z,
                                         r.normal[0], r.normal[1], r.normal[2]});
-        spdlog::info("[ScanWorkflow] 续扫基准 {} 点", markerRecs.size());
+        JMW_LOG_INFO("02-ScanWorkflow", "[ScanWorkflow] 续扫基准 {} 点", markerRecs.size());
     } else {
-        spdlog::warn("[ScanWorkflow] 无续扫基准（新扫描或上次未留存）");
+        JMW_LOG_WARN("02-ScanWorkflow", "[ScanWorkflow] 无续扫基准（新扫描或上次未留存）");
     }
     pipeline_ = std::make_unique<sp::ScanPipeline>(cfg);
 
@@ -88,7 +89,7 @@ Result ScanWorkflow::assemblePipeline() {
 
     sp::PipelineDeps deps;
     deps.eventBus = ctx_ ? ctx_->eventBus() : nullptr;
-    // TODO(接入期): 03 渲染 ISceneFeed 接线（pushCloudSnapshot→OSG 场景推送）
+    deps.sceneFeed = ctx_ ? ctx_->sceneFeed() : nullptr;   // P2 渲染加固：app SceneFeedAdapter（可空）
     auto cr = pipeline_->configure(deps);
     if (!cr.success) {
         pipeline_.reset();
@@ -103,7 +104,7 @@ Result ScanWorkflow::start() {
     auto ar = assemblePipeline();
     if (!ar.success) {
         state_ = WorkflowState::Error;
-        spdlog::error("[ScanWorkflow] 装配失败: {}", ar.message);
+        JMW_LOG_ERROR("02-ScanWorkflow", "[ScanWorkflow] 装配失败: {}", ar.message);
         return ar;
     }
 
@@ -111,7 +112,7 @@ Result ScanWorkflow::start() {
     if (!sr.success) {
         pipeline_.reset();
         state_ = WorkflowState::Error;
-        spdlog::error("[ScanWorkflow] ScanPipeline 启动失败: {}", sr.message);
+        JMW_LOG_ERROR("02-ScanWorkflow", "[ScanWorkflow] ScanPipeline 启动失败: {}", sr.message);
         return Result::fail("ScanPipeline 启动失败: " + sr.message);
     }
 
@@ -122,7 +123,7 @@ Result ScanWorkflow::start() {
     sessionFrames_ = 0;
     sessionFusedFrames_ = 0;
     ctx_->publishEvent(EventType::ScanStarted);
-    spdlog::info("[ScanWorkflow] 已启动（帧处理移交 07 ScanPipeline）");
+    JMW_LOG_INFO("02-ScanWorkflow", "[ScanWorkflow] 已启动（帧处理移交 07 ScanPipeline）");
     return Result::ok();
 }
 
@@ -143,6 +144,14 @@ Result ScanWorkflow::resume() {
     return Result::ok();
 }
 
+// —— P3 可观测薄转发（渲染加固计划：pipeline_ 会话私有，未装配=0）——
+uint64_t ScanWorkflow::processedFrameCount() const {
+    return pipeline_ ? pipeline_->consumedFrames() : 0;
+}
+uint64_t ScanWorkflow::droppedFrameCount() const {
+    return pipeline_ ? pipeline_->droppedFrames() : 0;
+}
+
 Result ScanWorkflow::stop() {
     if (state_ == WorkflowState::Idle) return Result::ok();
     // 完成回报（P5-T15）只在「活跃会话终止」时恰一次：重复 stop / 停后析构 /
@@ -160,13 +169,13 @@ Result ScanWorkflow::stop() {
     if (ctx_) {
         ctx_->publishEvent(EventType::ScanStopped);
     }
-    spdlog::info("[ScanWorkflow] 已停止（会话记账: 起={}ms 止={}ms 帧={}/融合={}）",
+    JMW_LOG_INFO("02-ScanWorkflow", "[ScanWorkflow] 已停止（会话记账: 起={}ms 止={}ms 帧={}/融合={}）",
                  sessionStartTime_, sessionEndTime_, sessionFrames_, sessionFusedFrames_);
     // 合账钩子——app 侧注入调 gate->notifyCompleted 切 S2（§9 02-⑩）。
     // 02 不依赖 10：经 std::function 回调反向解耦（JMW_LOG 宏头在 10，
     // 以下按其展开格式直写 spdlog——输出与 JMW_LOG_INFO 等价，§8.2 生命周期）
     if (reportFinish && onFinished_) {
-        spdlog::info("[02-ScanWorkflow] 扫描会话终止 ok=true（⑩ 合账回报）");
+        JMW_LOG_INFO("02-ScanWorkflow", "[02-ScanWorkflow] 扫描会话终止 ok=true（⑩ 合账回报）");
         onFinished_(true);
     }
     return Result::ok();

@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+class SceneFeedAdapter;   // P2 渲染加固：ISceneFeed 实现（app 装配持有）
+
 namespace Scanner::data    { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibrationRepository; }
 namespace Scanner::service { class StateMachine; class ParameterManager; class FaultHandler; class CommandGate; class PerfMonitor; }
 namespace Scanner::infra   { class EventBus; }
@@ -61,6 +63,9 @@ public:
     // Infra
     Scanner::infra::EventBus* eventBus() { return eventBus_.get(); }
 
+    // 渲染推送（P2 渲染加固；MainWindow 连其信号到 OSGWidget）
+    SceneFeedAdapter* sceneFeed() { return sceneFeed_.get(); }
+
     // Workflow
     Scanner::workflow::WorkflowContext*     workflowCtx()    { return wfCtx_.get(); }
     Scanner::workflow::ScanWorkflow*        scanWorkflow()   { return scanWf_.get(); }
@@ -85,6 +90,9 @@ private:
 
     // Infra
     std::unique_ptr<Scanner::infra::EventBus> eventBus_;
+
+    // 渲染推送（P2；声明于 eventBus_ 后——逆序析构先于总线亡）
+    std::unique_ptr<SceneFeedAdapter> sceneFeed_;
 
     // HAL（deviceManager_ 声明于 selfCheckCollector_/hwMonitor_ 之前：析构逆序
     // → 巡检件先亡——hwMonitor 经裸指针/回调触达门面与自检采集器）

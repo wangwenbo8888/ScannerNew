@@ -9,6 +9,7 @@
 #include <QMainWindow>
 #include <QTimer>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include "ui_ScannerWindow.h"
 
@@ -61,6 +62,14 @@ private:
     uint64_t m_frameCount = 0;
     uint64_t m_prevFrameCount = 0;
     uint64_t m_currentFps = 0;
+
+    // P3 渲染加固：处理帧率估算器（HardwareMonitor 巡检线程调——线程安全差分）
+    struct ProcFpsEstimator {
+        mutable std::mutex mtx;
+        uint64_t lastCount = 0;
+        int64_t lastMs = 0;
+        double estimate(uint64_t count);
+    } m_procFps;
 
     // 设备开/关移后台线程（dm->open/close 含自动搜口+join 逻辑线程+Galaxy 关闭，
     // 同步跑在 UI 线程会冻窗 ~2s——观感即"按钮没作用"）。busy 期间四个设备按钮禁用。

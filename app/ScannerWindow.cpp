@@ -15,6 +15,7 @@
 
 #include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -308,7 +309,19 @@ void ScannerWindow::onStartScanner()
         m_appCtx->hwMonitor()->setFrameCounter([this]() {
             return static_cast<int>(m_currentFps);
         });
-        // TODO(07 接入期): process/drop 计数器自 07 流水线侧注入（A-T17 暂不接）
+        // P3 渲染加固：process/drop 计数自 07 流水线侧注入（闭 A-T17 缺口）
+        // 口径：processFps=融合消费帧率（02→07 FuseConsumer::consumed 差分）；
+        //       drop=输出队列覆盖丢帧累计（HardwareMonitor 透传进 Camera 行 droppedFrames）
+        m_appCtx->hwMonitor()->setProcessCounter([this]() -> double {
+            return m_procFps.estimate(m_appCtx->scanWorkflow()
+                                          ? m_appCtx->scanWorkflow()->processedFrameCount()
+                                          : 0);
+        });
+        m_appCtx->hwMonitor()->setDropCounter([this]() -> double {
+            return static_cast<double>(m_appCtx->scanWorkflow()
+                                           ? m_appCtx->scanWorkflow()->droppedFrameCount()
+                                           : 0);
+        });
         m_appCtx->hwMonitor()->start(1000);
     }
 
@@ -456,6 +469,25 @@ void ScannerWindow::onResolutionChanged(int index)
 // ============================================================================
 // FPS 定时器
 // ============================================================================
+// —— P3 渲染加固：处理帧率估算（首次调用立基线返 0；此后 Δcount/Δt）——
+double ScannerWindow::ProcFpsEstimator::estimate(uint64_t count) {
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    std::lock_guard<std::mutex> lock(mtx);
+    if (lastMs == 0) {                       // 首调：立基线不报率
+        lastCount = count;
+        lastMs = now;
+        return 0.0;
+    }
+    const double dt = static_cast<double>(now - lastMs) / 1000.0;
+    if (dt <= 0.0) return 0.0;
+    const double fps = static_cast<double>(count - lastCount) / dt;
+    lastCount = count;
+    lastMs = now;
+    return fps < 0.0 ? 0.0 : fps;
+}
+
 void ScannerWindow::onTimeout()
 {
     uint64_t fps = m_frameCount - m_prevFrameCount;

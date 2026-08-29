@@ -88,6 +88,12 @@ public:
     /// 逐帧观测累加器（D GBA 读）
     FrameObsAccumulator& obs();
 
+    // —— P3 可观测（渲染加固计划）：app 装配喂 HardwareMonitor ——
+    /// 已融合消费帧数（FuseConsumer::consumed；未启动=0）
+    uint64_t consumedFrames() const;
+    /// 输出队列覆盖丢帧累计（队列满整帧丢；消费跟不上时增长）
+    uint64_t droppedFrames() const;
+
     // —— 测试模式注入（configure 前调用；与 attachCalib 互斥）——
     void attachTestHooks(Hooks hooks);
     void attachTestFuseAdapters(ISeedableMarkerFuse* markerFuse

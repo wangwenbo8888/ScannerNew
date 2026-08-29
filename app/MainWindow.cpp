@@ -1,5 +1,6 @@
-﻿#include "MainWindow.h"
+#include "MainWindow.h"
 #include "AppContext.h"
+#include "SceneFeedAdapter.h"
 #include "DeviceStateCache.h"
 #include "PointCloudBuffer.h"
 #include "CalibDialog.h"
@@ -13,6 +14,11 @@
 #include "stubs/scan_workflow.h"
 #include "file_io.h"
 #include "PerfMonitor.h"   // A-T17：updateInfoSection 内 perfMonitor()->poll() 需完整类型
+#include "base/EventBus.h" // P2 渲染事件桥：faultSink lambda 需完整类型（publish）
+#include <spdlog/spdlog.h>
+#include "jmw_logging.h"
+#include <string>
+#include <vector>
 #include <osg/Vec3>
 #include <osg/Matrix>
 #include <osgGA/TrackballManipulator>
@@ -149,8 +155,41 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
     mainLayout->addLayout(contentLayout, 1);
 
     setCentralWidget(central);
-    
+
     createFloatingToolbar();
+
+    // —— P2 渲染加固接线 ——
+    // ① 流水线→渲染：SceneFeedAdapter（queued）→ OSGWidget 标志点更新（UI 线程）
+    if (m_appCtx && m_3dView) {
+        if (auto* feed = m_appCtx->sceneFeed()) {
+            connect(feed, &SceneFeedAdapter::markerCloudUpdated, this,
+                    [this](const std::vector<cv::Point3f>& pts) {
+                        if (!m_3dView || pts.empty()) return;
+                        std::vector<osg::Vec3> markers;
+                        markers.reserve(pts.size());
+                        for (const auto& p : pts) markers.emplace_back(p.x, p.y, p.z);
+                        m_3dView->loadMarkerPoints(markers);   // 专用标志点几何（原地更新）
+                    });
+            connect(feed, &SceneFeedAdapter::freezeChanged, this,
+                    [this](bool frozen) {
+                        // D 批处理期冻结：画面保持末帧（ingest 已由 adapter 丢弃）——状态条提示可后续挂
+                        JMW_LOG_DEBUG("app-MainWindow", "[MainWindow] sceneFeed freeze={}", frozen);
+                    });
+        }
+        // ② 03 渲染事件 → EventBus（P1.4 桥：码表见 RenderSanity.h RenderEvent；
+        //    对齐 07 EventBusEventSink 口径——param1=码 param2=severity，文本走日志）
+        if (auto* bus = m_appCtx->eventBus()) {
+            m_3dView->setFaultSink([bus](int code, const std::string& msg) {
+                JMW_LOG_WARN("app-MainWindow", "[render] 0x{:04X} {}", code, msg);
+                Scanner::Event ev;
+                ev.type = Scanner::EventType::FaultOccurred;
+                ev.sourceId = 0x03;
+                ev.param1 = code;
+                ev.param2 = static_cast<int64_t>(Scanner::QualityFlag::Degraded);
+                bus->publish(ev);
+            });
+        }
+    }
 
     m_integrateTestDialog = nullptr;
     m_calibDialog = nullptr;
@@ -177,7 +216,9 @@ void MainWindow::onReloadPointCloud()
     m_3dView->clearScene();
     if (m_cloudItem001)
         m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (0)"));
-    m_3dView->loadTestDataFromPLY("D:/pointcloud_100M.ply", 0);
+    // 3000 万点截断（100M.ply 全量 ~2 亿？实为 2000 万；30M 上限=测试口径：真实
+    // 扫描单工件点量级远低于此，全量加载浪费时间）
+    m_3dView->loadTestDataFromPLY("D:/pointcloud_100M.ply", 30000000);
 }
 
 void MainWindow::onCalibDeviceClicked()

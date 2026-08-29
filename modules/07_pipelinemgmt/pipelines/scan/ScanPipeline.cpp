@@ -16,6 +16,7 @@
 #include <utility>
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 #ifdef JMW_BUILD_CUDA
 #include <opencv2/core/cuda.hpp>
@@ -70,7 +71,7 @@ public:
             // whiteRadius：MarkerPoint3D 无半径字段，置 0（饱和判定降级，不影响位置融合）
         }
         auto r = op_.Execute(in, matxFromArr9(R), vec3FromArr3(T));
-        if (!r.success) spdlog::warn("[ScanPipeline] marker 融合失败: {}", r.message);
+        if (!r.success) JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] marker 融合失败: {}", r.message);
     }
 
     /// 稳定存储：算子内部 vector 对象（地址跨调用稳定，渲染句柄安全）
@@ -99,13 +100,13 @@ public:
             cv::cuda::GpuMat view = block.points.colRange(0, n);   // 1×n CV_32FC3 视图
             auto fr = fuse_.Execute(view, matxFromArr9(R), vec3FromArr3(T));
             if (!fr.success) {
-                spdlog::warn("[ScanPipeline] laser 融合失败: {}", fr.message);
+                JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] laser 融合失败: {}", fr.message);
                 return;
             }
             auto nr = normal_.Execute(fuse_, fr);                  // 新体素法线估计
-            if (!nr.success) spdlog::warn("[ScanPipeline] laser 法线估计失败: {}", nr.message);
+            if (!nr.success) JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] laser 法线估计失败: {}", nr.message);
         } catch (const std::exception& e) {
-            spdlog::error("[ScanPipeline] laser 融合适配器异常: {}", e.what());
+            JMW_LOG_ERROR("07-ScanPipeline", "[ScanPipeline] laser 融合适配器异常: {}", e.what());
         }
     }
 
@@ -149,6 +150,13 @@ void ScanPipeline::attachCalib(const cv::Mat& K1, const cv::Mat& D1, const cv::M
 
 sched::FrameResultQueue<FrameResult>& ScanPipeline::outputQueue() { return queue_; }
 FrameObsAccumulator& ScanPipeline::obs() { return obs_; }
+
+uint64_t ScanPipeline::consumedFrames() const {          // P3 可观测（FuseConsumer 计数）
+    return consumer_ ? consumer_->consumed() : 0;
+}
+uint64_t ScanPipeline::droppedFrames() const {           // P3 可观测（队列覆盖累计）
+    return queue_.dropped();
+}
 
 void ScanPipeline::attachTestHooks(Hooks hooks) {
     testHooksSet_ = true;
@@ -340,6 +348,12 @@ Scanner::Result ScanPipeline::start() {
     }
 
     state_ = State::Running;
+    // 会话参数快照（一次性——运行期排查"当时怎么配的"唯一依据）
+    JMW_LOG_INFO("07-ScanPipeline",
+        "[ScanPipeline] 会话启动: enableLaser={} budgetMB={} gpuSlots={} queueCap={} "
+        "dropThreshold={} seedMarkers={} 水位={}",
+        cfg_.enableLaser, cfg_.laserCacheBudgetMB, kScanGpuSlots, kQueueCapacity,
+        dropThreshold_, cfg_.existingMarkers.size(), pauseCounter_);
     return Result::ok();
 }
 
@@ -355,6 +369,16 @@ void ScanPipeline::stop() {
         consumer_->requestStop();
         consumer_->join();                        // drain 语义：排空队列后返回
     }
+    // 会话统计汇总（一次性——丢帧/异常排查的最终账本）
+    if (state_ != State::Stopped) {               // 重复 stop 不重打
+        const auto st = runtime_.stats();
+        JMW_LOG_INFO("07-ScanPipeline",
+            "[ScanPipeline] 会话结束: 态={} 已处理={} 跳帧={} GPU拒={} 钩子异常={} "
+            "队列覆盖={} 已融合={} 水位={}",
+            static_cast<int>(state_), st.processed, st.droppedSkips,
+            st.gpuRejects, st.finalizeFails, queue_.dropped(),
+            consumer_ ? consumer_->consumed() : 0, runtime_.lastCounter());
+    }
     state_ = State::Stopped;
 }
 
@@ -369,12 +393,14 @@ bool ScanPipeline::isRunning() const {
 void ScanPipeline::pause() {
     syncState();
     if (state_ != State::Running) {
-        spdlog::warn("[ScanPipeline] pause: 非运行态（忽略）");
+        JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] pause: 非运行态（忽略）");
         return;
     }
     runtime_.requestStop();
     runtime_.drainAndShutdown();                 // lane 停抓新帧；在飞帧输出已入队列
     pauseCounter_ = runtime_.lastCounter();      // 记消费水位（resume 注入，防已消费帧重扫）
+    JMW_LOG_INFO("07-ScanPipeline", "[ScanPipeline] 暂停: 水位={} 已融合={}",
+                 pauseCounter_, consumer_ ? consumer_->consumed() : 0);
     state_ = State::Paused;
     // consumer 保持活着：fusion/obs/pool 与配准 prevState 锚（chains_ 内存续）全保留
 }
@@ -389,6 +415,7 @@ Scanner::Result ScanPipeline::resume() {
     if (!rs.success)
         return Result::fail("ScanPipeline::resume: runtime 重启失败: " + rs.message);
     state_ = State::Running;
+    JMW_LOG_INFO("07-ScanPipeline", "[ScanPipeline] 恢复: 注入水位={}", pauseCounter_);
     return Result::ok();
 }
 
