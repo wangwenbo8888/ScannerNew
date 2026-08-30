@@ -159,6 +159,19 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
     createFloatingToolbar();
 
     // —— P2 渲染加固接线 ——
+    // ⓪ 扫描会话终止回调（后台装配失败——AppContext 后台线程调，queued 切 UI）：
+    //    复原扫描按钮态＋状态栏提示（幂等；正常停止路径的复原在点击 lambda 内）
+    if (m_appCtx) {
+        m_appCtx->setScanSessionEndedHandler([this](bool ok) {
+            QMetaObject::invokeMethod(this, [this, ok]() {
+                if (!ok) {
+                    if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                    m_activeScanToolIdx = -1;
+                    statusBar()->showMessage(QStringLiteral("扫描启动失败（后台装配）——详见日志"), 5000);
+                }
+            }, Qt::QueuedConnection);
+        });
+    }
     // ① 流水线→渲染：SceneFeedAdapter（queued）→ OSGWidget 标志点更新（UI 线程）
     if (m_appCtx && m_3dView) {
         if (auto* feed = m_appCtx->sceneFeed()) {

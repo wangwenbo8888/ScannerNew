@@ -99,36 +99,53 @@ void AppContext::initialize() {
                 }
                 return Scanner::Result::ok();
             };
-            // 点火语义：标定仓库→ScanCalibration 静态转接（app=组合根做注入：
-            // repo->stereo() 一次取结构体逐字段赋——01 写入/02 读取同源；
-            // TODO 06 出口查表后逐温档 K/D/激光温度表归 02 侧自查）+ initialize +
-            // start——帧处理归 07 内部线程，handler 毫秒级即返；同步失败（07 装配
-            // 失败等）返回 fail 由 gate 回滚 S2（§3.3）。
-            // ScanMode 不经 gate payload（handler 无参，payload 只喂 transition 的
-            // S4/S5 判别）——UI 入口先 setScanMode 设进工作流（见 ScannerWindow）
+            // 点火语义（装配后台化）：标定转接＋02 initialize＋start 全套在后台
+            // 线程执行——handler 毫秒级即返（§3.3 契约兑现：装配数百 ms 不再卡
+            // 点击路径）。后台失败 → 设备收口（灯灭/采集停）＋notifyCompleted(false)
+            // 合账回滚 S2 ＋ scanSessionEndedHandler_(false) 复原 UI 按钮态。
+            // ScanMode 不经 gate payload——UI 入口先 setScanMode 设进工作流
             spec.handler = [this]() {
                 if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
-                auto* repo = wfCtx_ ? wfCtx_->calibRepo() : nullptr;
-                if (repo) {
-                    const auto st = repo->stereo();
-                    if (!st.cameraMatrixL.empty() && !st.cameraMatrixR.empty()) {
-                        Scanner::workflow::ScanCalibration c;
-                        c.cameraMatrixL = st.cameraMatrixL;
-                        c.cameraMatrixR = st.cameraMatrixR;
-                        c.distCoeffsL   = st.distCoeffsL;
-                        c.distCoeffsR   = st.distCoeffsR;
-                        c.R1 = st.R1;  c.R2 = st.R2;
-                        c.P1 = st.P1;  c.P2 = st.P2;  c.Q = st.Q;
-                        c.imageSize = st.imageSize;
-                        c.valid = true;
-                        scanWf_->setCalibration(c);
+                if (scanStartThread_.joinable())
+                    return Scanner::Result::fail("扫描正在启动中（后台装配未完）");
+                scanStartThread_ = std::thread([this]() {
+                    Scanner::Result r = Scanner::Result::fail("未知");
+                    auto* repo = wfCtx_ ? wfCtx_->calibRepo() : nullptr;
+                    if (repo) {
+                        const auto st = repo->stereo();
+                        if (!st.cameraMatrixL.empty() && !st.cameraMatrixR.empty()) {
+                            Scanner::workflow::ScanCalibration c;
+                            c.cameraMatrixL = st.cameraMatrixL;
+                            c.cameraMatrixR = st.cameraMatrixR;
+                            c.distCoeffsL   = st.distCoeffsL;
+                            c.distCoeffsR   = st.distCoeffsR;
+                            c.R1 = st.R1;  c.R2 = st.R2;
+                            c.P1 = st.P1;  c.P2 = st.P2;  c.Q = st.Q;
+                            c.imageSize = st.imageSize;
+                            c.valid = true;
+                            scanWf_->setCalibration(c);
+                            r = scanWf_->initialize();
+                            if (r.success) r = scanWf_->start();
+                        } else {
+                            r = Scanner::Result::fail("标定仓库数据为空——请先完成标定");
+                        }
                     } else {
-                        return Scanner::Result::fail("标定仓库数据为空——请先完成标定");
+                        r = Scanner::Result::fail("无标定仓库");
                     }
-                }
-                auto r = scanWf_->initialize();
-                if (!r.success) return r;
-                return scanWf_->start();
+                    if (!r.success) {
+                        JMW_LOG_ERROR("app-AppContext",
+                            "[AppContext] 扫描后台装配失败（已回滚待机）: {}", r.message);
+                        if (deviceManager_) {          // 设备收口（灯/采集已点，须收回）
+                            deviceManager_->lightsAllOff();
+                            deviceManager_->stopCapture();
+                        }
+                        commandGate_->notifyCompleted("start_scan", false);
+                        if (scanSessionEndedHandler_) scanSessionEndedHandler_(false);
+                    } else {
+                        JMW_LOG_INFO("app-AppContext", "[AppContext] 扫描后台装配完成");
+                    }
+                });
+                return Scanner::Result::ok("扫描启动中（后台装配）");
             };
         }
         if (spec.name == "finish_scan") {
@@ -311,6 +328,7 @@ void AppContext::startDevicesAsync() {
 // 扫描会话点火——统一入口（工具栏标点/面片扫描＋ScannerWindow 共用同一条真链）
 // ============================================================================
 Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
+    const auto t0 = std::chrono::steady_clock::now();   // 启停耗时打点（分段排查）
     auto* dm = deviceManager_.get();
     if (!dm || !dm->isDeviceReady()) {
         JMW_LOG_WARN("app-AppContext", "[AppContext] 扫描点火被拦: 设备未就绪（门面空/相机或 MCU 未开）");
@@ -355,11 +373,20 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
         JMW_LOG_WARN("app-AppContext", "[AppContext] {} 点火被拒: {}", modeName, gr.message);
         return gr;
     }
-    JMW_LOG_INFO("app-AppContext", "[AppContext] {} 已点火", modeName);
+    {
+        const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        JMW_LOG_INFO("app-AppContext", "[AppContext] ▶启动同步段完成 t+{}ms（灯命令已编队/装配转后台）", el);
+    }
     return Scanner::Result::ok(modeName);
 }
 
 Scanner::Result AppContext::stopScanSession() {
+    const auto t0 = std::chrono::steady_clock::now();   // 启停耗时打点（分段排查）
+    JMW_LOG_INFO("app-AppContext", "[AppContext] ■停止点击 t+0ms");
+    // 装配中防竞态：先等后台装配线程收尾，再走停止链——防 stop() 与 start()
+    // 并发操作同一 pipeline_
+    if (scanStartThread_.joinable()) scanStartThread_.join();
     if (deviceManager_) {
         // 灯命令先行：相机停流实测阻塞 ~2s，若排在前会把灭灯压到 2s+ 后——
         // 先 lightsAllOff（N10 即刻落总线下页灯灭，体感即时）再停采集/流
@@ -367,7 +394,14 @@ Scanner::Result AppContext::stopScanSession() {
         deviceManager_->stopCapture();       // 设备侧采集停（幂等）
     }
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
-    return commandGate_->submit("finish_scan");          // 工作流合账（handler=stop）
+    auto r = commandGate_->submit("finish_scan");          // 工作流合账（handler=stop）
+    {
+        const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        JMW_LOG_INFO("app-AppContext", "[AppContext] ■停止同步段完成 t+{}ms（合账={}）", el,
+                     r.success ? "ok" : r.message);
+    }
+    return r;
 }
 
 bool AppContext::isScanSessionActive() const {
@@ -383,6 +417,7 @@ void AppContext::shutdown() {
     // DeviceManager::close 挂死致进程不退（cmd 窗口残留）——相机 SDK 的二次
     // 关闭路径不可依赖。首轮在 main 线程、时序确定，一轮即止
     if (shutdownDone_.exchange(true, std::memory_order_acq_rel)) return;
+    if (scanStartThread_.joinable()) scanStartThread_.join();   // 装配线程先收（防与 stop 竞态）
     if (devStartThread_.joinable()) devStartThread_.join();   // 设备启动收尾再关（防竞态）
     if (hwMonitor_) hwMonitor_->stop();
     if (scanWf_)    scanWf_->stop();

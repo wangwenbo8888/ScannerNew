@@ -75,6 +75,11 @@ public:
     Scanner::Result stopScanSession();
     /// 扫描会话是否活跃（Running/Paused——按钮启停切换判据）
     bool isScanSessionActive() const;
+    /// 会话终止/装配失败回调（**后台线程调用**——UI 侧自行切线程；可空）。
+    /// ok=false＝后台装配失败（gate 已回滚待机，UI 需复原扫描按钮态）
+    void setScanSessionEndedHandler(std::function<void(bool ok)> h) {
+        scanSessionEndedHandler_ = std::move(h);
+    }
 
     // Workflow
     Scanner::workflow::WorkflowContext*     workflowCtx()    { return wfCtx_.get(); }
@@ -132,4 +137,7 @@ private:
     mutable std::mutex selfCheckMtx_;
     std::thread devStartThread_;                // 设备启动后台线程（shutdown 先 join）
     std::atomic<bool> shutdownDone_{false};     // shutdown once 守卫（析构链防重复关）
+    std::thread scanStartThread_;               // 扫描装配后台线程（§3.3 handler 毫秒级契约；
+                                                //   stop/shutdown 先 join——防与 stop() 竞态）
+    std::function<void(bool)> scanSessionEndedHandler_;   // 会话终止回调（后台线程调；可空）
 };

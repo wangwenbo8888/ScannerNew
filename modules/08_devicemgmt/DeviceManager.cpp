@@ -403,10 +403,17 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
 // 顺序依据实测固件行为（2026-08-22 真机）：N11H1"按照上次的采集参数执行"——
 // 若 N10 在前，N11H1 会用旧参数（如自检收尾的 B0/L0）重启采集，把刚点亮的灯
 // 重置熄灭（"激光闪一下就灭"根因）。先开扫描再设参，灯态以最新 N10 为准。
+// 第三步 flushWrites：串口命令全部落线后才开相机流——相机开流瞬间的 USB3 风暴
+// 会把并行发出的串口写饿死 2~5s（实测 jmw 10:24：N10 卡 5279ms，"启动灯慢"
+// 根因）；先冲净写队列再动相机，串口命令趁总线安静走完
 std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
     return {{"N11H1", [this](McuDone cb) { mcu_->startScan(std::move(cb)); }},
             {"N10", [this](McuDone cb) {
                 mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
+            }},
+            {"FLUSH", [this](McuDone cb) {
+                mcu_->flushWrites(300);        // 有界：残余慢写最多 300ms
+                cb(true, "");
             }}};
 }
 
@@ -615,6 +622,9 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
         const bool ok = selfCheck_.frameValid.load(std::memory_order_relaxed);
         if (ok || nowMs_ - selfCheck_.stageStartMs > 800) {
             if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
+            // 自检收口灯灭（用户报"自检完灯不灭"）：stage1 的 lightsOff 在闪亮窗
+            // 后发，但 N10 可能因写延迟未达固件；stage2 结束时再补一发确保全灭
+            mcu_->lightsOff();
             selfCheck_.report("camera", ok);
             JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 启动自检完成（相机验证 {} 帧）",
                          selfCheck_.frames.load(std::memory_order_relaxed));
