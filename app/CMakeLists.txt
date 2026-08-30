@@ -7,8 +7,8 @@ set(JMW_QT5_PREFIX "C:/Qt/Qt5.15.2/5.15.2/msvc2019_64" CACHE PATH "Qt5 安装前
 list(APPEND CMAKE_PREFIX_PATH "${JMW_QT5_PREFIX}")
 find_package(Qt5 5.15 COMPONENTS Core Gui Widgets OpenGL Svg SerialPort)
 
-# OSG（路径见 环境配置汇总.md §10，直接 lib 路径，非 imported target）
-set(OSG_ROOT "C:/devlibs/osg-install" CACHE PATH "OSG 安装目录")
+# OSG（本机 F:/osg3.6.5/install，直接 lib 路径，非 imported target）
+set(OSG_ROOT "F:/osg3.6.5/install" CACHE PATH "OSG 安装目录")
 
 # scan_demo 仅在 Qt5 Svg/SerialPort 齐备 + stubs/ 源码存在时构建
 # （stubs/ 5 个桩头已补齐，当前正常构建；若桩头缺失则跳过以保"库+测试"构建绿）
@@ -123,6 +123,14 @@ target_compile_definitions(scan_demo PRIVATE
 add_custom_command(TARGET scan_demo POST_BUILD
     COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/copy_dlls.bat" "$<TARGET_FILE_DIR:scan_demo>" "$<CONFIG>"
     COMMENT "Copying DLLs to output directory..."
+)
+
+# ============================================================================
+# VS2022 调试体验：调试工作目录指向 exe 目录（DLLs/platforms 旁）
+# （启动项目在顶层 CMakeLists.txt 经目录属性 VS_STARTUP_PROJECT 设置）
+# ============================================================================
+set_target_properties(scan_demo PROPERTIES
+    VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>"
 )
 
 else()

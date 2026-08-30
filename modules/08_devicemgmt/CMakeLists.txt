@@ -17,6 +17,9 @@ target_include_directories(mod_devicemgmt
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# QSerialPort（CH343 兼容——Win32 WriteFile 不达固件）
+find_package(Qt5 COMPONENTS SerialPort REQUIRED)
+
 target_link_libraries(mod_devicemgmt
     PUBLIC
         base
@@ -25,6 +28,7 @@ target_link_libraries(mod_devicemgmt
     PRIVATE
         "${GALAXY_SDK_DIR}/lib/x64/GxIAPICPPEx.lib"
         Pdh    # SelfCheckCollector CPU 占用（PDH 查询）
+        Qt5::SerialPort
 )
 
 # Galaxy SDK DLL 运行时路径（构建后复制）

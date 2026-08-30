@@ -67,12 +67,10 @@ if(BUILD_CUDA)
 endif()
 
 # 第三方路径（CACHE，骨架桩不强制 find；算子迁入后启用）
-# OpenCV 有两套：Release 预装包（C:/opencv-cuda-4.13.0，/MD CRT）与 Debug 自建包
-# （C:/opencv-cuda-4.13.0-debug，/MDd CRT + debug_build_guard 符号，与工程 Debug 匹配，
-#   避免 Debug↔Release CRT 混用堆破坏）。默认指向 Release；Debug 构建目录用
-#   -DOpenCV_DIR=C:/opencv-cuda-4.13.0-debug/x64/vc17/lib 覆盖。
-set(OpenCV_DIR "C:/opencv-cuda-4.13.0" CACHE PATH "OpenCV")
-set(Eigen3_DIR "C:/devlibs/eigen-3.4.1-install/share/eigen3/cmake" CACHE PATH "Eigen3")
+# OpenCV（本机 F:/opencv4.13/install，Release /MD；原 C:/opencv-cuda-4.13.0 不存在）
+set(OpenCV_DIR "F:/opencv4.13/install/x64/vc17/lib" CACHE PATH "OpenCV")
+# Eigen 3.4.1（header-only 源码树；FindEigen3.cmake 模块模式按 include 目录命中）
+set(EIGEN3_INCLUDE_DIR "F:/eigen-3.4.1" CACHE PATH "Eigen3 源码树（含 Eigen/ 子目录）")
 
 set(JMW_GH_MIRROR "" CACHE STRING "GitHub 镜像前缀（空=直连 github.com；本机被封时设 https://ghfast.top/）")
 
@@ -149,6 +147,17 @@ include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/modules/06_fileio)
 include_directories(${CMAKE_SOURCE_DIR}/modules/08_devicemgmt)
 include_directories(${CMAKE_SOURCE_DIR}/modules/10_observability)
+
+# Qt5 搜索路径前置（modules/08 的 find_package(Qt5 SerialPort) 先于 app 配置，
+# CMAKE_PREFIX_PATH 必须在首个 add_subdirectory 前就位，不依赖 cache 残留）
+set(JMW_QT5_PREFIX "C:/Qt/Qt5.15.2/5.15.2/msvc2019_64" CACHE PATH "Qt5 安装前缀")
+list(APPEND CMAKE_PREFIX_PATH "${JMW_QT5_PREFIX}")
+
 add_subdirectory(base)
 add_subdirectory(modules)
 add_subdirectory(app)
+
+# VS 生成器默认启动项目为 ALL_BUILD（不可运行）；改设 scan_demo 为 sln 首个工程
+if(TARGET scan_demo)
+    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT scan_demo)
+endif()

@@ -82,6 +82,9 @@ public:
     void setAckTimeoutMs(int ms);  // ACK 超时注入（open 前配；钳 ≥1；测试缩短重传周期用）
     uint64_t keyDropCount() const;  // D-T13：K 事件环满丢新计数出口（门面 0x0806 巡检用；
                                     // 单调累计不随 open 复位——与 parseFailCount 同口径）
+    // 串口收发监听（调试弹窗用）：TX=写线程实际出队帧（含分号），RX=上行完整帧
+    // 载荷/裸文本行。回调可能来自 rx/写线程——订阅方自行切线程；open 前设置
+    void setWireTap(std::function<void(bool tx, const std::string& data)> tap);
 
     // —— 测试缝（仅测试）：等价 rx 线程收到原始字节——喂 codec 并分发入环 ——
     void testInjectRaw(const std::string& frameBytes);
@@ -140,6 +143,9 @@ private:
     std::atomic<Scanner::TimestampMs> lastRx_{0};   // 通讯心跳（任何有效上行帧刷新）
     std::atomic<uint64_t> seqGapCount_{0};          // T seq 跳变丢帧计数
     std::atomic<uint64_t> parseFailCount_{0};       // 上行载荷解析失败计数（含 v2 匿名 K/旧 E）
+    std::function<void(bool, const std::string&)> wireTap_;  // 串口收发监听（调试）
+    std::mutex tapMtx_;                             // wireTap_ 装卸互斥（回调热路径无锁快查）
+    void notifyTap(bool tx, const std::string& data);
     bool hasTSeq_ = false;                          // T seq 对账基线（仅逻辑线程）
     uint16_t lastTSeq_ = 0;
 };

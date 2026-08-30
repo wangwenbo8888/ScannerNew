@@ -152,6 +152,9 @@ public:
     // 闪亮 800ms→熄(B0/L0)。key："mcuLink" / "bgLight" / "laser" / "camera"
     void startupSelfCheck(std::function<void(const std::string&, bool)> report);
 
+    // 串口收发监听透传（MCUDriver wireTap；调试弹窗用——open 前设置以捕获探测帧）
+    void setWireTap(std::function<void(bool tx, const std::string& data)> tap);
+
     // —— 观测 ——
     bool isDeviceReady() const;                 // 相机开+MCU 开（无相机工厂=只看 MCU）
     serial::TempFrame getLastTemperatures() const;

@@ -69,6 +69,16 @@ bool MCUDriver::writeFrame(const std::string& frame) {
     return true;                                                // v2 发即返回；写失败由写线程记
 }
 
+void MCUDriver::setWireTap(std::function<void(bool, const std::string&)> tap) {
+    std::lock_guard<std::mutex> lock(tapMtx_);
+    wireTap_ = std::move(tap);
+}
+
+void MCUDriver::notifyTap(bool tx, const std::string& data) {
+    std::lock_guard<std::mutex> lock(tapMtx_);
+    if (wireTap_) wireTap_(tx, data);
+}
+
 // —— 写线程：唯一串口写者（R2-A1 属主天然落此线程）——
 void MCUDriver::enqueueWrite(const std::string& frame) {
     {
@@ -99,6 +109,7 @@ void MCUDriver::writeLoop() {
             }
         }
         if (frame.empty()) continue;               // 保活已删（卡写队列致灭灯命令出不去）
+        notifyTap(true, frame);                    // 调试监视：TX 实际出队帧
         const auto r = serial_.write(frame);    // 阻塞只落在本线程（实测驱动可卡 2~2.5s）
         lastWrite = std::chrono::steady_clock::now();
         if (!r.success)
@@ -218,22 +229,15 @@ std::string MCUDriver::probeAutoPort(int baud) {
         rxThread_ = std::thread(&MCUDriver::rxLoop, this);
         lastRx_.store(0, std::memory_order_release);
         probeHit_.store(false, std::memory_order_release);
-        probeN12Sent_.store(true, std::memory_order_release);   // 探测即 N12Z1（open ⑦ 幂等省略）
-        channel_.sendFireAndForget("N12 Z1");     // v2 组帧 "N12Z1;"；真机回显+文本应答
-        for (int waited = 0; waited < 300 && !probeHit_.load(std::memory_order_acquire);
-             waited += 10) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        if (probeHit_.load(std::memory_order_acquire)) {
-            JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 自动搜口命中: {}（{} 口中）", port, ports.size());
-            // 退出自检：探测的 N12 Z1 让固件进入自检模式，这里复位
-            channel_.sendFireAndForget("N12 Z0");
-            // ★冲写队列：CH343 的 WriteFile 可卡 2~8 秒——不等的话后续命令
-            //   全堵在队列里（N10 入队但写线程出不了队→自检超时→灯不灭的根因）
-            waitWriteDrained(5000);
+        probeN12Sent_.store(false, std::memory_order_release);  // 不再发 N12Z1（自检模式已废弃）
+        // 探测凭据=点灯参数帧（2026-08-30 合一定版）：探测与自检点灯共用一帧
+        // N10 H50 B50 T1 V2 L50——回显即命中（v2 固件整帧回显），灯随之点亮；
+        // 免去"探测(B0/L0)+点灯"两帧连发。回显=固件在线
+        if (sendEchoProbe("N10 H50 B50 T1 V2 L50", 3000)) {
+            JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 自动搜口命中: {}（{} 口中，N10 探测+点灯合一）", port, ports.size());
             return port;
         }
-        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 自动搜口: {} 无应答，试下一口", port);
+        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 自动搜口: {} 无回显，试下一口", port);
         close();                           // 停 rx 线程+关串口+open_ 复位（幂等）
     }
     return {};
@@ -303,6 +307,7 @@ void MCUDriver::rxLoop() {
 void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
     const Scanner::TimestampMs now = systemNowMs();
     lastRx_.store(now, std::memory_order_release);   // 任何有效帧（分帧+CRC 过）刷新心跳（§4-4）
+    if (!f.payload.empty()) notifyTap(false, f.payload + ";");   // 调试监视：RX 完整帧（补分号还原协议原文）
     if (f.payload.empty()) { onParseFail(f.payload); return; }
     switch (f.payload[0]) {
     case 'T': {
@@ -372,6 +377,7 @@ void MCUDriver::onParseFail(const std::string& payload) {
 // 活：刷 lastRx_（0x0802 心跳口径）。数值行兼作自动搜口命中凭据（回显/纯回环
 // 线不产数值行，不会误命中）。
 void MCUDriver::feedTextLine(const std::string& line) {
+    notifyTap(false, line);                       // 调试监视：RX 裸文本行
     lastRx_.store(systemNowMs(), std::memory_order_release);
     char* endp = nullptr;
     const double v = std::strtod(line.c_str(), &endp);

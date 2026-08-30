@@ -121,7 +121,14 @@ void obsLoggerInit(const ObsLoggerConfig& cfg) {
 
     auto logger = std::make_shared<spdlog::logger>(
         "jmw", spdlog::sinks_init_list{console, file});
-    logger->set_level(spdlog::level::info);
+    // 级别：默认 info；环境变量 JMW_LOG_LEVEL 可覆盖（trace/debug/info/warn/err，
+    // 非法值回落 info）——真机排障时设 debug 看协议收发细节
+    spdlog::level::level_enum lvl = spdlog::level::info;
+    if (const char* env = std::getenv("JMW_LOG_LEVEL")) {
+        const auto parsed = spdlog::level::from_str(env);
+        if (parsed != spdlog::level::off) lvl = parsed;
+    }
+    logger->set_level(lvl);
     logger->flush_on(spdlog::level::warn);          // warn+ 即时落盘（§7 崩溃留痕）
     // %s/%# = 源文件名(仅 basename)/行号——由 JMW_LOG_*（SPDLOG 宏族）在调用点
     // 自动捕获；散装 spdlog::info 等函数调用无 source_loc，显示为空段 [:0]

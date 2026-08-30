@@ -1,16 +1,23 @@
 // ============================================================================
-// SerialPort.cpp — 纯串口 IO 实现（Windows）
+// SerialPort.cpp — QSerialPort 实现（工厂软件同款；2026-08-30 定版）
+//
+// 架构：QSerialPort 住专属 QThread（事件循环）——QSerialPort 的 readyRead/
+//       bytesWritten 依赖事件循环，此前裸 std::thread 调用会收不到数据（已踩坑）。
+//       对上层保持同步阻塞接口：
+//         read  = rx 线程阻塞取  ← cv 字节队列 ← port 线程 readyRead→readAll
+//         write = 调用线程阻塞等 ← cv 结果     ← port 线程 write+waitForBytesWritten
 // ============================================================================
-
 #include "SerialPort.h"
-#include <spdlog/spdlog.h>
-#include "jmw_logging.h"
 
+#include <QMetaObject>
+#include <QSerialPort>
+#include <QSerialPortInfo>
+#include <QThread>
+
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <algorithm>
-#include <chrono>
-#include <cstring>
-#include <cstdlib>
-#include <utility>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -18,204 +25,232 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
+#include <windows.h>   // GetCurrentThreadId（R2-A1 写属主登记）
+
+#include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 
 namespace Scanner::device::serial {
 
-// 本类错误码段位：-100 ~ -108（统一负段，防与其它 HAL 错误码撞义；旧 -1~-5 已退役）
 namespace {
-constexpr int32_t kErrAlreadyOpen   = -100;  // open：句柄已存在
-constexpr int32_t kErrCreateFile    = -101;  // open：CreateFile 失败
-constexpr int32_t kErrGetCommState  = -102;
-constexpr int32_t kErrSetCommState  = -103;
-constexpr int32_t kErrSetCommTimeouts = -104;
-constexpr int32_t kErrWriteNotOpen  = -105;  // write：未 open
-constexpr int32_t kErrWriteOwner    = -106;  // write：并发写拒绝
-constexpr int32_t kErrWriteFail     = -107;  // write：WriteFile 失败
-constexpr int32_t kErrWritePartial  = -108;  // write：写不完整
+// 本类错误码段位（沿用旧口径）
+constexpr int32_t kErrAlreadyOpen = -100;
+constexpr int32_t kErrOpenFail    = -101;
+constexpr int32_t kErrNotOpen     = -105;
+constexpr int32_t kErrOwner       = -106;
+constexpr int32_t kErrWriteFail   = -107;
+constexpr size_t  kRxBufCap = 64 * 1024;   // RX 桥队列上限（满丢新——rx 消费慢防爆）
+} // namespace
+
+class SerialPort::Impl {
+public:
+    QThread portThread;                      // QSerialPort 专属线程（事件循环）
+    QSerialPort port;                        // 构造后 moveToThread；open/close/write 均经 invokeMethod
+    std::atomic<bool> opened{false};
+
+    // —— RX 桥：port 线程 → cv 队列 → 上层 rx 线程 ——
+    std::mutex rxMtx;
+    std::condition_variable rxCv;
+    std::deque<char> rxBuf;
+    bool rxHooked = false;                   // readyRead 是否已 connect（open 时一次）
+
+    // —— TX 桥：上层调用线程 → port 线程（invokeMethod）→ cv 结果回传 ——
+    std::mutex txMtx;
+    std::condition_variable txCv;
+    bool txPending = false;
+    bool txOk = false;
+
+    // —— open 桥结果 ——
+    std::mutex openMtx;
+    std::condition_variable openCv;
+    bool openPending = false;
+    bool openOk = false;
+    QString openErr;
+};
+
+// ============================================================================
+// 构造 / 析构
+// ============================================================================
+SerialPort::SerialPort() : impl_(new Impl()) {
+    impl_->portThread.start();               // 线程常驻（open 复用）；析构 quit
+    impl_->port.moveToThread(&impl_->portThread);
 }
 
 SerialPort::~SerialPort() {
     close();
+    {
+        std::lock_guard<std::mutex> lock(impl_->rxMtx);
+        impl_->rxBuf.clear();
+    }
+    QMetaObject::invokeMethod(&impl_->port, [this]() { impl_->port.close(); },
+                              Qt::BlockingQueuedConnection);
+    impl_->portThread.quit();
+    impl_->portThread.wait(1000);
+    delete impl_;
 }
 
 // ============================================================================
-// 打开/关闭
+// 枚举 COM 口
+// ============================================================================
+std::vector<std::string> SerialPort::listPorts() {
+    std::vector<std::string> result;
+    const auto ports = QSerialPortInfo::availablePorts();
+    for (const auto& info : ports) {
+        result.push_back(info.portName().toStdString());
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+// ============================================================================
+// 打开 / 关闭
 // ============================================================================
 Scanner::Result SerialPort::open(const std::string& port, int baud) {
-    if (hSerial_) return Scanner::Result::fail(kErrAlreadyOpen, "串口已打开");
-
-    std::string dev = port;
-    if (dev.substr(0, 3) != "\\\\.") dev = "\\\\.\\" + dev;
-
-    HANDLE h = CreateFileA(dev.c_str(), GENERIC_READ | GENERIC_WRITE,
-                           0, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return Scanner::Result::fail(kErrCreateFile, "串口打开失败: " + port);
+    if (impl_->opened.load()) return Scanner::Result::fail(kErrAlreadyOpen, "串口已打开");
+    {
+        std::unique_lock<std::mutex> lock(impl_->openMtx);
+        impl_->openPending = true;
     }
+    const QString name = QString::fromStdString(port);
+    QMetaObject::invokeMethod(&impl_->port, [this, name, baud]() {
+        // 工厂同款序列：setPortName → open → 8N1/NoFlowControl（DTR/RTS 不设——
+        // QSerialPort 默认不拉高，与工厂电气行为一致）
+        impl_->port.setPortName(name);
+        if (!impl_->port.open(QIODevice::ReadWrite)) {
+            std::lock_guard<std::mutex> lock(impl_->openMtx);
+            impl_->openOk = false;
+            impl_->openErr = impl_->port.errorString();
+            impl_->openPending = false;
+            impl_->openCv.notify_all();
+            return;
+        }
+        impl_->port.setBaudRate(baud);
+        impl_->port.setDataBits(QSerialPort::Data8);
+        impl_->port.setParity(QSerialPort::NoParity);
+        impl_->port.setStopBits(QSerialPort::OneStop);
+        impl_->port.setFlowControl(QSerialPort::NoFlowControl);
+        if (!impl_->rxHooked) {
+            impl_->rxHooked = true;
+            QObject::connect(&impl_->port, &QSerialPort::readyRead, [this]() {
+                const QByteArray data = impl_->port.readAll();
+                std::lock_guard<std::mutex> lock(impl_->rxMtx);
+                if (impl_->rxBuf.size() < kRxBufCap) {
+                    impl_->rxBuf.insert(impl_->rxBuf.end(), data.begin(), data.end());
+                }
+                impl_->rxCv.notify_all();
+            });
+        }
+        std::lock_guard<std::mutex> lock(impl_->openMtx);
+        impl_->openOk = true;
+        impl_->openPending = false;
+        impl_->openCv.notify_all();
+    }, Qt::QueuedConnection);
 
-    DCB dcb = {};
-    dcb.DCBlength = sizeof(DCB);
-    if (!GetCommState(h, &dcb)) {
-        CloseHandle(h);
-        return Scanner::Result::fail(kErrGetCommState, "GetCommState失败");
+    {
+        std::unique_lock<std::mutex> lock(impl_->openMtx);
+        if (!impl_->openCv.wait_for(lock, std::chrono::seconds(3),
+                                    [this] { return !impl_->openPending; })) {
+            return Scanner::Result::fail(kErrOpenFail, "串口打开超时: " + port);
+        }
     }
-    dcb.BaudRate = baud;
-    dcb.ByteSize = 8;
-    dcb.Parity = NOPARITY;
-    dcb.StopBits = ONESTOPBIT;
-    // 流控显式全关（工业串口标准动作）：GetCommState 保留的驱动默认值在
-    // CH34X 某些版本为开（fOutxCtsFlow=TRUE）——CTS 未接线/未就绪时 WriteFile
-    // 阻塞等"流控放开"，实测固定卡 ~2.6s 周期（其它软件显式关闭故快）。
-    // DTR/RTS 置 ENABLE：维持线路电平（部分适配器借 DTR/RTS 供电或复位）
-    dcb.fOutxCtsFlow = FALSE;              // CTS 硬件流控关
-    dcb.fOutxDsrFlow = FALSE;              // DSR 硬件流控关
-    dcb.fDtrControl = DTR_CONTROL_ENABLE;
-    dcb.fRtsControl = RTS_CONTROL_ENABLE;
-    dcb.fOutX = FALSE;                     // XON/XOFF 软件流控关
-    dcb.fInX = FALSE;
-    dcb.fTXContinueOnXoff = TRUE;
-    if (!SetCommState(h, &dcb)) {
-        CloseHandle(h);
-        return Scanner::Result::fail(kErrSetCommState, "SetCommState失败");
+    if (!impl_->openOk) {
+        return Scanner::Result::fail(kErrOpenFail,
+            "串口打开失败: " + port + " (" + impl_->openErr.toStdString() + ")");
     }
-
-    COMMTIMEOUTS timeouts = {};
-    timeouts.ReadIntervalTimeout = 50;
-    timeouts.ReadTotalTimeoutConstant = 50;
-    timeouts.ReadTotalTimeoutMultiplier = 10;
-    timeouts.WriteTotalTimeoutConstant = 50;
-    timeouts.WriteTotalTimeoutMultiplier = 10;
-    if (!SetCommTimeouts(h, &timeouts)) {
-        CloseHandle(h);
-        return Scanner::Result::fail(kErrSetCommTimeouts, "SetCommTimeouts失败");
+    {
+        std::lock_guard<std::mutex> lock(impl_->rxMtx);
+        impl_->rxBuf.clear();
     }
-
-    // 清残留＋启用 EV_RXCHAR 事件掩码（read 的 WaitCommEvent 依赖此设置；
-    // SetCommMask 失败则 read 退化为立即返回 0——不 fail open）
-    if (!PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR))
-        JMW_LOG_WARN("08-SerialPort", "[SerialPort] PurgeComm 失败（继续打开）: {}", port);
-    if (!SetCommMask(h, EV_RXCHAR | EV_ERR))
-        JMW_LOG_WARN("08-SerialPort", "[SerialPort] SetCommMask 失败（读将失效）: {}", port);
-
-    hSerial_ = h;
-    owner_.store(0, std::memory_order_release);
+    impl_->opened.store(true);
     return Scanner::Result::ok();
 }
 
 Scanner::Result SerialPort::close() {
-    HANDLE h = static_cast<HANDLE>(hSerial_);
-    hSerial_ = nullptr;
-    owner_.store(0, std::memory_order_release);
-    if (h) CloseHandle(h);
+    if (!impl_->opened.exchange(false)) return Scanner::Result::ok();
+    QMetaObject::invokeMethod(&impl_->port, [this]() { impl_->port.close(); },
+                              Qt::QueuedConnection);
+    {
+        std::lock_guard<std::mutex> lock(impl_->rxMtx);
+        impl_->rxBuf.clear();
+        impl_->rxCv.notify_all();            // 唤醒可能阻塞的 read（返回 0/-1）
+    }
+    JMW_LOG_INFO("08-SerialPort", "[SerialPort] 串口已关闭（QSerialPort）");
     return Scanner::Result::ok();
 }
 
-bool SerialPort::isOpen() const { return hSerial_ != nullptr; }
-
-void SerialPort::resetWriteOwner() { owner_.store(0, std::memory_order_release); }
-
-// ============================================================================
-// 枚举 COM 口（QueryDosDevice 符号链接名，不开句柄；口号升序）
-// ============================================================================
-std::vector<std::string> SerialPort::listPorts() {
-    std::vector<std::pair<int, std::string>> found;
-    DWORD need = 8192;
-    std::vector<char> buf(need);
-    for (;;) {                                  // 缓冲不够按需翻倍重试（上限防炸）
-        const DWORD n = QueryDosDeviceA(nullptr, buf.data(), need);
-        if (n > 0) break;
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || need >= 1 << 20) return {};
-        need *= 2;
-        buf.assign(need, '\0');
-    }
-    for (const char* p = buf.data(); *p; p += std::strlen(p) + 1) {
-        if (std::strncmp(p, "COM", 3) != 0) continue;
-        const char* d = p + 3;
-        if (!*d) continue;                      // 裸 "COM" 别名跳过
-        bool digits = true;
-        for (const char* q = d; *q; ++q)
-            if (*q < '0' || *q > '9') { digits = false; break; }
-        if (digits) found.emplace_back(std::atoi(d), p);
-    }
-    std::sort(found.begin(), found.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-    std::vector<std::string> ports;
-    ports.reserve(found.size());
-    for (auto& f : found) ports.push_back(std::move(f.second));
-    return ports;
+bool SerialPort::isOpen() const {
+    return impl_->opened.load();
 }
 
 // ============================================================================
-// 读（串口rx线程）——WaitCommEvent 事件驱动：无数据时不占驱动。
-// 工厂软件对照实证（QSerialPort 顺畅 vs 我们卡 2.6s）：同步句柄下 RX 线程
-// 持续 ReadFile 超时循环会占住 CH343 驱动内部队列，写线程的 WriteFile 被排到
-// 读间隙 → 秒级挂起（工厂不读串口故写独占、零延迟）。改为 EV_RXCHAR 事件
-// 通知——有数据才 ReadFile，空闲期驱动上零挂起 IRP，写通道畅通
+// 读（rx 线程；阻塞 50ms 语义） / 写（属主线程；阻塞至写完成）
 // ============================================================================
 int SerialPort::read(char* buf, int cap) {
-    HANDLE h = static_cast<HANDLE>(hSerial_);
-    if (!h || !buf || cap <= 0) return -1;
-
-    DWORD evMask = 0;
-    if (!WaitCommEvent(h, &evMask, nullptr)) return -1;   // 阻塞等数据（rx 线程专属）
-    if (!(evMask & EV_RXCHAR)) return 0;                  // 非数据事件：视作空读
-
-    // 事件到＝缓冲有字节；一次性读完（紧跟的 ReadFile 立即返回已有数据）
-    DWORD got = 0;
-    if (!ReadFile(h, buf, static_cast<DWORD>(cap), &got, nullptr)) return -1;
-    return static_cast<int>(got);
+    if (!impl_->opened.load() || !buf || cap <= 0) return -1;
+    std::unique_lock<std::mutex> lock(impl_->rxMtx);
+    if (impl_->rxBuf.empty()) {
+        impl_->rxCv.wait_for(lock, std::chrono::milliseconds(50));
+        if (impl_->rxBuf.empty()) return impl_->opened.load() ? 0 : -1;
+    }
+    const int n = static_cast<int>(std::min<size_t>(impl_->rxBuf.size(),
+                                                    static_cast<size_t>(cap)));
+    for (int i = 0; i < n; ++i) {
+        buf[i] = impl_->rxBuf.front();
+        impl_->rxBuf.pop_front();
+    }
+    return n;
 }
 
-// ============================================================================
-// 写（属主线程；R2-A1 并发写拒绝）
-// ============================================================================
 Scanner::Result SerialPort::write(const std::string& bytes) {
-    HANDLE h = static_cast<HANDLE>(hSerial_);
-    if (!h) return Scanner::Result::fail(kErrWriteNotOpen, "串口未打开");
+    if (!impl_->opened.load()) return Scanner::Result::fail(kErrNotOpen, "串口未打开");
+    // R2-A1 单写者纪律（口径保留：首次调用线程登记为属主）
+    const uint64_t tid = static_cast<uint64_t>(GetCurrentThreadId());
+    uint64_t expect = 0;
+    if (!owner_.compare_exchange_strong(expect, tid) && expect != tid) {
+        return Scanner::Result::fail(kErrOwner, "串口并发写拒绝");
+    }
+    {
+        std::unique_lock<std::mutex> lock(impl_->txMtx);
+        impl_->txPending = true;
+    }
+    const QByteArray data(bytes.data(), static_cast<int>(bytes.size()));
+    QMetaObject::invokeMethod(&impl_->port, [this, data]() {
+        const qint64 written = impl_->port.write(data);
+        const bool flushed = (written == data.size()) &&
+                             impl_->port.waitForBytesWritten(3000);
+        std::lock_guard<std::mutex> lock(impl_->txMtx);
+        impl_->txOk = flushed;
+        impl_->txPending = false;
+        impl_->txCv.notify_all();
+    }, Qt::QueuedConnection);
 
-    const uint64_t self = static_cast<uint64_t>(GetCurrentThreadId());
-    uint64_t expected = 0;
-    if (!owner_.compare_exchange_strong(expected, self,
-                                        std::memory_order_acq_rel,
-                                        std::memory_order_acquire)
-        && expected != self) {
-        return Scanner::Result::fail(kErrWriteOwner, "串口并发写拒绝");
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+        std::unique_lock<std::mutex> lock(impl_->txMtx);
+        if (!impl_->txCv.wait_for(lock, std::chrono::milliseconds(3500),
+                                  [this] { return !impl_->txPending; })) {
+            return Scanner::Result::fail(kErrWriteFail, "串口写桥超时");
+        }
     }
-
-    JMW_LOG_INFO("08-SerialPort", "[SerialPort] TX: '{}'", bytes);   // 每笔写打日志
-    const auto t0 = std::chrono::steady_clock::now();   // 慢写探针：USB 串口驱动偶发
-    DWORD written = 0;                                   // 长阻塞（流控/IRP 排队）——记档定位
-    if (!WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()),
-                   &written, nullptr)) {
-        return Scanner::Result::fail(kErrWriteFail, "串口写失败");
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+    if (ms > 1000) {
+        JMW_LOG_WARN("08-SerialPort", "[SerialPort] 慢写 {}ms（{} 字节）", ms, bytes.size());
     }
-    const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-    if (el > 50) JMW_LOG_WARN("08-SerialPort", "[SerialPort] 慢写 {}ms（{} 字节）", el, bytes.size());
-    if (written != bytes.size()) {
-        return Scanner::Result::fail(kErrWritePartial, "串口写不完整");
+    if (!impl_->txOk) {
+        return Scanner::Result::fail(kErrWriteFail,
+            "串口写不完整: " + std::to_string(bytes.size()) + " 字节");
     }
+    JMW_LOG_INFO("08-SerialPort", "[SerialPort] TX: '{}'", bytes);
     return Scanner::Result::ok();
 }
 
 Scanner::Result SerialPort::writeKeepalive(const std::string& bytes) {
-    HANDLE h = static_cast<HANDLE>(hSerial_);
-    if (!h) return Scanner::Result::fail(kErrWriteNotOpen, "串口未打开");
-    const auto t0 = std::chrono::steady_clock::now();   // 探针：保活写挂起现形（判
-    DWORD written = 0;                                   // CH343 纯 TX 挂起 vs 总线竞争）
-    if (!WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()),
-                   &written, nullptr)) {
-        return Scanner::Result::fail(kErrWriteFail, "串口写失败");
-    }
-    const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-    if (el > 50)
-        JMW_LOG_WARN("08-SerialPort", "[SerialPort] 保活慢写 {}ms（{} 字节）", el, bytes.size());
-    if (written != bytes.size()) {
-        return Scanner::Result::fail(kErrWritePartial, "串口写不完整");
-    }
-    return Scanner::Result::ok();
+    return write(bytes);
+}
+
+void SerialPort::resetWriteOwner() {
+    owner_.store(0);
 }
 
 } // namespace Scanner::device::serial

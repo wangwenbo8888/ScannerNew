@@ -211,15 +211,9 @@ Result DeviceManager::open() {
     params_->bootstrap([] { return ""; });
     refreshParamSnapshot();
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: bootstrap+快照 {}ms", el());
-    // ⑦ 开机自检 N12 Z1——**起逻辑线程前**发（Critical #1：open 全程单线程；
-    //    ACK 经 rx 线程入环、逻辑线程 pump 消化，DoneCb 失败异步 Fault）。
-    //    auto 搜口路径探测已发过 N12Z1（幂等）——省略：实测"相机配置后第一笔串口写"
-    //    必被 USB 驱动卡 ~2.5s，多这笔堵后续自检 N10 的回显窗口
-    if (!mcu_->probeDidSelfCheck()) {
-        mcu_->enterSelfCheck([this](bool ok, const std::string& p) {
-            if (!ok) publishFault(code(DevFault::CmdNoAck), "N12Z1 " + p);   // 3 败=无应答（#7≡#8）
-        });
-    }
+    // ⑦ （2026-08-30 去自检模式：不再发 N12 Z1——固件进自检态会强制亮灯且
+    //    串口响应劣化，"自检完灯不灭"根因。探测改用 N10 回显凭据，见
+    //    MCUDriver::probeAutoPort；灯控全走 N10 参数直控）
     // （写权交接已不需要：串口写者恒为 MCUDriver 写线程，open/逻辑线程只入队）
     // ⑥ 逻辑线程（manualTick=true 测试跳过）。灯态策略：open 不发 N10（灯不亮）——
     // 灯只在 startCapture（N10 账本全参+H1）时亮、stopCapture 熄灯收口
@@ -562,6 +556,10 @@ void DeviceManager::startStreamIfReady() {
 // 启动自检（open 成功后由 app 调）——无阻塞状态机版：启动只发帧+置态，等待全由
 // logicTick 每 10ms 的 selfCheckTick 分摊（单次 µs 级），逻辑线程不再被 sleep 堵死
 // ============================================================================
+void DeviceManager::setWireTap(std::function<void(bool, const std::string&)> tap) {
+    mcu_->setWireTap(std::move(tap));            // 装配期设置（open 前），无需编队
+}
+
 void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool)> report) {
     post([this, report = std::move(report)]() mutable {
         if (selfCheck_.stage != -1) return;      // 已在跑（幂等）
@@ -572,14 +570,15 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
         selfCheck_.stageStartMs = nowMs();
         selfCheck_.report("mcuLink", mcu_->isOpen());
 
-        // N10 账本值亮灯（v2 即发即回显）；回显匹配判定归 selfCheckTick stage 0
-        const hal::CaptureParams on = captureParamsFromAccount(*params_);
-        selfCheck_.expectEcho = "N10 H" + std::to_string(on.freqHz) +
-                                " B" + std::to_string(on.bgLight) +
-                                " T" + std::to_string(on.laserSelectA) +
-                                " V" + std::to_string(on.laserSelectB) +
-                                " L" + std::to_string(on.laserLevel);
-        mcu_->setCaptureParams(on, nullptr);
+        // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V2 L50（auto 搜口已探测合一
+        // 发过且回显命中——通常此处直接判过；manual 口/回显未达时补发兜底），
+        // 停留 5 秒 → N11 H0 收口（停扫描，固件关灯）
+        hal::CaptureParams on{};
+        on.freqHz = 50; on.bgLight = 50; on.laserSelectA = 1; on.laserSelectB = 2; on.laserLevel = 50;
+        selfCheck_.expectEcho = "N10 H50 B50 T1 V2 L50";
+        if (mcu_->lastEchoPayload() != selfCheck_.expectEcho) {
+            mcu_->setCaptureParams(on, nullptr);   // 兜底补发（manual 口路径）
+        }
     });
 }
 
@@ -601,42 +600,21 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
             selfCheck_.stageStartMs = nowMs_;      // ——灯败与相机验证独立，原直跳 stage2
         }                                          //   会漏 startAsyncCapture→相机恒 0 帧）
         break;
-    case 1:  // 闪亮 500ms 后熄灯进入相机验证；用户已点"打开扫描仪"（capturing）
-        // 则不熄灯——竞态修复。灯验证失败路径灯本就没亮，统一 500ms 无害
-        if (nowMs_ - selfCheck_.stageStartMs >= 500) {
-            if (!mode_->isCapturing()) {
-                mcu_->lightsOff();                // 灯败路径 N10 未达固件，此帧仅防半亮残留
-                if (camera_ && camera_->isOpen()) {
-                    camera_->startAsyncCapture([this](const hal::StereoFrame& f) {
-                        selfCheck_.frames.fetch_add(1, std::memory_order_relaxed);
-                        if (!f.leftGray.empty() && !f.rightGray.empty())
-                            selfCheck_.frameValid.store(true, std::memory_order_relaxed);
-                    });
-                }
-            }
+    case 1:  // 补光灯/激光器亮 5 秒（停留窗口；不起相机流——相机 USB 流量会
+             // 干扰 CH343 串口收发，2026-08-30 真机实测灭灯帧被丢的诱因）
+        if (nowMs_ - selfCheck_.stageStartMs >= 5000) {
             selfCheck_.stage = 2;
-            // 注意：startAsyncCapture（Galaxy 起流）实测阻塞 ~2s——窗口起点必须取
-            // 阻塞结束后的新鲜时刻，否则进本态即"超时"（相机验证恒 0 帧的根因）
             selfCheck_.stageStartMs = nowMs();
         }
         break;
-    case 2: {  // 相机收帧验证（≤800ms 首帧即过；用户已开扫描=流已活，不打扰直判过）
-        if (mode_->isCapturing()) {
-            selfCheck_.report("camera", true);
-            selfCheck_.stage = -1;
-            break;
-        }
-        const bool ok = selfCheck_.frameValid.load(std::memory_order_relaxed);
-        if (ok || nowMs_ - selfCheck_.stageStartMs > 800) {
-            if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
-            // 自检收口灯灭（用户报"自检完灯不灭"）：stage1 的 lightsOff 在闪亮窗
-            // 后发，但 N10 可能因写延迟未达固件；stage2 结束时再补一发确保全灭
-            mcu_->lightsOff();
-            selfCheck_.report("camera", ok);
-            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 启动自检完成（相机验证 {} 帧）",
-                         selfCheck_.frames.load(std::memory_order_relaxed));
-            selfCheck_.stage = -1;
-        }
+    case 2: {  // 收口：N11 H0（停扫描——固件关灯），用户定版流程，不发 N10 灭灯。
+        // camera 项以相机 open 状态判定（不起流验证——避免 USB 扰动串口）
+        mcu_->stopScan(nullptr);              // N11 H0
+        mcu_->flushWrites(2000);
+        selfCheck_.report("camera", camera_ && camera_->isOpen());
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 启动自检完成（相机 open={}）",
+                     camera_ && camera_->isOpen());
+        selfCheck_.stage = -1;
         break;
     }
     }
