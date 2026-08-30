@@ -247,18 +247,25 @@ Result DeviceManager::close() {
         std::lock_guard<std::mutex> lock(postMutex_);
         postQueue_.clear();                     // 退出场景：余任务丢弃（不保送）
     }
-    // 灯光收口：熄灯 N10（B0/L0）后再关串口——否则固件保持末次灯态（关扫描仪灯残留）
-    if (mcu_->isOpen()) mcu_->lightsOff();
-    mcu_->close();
-    if (camera_) camera_->close();
+    // —— 全量清理：补光灯/激光器关 + 退自检 + 冲写队列 + 关串口 + 关相机 ——
+    if (mcu_->isOpen()) {
+        mcu_->stopScan(nullptr);                // N11 H0：全停（灯/电机/触发）
+        mcu_->exitSelfCheck(nullptr);           // N12 Z0：退自检模式
+        mcu_->flushWrites(3000);                // 确保命令全部落线（3s 有界）
+    }
+    mcu_->close();                              // 关串口（停写线程+rx线程）
+    if (camera_) {
+        camera_->stopAsyncCapture();            // 停采集流
+        camera_->close();                       // 关相机
+    }
+    // —— 状态复位（重开=全新会话）——
     standbyActive_ = false;
-    camFaultLatched_ = false;                   // D-T13：边沿锚/锁全复位（重开=新会话）
+    camFaultLatched_ = false;
     camWasOpen_ = false;
     serialSilentLatched_ = false;
     tempHotLatched_ = false;
     tempSpikeLatched_ = false;
     prevTempsValid_ = false;
-    // lastKeyDrop_/lastSeqGap_ 不复位：MCUDriver 计数器单调累计（open 不清），增量对齐
     tempRxTime_ = 0;
     opened_ = false;
     return Result::ok();
@@ -567,11 +574,11 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
 
         // N10 账本值亮灯（v2 即发即回显）；回显匹配判定归 selfCheckTick stage 0
         const hal::CaptureParams on = captureParamsFromAccount(*params_);
-        selfCheck_.expectEcho = "N10H" + std::to_string(on.freqHz) +
-                                "B" + std::to_string(on.bgLight) +
-                                "T" + std::to_string(on.laserSelectA) +
-                                "V" + std::to_string(on.laserSelectB) +
-                                "L" + std::to_string(on.laserLevel);
+        selfCheck_.expectEcho = "N10 H" + std::to_string(on.freqHz) +
+                                " B" + std::to_string(on.bgLight) +
+                                " T" + std::to_string(on.laserSelectA) +
+                                " V" + std::to_string(on.laserSelectB) +
+                                " L" + std::to_string(on.laserLevel);
         mcu_->setCaptureParams(on, nullptr);
     });
 }

@@ -183,6 +183,7 @@ Scanner::Result SerialPort::write(const std::string& bytes) {
         return Scanner::Result::fail(kErrWriteOwner, "串口并发写拒绝");
     }
 
+    JMW_LOG_INFO("08-SerialPort", "[SerialPort] TX: '{}'", bytes);   // 每笔写打日志
     const auto t0 = std::chrono::steady_clock::now();   // 慢写探针：USB 串口驱动偶发
     DWORD written = 0;                                   // 长阻塞（流控/IRP 排队）——记档定位
     if (!WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()),

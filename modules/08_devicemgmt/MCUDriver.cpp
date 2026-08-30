@@ -61,10 +61,12 @@ void MCUDriver::applyVersion() {
 }
 
 bool MCUDriver::writeFrame(const std::string& frame) {
+    JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] writeFrame: '{}' open={} override={}",
+                 frame, open_.load(), writeOverride_ != nullptr);
     if (writeOverride_) return writeOverride_(frame);           // 测试模式
     if (!open_.load(std::memory_order_acquire)) return false;
-    enqueueWrite(frame);                                        // 写线程异步落串口
-    return true;                                                // v2 即发语义；写失败由写线程记档
+    enqueueWrite(frame);                                        // 写线程异步送串口
+    return true;                                                // v2 发即返回；写失败由写线程记
 }
 
 // —— 写线程：唯一串口写者（R2-A1 属主天然落此线程）——
@@ -93,14 +95,10 @@ void MCUDriver::writeLoop() {
             if (!writeQueue_.empty()) {
                 frame = std::move(writeQueue_.front().frame);
                 writeQueue_.pop_front();
+                JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] writeLoop 出队: '{}'", frame);
             }
         }
-        if (frame.empty()) {                    // 空闲超时：保活写（不占队列计）
-            if (std::chrono::steady_clock::now() - lastWrite < kKeepaliveInterval) continue;
-            serial_.writeKeepalive("\r\n");     // 写线程=唯一写者；空行回显被行层静默消化
-            lastWrite = std::chrono::steady_clock::now();
-            continue;
-        }
+        if (frame.empty()) continue;               // 保活已删（卡写队列致灭灯命令出不去）
         const auto r = serial_.write(frame);    // 阻塞只落在本线程（实测驱动可卡 2~2.5s）
         lastWrite = std::chrono::steady_clock::now();
         if (!r.success)
@@ -221,16 +219,18 @@ std::string MCUDriver::probeAutoPort(int baud) {
         lastRx_.store(0, std::memory_order_release);
         probeHit_.store(false, std::memory_order_release);
         probeN12Sent_.store(true, std::memory_order_release);   // 探测即 N12Z1（open ⑦ 幂等省略）
-        channel_.sendFireAndForget("N12Z1");     // v2 组帧 "N12Z1;"；真机回显+文本应答
+        channel_.sendFireAndForget("N12 Z1");     // v2 组帧 "N12Z1;"；真机回显+文本应答
         for (int waited = 0; waited < 300 && !probeHit_.load(std::memory_order_acquire);
              waited += 10) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (probeHit_.load(std::memory_order_acquire)) {
             JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 自动搜口命中: {}（{} 口中）", port, ports.size());
-            // 退出自检：探测的 N12Z1 会令固件进自检模式（实测回 "Self check begins"）
-            // ——不退则固件卡自检态：不回显后续命令、灯/采集行为异常（灯闪一下被复位）
-            channel_.sendFireAndForget("N12Z0");
+            // 退出自检：探测的 N12 Z1 让固件进入自检模式，这里复位
+            channel_.sendFireAndForget("N12 Z0");
+            // ★冲写队列：CH343 的 WriteFile 可卡 2~8 秒——不等的话后续命令
+            //   全堵在队列里（N10 入队但写线程出不了队→自检超时→灯不灭的根因）
+            waitWriteDrained(5000);
             return port;
         }
         JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 自动搜口: {} 无应答，试下一口", port);
@@ -413,43 +413,40 @@ void MCUDriver::accountTempSeq(uint16_t seq) {
 
 // ============================================================================
 // typed N10–N16（协议表 §2.2；payload 拼装 → CommandChannel）
+// ⚠ 参数前必须有空格（对齐工厂 "N10 H60 B80 T1 V1 L120;"）——无空格固件不解析
 // ============================================================================
 void MCUDriver::setCaptureParams(const hal::CaptureParams& p, DoneCb cb) {
-    channel_.send("N10H" + std::to_string(p.freqHz) +
-                  "B" + std::to_string(p.bgLight) +
-                  "T" + std::to_string(p.laserSelectA) +
-                  "V" + std::to_string(p.laserSelectB) +
-                  "L" + std::to_string(p.laserLevel), std::move(cb));
+    channel_.send("N10 H" + std::to_string(p.freqHz) +
+                  " B" + std::to_string(p.bgLight) +
+                  " T" + std::to_string(p.laserSelectA) +
+                  " V" + std::to_string(p.laserSelectB) +
+                  " L" + std::to_string(p.laserLevel), std::move(cb));
 }
-void MCUDriver::startScan(DoneCb cb)        { channel_.send("N11H1", std::move(cb)); }
-void MCUDriver::stopScan(DoneCb cb)         { channel_.send("N11H0", std::move(cb)); }
+void MCUDriver::startScan(DoneCb cb)        { channel_.send("N11 H1", std::move(cb)); }
+void MCUDriver::stopScan(DoneCb cb)         { channel_.send("N11 H0", std::move(cb)); }
 
-// 熄灯收口：固件无独立灯控命令——N10 的 B/L 即灯态（协议命令表：B0-255 补光 /
-// L0-255 激光亮度）。H/T/V 取合法下限，B0/L0 熄灯。帧入写队列（写线程异步落串口，
-// 阻塞不落调用线程）；close 场景由 stopWriteThread 等排空后再关串口，无截断风险。
+// 熄灯＝N11 H0（停止扫描）——工厂软件同款（实测 N10 B0/L0 不关灯，TX 日志确认）
 void MCUDriver::lightsOff() {
-    if (!open_.load() || writeOverride_) return;  // 未开/测试模式直跳
-    hal::CaptureParams p;
-    p.freqHz = 20; p.bgLight = 0; p.laserSelectA = 1; p.laserSelectB = 1; p.laserLevel = 0;
-    setCaptureParams(p, nullptr);
+    if (!open_.load() || writeOverride_) return;
+    stopScan(nullptr);
 }
 
 void MCUDriver::flushWrites(int timeoutMs) {
     if (writeOverride_) return;                  // 测试模式无队列
     waitWriteDrained(timeoutMs);
 }
-void MCUDriver::enterSelfCheck(DoneCb cb)   { channel_.send("N12Z1", std::move(cb)); }
-void MCUDriver::exitSelfCheck(DoneCb cb)    { channel_.send("N12Z0", std::move(cb)); }
-void MCUDriver::enterStandby(DoneCb cb)     { channel_.send("N13E1", std::move(cb)); }
-void MCUDriver::exitStandby(DoneCb cb)      { channel_.send("N13E0", std::move(cb)); }
+void MCUDriver::enterSelfCheck(DoneCb cb)   { channel_.send("N12 Z1", std::move(cb)); }
+void MCUDriver::exitSelfCheck(DoneCb cb)    { channel_.send("N12 Z0", std::move(cb)); }
+void MCUDriver::enterStandby(DoneCb cb)     { channel_.send("N13 E1", std::move(cb)); }
+void MCUDriver::exitStandby(DoneCb cb)      { channel_.send("N13 E0", std::move(cb)); }
 void MCUDriver::setHeatTarget(int celsius, DoneCb cb) {
-    channel_.send("N14T" + std::to_string(celsius), std::move(cb));
+    channel_.send("N14 T" + std::to_string(celsius), std::move(cb));
 }
 void MCUDriver::queryTemperature(int v0to2) {
-    channel_.sendFireAndForget("N15V" + std::to_string(v0to2));   // 查询类：发不等（§2.3）
+    channel_.sendFireAndForget("N15 V" + std::to_string(v0to2));
 }
-void MCUDriver::enterCalibration(DoneCb cb) { channel_.send("N16B1", std::move(cb)); }
-void MCUDriver::exitCalibration(DoneCb cb)  { channel_.send("N16B0", std::move(cb)); }
+void MCUDriver::enterCalibration(DoneCb cb) { channel_.send("N16 B1", std::move(cb)); }
+void MCUDriver::exitCalibration(DoneCb cb)  { channel_.send("N16 B0", std::move(cb)); }
 
 // ============================================================================
 // 上行/配置/观测
