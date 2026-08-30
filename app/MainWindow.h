@@ -77,12 +77,16 @@ private slots:
     void onReloadPointCloud();
     void onCalibDeviceClicked();
     void onScanClicked();
+    /// 单键扫描按钮态视觉：idx=2 标点/3 面片；active=红框"停止扫描"、false=复原。
+    /// 各键独立显示自己的会话态（活跃键记录 m_activeScanToolIdx）
+    void setScanButtonVisual(int idx, bool active);
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
+    int m_activeScanToolIdx = -1;     // 当前活跃扫描键（2/3；-1=无——停止复原用）
     QList<QPushButton*> m_navLeftButtons;
     QList<QPushButton*> m_navRightButtons;
     QList<QPushButton*> m_toolButtons;

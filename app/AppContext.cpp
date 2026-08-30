@@ -334,14 +334,17 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
             scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId);
         }
     });
-    // 灯型场景（08 具名封装）：A=只打补光；B=补光＋左右斜激光交替（T/V 异组，
-    // 交替归固件 H1 帧序）。先即时点亮，再采集组（N10 灯型覆写同源生效）
+    // 灯型归采集组 N10（effectiveN10 带灯型覆写）——不预点亮：固件 H1"按上次
+    // 采集参数重启"会重置灯态（2026-08-22 实测），预点亮＝闪一下→灭→组内 N10
+    // 再亮（真机"先闪一下再持续"根因）；组序 H1→N10，灯以组内 N10 为准一次到位
     const bool laserOn = (mode != Scanner::ScanMode::MarkerOnly);
-    if (laserOn)
-        dm->lightsBgAndCrossLaser();
-    else
-        dm->lightsBgOnly();
     dm->startCapture(laserOn);
+    if (laserOn) {
+        JMW_LOG_INFO("app-AppContext",
+            "[AppContext] 面片扫描激光组: 左斜=T{} 右斜=V{}（交替归固件 H1 帧序）",
+            static_cast<int>(dm->getParam("laserSelectA").value),
+            static_cast<int>(dm->getParam("laserSelectB").value));
+    }
 
     // 命令通道点火（门禁/前置/装配失败均带因返回；各"不走打印点"已落日志）
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
@@ -358,8 +361,10 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
 
 Scanner::Result AppContext::stopScanSession() {
     if (deviceManager_) {
-        deviceManager_->stopCapture();   // 设备侧采集停（幂等）
-        deviceManager_->lightsAllOff();  // 打光场景收口：全灭（防灯残留）
+        // 灯命令先行：相机停流实测阻塞 ~2s，若排在前会把灭灯压到 2s+ 后——
+        // 先 lightsAllOff（N10 即刻落总线下页灯灭，体感即时）再停采集/流
+        deviceManager_->lightsAllOff();
+        deviceManager_->stopCapture();       // 设备侧采集停（幂等）
     }
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
     return commandGate_->submit("finish_scan");          // 工作流合账（handler=stop）

@@ -78,9 +78,10 @@ void MCUDriver::enqueueWrite(const std::string& frame) {
 
 void MCUDriver::writeLoop() {
     // USB 保活：实测 CH343 串口 TX 空闲超阈（介于 100~500ms）即挂起，唤醒首写卡
-    // ~2.1s（注册表禁挂起无效；RX 流量不保活）。空闲 150ms 补一笔 "\r\n"（固件回
-    // 空行——行层静默丢弃），TX 间隙压进安全窗，业务帧恒快
-    constexpr auto kKeepaliveInterval = std::chrono::milliseconds(150);
+    // ~2.1s（注册表禁挂起无效；RX 流量不保活）。空闲 80ms 补一笔 "\r\n"（固件回
+    // 空行——行层静默丢弃），TX 间隙压进安全窗下沿（150ms 实测压线不稳，业务帧
+    // 仍偶撞挂起卡 5s——启停灯命令慢的根因之一），业务帧恒快
+    constexpr auto kKeepaliveInterval = std::chrono::milliseconds(80);
     auto lastWrite = std::chrono::steady_clock::now();
     while (writeRunning_.load(std::memory_order_acquire)) {
         std::string frame;

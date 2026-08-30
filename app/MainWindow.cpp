@@ -477,9 +477,11 @@ void MainWindow::onScanClicked()
     (void)series;   // 旧 stub 路径退役：下方改走真链（AppContext 统一点火口）
     if (!m_appCtx) return;
 
-    // 真链启停切换：navBar"扫描"——活跃则停、空闲则面片扫描（B；缺激光表由 02 降级 A）
+    // 真链启停切换：navBar"扫描"——活跃则停（复原活跃键）、空闲则面片扫描（B）
     if (m_appCtx->isScanSessionActive()) {
         auto r = m_appCtx->stopScanSession();
+        if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+        m_activeScanToolIdx = -1;
         statusBar()->showMessage(r.success ? QStringLiteral("扫描停止中——会话合账")
                                            : QString::fromStdString("停止被拒: " + r.message));
         return;
@@ -489,7 +491,34 @@ void MainWindow::onScanClicked()
         QMessageBox::warning(this, QStringLiteral("扫描"),
             QString::fromStdString("扫描启动被拒:\n" + r.message));
     } else {
+        setScanButtonVisual(3, true);           // navBar 起的面片——只亮面片键
+        m_activeScanToolIdx = 3;
         statusBar()->showMessage(QString::fromStdString(r.message) + QStringLiteral("——再点停止"));
+    }
+}
+
+// 单键扫描按钮态视觉：idx=2 标点/3 面片——活跃＝红框＋红字"停止扫描"，
+// 停止＝复原黑字原名。各键独立（点哪键哪键变，另一键不动）
+void MainWindow::setScanButtonVisual(int idx, bool active)
+{
+    if (idx < 0 || idx >= m_toolButtons.size()) return;
+    auto* btn = m_toolButtons[idx];
+    auto* textLbl = btn->findChild<QLabel*>(QStringLiteral("toolButtonText"));
+    if (!textLbl) return;
+    if (active) {
+        textLbl->setText(QStringLiteral("停止扫描"));
+        textLbl->setStyleSheet("color: #C0392B; font-weight: bold;");
+        btn->setStyleSheet(
+            "QPushButton { background-color: rgba(192,57,43,0.10);"
+            " border: 1px solid #C0392B; border-radius: 4px; }"
+            "QPushButton:hover { background-color: rgba(192,57,43,0.22); }");
+    } else {
+        textLbl->setText(idx == 2 ? QStringLiteral("标点扫描")
+                                  : QStringLiteral("面片扫描"));
+        textLbl->setStyleSheet("");
+        btn->setStyleSheet(
+            "QPushButton { background-color: transparent; border: none; }"
+            "QPushButton:hover { background-color: rgba(0,0,0,0.05); }");
     }
 }
 
@@ -796,27 +825,38 @@ QWidget *MainWindow::createToolBar()
             connect(btn, &QPushButton::clicked, this, &MainWindow::onCalibDeviceClicked);
         }
 
-        // 标点扫描（i==2）/面片扫描（i==3）：启停切换——首点启动、扫描中再点停止
-        // （AppContext 统一点火/收尾口；拒绝原因弹窗＋日志）
+        // 标点扫描（i==2）/面片扫描（i==3）：各自独立启停——点哪个键哪个键变红
+        // （另一键不动）；扫描中点另一键＝停旧启新（模式切换）
         if (i == 2 || i == 3) {
             const bool mesh = (i == 3);
+            const int myIdx = i;
             const QString title = mesh ? QStringLiteral("面片扫描") : QStringLiteral("标点扫描");
-            connect(btn, &QPushButton::clicked, this, [this, mesh, title]() {
+            connect(btn, &QPushButton::clicked, this, [this, myIdx, title]() {
                 if (!m_appCtx) return;
+                // 会话活跃（无论哪键起的）：先停＋复原"活跃键"视觉
                 if (m_appCtx->isScanSessionActive()) {
-                    // 再点＝停止（finish_scan 合账＋采集停；拒绝多为时序竞态，状态栏轻提示）
-                    auto r = m_appCtx->stopScanSession();
-                    statusBar()->showMessage(r.success ? QStringLiteral("扫描停止中——会话合账")
-                                                       : QString::fromStdString("停止被拒: " + r.message));
-                    return;
+                    auto sr = m_appCtx->stopScanSession();
+                    if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                    const bool wasSelf = (m_activeScanToolIdx == myIdx);
+                    m_activeScanToolIdx = -1;
+                    if (wasSelf) {   // 再点自己＝纯停止
+                        statusBar()->showMessage(sr.success
+                            ? QStringLiteral("扫描停止中——会话合账")
+                            : QString::fromStdString("停止被拒: " + sr.message));
+                        return;
+                    }
+                    // 点的是另一键：停旧后继续启动新模式（落下）
                 }
-                const auto mode = mesh ? Scanner::ScanMode::MarkerPlusLaser
-                                       : Scanner::ScanMode::MarkerOnly;
+                const auto mode = title == QStringLiteral("面片扫描")
+                                      ? Scanner::ScanMode::MarkerPlusLaser
+                                      : Scanner::ScanMode::MarkerOnly;
                 auto r = m_appCtx->startScanSession(mode);
                 if (!r.success) {
                     QMessageBox::warning(this, title,
                         QString::fromStdString("扫描启动被拒:\n" + r.message));
                 } else {
+                    setScanButtonVisual(myIdx, true);          // 只有本键变红
+                    m_activeScanToolIdx = myIdx;
                     statusBar()->showMessage(QString::fromStdString(r.message) +
                                              QStringLiteral("——再点停止"));
                 }
