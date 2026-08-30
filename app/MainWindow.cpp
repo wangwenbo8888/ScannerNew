@@ -506,14 +506,69 @@ void MainWindow::onScanClicked()
     } else {
         setScanButtonVisual(3, true);           // navBar 起的面片——只亮面片键
         m_activeScanToolIdx = 3;
+        showCameraMonitor();                    // 调试：弹相机左右图监视
         statusBar()->showMessage(QString::fromStdString(r.message) + QStringLiteral("——再点停止"));
     }
 }
 
+// ============================================================================
+// 相机预览监视弹窗（调试）：扫描启动时弹出，实时显示左右相机灰度图——观察
+// 灯帧交替（补光帧↔激光帧）/标记点可见性。数据走 AppContext 调试帧分路
+// （相机 SDK 线程直调，此处 invokeMethod queued 切 UI 线程；每 3 帧刷新）
+// ============================================================================
+namespace {
+QImage camMatToImage(const cv::Mat& m) {
+    if (m.empty()) return {};
+    return QImage(m.data, m.cols, m.rows, static_cast<qsizetype>(m.step),
+                  QImage::Format_Grayscale8).copy();
+}
+} // namespace
+
+void MainWindow::showCameraMonitor() {
+    if (!m_appCtx) return;
+    if (!m_camDlg) {
+        m_camDlg = new QDialog(this);
+        m_camDlg->setWindowTitle(QStringLiteral("相机预览监视（左 / 右）——调试"));
+        m_camDlg->setModal(false);
+        m_camDlg->resize(1040, 420);
+        m_camLeft = new QLabel(m_camDlg);
+        m_camRight = new QLabel(m_camDlg);
+        for (QLabel* l : {m_camLeft, m_camRight}) {
+            l->setMinimumSize(500, 380);
+            l->setAlignment(Qt::AlignCenter);
+            l->setStyleSheet("background:#202225;");
+        }
+        auto* lay = new QHBoxLayout(m_camDlg);
+        lay->setContentsMargins(4, 4, 4, 4);
+        lay->addWidget(m_camLeft);
+        lay->addWidget(m_camRight);
+        // 关闭即摘分路（帧回调不再进 UI）
+        connect(m_camDlg, &QDialog::finished, this, [this]() {
+            if (m_appCtx) m_appCtx->setDebugFrameTap(nullptr);
+        });
+    }
+    m_appCtx->setDebugFrameTap([this](const Scanner::hal::StereoFrame& f) {
+        if (++m_camFrameSkip < 3) return;        // 节流：≈10fps
+        m_camFrameSkip = 0;
+        const cv::Mat l = f.leftGray.clone();    // 深拷脱离 ring 复用
+        const cv::Mat r = f.rightGray.clone();
+        QMetaObject::invokeMethod(this, [this, l, r]() {
+            if (m_camDlg && m_camDlg->isVisible()) {
+                m_camLeft->setPixmap(QPixmap::fromImage(camMatToImage(l))
+                                         .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
+                m_camRight->setPixmap(QPixmap::fromImage(camMatToImage(r))
+                                          .scaled(m_camRight->size(), Qt::KeepAspectRatio));
+            }
+        }, Qt::QueuedConnection);
+    });
+    m_camDlg->show();
+    m_camDlg->raise();
+    m_camDlg->activateWindow();
+}
+
 // 单键扫描按钮态视觉：idx=2 标点/3 面片——活跃＝红框＋红字"停止扫描"，
 // 停止＝复原黑字原名。各键独立（点哪键哪键变，另一键不动）
-void MainWindow::setScanButtonVisual(int idx, bool active)
-{
+void MainWindow::setScanButtonVisual(int idx, bool active){
     if (idx < 0 || idx >= m_toolButtons.size()) return;
     auto* btn = m_toolButtons[idx];
     auto* textLbl = btn->findChild<QLabel*>(QStringLiteral("toolButtonText"));
@@ -870,6 +925,7 @@ QWidget *MainWindow::createToolBar()
                 } else {
                     setScanButtonVisual(myIdx, true);          // 只有本键变红
                     m_activeScanToolIdx = myIdx;
+                    showCameraMonitor();                       // 调试：弹相机左右图监视
                     statusBar()->showMessage(QString::fromStdString(r.message) +
                                              QStringLiteral("——再点停止"));
                 }

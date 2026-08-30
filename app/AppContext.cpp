@@ -351,6 +351,11 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
             const double tempC = (t.channels & 0x01) ? t.celsius[0] : 25.0;
             scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId);
         }
+        // ③ 调试分路：相机预览监视弹窗（相机 SDK 线程直调；订阅方切线程+节流自理）
+        {
+            std::lock_guard<std::mutex> lock(debugTapMtx_);
+            if (debugFrameTap_) debugFrameTap_(frame);
+        }
     });
     // 灯型归采集组 N10（effectiveN10 带灯型覆写）——不预点亮：固件 H1"按上次
     // 采集参数重启"会重置灯态（2026-08-22 实测），预点亮＝闪一下→灭→组内 N10
@@ -388,9 +393,8 @@ Scanner::Result AppContext::stopScanSession() {
     // 并发操作同一 pipeline_
     if (scanStartThread_.joinable()) scanStartThread_.join();
     if (deviceManager_) {
-        // 灯命令先行：相机停流实测阻塞 ~2s，若排在前会把灭灯压到 2s+ 后——
-        // 先 lightsAllOff（N10 即刻落总线下页灯灭，体感即时）再停采集/流
-        deviceManager_->lightsAllOff();
+        // 停止只发单帧 N11 H0（灭灯，stopCapture 内）——不发 N10（用户口径
+        // 2026-08-30：停止帧极简，lightsAllOff 的 N10 B0/L0 已删）
         deviceManager_->stopCapture();       // 设备侧采集停（幂等）
     }
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");

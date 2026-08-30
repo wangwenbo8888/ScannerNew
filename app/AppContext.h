@@ -18,6 +18,8 @@
 
 class SceneFeedAdapter;   // P2 渲染加固：ISceneFeed 实现（app 装配持有）
 
+namespace Scanner::hal    { struct StereoFrame; }   // 调试帧分路签名（IScannerCamera.h 定义）
+
 namespace Scanner::data    { class FrameBuffer; class PointCloudBuffer; class DeviceStateCache; class CalibrationRepository; }
 namespace Scanner::service { class StateMachine; class ParameterManager; class FaultHandler; class CommandGate; class PerfMonitor; }
 namespace Scanner::infra   { class EventBus; }
@@ -81,6 +83,13 @@ public:
         scanSessionEndedHandler_ = std::move(h);
     }
 
+    // 调试帧分路（相机预览监视弹窗用）：扫描会话帧回调里同步调用（相机 SDK
+    // 线程——订阅方自行切线程；节流自理）。可空=无订阅
+    void setDebugFrameTap(std::function<void(const Scanner::hal::StereoFrame&)> tap) {
+        std::lock_guard<std::mutex> lock(debugTapMtx_);
+        debugFrameTap_ = std::move(tap);
+    }
+
     // Workflow
     Scanner::workflow::WorkflowContext*     workflowCtx()    { return wfCtx_.get(); }
     Scanner::workflow::ScanWorkflow*        scanWorkflow()   { return scanWf_.get(); }
@@ -140,4 +149,6 @@ private:
     std::thread scanStartThread_;               // 扫描装配后台线程（§3.3 handler 毫秒级契约；
                                                 //   stop/shutdown 先 join——防与 stop() 竞态）
     std::function<void(bool)> scanSessionEndedHandler_;   // 会话终止回调（后台线程调；可空）
+    std::function<void(const Scanner::hal::StereoFrame&)> debugFrameTap_;   // 调试帧分路（可空）
+    std::mutex debugTapMtx_;
 };

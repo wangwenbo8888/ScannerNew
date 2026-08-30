@@ -400,13 +400,10 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
     });
 }
 
-// 采集组公共步链（2026-08-30 真机定版）：N10→FLUSH。
-// 定版依据：① N11 H1 实测（jmw 17:11:14）发出后固件串口静默 10s+（0x0802、
-// 回显全无），紧随的 N10 石沉大海——"点扫描灯不亮"根因；工厂软件"开始扫描
-// 仪"只发 N10（ScannerControl.cpp 口径），参数帧即灯控+采集参数，照齐。
-// ② N11 H0 停止收口保留（真机已验证灯灭）。③ flushWrites：串口命令全部落线
-// 后才开相机流——相机开流 USB3 风暴会把并行串口写饿死 2~5s（实测 N10 卡
-// 5279ms）；先冲净写队列再动相机
+// 采集组公共步链（2026-08-30 三次定版·用户口径）：N10→FLUSH。
+// 启动只发一帧 N10（参数+灯控）；不发 N11 H1。FLUSH：串口命令落线后才开
+// 相机流（相机开流 USB3 风暴会饿死并行串口写 2~5s）。停止见 stopCaptureOnLogic
+// （单帧 N11 H0，不发 N10）
 std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
     return {{"N10", [this](McuDone cb) {
                  mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
