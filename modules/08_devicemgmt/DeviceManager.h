@@ -168,8 +168,24 @@ public:
     // —— 采集启停（N10(账本全参)→N11H1→开流 / N11H0；不切模式；幂等：黑板同值
     //    直返；编队执行——调用后需一拍 logicTick 落地下行帧。A-T17 修复：采集链
     //    编排改命令组补 N10（原仅 N11H1——真机 MCU 以默认参数跑、UI 滑条死控件）——
-    void startCapture();
+    //    laserOn=false（标点扫描 A 模式）：N10 激光量强制 L=0（只开补光），
+    //    采集期参数变更重发同样生效；缺省 true=账本全参（面片扫描 B 模式）
+    void startCapture(bool laserOn = true);
     void stopCapture();
+
+    // —— 灯光直控（用户按钮直调；编队逻辑线程执行，不启停采集）——
+    /// N10 灯字段即时生效：bgOn/laserOn=true 取账本值、false 置 0（底层通用口）
+    void setLights(bool bgOn, bool laserOn);
+
+    // —— 打光场景封装（灯型三态；N10 即时生效，组合语义见各自注释）——
+    /// 只打补光灯（标志点扫描 A 模式）：B=账本值，L=0，激光线不开
+    void lightsBgOnly();
+    /// 打补光灯＋左右斜激光线（面片扫描 B 模式）：B/L=账本值；T=左斜组 V=右斜组
+    /// （账本 laserSelectA/B，异组保证固件帧序交替打两族线；同组会 warn——
+    /// 交替失效只打一族，组号映射随固件实测调参数）
+    void lightsBgAndCrossLaser();
+    /// 全灭（补光/激光全关；等价 close 前收口语义）
+    void lightsAllOff();
 
     // —— 参数双口（Critical #1：账本归逻辑线程，引用出口已删）——
     ParamEntry getParam(const std::string& key) const;   // 互斥快照读（≤6 项轻拷）
@@ -258,6 +274,7 @@ private:
     TimestampMs tempRxTime_ = 0;                // 最近 T 帧到达时刻（v2 兜底判据）
     std::function<void(bool)> warmupDone_;      // 当前预热完成回调（onStable/onTimeout 消费）
     bool standbyActive_ = false;                // MCU 侧待机记账（切模式前退待机判据）
+    bool captureLaserOn_ = true;                // 采集灯型（逻辑线程属主）：false=N10 强制 L=0
     // —— D-T13 故障边沿锚（逻辑线程属主；恢复清锚防复报）——
     bool camFaultLatched_ = false;              // 0x0801 掉线锁（相机重开清锚）
     bool camWasOpen_ = false;                   // 0x0801 前置锚：相机曾开（open 成功即置）

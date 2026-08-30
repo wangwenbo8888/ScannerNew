@@ -24,6 +24,10 @@
 #include <mutex>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>   // SetConsoleOutputCP——控制台按 UTF-8 解码（见 obsLoggerInit）
+#endif
+
 // 工程版本（09 core/common/version.h 为头文件内联，取宏不引链接依赖；
 // 不可含则写 unknown——__has_include 守卫保证构建永不因缺它而断）
 #if defined(__has_include)
@@ -90,6 +94,12 @@ std::string todayDateStr() {
 void obsLoggerInit(const ObsLoggerConfig& cfg) {
     std::lock_guard<std::mutex> lock(g_obsMutex);
     spdlog::shutdown();   // 幂等：先拆旧装配（flush 由 sink 析构保证）
+
+#ifdef _WIN32
+    // 控制台解码对齐：spdlog 输出 UTF-8 字节，Windows 控制台默认 GBK(936)——
+    // 不设则中文全乱码（等价 chcp 65001；仅本进程控制台会话生效）
+    SetConsoleOutputCP(CP_UTF8);
+#endif
 
     std::error_code ec;
     fs::create_directories(cfg.logDir, ec);

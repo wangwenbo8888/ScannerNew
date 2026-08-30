@@ -197,6 +197,10 @@ void ScanPipeline::syncState() const {
     // 由 recover() 限时 drain 决定可否原地救回
     if (state_ == State::Running && runtime_.hangDetected()) {
         state_ = State::Faulted;
+        const auto st = runtime_.stats();
+        JMW_LOG_ERROR("07-ScanPipeline",
+            "[ScanPipeline] 看门狗检出 lane 心跳超时→Faulted（1610）: "
+            "已处理={} 钩子异常={}", st.processed, st.finalizeFails);
         if (sink_) {
             sink_->report(Scanner::QualityFlag::Fault, kEvtLaneHang,
                           "C 扫描 lane 心跳超时（看门狗）；可尝试 recover() 原地恢复");
@@ -205,6 +209,11 @@ void ScanPipeline::syncState() const {
     }
     if (state_ == State::Running && runtime_.lanesExited()) {
         state_ = State::Faulted;
+        const auto st = runtime_.stats();
+        JMW_LOG_ERROR("07-ScanPipeline",
+            "[ScanPipeline] runtime 异常即停→Faulted（1604）: "
+            "已处理={} 跳帧={} GPU拒={} 钩子异常={}",
+            st.processed, st.droppedSkips, st.gpuRejects, st.finalizeFails);
         if (sink_) {
             sink_->report(Scanner::QualityFlag::Fault, kEvtRuntimeDied,
                           "C 扫描流水线异常停（帧钩子异常/资源故障），累积数据保留待 stop 收尾");

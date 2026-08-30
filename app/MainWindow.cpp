@@ -474,40 +474,22 @@ void MainWindow::onScanClicked()
     }
 
     auto* series = static_cast<LEADSCANSeries*>(m_integrateTestDialog);
-    if (!series) {
-        if (!m_integrateTestDialog) m_integrateTestDialog = new LEADSCANSeries();
-        series = static_cast<LEADSCANSeries*>(m_integrateTestDialog);
-    }
-    auto* cam = series->getCameraControl();
-    if (!cam || !cam->isScannerCameraOpen()) {
-        QMessageBox::warning(this, QStringLiteral("扫描"), QStringLiteral("请先在集成测试中打开扫描相机"));
+    (void)series;   // 旧 stub 路径退役：下方改走真链（AppContext 统一点火口）
+    if (!m_appCtx) return;
+
+    // 真链启停切换：navBar"扫描"——活跃则停、空闲则面片扫描（B；缺激光表由 02 降级 A）
+    if (m_appCtx->isScanSessionActive()) {
+        auto r = m_appCtx->stopScanSession();
+        statusBar()->showMessage(r.success ? QStringLiteral("扫描停止中——会话合账")
+                                           : QString::fromStdString("停止被拒: " + r.message));
         return;
     }
-
-    statusBar()->showMessage(QStringLiteral("扫描中..."));
-    QApplication::processEvents();
-
-    calibration::ScanWorkflow workflow;
-    workflow.setProgressCallback([this](int pct, const std::string& step) {
-        statusBar()->showMessage(QString::fromStdString(step) + " (" + QString::number(pct) + "%)");
-        QApplication::processEvents();
-    });
-
-    calibration::ScanInput input;
-
-    std::vector<cv::Point3f> fusedCloud, fusedNormals;
-    auto result = workflow.processFrameToCloud(input, fusedCloud, fusedNormals);
-
-    if (result.success && m_3dView && !fusedCloud.empty()) {
-        std::vector<osg::Vec3> osgPoints;
-        osgPoints.reserve(fusedCloud.size());
-        for (const auto& p : fusedCloud) osgPoints.emplace_back(p.x, p.y, p.z);
-        m_3dView->loadPointCloud(osgPoints);
-        QMessageBox::information(this, QStringLiteral("扫描完成"),
-            QStringLiteral("点云: %1 点\n法线: %2\n耗时: %3 ms")
-            .arg(result.fusedPoints).arg(result.fusedPoints).arg(static_cast<int>(result.totalTimeMs)));
+    auto r = m_appCtx->startScanSession(Scanner::ScanMode::MarkerPlusLaser);
+    if (!r.success) {
+        QMessageBox::warning(this, QStringLiteral("扫描"),
+            QString::fromStdString("扫描启动被拒:\n" + r.message));
     } else {
-        QMessageBox::warning(this, QStringLiteral("扫描"), QString::fromStdString(result.message));
+        statusBar()->showMessage(QString::fromStdString(r.message) + QStringLiteral("——再点停止"));
     }
 }
 
@@ -812,6 +794,33 @@ QWidget *MainWindow::createToolBar()
 
         if (i == 1) {
             connect(btn, &QPushButton::clicked, this, &MainWindow::onCalibDeviceClicked);
+        }
+
+        // 标点扫描（i==2）/面片扫描（i==3）：启停切换——首点启动、扫描中再点停止
+        // （AppContext 统一点火/收尾口；拒绝原因弹窗＋日志）
+        if (i == 2 || i == 3) {
+            const bool mesh = (i == 3);
+            const QString title = mesh ? QStringLiteral("面片扫描") : QStringLiteral("标点扫描");
+            connect(btn, &QPushButton::clicked, this, [this, mesh, title]() {
+                if (!m_appCtx) return;
+                if (m_appCtx->isScanSessionActive()) {
+                    // 再点＝停止（finish_scan 合账＋采集停；拒绝多为时序竞态，状态栏轻提示）
+                    auto r = m_appCtx->stopScanSession();
+                    statusBar()->showMessage(r.success ? QStringLiteral("扫描停止中——会话合账")
+                                                       : QString::fromStdString("停止被拒: " + r.message));
+                    return;
+                }
+                const auto mode = mesh ? Scanner::ScanMode::MarkerPlusLaser
+                                       : Scanner::ScanMode::MarkerOnly;
+                auto r = m_appCtx->startScanSession(mode);
+                if (!r.success) {
+                    QMessageBox::warning(this, title,
+                        QString::fromStdString("扫描启动被拒:\n" + r.message));
+                } else {
+                    statusBar()->showMessage(QString::fromStdString(r.message) +
+                                             QStringLiteral("——再点停止"));
+                }
+            });
         }
 
         // 文件管理：弹出导入/导出菜单

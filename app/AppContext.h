@@ -67,6 +67,15 @@ public:
     // 渲染推送（P2 渲染加固；MainWindow 连其信号到 OSGWidget）
     SceneFeedAdapter* sceneFeed() { return sceneFeed_.get(); }
 
+    // —— 扫描会话点火（统一入口：工具栏标点/面片扫描＋ScannerWindow 共用）——
+    /// 就绪检查→帧流双投递注册（预览＋会话环）→startCapture→命令通道 start_scan(模式)。
+    /// 拒绝原因随 Result 返回（日志同步由 gate/门面各"不走打印点"落）
+    Scanner::Result startScanSession(Scanner::ScanMode mode);
+    /// finish_scan 点火（工作流合账）＋采集停止（08 stopCapture）
+    Scanner::Result stopScanSession();
+    /// 扫描会话是否活跃（Running/Paused——按钮启停切换判据）
+    bool isScanSessionActive() const;
+
     // Workflow
     Scanner::workflow::WorkflowContext*     workflowCtx()    { return wfCtx_.get(); }
     Scanner::workflow::ScanWorkflow*        scanWorkflow()   { return scanWf_.get(); }

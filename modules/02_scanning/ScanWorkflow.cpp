@@ -8,9 +8,12 @@
 
 #include "ScanWorkflow.h"
 
+#include "CalibrationRepository.h"
 #include "PointCloudBuffer.h"
 #include "pipelines/PipelineDeps.h"
 #include "pipelines/scan/ScanPipeline.h"
+
+#include <nlohmann/json.hpp>
 
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
@@ -71,21 +74,34 @@ Result ScanWorkflow::assemblePipeline() {
     }
     pipeline_ = std::make_unique<sp::ScanPipeline>(cfg);
 
-    // TODO(接入期): 08 采集回调 session_.pushFrame(grayL, grayR, tempC, frameId)
-    // （enrich 出口查表→ring；fail 丢帧计数）；当前无真帧源——ring 空转，
-    // 流水线各线程等帧（07 防御路径保留）
+    // 帧响应接线（08 采集回调→session 环）：app 双投递经 pushSessionFrame 注入
     pipeline_->attachRing(session_.ring(), /*dropThreshold=*/0);   // 0=自动（2*lanes）
 
     if (!calib_.valid || calib_.cameraMatrixL.empty() || calib_.cameraMatrixR.empty()) {
         pipeline_.reset();
-        return Result::fail(
-            "无标定参数——07 生产链须 attachCalib（TODO 接入期：06 出口查表供逐温档 K/D）");
+        return Result::fail("无标定参数——07 生产链须 attachCalib");
     }
-    // TODO(接入期): 激光网格数据归 §8-1 协调项，接线批注入；A 模式（纯标记点）空表属正常配置
+
+    // —— 激光温度表注入（§8-1 消费侧就位；生产者缺口见下）——
+    // 消费契约：laser_match_scan 吃 mapData:[[xL,yL,uR,lineId],...]（LaserPlaneMap
+    // 布局）。档表含 mapData 的档逐条装表；全档无 mapData（当前工厂档现状：仅
+    // 温补相机参数）→ 表空＝B 模式降级 A（面片模式待算子侧补 mapData 生产者）
+    std::shared_ptr<calib::LaserPlaneMapTempTable> laserTable;
+    if (scanMode_ == ScanMode::MarkerPlusLaser) {
+        laserTable = buildLaserTableFromRepo();
+        if (!laserTable) {
+            JMW_LOG_WARN("02-ScanWorkflow",
+                "[ScanWorkflow] 激光温度表不可用（档表无 mapData——生产者缺口 §8-1），"
+                "B 模式降级 A（纯标记点）");
+            cfg.enableLaser = false;              // 降级：重建配置于 attachCalib 前
+            pipeline_ = std::make_unique<sp::ScanPipeline>(cfg);
+            pipeline_->attachRing(session_.ring(), /*dropThreshold=*/0);
+        }
+    }
     pipeline_->attachCalib(calib_.cameraMatrixL, calib_.distCoeffsL,
                            calib_.cameraMatrixR, calib_.distCoeffsR,
                            calib_.imageSize.width, calib_.imageSize.height,
-                           /*laserTable=*/nullptr);
+                           laserTable);           // 空=A 模式正常配置（ScanChains 不告警）
 
     sp::PipelineDeps deps;
     deps.eventBus = ctx_ ? ctx_->eventBus() : nullptr;
@@ -152,6 +168,79 @@ uint64_t ScanWorkflow::droppedFrameCount() const {
     return pipeline_ ? pipeline_->droppedFrames() : 0;
 }
 
+// ============================================================================
+// 帧响应接线——08 采集回调→会话环（app 双投递：预览 FrameBuffer＋此口）
+// 实现 ScanWorkflow.cpp:74 原 TODO：ring 空转断链就此接通
+// ============================================================================
+void ScanWorkflow::pushSessionFrame(const cv::Mat& grayL, const cv::Mat& grayR,
+                                    double temperatureC, uint64_t frameId) {
+    // 会话期外丢弃（app 回调常驻注册：预览/标定期帧不进扫描环）
+    const auto st = state_.load(std::memory_order_acquire);
+    if (st != WorkflowState::Running && st != WorkflowState::Paused) return;
+    // enrich 出口查表→Overwrite 环（fail 丢帧计数挂 session.droppedFrames）
+    session_.pushFrame(grayL, grayR, temperatureC, frameId);
+}
+
+uint64_t ScanWorkflow::droppedSessionFrames() const {
+    return session_.droppedFrames();
+}
+
+// ============================================================================
+// 激光温度表装载——06 仓库档表 JSON → 09 LaserPlaneMapTempTable
+// 格式与 laser_match_scan::LoadTempTable 同源：{"table":[{temperature,mapData}]}
+// 档缺 mapData（工厂档现状＝仅温补相机参数）跳过；全缺返 nullptr（调用方降级 A）
+// ============================================================================
+std::shared_ptr<calib::LaserPlaneMapTempTable>
+ScanWorkflow::buildLaserTableFromRepo() const {
+    const auto* repo = ctx_ ? ctx_->calibRepo() : nullptr;
+    if (!repo) return nullptr;
+    std::shared_ptr<calib::LaserPlaneMapTempTable> table;
+    try {
+        const nlohmann::json raw = repo->planeMapTempTableRaw();
+        const auto* tab = raw.contains("table") ? &raw["table"] : nullptr;
+        if (!tab || !tab->is_array() || tab->empty()) return nullptr;
+        table = std::make_shared<calib::LaserPlaneMapTempTable>();
+        size_t loaded = 0, skipped = 0;
+        for (const auto& entry : *tab) {
+            if (!entry.contains("temperature") || !entry.contains("mapData")) {
+                ++skipped;
+                continue;
+            }
+            const double temp = entry["temperature"].get<double>();
+            const auto& mapData = entry["mapData"];
+            const int n = static_cast<int>(mapData.size());
+            if (n <= 0) { ++skipped; continue; }
+            calib::LaserPlaneMap pm;
+            pm.temperature = temp;
+            pm.totalPairs = n;
+            cv::Mat m(n, 4, CV_32FC1);            // 每行 [xL, yL, uR, lineId]
+            for (int i = 0; i < n; ++i) {
+                const auto& row = mapData[i];
+                m.at<float>(i, 0) = row[0].get<float>();
+                m.at<float>(i, 1) = row[1].get<float>();
+                m.at<float>(i, 2) = row[2].get<float>();
+                m.at<float>(i, 3) = row[3].get<float>();
+            }
+            pm.leftToRightMap = std::move(m);
+            table->table[temp] = std::move(pm);
+            ++loaded;
+        }
+        if (table->table.empty()) return nullptr;
+        JMW_LOG_INFO("02-ScanWorkflow",
+            "[ScanWorkflow] 激光温度表装载: {} 档（跳过无 mapData 档 {}）", loaded, skipped);
+    } catch (const std::exception& e) {
+        JMW_LOG_WARN("02-ScanWorkflow", "[ScanWorkflow] 激光温度表解析异常（降级 A）: {}",
+                     e.what());
+        return nullptr;
+    }
+    return table;
+}
+
+Scanner::pipeline::FrameObsAccumulator& ScanWorkflow::obs() {
+    // pipeline_ 会话私有件——调方保证仅会话装配后访问（stop 后仍存活至析构）
+    return pipeline_->obs();
+}
+
 Result ScanWorkflow::stop() {
     if (state_ == WorkflowState::Idle) return Result::ok();
     // 完成回报（P5-T15）只在「活跃会话终止」时恰一次：重复 stop / 停后析构 /
@@ -175,7 +264,11 @@ Result ScanWorkflow::stop() {
     // 02 不依赖 10：经 std::function 回调反向解耦（JMW_LOG 宏头在 10，
     // 以下按其展开格式直写 spdlog——输出与 JMW_LOG_INFO 等价，§8.2 生命周期）
     if (reportFinish && onFinished_) {
-        JMW_LOG_INFO("02-ScanWorkflow", "[02-ScanWorkflow] 扫描会话终止 ok=true（⑩ 合账回报）");
+        // 会话终止账本（流程终点汇总——enrich 丢帧并入，与 07 会话结束账互补）
+        JMW_LOG_INFO("02-ScanWorkflow",
+            "[ScanWorkflow] 扫描会话终止: 已融合={} enrich丢帧={} 模式={}",
+            processedFrameCount(), droppedSessionFrames(),
+            scanMode_ == ScanMode::MarkerOnly ? "A(纯标记点)" : "B(标记点+激光)");
         onFinished_(true);
     }
     return Result::ok();

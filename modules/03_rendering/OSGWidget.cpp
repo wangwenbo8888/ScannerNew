@@ -101,6 +101,8 @@ void OSGWidget::clearScene()
 {
     m_root->removeChildren(0, m_root->getNumChildren());
     m_viewLocked = false;  // 解除视图锁定
+    m_lastFitRadius = -1.0;   // 视角跟随基准复位（新会话重新首取景）
+    m_lastFitTime = {};
     m_streamTimer->stop();
     if (m_streamFile.is_open())
         m_streamFile.close();
@@ -938,6 +940,7 @@ void OSGWidget::mouseMoveEvent(QMouseEvent *event)
 
 void OSGWidget::mousePressEvent(QMouseEvent *event)
 {
+    m_userInteracting = true;              // 视角跟随避让（Release 复位）
     if (m_lassoMode)
     {
         if (event->button() == Qt::LeftButton)
@@ -958,6 +961,7 @@ void OSGWidget::mousePressEvent(QMouseEvent *event)
 
 void OSGWidget::mouseReleaseEvent(QMouseEvent *event)
 {
+    m_userInteracting = false;             // 视角跟随恢复（Press 置位处）
     if (m_lassoMode)
         return;
     if (!m_gw.valid()) return;
@@ -1836,6 +1840,29 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
     m_markerGeom->setColorArray(m_markerColors);
     m_markerGeom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
     m_markerGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)markers.size()));
+
+    maybeAutoFrame();   // 扫描视角跟随（生长感知；SceneFeed 更新路径每 5 融合帧一达）
+}
+
+// ============================================================================
+// 扫描视角跟随——marker 云生长感知自动取景（P2 配套；UI 线程）
+//   触发：首次有效更新，或场景半径较上次取景增长 >25%（新区域显著出画）
+//   避让：用户拖拽中不抢视角；1s 节流防镜头抖动
+// ============================================================================
+void OSGWidget::maybeAutoFrame()
+{
+    if (!m_autoViewFit || m_userInteracting) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (m_lastFitRadius >= 0.0 && now - m_lastFitTime < std::chrono::seconds(1)) return;
+
+    const osg::BoundingSphere bs = m_root->getBound();
+    if (!bs.valid() || bs.radius() <= 0.0) return;
+    // 已取过景且未显著增长（<1.25×）——视角不动（防每 5 帧一跳）
+    if (m_lastFitRadius >= 0.0 && bs.radius() < m_lastFitRadius * 1.25) return;
+
+    fitCameraToRoot();
+    m_lastFitRadius = bs.radius();
+    m_lastFitTime = now;
 }
 
 // ============================================================================

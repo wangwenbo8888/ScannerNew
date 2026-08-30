@@ -62,7 +62,7 @@ Result CommandGate::submit(const std::string& name, int64_t payload) {
         }
     }
     if (!reject.empty()) {
-        publishRejected(name, reject);
+        publishRejected(name, reject);          // publishRejected 内统一打日志（不走点）
         return Result::fail("命令未注册: " + name);
     }
 
@@ -84,7 +84,7 @@ Result CommandGate::submit(const std::string& name, int64_t payload) {
             pr = Result::fail("precondition 异常: unknown");
         }
         if (!pr.success) {
-            publishRejected(name, pr.message);
+            publishRejected(name, "前置失败: " + pr.message);   // 原因并入（不走点）
             return Result::fail(pr.message);
         }
     }

@@ -357,6 +357,12 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
 
 void MCUDriver::onParseFail(const std::string& payload) {
     const uint64_t n = parseFailCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+    // 分级：v2 下 MCU 回显命令帧（'N' 开头）是链路预期行为——非垃圾；降 debug
+    // 防刷屏（真异常的 T/K/S/A 解析失败仍 warn）。回显帧已刷 lastRx（心跳口径）
+    if (!payload.empty() && payload[0] == 'N') {
+        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] v2 命令回显(计{}): '{}'", n, payload);
+        return;
+    }
     JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 上行载荷丢弃(计{}): '{}'", n, payload);
 }
 

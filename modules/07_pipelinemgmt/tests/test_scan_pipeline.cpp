@@ -639,13 +639,16 @@ TEST(ScanPipelineTest, CheckpointSaveRestore) {
 
     auto snapA = pipe2.obs().snapshot();           // 恢复后的
     ASSERT_EQ(snapA.obs.size(), 8u);
+    // obs 列表序＝完成序（多 lane 乱序窗口）——帧号用集合断言，不假设顺序
+    std::set<uint64_t> ids;
     for (size_t i = 0; i < snapA.obs.size(); ++i) {
-        EXPECT_EQ(snapA.obs[i].frameId, i);
+        ids.insert(snapA.obs[i].frameId);
         ASSERT_EQ(snapA.obs[i].markerObs.size(), 4u);          // 假链 4 标记点
         EXPECT_EQ(snapA.obs[i].markerObs[0].globalId, 0);
         EXPECT_EQ(snapA.obs[i].markerObs[3].globalId, 99);
         EXPECT_FALSE(snapA.obs[i].markerObs[3].isHighPrecision);
     }
+    for (uint64_t i = 0; i < 8; ++i) EXPECT_EQ(ids.count(i), 1u);
 
     // 坏档容错：魔术字破坏 → fail 不崩
     {

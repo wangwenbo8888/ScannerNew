@@ -41,8 +41,10 @@ std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红
         {"freqHz", 50.0, 20.0, 120.0},         // N10 H 拍照频率（默认 50）
         {"bgLight", 60.0, 0.0, 100.0},         // N10 B 补光（默认 60；实测灯控量程 0-100）
         {"laserLevel", 60.0, 0.0, 100.0},      // N10 L 激光强度（默认 60；实测灯控量程 0-100）
-        {"laserSelectA", 1.0, 1.0, 6.0},       // N10 T 交叉激光选择 A
-        {"laserSelectB", 1.0, 1.0, 6.0},       // N10 V 交叉激光选择 B
+        {"laserSelectA", 1.0, 1.0, 6.0},       // N10 T 交叉激光选择 A＝左斜组（1-6）
+        {"laserSelectB", 2.0, 1.0, 6.0},       // N10 V 交叉激光选择 B＝右斜组（1-6；
+                                               //   与 A 异组——同组则固件帧序交替失效，
+                                               //   只打一族线；组号↔左/右映射随固件实测定）
     };
 }
 
@@ -54,6 +56,14 @@ hal::CaptureParams captureParamsFromAccount(const ParamStore& params) {
     p.laserSelectA = static_cast<int>(params.get("laserSelectA").value);
     p.laserSelectB = static_cast<int>(params.get("laserSelectB").value);
     p.laserLevel = static_cast<int>(params.get("laserLevel").value);
+    return p;
+}
+
+// N10 生效参数（cpp 本地）：账本全参 ＋ 采集灯型覆写——laserOn=false（标点扫描
+// A 模式）激光量强制 L=0（只开补光）。调用点均在逻辑线程（捕获 this 直读成员）
+hal::CaptureParams effectiveN10(const ParamStore& params, bool laserOn) {
+    hal::CaptureParams p = captureParamsFromAccount(params);
+    if (!laserOn) p.laserLevel = 0;
     return p;
 }
 
@@ -396,7 +406,7 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
 std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
     return {{"N11H1", [this](McuDone cb) { mcu_->startScan(std::move(cb)); }},
             {"N10", [this](McuDone cb) {
-                mcu_->setCaptureParams(captureParamsFromAccount(*params_), std::move(cb));
+                mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
             }}};
 }
 
@@ -453,8 +463,49 @@ void DeviceManager::toIdleOnLogic() {
 // 采集启停（N10(账本)→N11H1→开流 / N11H0；不切模式；幂等；编队执行）
 // ============================================================================
 
-void DeviceManager::startCapture() {
-    post([this] { startCaptureOnLogic(); });
+void DeviceManager::startCapture(bool laserOn) {
+    post([this, laserOn] {
+        captureLaserOn_ = laserOn;               // 采集灯型（逻辑线程属主；N10 组帧生效）
+        startCaptureOnLogic();
+    });
+}
+
+// —— 灯光直控（用户按钮直调；不启停采集——N10 灯字段即时生效，实测口径同
+//    自检闪灯：固件收到 N10 即按新参数调灯，无需 H1）——
+// bgOn/laserOn：true=取账本值，false=0。标点扫描 A 模式＝(true,false) 只开补光
+void DeviceManager::setLights(bool bgOn, bool laserOn) {
+    post([this, bgOn, laserOn] {
+        if (!mcu_->isOpen()) return;
+        hal::CaptureParams p = captureParamsFromAccount(*params_);
+        p.bgLight = bgOn ? p.bgLight : 0;
+        p.laserLevel = laserOn ? p.laserLevel : 0;
+        mcu_->setCaptureParams(p, nullptr);
+    });
+}
+
+// —— 打光场景封装（灯型三态；组合语义入口，按钮/工作流直调）——
+void DeviceManager::lightsBgOnly() {
+    setLights(/*bgOn=*/true, /*laserOn=*/false);
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 打光场景: 只打补光灯（L=0）");
+}
+
+void DeviceManager::lightsBgAndCrossLaser() {
+    const int tSel = static_cast<int>(params_->get("laserSelectA").value);
+    const int vSel = static_cast<int>(params_->get("laserSelectB").value);
+    if (tSel == vSel) {
+        JMW_LOG_WARN("08-DeviceManager",
+            "[DeviceManager] 打光场景: 左斜组 T{} 与右斜组 V{} 同组——固件帧序交替"
+            "将只打一族激光线（调 laserSelectA/B 参数异组）", tSel, vSel);
+    }
+    setLights(/*bgOn=*/true, /*laserOn=*/true);
+    JMW_LOG_INFO("08-DeviceManager",
+        "[DeviceManager] 打光场景: 补光＋左右斜激光（左斜=T{} 右斜=V{}，交替归固件帧序）",
+        tSel, vSel);
+}
+
+void DeviceManager::lightsAllOff() {
+    setLights(/*bgOn=*/false, /*laserOn=*/false);
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 打光场景: 全灭");
 }
 
 void DeviceManager::stopCapture() {
@@ -521,14 +572,15 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
 void DeviceManager::selfCheckTick(int64_t nowMs_) {
     if (selfCheck_.stage < 0) return;
     switch (selfCheck_.stage) {
-    case 0:  // 等 N10 回显——实测"相机配置后第一笔串口写"可被 USB 驱动卡 ~2.5s（写
-        // 线程内部消化，但回显延迟到）：窗口给足 3s；正常路径 <100ms 即过
+    case 0:  // 等 N10 回显——实测"相机配置后第一笔串口写"可被 USB 驱动卡（本机
+        // 实测 5216ms，jmw 日志慢写行佐证；写线程内部消化，但回显延迟到）：
+        // 窗口给足 8s；正常路径 <100ms 即过
         if (mcu_->lastEchoPayload() == selfCheck_.expectEcho) {
             selfCheck_.report("bgLight", true);
             selfCheck_.report("laser", true);
             selfCheck_.stage = 1;
             selfCheck_.stageStartMs = nowMs_;      // 闪亮窗口起
-        } else if (nowMs_ - selfCheck_.stageStartMs > 3000) {
+        } else if (nowMs_ - selfCheck_.stageStartMs > 8000) {
             selfCheck_.report("bgLight", false);
             selfCheck_.report("laser", false);
             selfCheck_.stage = 1;                  // 仍走 stage1（闪亮窗缩短+相机启动不跳过
@@ -664,7 +716,7 @@ void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore
     // 空闲仅记账 done(true,false)（enterScan 时自账本组帧下发）。v2 通道发不等
     // → done(true,false)
     if (mode_->isCapturing()) {
-        mcu_->setCaptureParams(captureParamsFromAccount(*params_),
+        mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_),
                                [done](bool ok, const std::string&) { done(ok, ok); });
     } else {
         done(true, false);

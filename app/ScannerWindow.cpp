@@ -15,6 +15,7 @@
 
 #include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"
 #include <chrono>
 #include <QComboBox>
 #include <QHBoxLayout>
@@ -272,6 +273,7 @@ void ScannerWindow::onStartScanner()
 {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm || !dm->isCameraOpen()) {
+        JMW_LOG_WARN("app-ScannerWindow", "[ScannerWindow] 开始扫描被拦: 设备门面空或相机未开（流程不走的打印点）");
         ui.textEdit_Info->append("请先打开相机");
         return;
     }
@@ -283,25 +285,36 @@ void ScannerWindow::onStartScanner()
     dm->setParam("exposure", expose, Scanner::device::ParamEntry::Source::Ui);
 
     // 帧出口接线 + 采集启动（门面 startCapture 内含 N11 H1 与相机开流；
-    // 帧回调只做计数+入队，最轻量）
-    dm->startFrameStream([this](const Scanner::hal::StereoFrame& frame) {
-        pushFrameToBuffer(frame);
+    // 帧回调双投递——预览 FrameBuffer ＋ 扫描会话环（02 pushSessionFrame：
+    // enrich 出口查表→SlotRing，非扫描期该口自弃）。
+    // 帧温＝MCU 末帧温度互斥快照（首路有效取之，否则 25℃ 缺省档）
+    dm->startFrameStream([this, dm](const Scanner::hal::StereoFrame& frame) {
+        pushFrameToBuffer(frame);                       // ① 预览链
+        if (m_appCtx && m_appCtx->scanWorkflow()) {     // ② 扫描链
+            const auto t = dm->getLastTemperatures();
+            const double tempC =
+                (t.channels & 0x01) ? t.celsius[0] : 25.0;
+            m_appCtx->scanWorkflow()->pushSessionFrame(frame.leftGray, frame.rightGray,
+                                                       tempC, frame.frameId);
+        }
     });
     dm->startCapture();
 
     // P5-T15 ①：经统一命令通道点火扫描（门禁 S2→S4/S5；payload=ScanMode 0/1
     // 只喂状态机 S4/S5 判别——handler 无参拿不到，模式经 setScanMode 先设进
-    // 工作流）。TODO(UI 接入期)：模式选择控件落地后改读控件值；现状固定 A 模式
-    // （纯标记点——激光温度表空=A 模式正常配置）。拒绝时 gate 已发
-    // CommandRejected 事件，此处沿用信息面板轻提示（同 T14 口径）
+    // 工作流）。面片扫描默认请求 B 模式（标记点+激光）——02 装配时查激光
+    // 温度表（mapData）：缺表自动降级 A 并日志告警（§8-1 生产者缺口）。
+    // 拒绝＝流程不走的打印点：UI 提示＋JMW_LOG 双出口（gate 内亦有一道）
     if (m_appCtx && m_appCtx->scanWorkflow()) {
-        const auto mode = Scanner::ScanMode::MarkerOnly;
+        const auto mode = Scanner::ScanMode::MarkerPlusLaser;
         m_appCtx->scanWorkflow()->setScanMode(mode);
         auto gr = m_appCtx->commandGate()->submit("start_scan",
                                                   static_cast<int64_t>(mode));
-        if (!gr.success)
+        if (!gr.success) {
+            JMW_LOG_WARN("app-ScannerWindow", "[ScannerWindow] 扫描启动被拒: {}", gr.message);
             ui.textEdit_Info->append(QString("扫描启动被拒: %1")
                 .arg(QString::fromStdString(gr.message)));
+        }
     }
 
     // 启动 HardwareMonitor（周期采集温度/帧率）

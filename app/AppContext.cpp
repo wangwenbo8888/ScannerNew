@@ -237,6 +237,21 @@ void AppContext::initialize() {
     // P5-T15 完成回报注入（§9 02-⑩）：工作流 stop() 活跃会话终止回调 → 合账切 S2；
     // app 是组合根，可同时触达 02 工作流与 10 门禁（02 自身不依赖 10）
     scanWf_->setOnFinished([this](bool ok) {
+        // 标志点点云落 06 仓库（A 模式的产物出口）：渲染适配器末次快照 →
+        // markers 通道（续扫基准 seed 同源＋exportMarkers 可导）。不放 points
+        // 通道——A 模式"不进后处理网格链"口径（getTotalPointCount 仍 0，
+        // start_postprocess 的 pre 继续拦稀疏点误入网格）
+        if (ok && pointCloudBuffer_ && sceneFeed_) {
+            auto markers = sceneFeed_->latestMarkers();
+            if (!markers.empty()) {
+                pointCloudBuffer_->setMarkers(markers);
+                JMW_LOG_INFO("app-AppContext",
+                    "[AppContext] 标志点点云落库: {} 点（续扫基准/导出就绪）", markers.size());
+            } else {
+                JMW_LOG_WARN("app-AppContext",
+                    "[AppContext] 扫描合账：无标志点可落库（会话内 0 次有效推送）");
+            }
+        }
         commandGate_->notifyCompleted("start_scan", ok);
     });
     calibWf_ = std::make_unique<Scanner::workflow::CalibrationWorkflow>(wfCtx_.get());
@@ -292,6 +307,71 @@ void AppContext::startDevicesAsync() {
     });
 }
 
+// ============================================================================
+// 扫描会话点火——统一入口（工具栏标点/面片扫描＋ScannerWindow 共用同一条真链）
+// ============================================================================
+Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
+    auto* dm = deviceManager_.get();
+    if (!dm || !dm->isDeviceReady()) {
+        JMW_LOG_WARN("app-AppContext", "[AppContext] 扫描点火被拦: 设备未就绪（门面空/相机或 MCU 未开）");
+        return Scanner::Result::fail("设备未就绪——请等待自检完成（相机/串口）");
+    }
+    // 帧流双投递注册（单槽语义：后注册生效）＋采集启动（N10 账本全参→N11H1→开流）
+    dm->startFrameStream([this, dm](const Scanner::hal::StereoFrame& frame) {
+        // ① 预览链：06 FrameBuffer（ScannerWindow 10fps 消费）
+        if (frameBuffer_) {
+            Scanner::data::FrameData fd;
+            fd.frameId = frame.frameId;
+            fd.timestamp = frame.timestamp;
+            fd.leftGray = frame.leftGray;
+            fd.rightGray = frame.rightGray;
+            frameBuffer_->pushFrame(fd);
+        }
+        // ② 扫描链：02 会话环（enrich 出口查表→SlotRing；非扫描期该口自弃）
+        if (scanWf_) {
+            const auto t = dm->getLastTemperatures();
+            const double tempC = (t.channels & 0x01) ? t.celsius[0] : 25.0;
+            scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId);
+        }
+    });
+    // 灯型场景（08 具名封装）：A=只打补光；B=补光＋左右斜激光交替（T/V 异组，
+    // 交替归固件 H1 帧序）。先即时点亮，再采集组（N10 灯型覆写同源生效）
+    const bool laserOn = (mode != Scanner::ScanMode::MarkerOnly);
+    if (laserOn)
+        dm->lightsBgAndCrossLaser();
+    else
+        dm->lightsBgOnly();
+    dm->startCapture(laserOn);
+
+    // 命令通道点火（门禁/前置/装配失败均带因返回；各"不走打印点"已落日志）
+    if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
+    scanWf_->setScanMode(mode);
+    const auto modeName = mode == Scanner::ScanMode::MarkerOnly ? "标点扫描(A)" : "面片扫描(B)";
+    auto gr = commandGate_->submit("start_scan", static_cast<int64_t>(mode));
+    if (!gr.success) {
+        JMW_LOG_WARN("app-AppContext", "[AppContext] {} 点火被拒: {}", modeName, gr.message);
+        return gr;
+    }
+    JMW_LOG_INFO("app-AppContext", "[AppContext] {} 已点火", modeName);
+    return Scanner::Result::ok(modeName);
+}
+
+Scanner::Result AppContext::stopScanSession() {
+    if (deviceManager_) {
+        deviceManager_->stopCapture();   // 设备侧采集停（幂等）
+        deviceManager_->lightsAllOff();  // 打光场景收口：全灭（防灯残留）
+    }
+    if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
+    return commandGate_->submit("finish_scan");          // 工作流合账（handler=stop）
+}
+
+bool AppContext::isScanSessionActive() const {
+    if (!scanWf_) return false;
+    using Scanner::workflow::WorkflowState;
+    const auto st = scanWf_->getState();
+    return st == WorkflowState::Running || st == WorkflowState::Paused;
+}
+
 void AppContext::shutdown() {
     // once 守卫：main 显式调用后，对象析构（及任何迟到路径）不再重复走关闭序列。
     // 实证（jmw_2026-08-29 日志）：无守卫时退出链跑了 3+ 轮 shutdown，末轮
@@ -321,6 +401,10 @@ void AppContext::notifySelfCheckItem(const std::string& item, bool ok) {
         ++selfCheck_.reportedCount;
     }
     JMW_LOG_INFO("app", "自检项 {}: {}", item, ok ? "通过" : "失败");
+    if (!ok) {
+        // 流程不走点：自检失败升级 warn（S1 卡点根因要可在日志直接检索）
+        JMW_LOG_WARN("app", "[自检] 项 '{}' 失败——该链路不通，后续依赖项将受阻", item);
+    }
     // 全过且仍处 S1 → 经命令通道切 S2（恰一次：submit 成功即离 S1，重复调用幂等失败）
     if (selfCheckAllPassed() &&
         stateMachine_->getCurrentState() == Scanner::service::SystemState::Init) {

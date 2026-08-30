@@ -70,6 +70,10 @@ public:
     bool tryResumeRender();                  // 挂起后恢复（外部按钮/定时重试）
     uint64_t lastIngestedVersion() const { return m_lastIngestVersion; }
 
+    // —— 扫描视角跟随（marker 云生长感知自动取景；SceneFeed 更新路径消费）——
+    void setAutoViewFit(bool on) { m_autoViewFit = on; }
+    bool autoViewFit() const { return m_autoViewFit; }
+
     // 渲染观测（P3）：只读快照——app 装配喂 HardwareMonitor（processFps 等）
     struct RenderStats {
         uint64_t framesDrawn = 0;    // 成功执行的 frame() 次数
@@ -119,6 +123,7 @@ private:
     osg::ref_ptr<osg::Geode> buildCloudGeode(const std::vector<osg::Vec3>& points,
                                              const std::vector<osg::Vec4ub>* colors);
     void fitCameraToRoot();                               // 相机定位到场景包围球（原 loadPointCloud 尾块）
+    void maybeAutoFrame();                                // 扫描视角跟随：生长感知＋节流＋交互避让
 
 
 protected:
@@ -302,4 +307,10 @@ private:
     int m_overBudgetStreak = 0;                     // 连续超阈帧计数（5 触发降级）
     int m_degradeLevel = 0;                         // 降级级别（0..3——预算阶梯索引）
     static const size_t kDegradeBudgets[4];         // 8M/4M/1M/256K（cpp 定义）
+
+    // —— 扫描视角跟随（UI 线程属主）——
+    bool m_autoViewFit = true;                      // 总开关（默认开）
+    bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角）
+    double m_lastFitRadius = -1.0;                  // 上次取景时场景半径（-1=未取过）
+    std::chrono::steady_clock::time_point m_lastFitTime{};   // 上次取景时刻（1s 节流）
 };

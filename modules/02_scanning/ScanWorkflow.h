@@ -28,12 +28,17 @@
 #include "WorkflowContext.h"
 #include "ScanSessionData.h"
 #include "base/types.h"
+#include <opencv2/core.hpp>
 #include <functional>
 #include <memory>
 #include <atomic>
 
 // 前向声明（07 流水线对象；定义见 modules/07_pipelinemgmt/pipelines/scan/）
-namespace Scanner::pipeline { class ScanPipeline; }
+namespace Scanner::pipeline {
+class ScanPipeline;
+class FrameObsAccumulator;
+}
+namespace calib { struct LaserPlaneMapTempTable; }   // 09 激光温度表（档→映射表）
 
 namespace Scanner::workflow {
 
@@ -69,6 +74,19 @@ public:
     uint64_t processedFrameCount() const;    // 已融合消费帧数（07 FuseConsumer）
     uint64_t droppedFrameCount() const;      // 输出队列覆盖丢帧累计（07 queue）
 
+    // —— 帧响应接线（08 采集回调→会话环；app 帧回调双投递：预览 FrameBuffer＋此口）——
+    /// 扫描会话帧入口：enrich 出口查表→Overwrite 环。仅 Running/Paused 态接收；
+    /// 其余态静默丢弃（app 回调常驻注册，非扫描期帧不进环）。
+    /// 线程＝相机回调线程（SlotRing 单生产者约定——只从这一个线程调）
+    void pushSessionFrame(const cv::Mat& grayL, const cv::Mat& grayR,
+                          double temperatureC, uint64_t frameId);
+    /// enrich fail 丢帧累计（挂 10 故障桥的口径源）
+    uint64_t droppedSessionFrames() const;
+
+    /// 逐帧观测累加器出口（app 收尾 GBA 消费；pipeline_ 未装配/已停＝未定义——
+    /// 调方保证仅在会话 stop 后、对象存活期内访问）
+    Scanner::pipeline::FrameObsAccumulator& obs();
+
     // IWorkflow
     std::string getName() const override { return "ScanWorkflow"; }
     Result initialize() override;
@@ -78,6 +96,11 @@ public:
     Result stop() override;
     WorkflowState getState() const override { return state_.load(); }
     Result setProgressCallback(WorkflowCallback cb) override;
+
+private:
+    /// 激光温度表装载：06 仓库档表 JSON → 09 LaserPlaneMapTempTable（mapData 格式，
+    /// 与 laser_match_scan::LoadTempTable 同源）。全档无 mapData → nullptr（降级 A）
+    std::shared_ptr<calib::LaserPlaneMapTempTable> buildLaserTableFromRepo() const;
 
 private:
     WorkflowContext* ctx_;

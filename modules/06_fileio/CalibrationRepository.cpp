@@ -144,12 +144,19 @@ nlohmann::json adaptFactoryCalib(const nlohmann::json& src) {
 
 // 工厂激光档并入主工程档（planeMap.tempTable ← laser_calib.json 顶层 tempTable 子树；
 // 工厂 schema 现状无该子树时置空数组——readyForScan 报缺"激光档表"如实反映）
+// 键名兼容两代工厂输出：主档顶层 tempTable；left_skew 变体 planeMapTempTable
 void mergeFactoryLaser(nlohmann::json& doc, const nlohmann::json& laser) {
     nlohmann::json pm = nlohmann::json::object();
     pm["tempTable"] = nlohmann::json::object();
-    pm["tempTable"]["table"] = laser.contains("tempTable") && laser["tempTable"].contains("table")
-                                   ? laser["tempTable"]["table"]
-                                   : nlohmann::json::array();
+    nlohmann::json table = nlohmann::json::array();
+    for (const char* key : {"tempTable", "planeMapTempTable"}) {
+        if (laser.contains(key) && laser[key].contains("table") &&
+            laser[key]["table"].is_array() && !laser[key]["table"].empty()) {
+            table = laser[key]["table"];
+            break;
+        }
+    }
+    pm["tempTable"]["table"] = std::move(table);
     doc["planeMap"] = std::move(pm);
 }
 

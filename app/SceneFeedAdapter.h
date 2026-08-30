@@ -12,6 +12,7 @@
 //   - pushPostureView：A 姿态实时视图——01 侧接入期接线（暂记日志 TODO）。
 // ============================================================================
 #include <atomic>
+#include <mutex>
 #include <vector>
 
 #include <QObject>
@@ -19,6 +20,8 @@
 #include "opencv2/core.hpp"
 
 #include "pipelines/ISceneFeed.h"
+
+namespace Scanner::data { struct MarkerRecord; }   // 06 标志点记录（latestMarkers 缓存）
 
 class SceneFeedAdapter : public QObject, public Scanner::pipeline::ISceneFeed {
     Q_OBJECT
@@ -36,6 +39,10 @@ public:
     uint64_t pushedClouds() const { return pushedClouds_.load(std::memory_order_relaxed); }
     uint64_t droppedByFreeze() const { return droppedByFreeze_.load(std::memory_order_relaxed); }
 
+    /// 最近一次推送的标志点点云快照（含法线；任意线程）。空=尚无推送。
+    /// 扫描合账时由 app 落 06 PointCloudBuffer（A 模式的"生成标志点点云"出口）
+    std::vector<Scanner::data::MarkerRecord> latestMarkers() const;
+
 signals:
     // UI 线程消费（MainWindow 接 OSGWidget::loadMarkerPoints；metatype 在 cpp 注册）
     void markerCloudUpdated(const std::vector<cv::Point3f>& points);
@@ -45,4 +52,7 @@ private:
     std::atomic<bool>     frozen_{false};
     std::atomic<uint64_t> pushedClouds_{0};
     std::atomic<uint64_t> droppedByFreeze_{0};
+
+    mutable std::mutex markersMtx_;                          // latestMarkers 缓存锁
+    std::vector<Scanner::data::MarkerRecord> latestMarkers_; // 末次推送快照（推线程写/任意读）
 };

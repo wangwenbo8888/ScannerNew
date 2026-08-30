@@ -3,6 +3,7 @@
 // ============================================================================
 #include "SceneFeedAdapter.h"
 
+#include "PointCloudBuffer.h"   // Scanner::data::MarkerRecord（latestMarkers 缓存）
 #include "core/marker/marker_cloud_fuse_cpu/marker_cloud_fuse_cpu.h"   // calib::MarkerCloudPoint
 
 #include <cmath>
@@ -26,6 +27,11 @@ void SceneFeedAdapter::pushPostureView(const Scanner::Pose& /*live*/,
     JMW_LOG_DEBUG("app-SceneFeed", "[SceneFeedAdapter] pushPostureView（01 接入期待接线）");
 }
 
+std::vector<Scanner::data::MarkerRecord> SceneFeedAdapter::latestMarkers() const {
+    std::lock_guard<std::mutex> lock(markersMtx_);
+    return latestMarkers_;
+}
+
 void SceneFeedAdapter::pushCloudSnapshot(Scanner::pipeline::CloudViewHandle cloud) {
     pushedClouds_.fetch_add(1, std::memory_order_relaxed);
     if (frozen_.load(std::memory_order_acquire)) {
@@ -38,14 +44,27 @@ void SceneFeedAdapter::pushCloudSnapshot(Scanner::pipeline::CloudViewHandle clou
     // 地址（FuseConsumer 适配器保证调用期间有效）；数百点级，廉价。
     // deviceLaser 恒 nullptr（契约现状——激光互操作 P4 另立计划）。
     std::vector<cv::Point3f> pts;
+    std::vector<Scanner::data::MarkerRecord> recs;
     if (cloud.hostMarker) {
         const auto& src =
             *static_cast<const std::vector<calib::MarkerCloudPoint>*>(cloud.hostMarker);
         pts.reserve(src.size());
+        recs.reserve(src.size());
+        uint32_t idx = 0;                         // globalId=下标（07 seed 对接口径同源）
         for (const auto& p : src) {
-            if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))
-                pts.emplace_back(p.x, p.y, p.z);  // 入口先滤一道（P1 同款防御）
+            if (!(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)))
+                continue;                         // 入口先滤一道（P1 同款防御）
+            pts.emplace_back(p.x, p.y, p.z);
+            Scanner::data::MarkerRecord r;
+            r.globalId = idx++;
+            r.pos = cv::Point3f(p.x, p.y, p.z);
+            r.normal = cv::Vec3f(p.nx, p.ny, p.nz);
+            recs.push_back(std::move(r));
         }
+    }
+    {   // 末次快照缓存（扫描合账落 06 仓库的取数口——A 模式标志点点云出口）
+        std::lock_guard<std::mutex> lock(markersMtx_);
+        latestMarkers_ = std::move(recs);
     }
     emit markerCloudUpdated(pts);                 // queued → UI 线程
 }

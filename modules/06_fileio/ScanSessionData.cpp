@@ -3,6 +3,9 @@
 
 #include "FrameEnricher.h"
 
+#include <spdlog/spdlog.h>
+#include "jmw_logging.h"
+
 #include <memory>
 #include <utility>
 
@@ -23,7 +26,12 @@ Scanner::Result ScanSessionData::pushFrame(const cv::Mat& grayL, const cv::Mat& 
     const Result r =
         enrich(grayL, grayR, temperatureC, stereoTable_, laserTiers_, frameId, out);
     if (!r.success) {
-        droppedFrames_.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t n = droppedFrames_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n == 1) {   // 流程不走点：首丢告警（后续静默计数——会话账本汇总）
+            JMW_LOG_WARN("06-ScanSession",
+                "[ScanSession] enrich 失败首帧丢弃（后续静默计数）: 帧{} 温{:.1f}℃ {}",
+                frameId, temperatureC, r.message);
+        }
         return r;                           // fail 透传，不写环
     }
     ring_.write(std::make_shared<EnhancedFrame>(std::move(out)));
