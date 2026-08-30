@@ -400,21 +400,20 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
     });
 }
 
-// 采集组公共步链（A-T17 N10 断链修复抽取）：N11H1→N10。
-// 顺序依据实测固件行为（2026-08-22 真机）：N11H1"按照上次的采集参数执行"——
-// 若 N10 在前，N11H1 会用旧参数（如自检收尾的 B0/L0）重启采集，把刚点亮的灯
-// 重置熄灭（"激光闪一下就灭"根因）。先开扫描再设参，灯态以最新 N10 为准。
-// 第三步 flushWrites：串口命令全部落线后才开相机流——相机开流瞬间的 USB3 风暴
-// 会把并行发出的串口写饿死 2~5s（实测 jmw 10:24：N10 卡 5279ms，"启动灯慢"
-// 根因）；先冲净写队列再动相机，串口命令趁总线安静走完
+// 采集组公共步链（2026-08-30 真机定版）：N10→FLUSH。
+// 定版依据：① N11 H1 实测（jmw 17:11:14）发出后固件串口静默 10s+（0x0802、
+// 回显全无），紧随的 N10 石沉大海——"点扫描灯不亮"根因；工厂软件"开始扫描
+// 仪"只发 N10（ScannerControl.cpp 口径），参数帧即灯控+采集参数，照齐。
+// ② N11 H0 停止收口保留（真机已验证灯灭）。③ flushWrites：串口命令全部落线
+// 后才开相机流——相机开流 USB3 风暴会把并行串口写饿死 2~5s（实测 N10 卡
+// 5279ms）；先冲净写队列再动相机
 std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
-    return {{"N11H1", [this](McuDone cb) { mcu_->startScan(std::move(cb)); }},
-            {"N10", [this](McuDone cb) {
-                mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
-            }},
+    return {{"N10", [this](McuDone cb) {
+                 mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
+             }},
             {"FLUSH", [this](McuDone cb) {
-                mcu_->flushWrites(300);        // 有界：残余慢写最多 300ms
-                cb(true, "");
+                 mcu_->flushWrites(300);        // 有界：残余慢写最多 300ms
+                 cb(true, "");
             }}};
 }
 
@@ -539,10 +538,9 @@ void DeviceManager::stopCaptureOnLogic() {
             return;
         }
         mode_->setCapturing(false);
-        // 灯态收口：停扫描即熄灯（B0/L0）——与 startCapture 亮灯对称。熄灯帧先落线
-        // 再停相机流：实测相机停流瞬间的 USB 风暴会把串口 WriteFile 堵 2~2.5s，
-        // 灯迟灭即此（flush 有界 300ms，保活使 TX 通常 55ms 级落线）
-        mcu_->lightsOff();
+        // 灯态收口：单帧 N11 H0 即灭灯（真机+工厂软件同款验证；原 lightsOff
+        // 补发属重复帧，2026-08-30 删）。停相机流前先冲队列——相机停流瞬间
+        // USB 风暴会堵串口写（flush 有界 300ms）
         mcu_->flushWrites(300);
         if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
     });
