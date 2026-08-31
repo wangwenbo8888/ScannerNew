@@ -346,8 +346,12 @@ void collectMatchStatistics(MarkerMatchStats& stats,
 // MarkerMatchCPUParams::validate
 // ============================================================
 void MarkerMatchCPUParams::validate() const {
-    if (y_tolerance <= 0.0f || y_tolerance > 1.0f)
-        throw std::invalid_argument("y_tolerance must be in (0, 1], got " + std::to_string(y_tolerance));
+    // 上限 1.0→10.0（2026-08-31 真机定版）：y_tolerance 实际口径为像素
+    // （Execute 内 |center_y - matched_y| 直接像素比较），原 (0,1] 按归一化
+    // 设计与用法矛盾——扫描链现场装配/温漂下真实标志点左右中心 y 差
+    // 1~3px，上限 1 令匹配不稳定（真机 13 标志点帧 0~3 对波动）
+    if (y_tolerance <= 0.0f || y_tolerance > 10.0f)
+        throw std::invalid_argument("y_tolerance must be in (0, 10], got " + std::to_string(y_tolerance));
     if (num_threads < 0)
         throw std::invalid_argument("num_threads must be >= 0, got " + std::to_string(num_threads));
     if (prealloc_buffer_size == 0)

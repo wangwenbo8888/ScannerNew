@@ -778,8 +778,6 @@ void OSGWidget::initializeGL()
     sceneRoot->addChild(m_root.get());
     m_viewer->setSceneData(sceneRoot.get());
 
-
-
     osgGA::TrackballManipulator* manip = new osgGA::TrackballManipulator();
     manip->setAllowThrow(false);
     m_viewer->setCameraManipulator(manip);
@@ -1815,7 +1813,10 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
 {
     if (markers.empty()) return;
 
-    if (!m_markerRoot) {
+    if (!m_markerRoot || m_markerRoot->getNumParents() == 0) {
+        // clearScene() 会 removeChildren 但不置空延迟指针——重建判定按"是否
+        // 仍在场景树"（getNumParents==0=已被 clear，须重建重挂），否则二次
+        // 扫描标志点永不显示（指针非空跳过创建，几何悬空在场景外）
         m_markerRoot = new osg::Group;
         m_markerGeode = new osg::Geode;
         m_markerGeom = new osg::Geometry;
@@ -1839,7 +1840,12 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
     m_markerGeom->setVertexArray(m_markerCoords);
     m_markerGeom->setColorArray(m_markerColors);
     m_markerGeom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
-    m_markerGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)markers.size()));
+    // 首次须 addPrimitiveSet：空图元列表上 setPrimitiveSet(0,...) 被 OSG 静默
+    // 忽略（i<size 检查）——标志点从未渲染的根因（2026-08-31）
+    if (m_markerGeom->getNumPrimitiveSets() == 0)
+        m_markerGeom->addPrimitiveSet(new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)markers.size()));
+    else
+        m_markerGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)markers.size()));
 
     maybeAutoFrame();   // 扫描视角跟随（生长感知；SceneFeed 更新路径每 5 融合帧一达）
 }
@@ -1857,8 +1863,12 @@ void OSGWidget::maybeAutoFrame()
 
     const osg::BoundingSphere bs = m_root->getBound();
     if (!bs.valid() || bs.radius() <= 0.0) return;
-    // 已取过景且未显著增长（<1.25×）——视角不动（防每 5 帧一跳）
-    if (m_lastFitRadius >= 0.0 && bs.radius() < m_lastFitRadius * 1.25) return;
+    // 已取过景且未显著变化（0.8×~1.25× 带内）——视角不动（防每 5 帧一跳）；
+    // 带外（显著增大或缩小）都重取：缩小覆盖"停止扫描/二次会话"场景——
+    // 此前只防增大，停止后一次跳走的视角永不回来，点云"消失"假象
+    if (m_lastFitRadius >= 0.0 &&
+        bs.radius() < m_lastFitRadius * 1.25 &&
+        bs.radius() > m_lastFitRadius * 0.8) return;
 
     fitCameraToRoot();
     m_lastFitRadius = bs.radius();

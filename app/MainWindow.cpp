@@ -177,6 +177,29 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
         if (auto* feed = m_appCtx->sceneFeed()) {
             connect(feed, &SceneFeedAdapter::markerCloudUpdated, this,
                     [this](const std::vector<cv::Point3f>& pts) {
+                        // 显示链终点观测（节流 1/30）：信号到 UI 的点数；同步导出
+                        // PLY 快照（exe 目录 markers_snapshot.ply——数据正确性人工
+                        // 核对用，覆盖写）
+                        static std::atomic<uint64_t> s_uiRecv{0};
+                        if (const auto k = s_uiRecv.fetch_add(1); k % 30 == 0) {
+                            JMW_LOG_INFO("app-MainWindow", "[MainWindow] 标志点信号到达: {} 点（第 {} 次）",
+                                         pts.size(), k);
+                            if (QFile f(QStringLiteral("markers_snapshot.ply"));
+                                f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                                QByteArray out;
+                                out += "ply\nformat ascii 1.0\n";
+                                out += QString("element vertex %1\n").arg(pts.size()).toUtf8();
+                                out += "property float x\nproperty float y\nproperty float z\nend_header\n";
+                                for (const auto& p : pts) {
+                                    out += QString("%1 %2 %3\n")
+                                              .arg(p.x, 0, 'f', 3)
+                                              .arg(p.y, 0, 'f', 3)
+                                              .arg(p.z, 0, 'f', 3)
+                                              .toUtf8();
+                                }
+                                f.write(out);
+                            }
+                        }
                         if (!m_3dView || pts.empty()) return;
                         std::vector<osg::Vec3> markers;
                         markers.reserve(pts.size());
