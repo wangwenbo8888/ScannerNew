@@ -88,7 +88,14 @@ public:
     }
 
 private:
-    calib::MarkerCloudFuseCPU op_;
+    // 体素 0.5mm→5mm（2026-08-31 真机）：重建点帧间漂移 1~3mm（y 差 1~3px
+    // 量级），0.5mm 格子下同一标志点每帧进新体素=点数无限膨胀（扫描中持续
+    // 涨、停止 drain 一口气暴增数百红点）；5mm 归簇后 13 标志点≈13 稳定体素
+    calib::MarkerCloudFuseCPU op_{[] {
+        calib::MarkerCloudFuseCPUParams p;
+        p.voxelSize = 5.0f;
+        return p;
+    }()};
 };
 
 #ifdef JMW_BUILD_CUDA

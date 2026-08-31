@@ -124,6 +124,7 @@ private:
                                              const std::vector<osg::Vec4ub>* colors);
     void fitCameraToRoot();                               // 相机定位到场景包围球（原 loadPointCloud 尾块）
     void maybeAutoFrame();                                // 扫描视角跟随：生长感知＋节流＋交互避让
+    void setLeftCameraView();                             // 左相机视角：eye 沿 -z 看向点云中心、up=-y（OpenCV 系 y 向下，画面方向与左相机取景一致）
 
 
 protected:
@@ -310,6 +311,10 @@ private:
 
     // —— 扫描视角跟随（UI 线程属主）——
     bool m_autoViewFit = true;                      // 总开关（默认开）
+    bool m_leftCamViewApplied = false;              // 左相机视角已设（标志点会话首点设一次；重建后重置）
+    osg::ref_ptr<osg::Group> m_markerBbGroup;       // 标志点 billboard 容器（同心圆贴图朝屏）
+    osg::ref_ptr<osg::Texture2D> m_markerTexture;   // 同心圆纹理（内白外黑）
+    osg::ref_ptr<osg::Geode> m_pcbGeode;            // PointCloudBuffer 直读点云 geode（原子替换用）
     bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角）
     double m_lastFitRadius = -1.0;                  // 上次取景时场景半径（-1=未取过）
     std::chrono::steady_clock::time_point m_lastFitTime{};   // 上次取景时刻（1s 节流）

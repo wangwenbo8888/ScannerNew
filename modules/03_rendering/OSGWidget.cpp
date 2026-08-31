@@ -12,6 +12,7 @@
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/Point>
+#include <osg/PointSprite>
 #include <osg/Material>
 #include <osg/LightModel>
 #include <osgDB/ReadFile>
@@ -56,7 +57,7 @@ OSGWidget::OSGWidget(QWidget *parent)
     m_root->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
 
     connect(m_timer, &QTimer::timeout, this, [this]() { update(); });
-    m_timer->start(16);
+    m_timer->start(33);                 // 渲染 30fps（原 16ms≈60，降半省资源）
 
     connect(m_streamTimer, &QTimer::timeout, this, &OSGWidget::streamNextBatch);
 }
@@ -99,6 +100,9 @@ void OSGWidget::setCenterOverlayVisible(bool visible)
 
 void OSGWidget::clearScene()
 {
+    // 诊断（2026-08-31"停止后点消失"）：清场动作留痕——谁在扫描停止链上清场景
+    JMW_LOG_INFO("03-OSGWidget", "[OSGWidget] clearScene 执行（场景子节点={} 被清）",
+                 m_root->getNumChildren());
     m_root->removeChildren(0, m_root->getNumChildren());
     m_viewLocked = false;  // 解除视图锁定
     m_lastFitRadius = -1.0;   // 视角跟随基准复位（新会话重新首取景）
@@ -241,6 +245,27 @@ void OSGWidget::updateAxesView()
 
     osg::Matrix vm = m_viewer->getCamera()->getViewMatrix();
     vm.setTrans(0, 0, 0);
+    // 诊断（2026-08-31 HUD Y 轴上下跳）：view 的 Z 轴行（画面 up 方向）跳变
+    // 时留痕——两态数值直接暴露视角源打架的真实来源
+    static osg::Matrix lastVm;
+    static bool hasLast = false;
+    static auto lastLog = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+    if (hasLast) {
+        const bool flipped = ((vm(2, 0) > 0) != (lastVm(2, 0) > 0)) ||
+                             ((vm(2, 1) > 0) != (lastVm(2, 1) > 0));
+        if (flipped) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastLog > std::chrono::seconds(1)) {
+                lastLog = now;
+                JMW_LOG_INFO("03-OSGWidget",
+                             "[OSGWidget] view Z行跳变: 前=({:.2f},{:.2f},{:.2f}) 后=({:.2f},{:.2f},{:.2f})",
+                             lastVm(2, 0), lastVm(2, 1), lastVm(2, 2),
+                             vm(2, 0), vm(2, 1), vm(2, 2));
+            }
+        }
+    }
+    lastVm = vm;
+    hasLast = true;
     m_axesCamera->setViewMatrix(vm);
 }
 
@@ -381,11 +406,14 @@ void OSGWidget::loadFromPointCloudBuffer(Scanner::data::PointCloudBuffer* pcb) {
         return;
     }
 
-    // ③ 原子替换：clear＋addChild 之间无 paint 插入（UI 线程同步执行，皆不抛）
-    clearScene();
+    // ③ 原子替换：仅替换点云 geode——不再 clearScene（曾把标志点几何一并
+    // 清掉，与标志点信号形成"清-建-清-建"循环=标志点闪烁+双视角源（此处
+    // fitCameraToRoot z-up vs setLeftCameraView -y-up）交替=HUD Y 轴上下跳
+    // 的共同根因 2026-08-31）；定时器直读路径不动视角
+    if (m_pcbGeode && m_pcbGeode->getNumParents() > 0)
+        m_root->removeChild(m_pcbGeode.get());
+    m_pcbGeode = geode;
     m_root->addChild(geode.get());
-    if (colors.empty())
-        fitCameraToRoot();                             // 保持原行为：无色路径才定位相机
 
     m_lastIngestVersion = version;
     ++m_ingestCount;
@@ -909,7 +937,7 @@ bool OSGWidget::tryResumeRender()
 {
     if (!m_renderSuspended) return true;
     m_renderSuspended = false;
-    m_timer->start(16);                  // 与 ctor 同节拍
+    m_timer->start(33);                 // 渲染 30fps（原 16ms≈60，降半省资源）                  // 与 ctor 同节拍
     reportFault(static_cast<int>(Scanner::render::RenderEvent::RenderResumed),
                 "渲染循环恢复");
     return true;
@@ -1811,6 +1839,7 @@ bool OSGWidget::loadMesh(const QString& filepath)
 void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
                                  const osg::Vec4& color)
 {
+    (void)color;   // 颜色参数退役：同心圆贴图样式（用户口径 2026-08-31）
     if (markers.empty()) return;
 
     if (!m_markerRoot || m_markerRoot->getNumParents() == 0) {
@@ -1827,16 +1856,51 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
         m_markerRoot->addChild(m_markerGeode);
         m_root->addChild(m_markerRoot);
 
+        // 同心圆样式（POINTS+点精灵路径——billboard 管线实测不可见弃用）：
+        // 纹理 64×64 外黑环+内白圆（内6外10 比例），点尺寸 24px
+        const int S = 64;
+        QImage q(S, S, QImage::Format_RGBA8888);
+        q.fill(Qt::transparent);
+        {
+            QPainter p(&q);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(15, 15, 15, 255));
+            p.drawEllipse(2, 2, S - 4, S - 4);
+            const int inner = S * 36 / 60;   // 内径 = 外径 × 0.6（6/10）
+            p.setBrush(QColor(250, 250, 250, 255));
+            p.drawEllipse((S - inner) / 2, (S - inner) / 2, inner, inner);
+        }
+        m_markerTexture = new osg::Texture2D;
+        osg::ref_ptr<osg::Image> img = new osg::Image;
+        auto* px = new unsigned char[S * S * 4];
+        std::memcpy(px, q.constBits(), static_cast<size_t>(S * S * 4));
+        img->setImage(S, S, 1, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, px, osg::Image::USE_NEW_DELETE);
+        m_markerTexture->setImage(img.get());
+        // 过滤器必须显式 LINEAR：默认 MIN_FILTER=LINEAR_MIPMAP_LINEAR 而 setImage
+        // 不自动生成 mipmap——采样全透明=点不可见（本次"无显示"根因）
+        m_markerTexture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+        m_markerTexture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
+
+        osg::StateSet* ss = m_markerRoot->getOrCreateStateSet();
         osg::ref_ptr<osg::Point> pointSize = new osg::Point;
-        pointSize->setSize(5.0f);  // 标志点更大
-        m_markerRoot->getOrCreateStateSet()->setAttribute(pointSize);
+        pointSize->setSize(24.0f);
+        ss->setAttribute(pointSize);
+        ss->setTextureAttributeAndModes(0, m_markerTexture.get(), osg::StateAttribute::ON);
+        ss->setMode(GL_BLEND, osg::StateAttribute::ON);
+        ss->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
+        // 点精灵（纹理贴到点光栅上）
+        osg::ref_ptr<osg::PointSprite> sprite = new osg::PointSprite;
+        ss->setAttributeAndModes(sprite.get(), osg::StateAttribute::ON);
+        ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
 
         m_markerCoords = new osg::Vec3Array;
         m_markerColors = new osg::Vec4Array;
+        m_leftCamViewApplied = false;    // 新会话首点——左相机视角重新设置
     }
 
     m_markerCoords->assign(markers.begin(), markers.end());
-    m_markerColors->resize(markers.size(), color);
+    m_markerColors->resize(markers.size(), osg::Vec4(1.0f, 1.0f, 1.0f, 1.0f));  // 白（贴图调制）
     m_markerGeom->setVertexArray(m_markerCoords);
     m_markerGeom->setColorArray(m_markerColors);
     m_markerGeom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
@@ -1847,7 +1911,41 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
     else
         m_markerGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)markers.size()));
 
-    maybeAutoFrame();   // 扫描视角跟随（生长感知；SceneFeed 更新路径每 5 融合帧一达）
+    // 左相机视角（用户口径）：标志点会话首点设置一次（视角=左相机取景方向，
+    // up=-y 对齐 OpenCV 图像 y 向下）；用户交互中不抢，设置后可自由旋转
+    if (!m_leftCamViewApplied && !m_userInteracting) {
+        setLeftCameraView();
+        m_leftCamViewApplied = true;
+    }
+}
+
+// ============================================================================
+// 左相机视角——重建坐标系即左相机系（原点=左相机光心，+z 朝场景，y 向下）。
+// eye 置于点云中心正后方（沿 -z），看向中心，up=(0,-1,0)——画面方向与左
+// 相机原图一致（用户口径 2026-08-31）
+// ============================================================================
+void OSGWidget::setLeftCameraView()
+{
+    if (!m_viewer || !m_root) return;
+    const osg::BoundingSphere bs = m_root->getBound();
+    if (!bs.valid() || bs.radius() <= 0) return;
+
+    const osg::Vec3d c(bs.center());
+    const double dist = bs.radius() * 2.0;
+    const osg::Vec3d eye(c.x(), c.y(), c.z() - dist);
+    const osg::Vec3d up(0.0, -1.0, 0.0);
+
+    const double r = bs.radius();
+    const osg::GraphicsContext::Traits* traits = m_gw->getTraits();
+    const double aspect = static_cast<double>(traits->width) / static_cast<double>(traits->height);
+    m_viewer->getCamera()->setProjectionMatrixAsPerspective(30.0, aspect, r * 0.01, r * 100.0);
+    m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
+
+    osg::ref_ptr<osgGA::TrackballManipulator> manip = new osgGA::TrackballManipulator;
+    manip->setAllowThrow(false);
+    manip->setHomePosition(eye, c, up, false);
+    m_viewer->setCameraManipulator(manip);
+    manip->home(0);
 }
 
 // ============================================================================

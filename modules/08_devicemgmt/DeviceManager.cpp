@@ -170,6 +170,10 @@ Result DeviceManager::open() {
             if (!r.success) {
                 camera_.reset();
                 camR = Result::fail("相机打开失败: " + r.message);
+            } else {
+                // 曝光保持相机自动（用户口径 2026-08-31：固定值试验 10/5/3ms
+                // 均劣于自动——3ms+B30 时 ROI 暴增 137/76 触发 marker_match
+                // maxPoints=100 上限异常，pChain 整帧报废）
             }
         });
     }

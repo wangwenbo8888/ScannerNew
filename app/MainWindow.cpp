@@ -1110,6 +1110,11 @@ QWidget *MainWindow::createToolBar()
         // 注意：i==0 是"文件管理/导入"按钮，只开菜单，不能在这里 clearScene（否则导入后被清空）
         if (i == 2 || i == 3 || i == 4 || i == 5) {
             connect(btn, &QPushButton::clicked, this, [this]() {
+                // 仅从标定分屏切回时恢复（clearScene 会清扫描标志点——恢复
+                // lambda 与扫描启停 lambda 同键先后无条件执行，曾致"停止后点
+                // 消失/扫描中清建循环闪烁/HUD Y 轴上下跳（z-up home 与左相机
+                // -y up 视角打架）"三症并发，2026-08-31）
+                if (!m_calibBoard2D || !m_calibBoard2D->isVisible()) return;
                 if (m_calibBoard2D) m_calibBoard2D->hide();
                 // 隐藏左右、前后彩条
                 auto* va = m_3dView ? m_3dView->parentWidget()->parentWidget() : nullptr;

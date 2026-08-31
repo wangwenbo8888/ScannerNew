@@ -187,6 +187,8 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
     // 抛异常、整链瘫，勿超
     calib::MarkerMatchCPUParams mmp;
     mmp.y_tolerance = 3.0f;
+    mmp.max_points = 300;      // 100→300：亮灯场景 ROI 可达 137+，超上限算子
+                               // 抛异常令 pChain 整帧报废（"无点"根因之一）
     ops->match       = std::make_unique<calib::MarkerMatchCPU>(mmp);
         ops->epiIntersect = std::make_unique<calib::EpipolarIntersectCPU>();
         ops->edgeMatch   = std::make_unique<calib::EdgeMatchCPU>();
@@ -500,22 +502,32 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
         JMW_LOG_INFO("07-ScanChains", "[ScanChains] P链观测#{}: roisL={} roisR={}",
                      pchainSeq, front.roisL.size(), front.roisR.size());
     }
-    // 每相机：image_split(gray, rois) → zernike 逐子图 → image_merge
+    // 分段计时（lane 慢定位 2026-08-31：实测整帧 ~220ms 只消化 4.5fps→丢帧
+    // 90%；split/zernike/merge/undistort/ellipse/match/epi/edge/recon 各段）
+    using CLK = std::chrono::steady_clock;
+    const auto tAll0 = CLK::now();
+    double tSplit = 0, tZern = 0, tMerge = 0;
     auto runCamera = [&](const cv::Mat& gray, const std::vector<cv::Rect>& rois,
                          calib::ImageMergeCPUResult& merged, const char* tag) -> bool {
+        const auto s0 = CLK::now();
         auto sp = ops.split->Execute(gray, rois);
+        tSplit += std::chrono::duration<double, std::milli>(CLK::now() - s0).count();
         if (!sp.success || sp.splitCount == 0) {
             if (verbose) JMW_LOG_WARN("07-ScanChains", "[ScanChains] P链: {} split 0/败（rois={}）",
                                       tag, rois.size());
             return false;
         }
+        const auto s1 = CLK::now();
         std::vector<std::vector<calib::EdgePoint>> edges(
             static_cast<size_t>(sp.splitCount));
         for (int i = 0; i < sp.splitCount; ++i) {
             auto zr = ops.zernike->Execute(sp.splitImages[static_cast<size_t>(i)]);
             if (zr.success) edges[static_cast<size_t>(i)] = std::move(zr.edgePoints);
         }
+        tZern += std::chrono::duration<double, std::milli>(CLK::now() - s1).count();
+        const auto s2 = CLK::now();
         merged = ops.merge->Execute(edges, rois);
+        tMerge += std::chrono::duration<double, std::milli>(CLK::now() - s2).count();
         if (!(merged.success && merged.mergedEdgeCount > 0)) {
             if (verbose) JMW_LOG_WARN("07-ScanChains", "[ScanChains] P链: {} merge 0/败（split={} 边缘0）",
                                       tag, sp.splitCount);
@@ -532,12 +544,15 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
     // undistort_cpu（矫正矩阵=帧 snapshot；R1/R2/P1/P2/Q 每帧注入）
     const cv::Mat R1(frame.snapshot.R1), R2(frame.snapshot.R2),
         P1(frame.snapshot.P1), P2(frame.snapshot.P2), Q(frame.snapshot.Q);
+    const auto tu0 = CLK::now();
     ops.undistCpu->SetRectifyMatrices(R1, R2, P1, P2, Q);
     auto ur = ops.undistCpu->Execute(mL.mergedEdgePoints, mR.mergedEdgePoints,
                                      mL.groupIds, mR.groupIds);
+    const double tUndist = std::chrono::duration<double, std::milli>(CLK::now() - tu0).count();
     if (!ur.success) return false;
 
     // ellipse_fit 逐组（矫正坐标系）
+    const auto te0 = CLK::now();
     auto fitGroups = [&](const std::vector<std::vector<cv::Point2d>>& groups,
                          std::vector<calib::EllipseFitCPUResult>& out) {
         for (const auto& g : groups) {
@@ -548,6 +563,7 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
     std::vector<calib::EllipseFitCPUResult> ellL, ellR;
     fitGroups(ur.splitRectifiedPoints1ByGroup(), ellL);
     fitGroups(ur.splitRectifiedPoints2ByGroup(), ellR);
+    const double tEllipse = std::chrono::duration<double, std::milli>(CLK::now() - te0).count();
     if (ellL.size() < 3 || ellR.size() < 3) {   // 重建/配准最少点数
         if (verbose) JMW_LOG_WARN("07-ScanChains", "[ScanChains] P链: 椭圆组不足 L={} R={}（需≥3）",
                                   ellL.size(), ellR.size());
@@ -561,7 +577,9 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
 
     if (verbose) JMW_LOG_INFO("07-ScanChains", "[ScanChains] P链观测#{}: →marker_match（L中心={} R中心={}）",
                               pchainSeq, cL.size(), cR.size());
+    const auto tm0 = CLK::now();
     auto mm = ops.match->Execute(cL, cR);
+    const double tMatch = std::chrono::duration<double, std::milli>(CLK::now() - tm0).count();
     if (!mm.success) {
         if (verbose) JMW_LOG_WARN("07-ScanChains", "[ScanChains] P链: marker_match 败（L中心={} R中心={}）",
                                   cL.size(), cR.size());
@@ -569,8 +587,10 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
     }
     if (verbose) JMW_LOG_INFO("07-ScanChains", "[ScanChains] P链观测#{}: →epipolar_intersect", pchainSeq);
 
+    const auto tp0 = CLK::now();
     auto eiL = ops.epiIntersect->Execute(ellL);
     auto eiR = ops.epiIntersect->Execute(ellR);
+    const double tEpi = std::chrono::duration<double, std::milli>(CLK::now() - tp0).count();
     if (!eiL.success || !eiR.success) {
         if (verbose) JMW_LOG_WARN("07-ScanChains", "[ScanChains] P链: 极线交点败 L={} R={}",
                                   eiL.success, eiR.success);
@@ -578,8 +598,10 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
     }
     if (verbose) JMW_LOG_INFO("07-ScanChains", "[ScanChains] P链观测#{}: →edge_match", pchainSeq);
 
+    const auto tx0 = CLK::now();
     auto em = ops.edgeMatch->Execute(eiL.ellipseResults, eiR.ellipseResults,
                                      mm.centerMatches);
+    const double tEdge = std::chrono::duration<double, std::milli>(CLK::now() - tx0).count();
     if (!em.success) {
         if (verbose) JMW_LOG_WARN("07-ScanChains", "[ScanChains] P链: edge_match 败（中心匹配对={}）",
                                   mm.centerMatches.size());
@@ -587,8 +609,10 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
     }
     if (verbose) JMW_LOG_INFO("07-ScanChains", "[ScanChains] P链观测#{}: →reconstruct", pchainSeq);
 
+    const auto tr0 = CLK::now();
     ops.reconstruct->SetProjectionMatrices(P1, P2, Q);
     auto pr = ops.reconstruct->Execute(em);
+    const double tRecon = std::chrono::duration<double, std::milli>(CLK::now() - tr0).count();
     if (!pr.success) {
         if (verbose) JMW_LOG_WARN("07-ScanChains", "[ScanChains] P链: 三维重建败");
         return false;
@@ -597,12 +621,8 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
 
     for (const auto& m : pr.markerResults) {
         if (!m.validPlane || !m.validCircle) continue;
-        // 几何过滤（2026-08-31）：真标志点必在相机视野内——z（拍摄距离）
-        // 100~1000mm、|x|/|y|<1500mm；假匹配三角化飞点坐标可达几万~几十万
-        // mm（真机 368 点快照 y 达 248m），全灭于此。同时保住渲染取景不被
-        // 飞点尺度撑爆（"停止后视野飞了"根因）
-        if (m.centerZ < 100.0 || m.centerZ > 1000.0) continue;
-        if (std::abs(m.centerX) > 1500.0 || std::abs(m.centerY) > 1500.0) continue;
+        // 无几何过滤（用户口径 2026-08-31：过滤掩盖真实问题——假匹配飞点
+        // 须从源头治理：左右匹配质量/曝光/标定，不以范围判定藏污）
         positions.emplace_back(m.centerX, m.centerY, m.centerZ);
         normals.emplace_back(m.normalX, m.normalY, m.normalZ);
     }
@@ -610,6 +630,14 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
         const auto matchedCenters = static_cast<size_t>(std::count_if(
             mm.centerMatches.begin(), mm.centerMatches.end(),
             [](int v) { return v >= 0; }));
+        // 耗时汇总（lane 慢定位：实测整帧 ~220ms/4.5fps→丢帧 90%）
+        JMW_LOG_INFO("07-ScanChains",
+                     "[ScanChains] P链耗时#{0}: split={1:.1f} zernike={2:.1f} merge={3:.1f} "
+                     "undist={4:.1f} ellipse={5:.1f} match={6:.1f} epi={7:.1f} "
+                     "edge={8:.1f} recon={9:.1f} | 总(含杂)={10:.1f}ms",
+                     pchainSeq, tSplit, tZern, tMerge, tUndist, tEllipse, tMatch,
+                     tEpi, tEdge, tRecon,
+                     std::chrono::duration<double, std::milli>(CLK::now() - tAll0).count());
         // y 差诊断：成功对的左右中心 y 差分布（中位/最大）——判断立体校正
         // 质量：中位 <1.5px=矫正良好（容差安全）；中位 >3px=标定与装配不匹
         // 配（应重标定而非放容差）
