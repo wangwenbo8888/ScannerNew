@@ -314,6 +314,21 @@ ScanChains::Hooks ScanChains::assemble() {
         }
         front.roisL = cclL.toRectList();        // host 数据（ccl 内部已同步下载）
         front.roisR = cclR.toRectList();
+        // ROI 尺寸过滤（2026-09-01 性能第一步）：真标志点 φ17px（距离浮动
+        // 10~45px 带）；噪声碎片/大块全剔除——此前 50 个 ROI 仅 ~13 真点，
+        // zernike/ellipse 按输入量耗时（28+45ms 大头），过滤后同比例降
+        {
+            auto passSize = [](const std::vector<cv::Rect>& in) {
+                std::vector<cv::Rect> out;
+                out.reserve(in.size());
+                for (const auto& r : in)
+                    if (r.width >= 10 && r.width <= 45 && r.height >= 10 && r.height <= 45)
+                        out.push_back(r);
+                return out;
+            };
+            front.roisL = passSize(front.roisL);
+            front.roisR = passSize(front.roisR);
+        }
 
         // 3) ccl 就绪点：提交 P 链（此后激光段与 P 链帧内并行）
         frontReady();

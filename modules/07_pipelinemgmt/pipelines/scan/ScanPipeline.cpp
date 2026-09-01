@@ -37,7 +37,9 @@ constexpr int32_t kEvtLaneHang = 1610;         // lane 心跳超时（看门狗�
 constexpr int32_t kEvtRecovered = 1611;        // Faulted 原地恢复成功（累积全保留）
 constexpr int32_t kEvtCheckpointFail = 1612;   // 检查点写/读失败（Fault，不中断扫描）
 constexpr size_t kQueueCapacity = 64;          // 输出队列容量（consumer 持续排空，宽裕）
-constexpr int kScanGpuSlots = 2;               // 扫描 GPU 槽（设计 §4.3）
+constexpr int kScanGpuSlots = 4;               // 扫描 GPU 槽（§4.3；2026-09-01
+                                              // 2→4——120fps 目标下 GPU 段 20ms×
+                                              // 帧并发需 ≥3 槽，2 槽上限 100fps）
 constexpr int kRenderThrottleFrames = 5;       // 渲染节流（首帧起每 N 帧）
 constexpr std::chrono::milliseconds kPoolAcquireTimeout{50};
 constexpr std::chrono::milliseconds kRecoverJoinTimeout{2000};  // recover 限时 drain（僵尸 detach 兜底）

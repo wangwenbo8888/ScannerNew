@@ -38,7 +38,7 @@ constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
     return {
         {"exposure", 10.0, 1.0, 100.0},        // 曝光 ms（相机直设）
-        {"freqHz", 50.0, 20.0, 120.0},         // N10 H 拍照频率（默认 50）
+        {"freqHz", 60.0, 20.0, 120.0},         // N10 H 拍照频率（默认 60——USB 传输上限 60fps，用户口径 2026-09-01）
         {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10——B 模式成功配置基线；B30 过曝毁检测 ROI 跌至 4）
         {"laserLevel", 40.0, 0.0, 100.0},      // N10 L 激光强度（默认 40；60 过亮→40 折中）
         {"laserSelectA", 1.0, 1.0, 6.0},       // N10 T 交叉激光选择 A＝左斜组（1-6）
