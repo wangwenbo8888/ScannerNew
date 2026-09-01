@@ -56,6 +56,12 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Execute(
         return result;
     }
 
+    // 纯点图模式（spotThreshold>0，A 模式纯补光图——还账 2026-09-01：直接
+    // 阈值化出标记点掩膜，跳过线点共存形态学（该模式下失效）；激光掩膜空）
+    if (pImpl_->spotThreshold() > 0) {
+        return pImpl_->binarizeSpot(grayImage, stream);
+    }
+
     return pImpl_->separate(grayImage, stream);
 }
 

@@ -52,6 +52,12 @@ struct LaserMarkingSeparationCUDA::Impl {
     LaserMarkingSeparationResult separate(const cv::Mat& grayImage,
                                           cv::cuda::Stream& stream);
 
+    // 纯点图模式（spotThreshold>0）：直接阈值化出标记点掩膜（A 模式纯补光
+    // 图——形态学线点分离在该模式失效；还账 2026-09-01 收编入算子）
+    LaserMarkingSeparationResult binarizeSpot(const cv::Mat& grayImage,
+                                              cv::cuda::Stream& stream);
+    int spotThreshold() const { return params_.spotThreshold; }
+
     void setParams(const LaserMarkingSeparationParams& params);
     void warmup(int rows, int cols);
 

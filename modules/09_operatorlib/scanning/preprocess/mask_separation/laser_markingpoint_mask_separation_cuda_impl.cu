@@ -3,6 +3,7 @@
 #include "common/calib_logging.h"
 #include <cuda_runtime.h>
 #include <opencv2/cudaimgproc.hpp>
+#include <opencv2/cudaarithm.hpp>   // cv::cuda::threshold（spot 模式）
 #include <stdexcept>
 
 using namespace calib;
@@ -356,6 +357,47 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
     } catch (const std::exception& e) {
         result.success=false; result.message=std::string("Err: ")+e.what();
         result.qualityFlag=calib::QualityFlag::Degraded;
+    }
+    return result;
+}
+
+// 纯点图模式（A 模式）：upload→threshold→marking 掩膜（无形态学；激光空）
+LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::binarizeSpot(
+    const cv::Mat& grayImage, cv::cuda::Stream& stream)
+{
+#ifndef NDEBUG
+    assert(!inProcess_.load());
+    struct SF { std::atomic<bool>*f; SF(std::atomic<bool>*f_):f(f_){} ~SF(){f->store(false);} };
+    SF guard(&inProcess_); inProcess_.store(true);
+#endif
+
+    LaserMarkingSeparationResult result;
+    try {
+        const int r = grayImage.rows, c = grayImage.cols;
+        if (!warmed_up_ || warmup_rows_ != r || warmup_cols_ != c) {
+            cv::cuda::createContinuous(r, c, CV_8UC1, d_inputBuffer);
+            cv::cuda::createContinuous(r, c, CV_8UC1, d_marking_final);
+            cv::cuda::createContinuous(r, c, CV_8UC1, d_laser_mask);
+            warmup_rows_ = r; warmup_cols_ = c; warmed_up_ = true;
+        }
+        d_inputBuffer.upload(grayImage, stream);
+        cv::cuda::threshold(d_inputBuffer, d_marking_final,
+                            static_cast<double>(params_.spotThreshold), 255.0,
+                            cv::THRESH_BINARY, stream);
+        d_laser_mask.setTo(0, stream);
+
+        result.success = true;
+        result.message = "Spot binarize successful";
+        result.qualityFlag = calib::QualityFlag::Normal;
+        result.d_laserMask = std::make_shared<cv::cuda::GpuMat>(d_laser_mask.clone());
+        result.d_markingPointMask =
+            std::make_shared<cv::cuda::GpuMat>(d_marking_final.clone());
+    } catch (const cv::Exception& e) {
+        result.success = false; result.message = std::string("OpenCV: ") + e.what();
+        result.qualityFlag = calib::QualityFlag::Degraded;
+    } catch (const std::exception& e) {
+        result.success = false; result.message = std::string("Err: ") + e.what();
+        result.qualityFlag = calib::QualityFlag::Degraded;
     }
     return result;
 }

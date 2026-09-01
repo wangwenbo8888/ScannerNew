@@ -39,6 +39,9 @@ struct WarmupConfig;
 struct LaserMarkingSeparationParams {
     int gaussianSize = 5;
     int threshold = 80;
+    int spotThreshold = 0;            ///< 纯点图模式阈值（0=关闭走线点分离形态学；
+                                      ///<  >0=A 模式纯补光图直接阈值化出标记点掩膜
+                                      ///<  ——激光掩膜空。2026-09-01 还账收编）
 
     int step2_erodeSize = 3;       ///< �?步腐蚀核大小（奇数，去小噪点）
     int step2_dilateSize = 3;      ///< �?步膨胀核大小（奇数，同腐蚀核）
