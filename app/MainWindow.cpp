@@ -1756,11 +1756,22 @@ void MainWindow::updateInfoSection()
 {
     static int updateCount = 0;
     ++updateCount;
+    // 诊断（2026-09-01 状态不更新）：函数心跳+poll 耗时（perfMonitor::poll
+    // 阻塞嫌疑——卡住则横幅/CPU/连接全不更新）
+    const bool infoVerbose = (updateCount % 30 == 0);
+    auto pollMs = 0;
 
     // A-T17：PerfMonitor 1s 拉取驱动（10 设计 P3——挂既有 m_infoTimer；
     // AppContext 无 Qt 依赖不持定时器，poll=provider 快照→阈值判定→双级告警）
     if (m_appCtx && m_appCtx->perfMonitor()) {
+        const auto t0 = std::chrono::steady_clock::now();
         m_appCtx->perfMonitor()->poll();
+        pollMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - t0).count());
+    }
+    if (infoVerbose) {
+        JMW_LOG_INFO("app-MainWindow", "[MainWindow] infoTimer 心跳 #{}（perfPoll={}ms）",
+                     updateCount, pollMs);
     }
 
     // 启动自检横幅（1s 轮询快照；完成后继续显示终态 10s 再撤，常态零占用）
@@ -1831,6 +1842,11 @@ void MainWindow::updateInfoSection()
             auto camState = dsc->getState("Camera");
             camConnected = (camState.state == Scanner::DeviceState::Connected ||
                             camState.state == Scanner::DeviceState::Streaming);
+            if (infoVerbose) {
+                JMW_LOG_INFO("app-MainWindow",
+                             "[MainWindow] 状态诊断: Camera.state={} camConn={} dsc={} poll={}ms",
+                             static_cast<int>(camState.state), camConnected, dsc ? 1 : 0, pollMs);
+            }
         }
         m_infoConnLabel->setText(camConnected ? "已连接" : "未连接");
         m_infoConnLabel->setStyleSheet(camConnected ? "color: #00AA00;" : "color: #CC0000;");
