@@ -42,6 +42,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <pdh.h>
+#pragma comment(lib, "pdh.lib")
 
 #pragma execution_character_set("utf-8")
 
@@ -1798,22 +1800,33 @@ void MainWindow::updateInfoSection()
 
     // === 先更新 CPU 和内存（纯 Windows API，不依赖任何框架组件）===
     if (m_infoCpuLabel) {
-        FILETIME idleTime, kernelTime, userTime;
-        if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
-            auto toU64 = [](const FILETIME& ft) -> uint64_t {
-                ULARGE_INTEGER u; u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
-                return u.QuadPart;
-            };
-            double idle = static_cast<double>(toU64(idleTime));
-            double kernel = static_cast<double>(toU64(kernelTime));
-            double user = static_cast<double>(toU64(userTime));
-            double idleDiff = idle - m_prevCpuIdle;
-            double total = (kernel - m_prevCpuKernel) + (user - m_prevCpuUser);
-            m_prevCpuIdle = idle; m_prevCpuKernel = kernel; m_prevCpuUser = user;
-            double usage = (total > 0) ? ((total - idleDiff) / total * 100.0) : 0.0;
-            if (usage < 0) usage = 0; if (usage > 100) usage = 100;
-            m_infoCpuLabel->setText(QString::number(usage, 'f', 1) + " %");
+        // PDH 计数器直读（2026-09-01）：GetSystemTimes 差分实测恒 0（多核语义
+        // 陷阱），换 \\Processor Information(_Total)\\% Processor Utility 直出
+        static PDH_HQUERY hQuery = nullptr;
+        static PDH_HCOUNTER hCpu = nullptr;
+        static bool pdhFailed = false;
+        if (!hQuery && !pdhFailed) {
+            if (PdhOpenQueryW(nullptr, 0, &hQuery) == ERROR_SUCCESS &&
+                PdhAddEnglishCounterW(hQuery,
+                    L"\\Processor Information(_Total)\\% Processor Utility",
+                    0, &hCpu) == ERROR_SUCCESS) {
+                // 首次收集建立基线
+                PdhCollectQueryData(hQuery);
+            } else {
+                pdhFailed = true;
+                hQuery = nullptr;
+            }
         }
+        double usage = 0.0;
+        if (hQuery && hCpu && PdhCollectQueryData(hQuery) == ERROR_SUCCESS) {
+            PDH_FMT_COUNTERVALUE val;
+            if (PdhGetFormattedCounterValue(hCpu, PDH_FMT_DOUBLE, nullptr, &val) ==
+                ERROR_SUCCESS) {
+                usage = val.doubleValue;
+            }
+        }
+        if (usage < 0) usage = 0; if (usage > 100) usage = 100;
+        m_infoCpuLabel->setText(QString::number(usage, 'f', 1) + " %");
     }
 
     if (m_infoMemLabel) {

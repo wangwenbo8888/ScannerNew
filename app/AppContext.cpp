@@ -305,6 +305,22 @@ void AppContext::startDevicesAsync() {
         notifySelfCheckItem("license", true);   // 占位（狗到货接实检）
 
         if (devR.success) {
+            // 设备状态落缓存（UI 连接状态显示源——2026-09-01：此前全工程无
+            // 写入者，"未连接"恒定；app 桥接 08→06：相机/MCU open 成功即 Connected）
+            if (deviceStateCache_) {
+                const auto now = static_cast<Scanner::TimestampMs>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                Scanner::data::DeviceStateInfo cam;
+                cam.deviceId = "Camera"; cam.deviceType = "ScannerCamera";
+                cam.state = Scanner::DeviceState::Connected; cam.timestamp = now;
+                deviceStateCache_->pushState(cam);
+                Scanner::data::DeviceStateInfo mcu;
+                mcu.deviceId = "MCU"; mcu.deviceType = "MCU";
+                mcu.state = Scanner::DeviceState::Connected; mcu.timestamp = now;
+                deviceStateCache_->pushState(mcu);
+                JMW_LOG_INFO("app-AppContext", "[AppContext] 设备状态落缓存: Camera/MCU=Connected");
+            }
             // 启动自检序列：mcuLink/bgLight/laser 闪灯回环 + 相机收帧（无阻塞状态机，
             // 逻辑线程 tick 驱动）。report 回调直投 notifySelfCheckItem（mutex+submit 线程安全）
             deviceManager_->startupSelfCheck([this](const std::string& key, bool ok) {
