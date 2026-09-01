@@ -8,7 +8,13 @@
 
 namespace Scanner::pipeline {
 
-struct CloudViewHandle { const void* hostMarker = nullptr; const void* deviceLaser = nullptr; };  // 句柄式，实施期细化
+struct CloudViewHandle {
+    const void* hostMarker = nullptr;   // const std::vector<calib::MarkerCloudPoint>*
+    const void* deviceLaser = nullptr;  // 预留 GPU 句柄（未实施）
+    const float* hostLaser = nullptr;   // 激光点 host xyz（n×3 平铺；FuseConsumer
+                                        // 帧块下载直推——2026-08-31 激光显示）
+    size_t laserCount = 0;              // hostLaser 点数
+};  // 句柄式，实施期细化
 
 class ISceneFeed {
 public:

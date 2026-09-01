@@ -67,6 +67,20 @@ void SceneFeedAdapter::pushCloudSnapshot(Scanner::pipeline::CloudViewHandle clou
         latestMarkers_ = std::move(recs);
     }
     emit markerCloudUpdated(pts);                 // queued → UI 线程
+
+    // 激光 host 块（n×3 float 平铺——调用线程立即值拷贝后 queued）
+    if (cloud.hostLaser && cloud.laserCount > 0) {
+        std::vector<cv::Point3f> laser;
+        laser.reserve(cloud.laserCount);
+        for (size_t i = 0; i < cloud.laserCount; ++i) {
+            const float x = cloud.hostLaser[i * 3 + 0];
+            const float y = cloud.hostLaser[i * 3 + 1];
+            const float z = cloud.hostLaser[i * 3 + 2];
+            if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z))
+                laser.emplace_back(x, y, z);
+        }
+        emit laserCloudUpdated(laser);            // queued → UI 线程
+    }
 }
 
 void SceneFeedAdapter::notifyFreeze(bool frozen) {

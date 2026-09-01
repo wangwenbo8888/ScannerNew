@@ -46,6 +46,7 @@ public:
 signals:
     // UI 线程消费（MainWindow 接 OSGWidget::loadMarkerPoints；metatype 在 cpp 注册）
     void markerCloudUpdated(const std::vector<cv::Point3f>& points);
+    void laserCloudUpdated(const std::vector<cv::Point3f>& points);   // 激光点（host 块直推，2026-08-31）
     void freezeChanged(bool frozen);
 
 private:

@@ -1911,12 +1911,10 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
     else
         m_markerGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)markers.size()));
 
-    // 左相机视角（用户口径）：标志点会话首点设置一次（视角=左相机取景方向，
-    // up=-y 对齐 OpenCV 图像 y 向下）；用户交互中不抢，设置后可自由旋转
-    if (!m_leftCamViewApplied && !m_userInteracting) {
-        setLeftCameraView();
-        m_leftCamViewApplied = true;
-    }
+    // 扫描视图跟框（生长感知+节流+交互避让；取景=左相机视角）——每次标志点
+    // 到达都检查：半径带外（±20%）重设视角。此前"首点一次制"在场景含残留
+    // 大物体时取景过远，点过小"看不见"，须导入触发 fit 才可见（2026-08-31）
+    maybeAutoFrame();
 }
 
 // ============================================================================
@@ -1924,14 +1922,55 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
 // eye 置于点云中心正后方（沿 -z），看向中心，up=(0,-1,0)——画面方向与左
 // 相机原图一致（用户口径 2026-08-31）
 // ============================================================================
+void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
+{
+    if (laser.empty()) return;
+    if (!m_laserRoot || m_laserRoot->getNumParents() == 0) {
+        // 重建判定同标志点（clearScene 摘除后指针不置空的坑）
+        m_laserRoot = new osg::Group;
+        m_laserGeode = new osg::Geode;
+        m_laserGeom = new osg::Geometry;
+        m_laserGeom->setUseVertexBufferObjects(true);
+        m_laserGeom->setUseDisplayList(false);
+        m_laserGeom->setDataVariance(osg::Object::DYNAMIC);
+        m_laserGeode->addDrawable(m_laserGeom);
+        m_laserRoot->addChild(m_laserGeode);
+        m_root->addChild(m_laserRoot);
+
+        osg::ref_ptr<osg::Point> pointSize = new osg::Point;
+        pointSize->setSize(2.0f);
+        m_laserRoot->getOrCreateStateSet()->setAttribute(pointSize);
+        m_laserRoot->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+        // 颜色=导入点云默认色（LeadScan 浅蓝 0.529/0.808/0.980——用户口径同源）
+        auto* lc = new osg::Vec4Array(1);
+        (*lc)[0] = osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f);
+        m_laserGeom->setColorArray(lc, osg::Array::BIND_OVERALL);
+        m_laserCoords = new osg::Vec3Array;
+    }
+    m_laserCoords->assign(laser.begin(), laser.end());
+    m_laserGeom->setVertexArray(m_laserCoords);
+    if (m_laserGeom->getNumPrimitiveSets() == 0)
+        m_laserGeom->addPrimitiveSet(new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)laser.size()));
+    else
+        m_laserGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)laser.size()));
+}
+
+// ============================================================================
+// 左相机视角（实现）——eye 沿 -z 看向点云中心、up=-y（OpenCV 系 y 向下）
+// ============================================================================
 void OSGWidget::setLeftCameraView()
 {
     if (!m_viewer || !m_root) return;
-    const osg::BoundingSphere bs = m_root->getBound();
+    // 视角基准=标志点自身包围球（与 maybeAutoFrame 同源——全场景 bound 会被
+    // 残留点云污染）
+    const osg::BoundingSphere bs =
+        (m_markerRoot && m_markerRoot->getNumParents() > 0)
+            ? m_markerRoot->getBound()
+            : m_root->getBound();
     if (!bs.valid() || bs.radius() <= 0) return;
 
     const osg::Vec3d c(bs.center());
-    const double dist = bs.radius() * 2.0;
+    const double dist = bs.radius() * 1.2;   // 取景距离 2.0r→1.2r（点占屏更大）
     const osg::Vec3d eye(c.x(), c.y(), c.z() - dist);
     const osg::Vec3d up(0.0, -1.0, 0.0);
 
@@ -1959,7 +1998,12 @@ void OSGWidget::maybeAutoFrame()
     const auto now = std::chrono::steady_clock::now();
     if (m_lastFitRadius >= 0.0 && now - m_lastFitTime < std::chrono::seconds(1)) return;
 
-    const osg::BoundingSphere bs = m_root->getBound();
+    // 取景基准=标志点自身包围球（非全场景——残留点云 geode 会污染半径/中心，
+    // 视角过远点过小"看不见"，须导入触发 fit 才可见的根因 2026-09-01）
+    const osg::BoundingSphere bs =
+        (m_markerRoot && m_markerRoot->getNumParents() > 0)
+            ? m_markerRoot->getBound()
+            : osg::BoundingSphere();
     if (!bs.valid() || bs.radius() <= 0.0) return;
     // 已取过景且未显著变化（0.8×~1.25× 带内）——视角不动（防每 5 帧一跳）；
     // 带外（显著增大或缩小）都重取：缩小覆盖"停止扫描/二次会话"场景——
@@ -1968,7 +2012,9 @@ void OSGWidget::maybeAutoFrame()
         bs.radius() < m_lastFitRadius * 1.25 &&
         bs.radius() > m_lastFitRadius * 0.8) return;
 
-    fitCameraToRoot();
+    // 扫描标志点路径：取景用左相机视角（用户口径）——通用 fitCameraToRoot
+    // 斜视角仅导入路径用
+    setLeftCameraView();
     m_lastFitRadius = bs.radius();
     m_lastFitTime = now;
 }

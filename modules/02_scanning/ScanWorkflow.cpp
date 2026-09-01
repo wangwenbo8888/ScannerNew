@@ -90,12 +90,11 @@ Result ScanWorkflow::assemblePipeline() {
     if (scanMode_ == ScanMode::MarkerPlusLaser) {
         laserTable = buildLaserTableFromRepo();
         if (!laserTable) {
+            // 2026-08-31 起不降级：工厂档无 mapData（生产者缺口 §8-1）时
+            // laser_match_scan 查表路线弃用——ScanChains 激光段走同行配对旁路
+            // （标准立体方法，不依赖表），激光点照常重建/显示
             JMW_LOG_WARN("02-ScanWorkflow",
-                "[ScanWorkflow] 激光温度表不可用（档表无 mapData——生产者缺口 §8-1），"
-                "B 模式降级 A（纯标记点）");
-            cfg.enableLaser = false;              // 降级：重建配置于 attachCalib 前
-            pipeline_ = std::make_unique<sp::ScanPipeline>(cfg);
-            pipeline_->attachRing(session_.ring(), /*dropThreshold=*/0);
+                "[ScanWorkflow] 激光温度表不可用（档表无 mapData）——查表匹配旁路为同行配对（标准立体）");
         }
     }
     pipeline_->attachCalib(calib_.cameraMatrixL, calib_.distCoeffsL,

@@ -206,6 +206,34 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         for (const auto& p : pts) markers.emplace_back(p.x, p.y, p.z);
                         m_3dView->loadMarkerPoints(markers);   // 专用标志点几何（原地更新）
                     });
+            // 激光点云（host 块直推——FuseConsumer 下载的当帧激光块）
+            connect(feed, &SceneFeedAdapter::laserCloudUpdated, this,
+                    [this](const std::vector<cv::Point3f>& pts) {
+                        // 节流导出（exe 目录 laser_snapshot.ply——人工导入核对用）
+                        static std::atomic<uint64_t> s_lRecv{0};
+                        if (const auto k = s_lRecv.fetch_add(1); k % 30 == 0 && !pts.empty()) {
+                            if (QFile f(QStringLiteral("laser_snapshot.ply"));
+                                f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                                QByteArray out;
+                                out += "ply\nformat ascii 1.0\n";
+                                out += QString("element vertex %1\n").arg(pts.size()).toUtf8();
+                                out += "property float x\nproperty float y\nproperty float z\nend_header\n";
+                                for (const auto& p : pts) {
+                                    out += QString("%1 %2 %3\n")
+                                              .arg(p.x, 0, 'f', 3)
+                                              .arg(p.y, 0, 'f', 3)
+                                              .arg(p.z, 0, 'f', 3)
+                                              .toUtf8();
+                                }
+                                f.write(out);
+                            }
+                        }
+                        if (!m_3dView || pts.empty()) return;
+                        std::vector<osg::Vec3> laser;
+                        laser.reserve(pts.size());
+                        for (const auto& p : pts) laser.emplace_back(p.x, p.y, p.z);
+                        m_3dView->loadLaserPoints(laser);
+                    });
             connect(feed, &SceneFeedAdapter::freezeChanged, this,
                     [this](bool frozen) {
                         // D 批处理期冻结：画面保持末帧（ingest 已由 adapter 丢弃）——状态条提示可后续挂

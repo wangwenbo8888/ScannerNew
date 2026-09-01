@@ -39,8 +39,8 @@ std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红
     return {
         {"exposure", 10.0, 1.0, 100.0},        // 曝光 ms（相机直设）
         {"freqHz", 50.0, 20.0, 120.0},         // N10 H 拍照频率（默认 50）
-        {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10；量程 0-100）
-        {"laserLevel", 10.0, 0.0, 100.0},      // N10 L 激光强度（默认 10；量程 0-100）
+        {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10——B 模式成功配置基线；B30 过曝毁检测 ROI 跌至 4）
+        {"laserLevel", 40.0, 0.0, 100.0},      // N10 L 激光强度（默认 40；60 过亮→40 折中）
         {"laserSelectA", 1.0, 1.0, 6.0},       // N10 T 交叉激光选择 A＝左斜组（1-6）
         {"laserSelectB", 2.0, 1.0, 6.0},       // N10 V 交叉激光选择 B＝右斜组（1-6；
                                                //   与 A 异组——同组则固件帧序交替失效，
@@ -63,7 +63,12 @@ hal::CaptureParams captureParamsFromAccount(const ParamStore& params) {
 // A 模式）激光量强制 L=0（只开补光）。调用点均在逻辑线程（捕获 this 直读成员）
 hal::CaptureParams effectiveN10(const ParamStore& params, bool laserOn) {
     hal::CaptureParams p = captureParamsFromAccount(params);
-    if (!laserOn) p.laserLevel = 0;
+    if (!laserOn) {
+        // A 模式（纯补光）：L=0（无激光——业务要求）+ B 提到 40——真标志点
+        // 亮斑须超分离阈值 80（B10 纯点图实测 ROI=0；高补光代偿激光缺失）
+        p.laserLevel = 0;
+        p.bgLight = 40;
+    }
     return p;
 }
 

@@ -41,6 +41,8 @@
 #ifdef JMW_BUILD_CUDA
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/core/cuda_stream_accessor.hpp>
+#include <opencv2/cudaarithm.hpp>   // cv::cuda::threshold（A 模式亮斑二值化）
+#include <opencv2/imgproc.hpp>      // cv::THRESH_BINARY
 #endif
 
 namespace Scanner::pipeline {
@@ -142,7 +144,12 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
     auto ops = std::make_shared<ScanLaneOps>();
     try {
 #ifdef JMW_BUILD_CUDA
-        ops->sep      = std::make_unique<calib::LaserMarkingSeparationCUDA>();
+        // 分离阈值按模式（2026-09-01 定版）：B 模式（含激光线）80——线碎片亮
+        // 基线；A 模式（纯补光图）50——真标志点亮斑低于 80（B40 实测 ROI=2，
+        // th50 纯点图曾出椭圆 20/13）
+        calib::LaserMarkingSeparationParams sepParams;
+        sepParams.threshold = cfg_.enableLaser ? 80 : 50;
+        ops->sep      = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
         ops->ccl      = std::make_unique<calib::RegionAnalyzerCUDA>();
         ops->steger   = std::make_unique<calib::StegerExtractorCUDA>();
         ops->undistG  = std::make_unique<calib::UndistortPointsCuda>(
@@ -239,33 +246,64 @@ ScanChains::Hooks ScanChains::assemble() {
         front.laserBlock.reset();               // 防上帧残留（失败/池耗尽路径）
         front.laserTruncated = false;           // 同上（截断标志逐帧重置）
 
-        // 1) mask_separation L/R（host Mat 入参，算子自上传）
+        // 1) 掩膜来源按模式（2026-09-01 定版）：
+        //    B 模式（含激光线）→ mask_separation（线点共存形态学分离——成功基线）
+        //    A 模式（纯补光图）→ 直接阈值化（分离算子在纯点图失效：实测 ROI 2-3；
+        //      标准做法=固定阈值找亮斑——反光标志点亮斑远亮于漫反射背景）
         calib::LaserMarkingSeparationResult sepL, sepR;
+        cv::cuda::GpuMat d_binL, d_binR;        // A 模式二值图（ccl 输入）
+        std::shared_ptr<cv::cuda::GpuMat> markMaskL, markMaskR;
         try {
-            sepL = ops.sep->Execute(frame->grayL, stream);
-            if (!sepL.success) {
-                JMW_LOG_WARN("07-ScanChains", "[ScanChains] mask_separation L 失败: {}", sepL.message);
-                return false;
-            }
-            sepR = ops.sep->Execute(frame->grayR, stream);
-            if (!sepR.success) {
-                JMW_LOG_WARN("07-ScanChains", "[ScanChains] mask_separation R 失败: {}", sepR.message);
-                return false;
+            if (cfg_.enableLaser) {
+                sepL = ops.sep->Execute(frame->grayL, stream);
+                if (!sepL.success) {
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] mask_separation L 失败: {}", sepL.message);
+                    return false;
+                }
+                sepR = ops.sep->Execute(frame->grayR, stream);
+                if (!sepR.success) {
+                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] mask_separation R 失败: {}", sepR.message);
+                    return false;
+                }
+                markMaskL = sepL.d_markingPointMask;
+                markMaskR = sepR.d_markingPointMask;
+            } else {
+                ops.d_grayL.upload(frame->grayL, stream);
+                ops.d_grayR.upload(frame->grayR, stream);
+                constexpr double kBinThresh = 100.0;   // A 模式亮斑阈值（B40 补光）
+                cv::cuda::threshold(ops.d_grayL, d_binL, kBinThresh, 255.0, cv::THRESH_BINARY, stream);
+                cv::cuda::threshold(ops.d_grayR, d_binR, kBinThresh, 255.0, cv::THRESH_BINARY, stream);
+                markMaskL = std::make_shared<cv::cuda::GpuMat>(d_binL);
+                markMaskR = std::make_shared<cv::cuda::GpuMat>(d_binR);
             }
         } catch (const std::exception& e) {
-            JMW_LOG_ERROR("07-ScanChains", "[ScanChains] mask_separation 异常: {}", e.what());
+            JMW_LOG_ERROR("07-ScanChains", "[ScanChains] 掩膜来源异常: {}", e.what());
             return false;
         }
 
-        // 2) ccl（吃 d_markingPointMask）L/R → 包围盒入 front 前段分区
+        // 2) ccl（吃标记点掩膜）L/R → 包围盒入 front 前段分区
+        // 激光掩膜观测（节流 1/30 帧，仅 B 模式）：分离出的激光掩膜非零像素
+        if (cfg_.enableLaser) {
+            static std::atomic<uint64_t> s_maskFrames{0};
+            if (s_maskFrames.fetch_add(1) % 30 == 0) {
+                cv::Mat hMaskL, hMaskR;
+                sepL.d_laserMask->download(hMaskL, stream);
+                sepR.d_laserMask->download(hMaskR, stream);
+                stream.waitForCompletion();
+                const int nL = hMaskL.empty() ? 0 : cv::countNonZero(hMaskL);
+                const int nR = hMaskR.empty() ? 0 : cv::countNonZero(hMaskR);
+                JMW_LOG_INFO("07-ScanChains", "[ScanChains] 激光掩膜: L={}px R={}px（0=分离未出线）",
+                             nL, nR);
+            }
+        }
         calib::RegionAnalysisResult cclL, cclR;
         try {
-            cclL = ops.ccl->Execute(sepL.d_markingPointMask, stream);
+            cclL = ops.ccl->Execute(markMaskL, stream);
             if (!cclL.success) {
                 JMW_LOG_WARN("07-ScanChains", "[ScanChains] ccl L 失败: {}", cclL.message);
                 return false;
             }
-            cclR = ops.ccl->Execute(sepR.d_markingPointMask, stream);
+            cclR = ops.ccl->Execute(markMaskR, stream);
             if (!cclR.success) {
                 JMW_LOG_WARN("07-ScanChains", "[ScanChains] ccl R 失败: {}", cclR.message);
                 return false;
@@ -358,23 +396,68 @@ ScanChains::Hooks ScanChains::assemble() {
                 }
                 if (eiR.interpCount == 0 || !hasPts(eiR.d_interpPoints)) return 0;
 
-                ops.matchScan->SetCurrentTemperature(frame->temperature);
-                auto mr = ops.matchScan->Execute(*eiL.d_interpPoints,
-                                                 *eiL.d_interp_line_ids,
-                                                 *eiR.d_interpPoints,
-                                                 *eiR.d_interp_line_ids, stream);
-                if (!mr.success) {
-                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] laser_match_scan 失败: {}", mr.message);
-                    return -1;
-                }
-                if (mr.matchedCount == 0 || !hasPts(mr.d_matched_left) ||
-                    !hasPts(mr.d_matched_right)) {
-                    JMW_LOG_INFO("07-ScanChains", "[ScanChains] 激光匹配 0 点，本帧无激光（降级）");
-                    return 0;
+                // —— 帧号奇偶→激光组别分派（用户口径 2026-08-31）：固件 T/V
+                // 交替打灯，偶数帧=左斜线（T 组）→ 左斜激光标定参数
+                // （left_skew）；奇数帧=右斜线（V 组）→ 右斜参数（未标定，
+                // 暂用左斜参数重建——右斜到位后在此按组分派）
+                const bool leftSkewFrame = (frame->frameId % 2) == 0;
+
+                // —— 激光左右匹配：旁路 laser_match_scan（2026-08-31 用户口径：
+                // 激光点显示——工厂档无 mapData，查表路线不可用）。标准立体
+                // 方法：矫正后同行（y）配对——下载左右极线插值点 → y 桶最近
+                // 配对（|dy|<0.75px、正视差 (0.5,150]px）→ 上传喂 laser_reconstruct
+                std::vector<int> laserIds;
+                cv::cuda::GpuMat d_mL, d_mR, d_mId;
+                {
+                    cv::Mat hL, hR, hLid;
+                    eiL.d_interpPoints->download(hL, stream);
+                    eiR.d_interpPoints->download(hR, stream);
+                    eiL.d_interp_line_ids->download(hLid, stream);
+                    const auto* pL = hL.ptr<cv::Point2f>();
+                    const auto* pR = hR.ptr<cv::Point2f>();
+                    const int* lids = hLid.ptr<int>();
+                    const int nL = static_cast<int>(hL.total());
+                    const int nR = static_cast<int>(hR.total());
+                    // R 点按 y 分桶（2px 粒度）
+                    std::unordered_map<int, std::vector<int>> rows;
+                    for (int j = 0; j < nR; ++j)
+                        rows[static_cast<int>(pR[j].y * 0.5f)].push_back(j);
+                    std::vector<cv::Point2f> mL2, mR2;
+                    for (int i = 0; i < nL; ++i) {
+                        auto it = rows.find(static_cast<int>(pL[i].y * 0.5f));
+                        if (it == rows.end()) continue;
+                        int best = -1;
+                        float bestDy = 1e9f;
+                        for (int j : it->second) {
+                            const float dy = std::abs(pL[i].y - pR[j].y);
+                            const float disp = pL[i].x - pR[j].x;
+                            if (dy < 0.75f && disp > 0.5f && disp < 150.0f && dy < bestDy) {
+                                bestDy = dy;
+                                best = j;
+                            }
+                        }
+                        if (best >= 0) {
+                            mL2.push_back(pL[i]);
+                            mR2.push_back(pR[best]);
+                            laserIds.push_back(lids[i]);
+                        }
+                    }
+                    if (laserIds.size() < 8) {
+                        JMW_LOG_INFO("07-ScanChains", "[ScanChains] 激光同行配对 {} 点（过少，本帧降级）",
+                                     laserIds.size());
+                        return 0;
+                    }
+                    JMW_LOG_INFO("07-ScanChains", "[ScanChains] 激光帧#{}（{}斜，{}斜参数）同行配对 {} 点",
+                                 frame->frameId, leftSkewFrame ? "左" : "右",
+                                 leftSkewFrame ? "左" : "左(暂)",
+                                 laserIds.size());
+                    const int n = static_cast<int>(laserIds.size());
+                    d_mL.upload(cv::Mat(n, 1, CV_32FC2, mL2.data()), stream);
+                    d_mR.upload(cv::Mat(n, 1, CV_32FC2, mR2.data()), stream);
+                    d_mId.upload(cv::Mat(n, 1, CV_32SC1, laserIds.data()), stream);
                 }
 
-                auto rc = ops.recon->Execute(*mr.d_matched_left, *mr.d_matched_right,
-                                             *mr.d_matched_line_ids,
+                auto rc = ops.recon->Execute(d_mL, d_mR, d_mId,
                                              cv::Mat(frame->snapshot.Q), stream);
                 if (!rc.success) {
                     JMW_LOG_WARN("07-ScanChains", "[ScanChains] laser_reconstruct 失败: {}", rc.message);

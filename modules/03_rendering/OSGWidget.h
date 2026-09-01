@@ -50,6 +50,7 @@ public:
     // LeadScan 移植：加载标志点
     void loadMarkerPoints(const std::vector<osg::Vec3>& markers,
                           const osg::Vec4& color = osg::Vec4(1.0f, 0.0f, 0.0f, 1.0f));
+    void loadLaserPoints(const std::vector<osg::Vec3>& laser);   // 激光点云（青色小点，host 块直推）
 
     // LeadScan 移植：自动相机定位到场景包围球
     void autoFitCamera();
@@ -315,6 +316,10 @@ private:
     osg::ref_ptr<osg::Group> m_markerBbGroup;       // 标志点 billboard 容器（同心圆贴图朝屏）
     osg::ref_ptr<osg::Texture2D> m_markerTexture;   // 同心圆纹理（内白外黑）
     osg::ref_ptr<osg::Geode> m_pcbGeode;            // PointCloudBuffer 直读点云 geode（原子替换用）
+    osg::ref_ptr<osg::Group> m_laserRoot;           // 激光点容器（points 几何）
+    osg::ref_ptr<osg::Geode> m_laserGeode;
+    osg::ref_ptr<osg::Geometry> m_laserGeom;
+    osg::ref_ptr<osg::Vec3Array> m_laserCoords;
     bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角）
     double m_lastFitRadius = -1.0;                  // 上次取景时场景半径（-1=未取过）
     std::chrono::steady_clock::time_point m_lastFitTime{};   // 上次取景时刻（1s 节流）

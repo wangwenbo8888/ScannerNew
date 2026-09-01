@@ -360,6 +360,8 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
     // 灯型归采集组 N10（effectiveN10 带灯型覆写）——不预点亮：固件 H1"按上次
     // 采集参数重启"会重置灯态（2026-08-22 实测），预点亮＝闪一下→灭→组内 N10
     // 再亮（真机"先闪一下再持续"根因）；组序 H1→N10，灯以组内 N10 为准一次到位
+    // 灯型按模式（2026-09-01 定版）：A=纯补光（无激光——业务要求）；B=补光+激光。
+    // A 模式纯点图下真标志点亮斑须超分离阈值 80——DeviceManager 侧高补光代偿
     const bool laserOn = (mode != Scanner::ScanMode::MarkerOnly);
     dm->startCapture(laserOn);
     if (laserOn) {
