@@ -1736,7 +1736,8 @@ void MainWindow::startInfoTimer()
     connect(m_infoTimer, &QTimer::timeout, this, &MainWindow::updateInfoSection);
     m_infoTimer->start(1000);
 
-    // 3D 视图定时刷新（从 PointCloudBuffer 直读快照）
+    // 3D 视图定时刷新（从 PointCloudBuffer 拉快照→值传渲染——快照拉取归
+    // 调用方，03 不再依赖 06 实现类 2026-09-01）
     QTimer* cloudTimer = new QTimer(this);
     connect(cloudTimer, &QTimer::timeout, this, [this]() {
         if (!m_appCtx || !m_3dView) return;
@@ -1745,7 +1746,11 @@ void MainWindow::startInfoTimer()
         static int lastCount = 0;
         int curCount = pcb->getTotalPointCount();
         if (curCount != lastCount) {
-            m_3dView->loadFromPointCloudBuffer(pcb);
+            uint64_t version = 0;
+            std::vector<cv::Point3f> points;
+            std::vector<cv::Vec3b> colors;
+            pcb->getSnapshot(version, points, colors);
+            m_3dView->loadCloudSnapshot(version, points, colors);
             lastCount = curCount;
             if (m_cloudItem001)
                 m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)").arg(curCount));

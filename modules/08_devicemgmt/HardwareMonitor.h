@@ -14,13 +14,14 @@
 
 #include "base/types.h"
 #include "serial/McuFrame.h"   // serial::TempFrame（setLastTemps 注入口类型）
+#include "IDeviceStateSink.h"  // 解 06 实现类耦合（挂账清账 2026-09-01）：
+                               // 只用 pushState（虚接口），不再 include DeviceStateCache
 
 #include <atomic>
 #include <functional>
 #include <mutex>
 #include <thread>
 
-namespace Scanner::data { class DeviceStateCache; }
 namespace Scanner::infra { class EventBus; }
 namespace Scanner::hal  { class IScannerCamera; }
 
@@ -37,7 +38,9 @@ public:
     HardwareMonitor& operator=(const HardwareMonitor&) = delete;
 
     // —— 注入依赖（装配期调用；巡检线程起后不再改）——
-    void setDeviceStateCache(data::DeviceStateCache* cache) { stateCache_ = cache; }
+    // 状态落地口换契约接口（DeviceStateCache* 隐式上转 IDeviceStateSink*，
+    // 调用方零改动）；虚调用免链接符号汇聚
+    void setDeviceStateSink(data::IDeviceStateSink* sink) { stateSink_ = sink; }
     void setEventBus(infra::EventBus* bus) { eventBus_ = bus; }
     void setCamera(hal::IScannerCamera* cam) { camera_ = cam; }
 
@@ -78,7 +81,7 @@ private:
     std::thread thread_;
     int intervalMs_ = 1000;
 
-    data::DeviceStateCache* stateCache_ = nullptr;
+    data::IDeviceStateSink* stateSink_ = nullptr;
     infra::EventBus* eventBus_ = nullptr;
     hal::IScannerCamera* camera_ = nullptr;
     SelfCheckCollector* selfCheck_ = nullptr;

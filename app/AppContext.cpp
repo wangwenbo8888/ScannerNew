@@ -222,7 +222,7 @@ void AppContext::initialize() {
 
     selfCheckCollector_ = std::make_unique<Scanner::device::SelfCheckCollector>();
     hwMonitor_ = std::make_unique<Scanner::device::HardwareMonitor>();
-    hwMonitor_->setDeviceStateCache(deviceStateCache_.get());
+    hwMonitor_->setDeviceStateSink(deviceStateCache_.get());   // IDeviceStateSink*（隐式上转）
     hwMonitor_->setEventBus(eventBus_.get());
     // MCU 温度改门面快照注入（H-T16 口径）；相机行注入口无法保留——DeviceManager
     // 铁规不漏相机指针（遗留：08 侧后续增相机状态快照口）

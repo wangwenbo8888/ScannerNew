@@ -1,5 +1,4 @@
 #include "OSGWidget.h"
-#include "PointCloudBuffer.h"
 #include "file_io.h"
 #include "RenderSanity.h"
 
@@ -355,18 +354,21 @@ void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points,
 
 // ============================================================================
 // P1 摄入加固：四道闸（RenderSanity）→ 先建后换（原子替换）→ 版本记账
+// （解 PointCloudBuffer 耦合 2026-09-01：快照拉取归调用方——渲染只吃
+// 值类型，不再 include 06 实现类；跨层 include 挂账清账）
 // ============================================================================
-void OSGWidget::loadFromPointCloudBuffer(Scanner::data::PointCloudBuffer* pcb) {
-    if (!pcb) return;
-
-    uint64_t version = 0;
-    std::vector<cv::Point3f> points;
-    std::vector<cv::Vec3b> colors;
-    pcb->getSnapshot(version, points, colors);
+void OSGWidget::loadCloudSnapshot(uint64_t version,
+                                  const std::vector<cv::Point3f>& points,
+                                  const std::vector<cv::Vec3b>& colors) {
+    // 原实现 pcb->getSnapshot 由调用方完成；sanitize 就地压缩（NaN 滤除/
+    // 抽稀）——值语义下拷局部（渲染摄入 500ms 一次，拷贝可接受）
+    if (points.empty()) return;
+    std::vector<cv::Point3f> pts = points;
+    std::vector<cv::Vec3b> cols = colors;
 
     // ① 净化与判定（版本短路/空/NaN/尺寸不配/包围盒/超预算抽稀）
     const auto d = Scanner::render::sanitizeSnapshot(
-        points, colors, version, m_lastIngestVersion,
+        pts, cols, version, m_lastIngestVersion,
         m_maxIngestPoints, m_maxIngestExtentMm);
     if (!d.accept) {
         if (std::strcmp(d.reason, "unchanged") != 0)   // 版本未变=正常静默路径
@@ -379,14 +381,14 @@ void OSGWidget::loadFromPointCloudBuffer(Scanner::data::PointCloudBuffer* pcb) {
     osg::ref_ptr<osg::Geode> geode;
     try {
         std::vector<osg::Vec3> osgPoints;
-        osgPoints.reserve(points.size());
-        for (const auto& p : points)
+        osgPoints.reserve(pts.size());
+        for (const auto& p : pts)
             osgPoints.emplace_back(p.x, p.y, p.z);
 
-        if (!colors.empty()) {
+        if (!cols.empty()) {
             std::vector<osg::Vec4ub> osgColors;
-            osgColors.reserve(colors.size());
-            for (const auto& c : colors)
+            osgColors.reserve(cols.size());
+            for (const auto& c : cols)
                 osgColors.emplace_back(c[0], c[1], c[2], 255);
             geode = buildCloudGeode(osgPoints, &osgColors);
         } else {

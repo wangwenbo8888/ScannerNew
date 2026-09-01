@@ -4,6 +4,8 @@
 #include <QTimer>
 #include <QLabel>
 
+#include <opencv2/core.hpp>   // cv::Point3f/Vec3b（loadCloudSnapshot 值签名）
+
 #include <osgViewer/GraphicsWindow>
 #include <osgViewer/Viewer>
 #include <osg/Group>
@@ -21,7 +23,6 @@
 #include <vector>
 #include <cstdint>
 
-namespace Scanner::data { class PointCloudBuffer; }
 
 class OSGWidget : public QOpenGLWidget
 {
@@ -57,8 +58,11 @@ public:
     bool loadTestData(int numPoints);
     bool loadTestDataFromPLY(const std::string& filepath, int numPoints);
 
-    // 从 PointCloudBuffer 直读快照（ADR7.8 只读窄接口）
-    void loadFromPointCloudBuffer(class Scanner::data::PointCloudBuffer* pcb);
+    // 点云快照摄入（ADR7.8 窄接口——2026-09-01 解 PointCloudBuffer 耦合：
+    // 快照拉取归调用方，渲染只吃值类型，不再前置声明 06 实现类）
+    void loadCloudSnapshot(uint64_t version,
+                           const std::vector<cv::Point3f>& points,
+                           const std::vector<cv::Vec3b>& colors);
     void clearScene();
 
     // —— P1 渲染加固（docs/plans/2026-08-25-渲染模块加固计划.md）——

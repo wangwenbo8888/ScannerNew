@@ -3,7 +3,7 @@
 // ============================================================================
 
 #include "HardwareMonitor.h"
-#include "DeviceStateCache.h"
+#include "IDeviceStateSink.h"   // 契约接口（挂账清账 2026-09-01）
 #include "base/EventBus.h"
 #include "IScannerCamera.h"
 #include "SelfCheckCollector.h"
@@ -54,7 +54,7 @@ void HardwareMonitor::monitorLoop() {
 
         // 2. MCU 温度行（改注入：有帧即在线；channels 按位写 MCU_T0..T3，首路
         //    同步写 MCU 行兼容 MainWindow 读法；注入源空不写——垫片行为延续）
-        if (getLastTemps_ && stateCache_) {
+        if (getLastTemps_ && stateSink_) {
             serial::TempFrame tf = getLastTemps_();
             const int n = std::min<int>(tf.channels, 4);
             for (int i = 0; i < n; ++i) {
@@ -64,7 +64,7 @@ void HardwareMonitor::monitorLoop() {
                 info.state = DeviceState::Connected;
                 info.temperature = tf.celsius[i];
                 info.timestamp = ts;
-                stateCache_->pushState(info);
+                stateSink_->pushState(info);
             }
             if (n > 0) {
                 data::DeviceStateInfo first;
@@ -73,12 +73,12 @@ void HardwareMonitor::monitorLoop() {
                 first.state = DeviceState::Connected;
                 first.temperature = tf.celsius[0];
                 first.timestamp = ts;
-                stateCache_->pushState(first);
+                stateSink_->pushState(first);
             }
         }
 
         // 3. 相机行照旧（isOpen/state/温度/fps）+ droppedFrames 累计
-        if (camera_ && stateCache_) {
+        if (camera_ && stateSink_) {
             data::DeviceStateInfo info;
             info.deviceId = "Camera";
             info.deviceType = "ScannerCamera";
@@ -87,7 +87,7 @@ void HardwareMonitor::monitorLoop() {
             info.fps = getFps_ ? getFps_() : 0;
             info.droppedFrames = static_cast<int>(getDropCount_ ? getDropCount_() : 0.0);
             info.timestamp = ts;
-            stateCache_->pushState(info);
+            stateSink_->pushState(info);
         }
 
         // 4. HealthMetrics 快照组装（自检结果 + 三件套回填；供 app 喂 10-PerfMonitor）
