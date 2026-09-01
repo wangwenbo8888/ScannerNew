@@ -7,6 +7,7 @@
 #include "FrameBuffer.h"
 #include "PointCloudBuffer.h"
 #include "DeviceStateCache.h"
+#include "sched/CpuTopology.h"   // 自检起点 CPU 拓扑记录（2026-09-01）
 #include "CalibrationRepository.h"
 #include "StateMachine.h"
 #include "ParameterManager.h"
@@ -298,6 +299,16 @@ void AppContext::initialize() {
 void AppContext::startDevicesAsync() {
     if (devStartThread_.joinable()) return;     // 已起（幂等）
     devStartThread_ = std::thread([this] {
+        // 自检起点：记录 CPU 拓扑（用户口径 2026-09-01——并行度审计基线）
+        {
+            const auto topo = Scanner::pipeline::sched::CpuTopology::detect();
+            const int lanes = Scanner::pipeline::sched::computeLanes(topo.pCores, topo.eCores, 0);
+            JMW_LOG_INFO("app-AppContext",
+                         "[自检] CPU: 物理核={} 逻辑核={} P核={} E核={} 混合架构={} → lanes={}",
+                         topo.pCores + topo.eCores,
+                         std::thread::hardware_concurrency(),
+                         topo.pCores, topo.eCores, topo.hybrid, lanes);
+        }
         const auto devR = deviceManager_->open();   // 相机枚举→MCU 自动搜口→N12Z1→逻辑线程
         JMW_LOG_INFO("app-AppContext", "[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
 

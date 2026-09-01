@@ -61,6 +61,7 @@ TopologyInfo CpuTopology::detect() {
     }
     int total = 0, perf = 0, eff = 0;
     std::vector<uint64_t> perfMasks, effMasks;
+    std::vector<uint64_t> allMasks;   // 同构 40/60 分组用（物理核粒度，含 SMT 对）
     DWORD offset = 0;
     while (offset < bytes) {
         auto* rec = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
@@ -71,6 +72,7 @@ TopologyInfo CpuTopology::detect() {
         // 每物理核掩码（GroupCount 恒 1，目标机单处理器组；防御性下标检查）
         if (rec->Processor.GroupCount >= 1) {
             const uint64_t mask = static_cast<uint64_t>(rec->Processor.GroupMask[0].Mask);
+            allMasks.push_back(mask);
             // 官方语义：值越大性能越高，仅异构系统非零 → 非零=P 核，0=E 核
             if (rec->Processor.EfficiencyClass != 0) {
                 ++perf;
@@ -90,11 +92,22 @@ TopologyInfo CpuTopology::detect() {
         info.pMasks = std::move(perfMasks);
         info.eMasks = std::move(effMasks);
     } else {
-        // 全 0：非混合架构或 Win10 前系统 → 全部按 P 核计（warn 一次）
+        // 全同构（EfficiencyClass 全 0）——逻辑分组（2026-09-01 用户口径）：
+        // 按物理核 40%/60% 分 P/E（P:E=1:1.5，对齐主流大小核比值；SMT 对
+        // 天然同组——mask 即物理核粒度）。此前 eCores=0 走 computeLanes 回退
+        // 且 masks 全空=绑核失效；分组后 lanes=min(P-1,E) 且绑核生效
+        const int pCount = std::max(1, total * 2 / 5);
         info.hybrid = false;
-        info.pCores = total;
-        info.eCores = 0;
-        JMW_LOG_WARN("07-CpuTopology", "CpuTopology::detect: 未区分出 P/E（物理核 {} 全为 EfficiencyClass 0），按纯 P 核处理", total);
+        info.pCores = pCount;
+        info.eCores = total - pCount;
+        for (int i = 0; i < total; ++i) {
+            (i < pCount ? perfMasks : effMasks).push_back(allMasks[static_cast<size_t>(i)]);
+        }
+        info.pMasks = std::move(perfMasks);
+        info.eMasks = std::move(effMasks);
+        JMW_LOG_INFO("07-CpuTopology",
+                     "CpuTopology::detect: 同构 CPU {} 核——40/60 逻辑分组 P={} E={}（lanes=min(P-1,E)）",
+                     total, info.pCores, info.eCores);
     }
     return info;
 }
