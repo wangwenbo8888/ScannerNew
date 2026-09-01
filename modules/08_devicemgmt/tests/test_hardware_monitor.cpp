@@ -95,7 +95,7 @@ TEST(HardwareMonitorTest, CameraRowWritten) {
     DeviceStateCache dsc;
     LocalFakeCam cam;
     HardwareMonitor mon;
-    mon.setDeviceStateCache(&dsc);
+    mon.setDeviceStateSink(&dsc);
     mon.setCamera(&cam);
     mon.setFrameCounter([] { return 30; });
     mon.setDropCounter([] { return 7.0; });
@@ -117,7 +117,7 @@ TEST(HardwareMonitorTest, CameraRowWritten) {
 TEST(HardwareMonitorTest, McuTempRowsWritten) {
     DeviceStateCache dsc;
     HardwareMonitor mon;
-    mon.setDeviceStateCache(&dsc);
+    mon.setDeviceStateSink(&dsc);
     const auto tf = makeTemps(25.1, 26.2, 27.3, 28.4, 4);
     mon.setLastTemps([tf] { return tf; });
     mon.start(50);
@@ -195,7 +195,7 @@ TEST(HardwareMonitorTest, SnapshotWithSelfCheck) {
 TEST(HardwareMonitorTest, NoSourceNoMcuRowAndChannelClip) {
     DeviceStateCache dsc;
     HardwareMonitor mon;
-    mon.setDeviceStateCache(&dsc);
+    mon.setDeviceStateSink(&dsc);
     mon.start(50);
     sleepMs(200);
     mon.stop();
