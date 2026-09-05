@@ -104,7 +104,9 @@ protected:
     QLabel *m_projectName;
     QTreeWidget *m_projectTree;
     QTreeWidgetItem *m_cloudItem001;
-    QTreeWidgetItem *m_markerItem001;   // 标记点 001 子项（扫描中实时计数）
+    QTreeWidgetItem *m_markerRootItem = nullptr;     // 标记点列表根（动态挂扫描会话节点）
+    QTreeWidgetItem *m_markerCurrentItem = nullptr;  // 当前扫描会话节点（实时计数落点）
+    int m_markerScanSeq = 0;                         // 会话序号（标记点 001、002…）
     QWidget *m_floatingToolbar;
 
     AppContext *m_appCtx = nullptr;

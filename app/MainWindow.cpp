@@ -202,13 +202,16 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                 f.write(out);
                             }
                         }
-                        // 工程树实时计数（节流 1/30 信号）：标记点 001＝重建标志点
-                        // 个数（融合云瞬时点数）；列表根/点云数据不写——pcb 落库后
-                        // 由 cloudTimer 500ms 通道更新点云计数
+                        // 工程树实时计数（节流 1/30 信号）：当前扫描会话节点
+                        // 「标记点 00N (M)」＝重建标志点个数（融合云瞬时点数）；
+                        // 历史会话节点保留各自最终值；点云数据由落库后 cloudTimer 更新
                         static std::atomic<uint64_t> s_treeTicks{0};
                         if (s_treeTicks.fetch_add(1) % 30 == 0) {
-                            if (m_markerItem001)
-                                m_markerItem001->setText(0, QStringLiteral("标记点 001 (%1)").arg(pts.size()));
+                            if (m_markerCurrentItem)
+                                m_markerCurrentItem->setText(
+                                    0, QStringLiteral("标记点 %1 (%2)")
+                                              .arg(m_markerScanSeq, 3, 10, QChar('0'))
+                                              .arg(pts.size()));
                         }
                         if (!m_3dView || pts.empty()) return;
                         std::vector<osg::Vec3> markers;
@@ -986,6 +989,21 @@ QWidget *MainWindow::createToolBar()
                 } else {
                     setScanButtonVisual(myIdx, true);          // 只有本键变红
                     m_activeScanToolIdx = myIdx;
+                    // 工程树：首个扫描会话建「标记点 001」，后续会话（标点/面片）
+                    // 复用同一节点不新建（有对应类型即可——用户口径 2026-09-05）；
+                    // 计数实时刷新；激光点数据由「点云数据 001」承载（合账落库
+                    // 后 cloudTimer 更新计数）
+                    if (!m_markerCurrentItem && m_markerRootItem) {
+                        m_markerScanSeq = 1;
+                        auto* item = new QTreeWidgetItem(
+                            m_markerRootItem,
+                            QStringList() << QStringLiteral("标记点 %1")
+                                                 .arg(m_markerScanSeq, 3, 10, QChar('0')));
+                        item->setIcon(0, QIcon(renderSvg(
+                            ":/icons/resources/icons/icon/left/marklist-black-11.svg", 11)));
+                        m_markerCurrentItem = item;
+                        m_markerRootItem->setExpanded(true);
+                    }
                     showCameraMonitor();                       // 调试：弹相机左右图监视
                     statusBar()->showMessage(QString::fromStdString(r.message) +
                                              QStringLiteral("——再点停止"));
@@ -1264,12 +1282,8 @@ QWidget *MainWindow::createProjectSection()
 
     QTreeWidgetItem *markerRoot = new QTreeWidgetItem(QStringList() << QStringLiteral("标记点列表"));
     markerRoot->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 14)));
-    QTreeWidgetItem *m1 = new QTreeWidgetItem(markerRoot, QStringList() << QStringLiteral("标记点 001"));
-    m1->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 11)));
-    QTreeWidgetItem *m2 = new QTreeWidgetItem(markerRoot, QStringList() << QStringLiteral("标记点 002"));
-    m2->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 11)));
     m_projectTree->addTopLevelItem(markerRoot);
-    m_markerItem001 = m1;   // 扫描中实时计数刷新（重建标志点个数）
+    m_markerRootItem = markerRoot;   // 扫描会话节点按实际启动动态创建（见扫描启动 lambda）
 
     QTreeWidgetItem *cloudRoot = new QTreeWidgetItem(QStringList() << QStringLiteral("点云/三角面列表"));
     cloudRoot->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/cloudlist-black-11.svg", 14)));
