@@ -127,6 +127,13 @@ public:
     /// 且零写入，表状态不变。
     ResultStatus seed(const std::vector<MarkerCloudPoint>& pts);
 
+    /// 编辑账本移除（05 D4 双账本·融合云侧，实施计划 P2）：按下标移除体素
+    /// 代表点——整个体素随之摘除（后续同位点重新建格、计数从零）；幸存体素
+    /// 的饱和计数保留。indices 为 GetFusedPoints() 下标（编辑会话期下标稳定
+    /// ——就绪态停采集只删不增）。空=幂等 ok；越界=fail 整批不动；重复下标
+    /// 自动去重。移除后幸存点下标整体前移（调用方须重新快照）。
+    ResultStatus removePoints(const std::vector<uint32_t>& indices);
+
     void Clear() noexcept;
     void Reserve(size_t voxelCount);
 

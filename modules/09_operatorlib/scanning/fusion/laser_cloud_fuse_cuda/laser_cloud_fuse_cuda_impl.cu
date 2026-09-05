@@ -365,3 +365,116 @@ void LaserCloudFuseCuda::Impl::clearImpl(cudaStream_t stream) {
     h_fusedPointCount_ = 0;
     h_voxelCount_ = 0;
 }
+
+// ============================================================
+// removePoints — 编辑账本（05 D4·激光云侧，实施计划 P2）
+// ============================================================
+
+#include <algorithm>   // sort/unique/binary_search（host 侧映射构建）
+
+constexpr unsigned int kLcfRemoved = 0xFFFFFFFFu;
+
+// 单数组压缩：幸存点按 host 顺序生成的 newIdx 写入 dst（确定性；xyz 与
+// normal 各跑一次同一 kernel——同映射保证点-法线关联）
+__global__ void compactArrayKernel(
+    const float* __restrict__ src, float* __restrict__ dst,
+    const unsigned int* __restrict__ newIdx, unsigned int oldCount)
+{
+    const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= oldCount) return;
+    const unsigned int ni = newIdx[i];
+    if (ni == kLcfRemoved) return;
+    dst[ni * 3 + 0] = src[i * 3 + 0];
+    dst[ni * 3 + 1] = src[i * 3 + 1];
+    dst[ni * 3 + 2] = src[i * 3 + 2];
+}
+
+// 哈希槽重映射：幸存体素槽改指新下标（counts_ 原值保留）；移除点所在槽
+// 清键（体素整体摘除——后续同位点重新建格）
+__global__ void remapHashKernel(
+    unsigned long long* keys, unsigned int* fusedIdx,
+    const unsigned int* __restrict__ newIdx, size_t capacity)
+{
+    const size_t s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= capacity) return;
+    if (keys[s] == 0) return;                 // 空槽（key+1 编码，0=空）
+    const unsigned int ni = newIdx[fusedIdx[s]];
+    if (ni == kLcfRemoved) keys[s] = 0;
+    else                   fusedIdx[s] = ni;
+}
+
+ResultStatus LaserCloudFuseCuda::Impl::removePointsImpl(
+    const std::vector<uint32_t>& indices, cudaStream_t stream)
+{
+    if (indices.empty()) return ResultStatus::ok();
+    const unsigned int n = h_fusedPointCount_;
+    if (n == 0) return ResultStatus::fail("removePoints: empty accumulator");
+
+    // 去重排序＋越界校验（整批原子：任一越界 fail 状态不动）
+    std::vector<uint32_t> sorted = indices;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    for (uint32_t i : sorted)
+        if (i >= n) return ResultStatus::fail("removePoints: index out of range");
+    if (sorted.size() >= n) {                 // 全删＝清空
+        clearImpl(stream);
+        CALIB_LOG_INFO("removePoints: all {} points removed", n);
+        return ResultStatus::ok();
+    }
+
+    // host 建 old→new 映射（幸存按原序前移——确定性，无原子）
+    std::vector<unsigned int> newIdx(n, kLcfRemoved);
+    {
+        unsigned int w = 0;
+        for (unsigned int i = 0; i < n; ++i)
+            if (!std::binary_search(sorted.begin(), sorted.end(), i))
+                newIdx[i] = w++;
+    }
+    const unsigned int newCount = n - static_cast<unsigned int>(sorted.size());
+
+    // 单 scratch 两轮复用（控显存峰值）；newIdx 上传
+    const size_t ptsBytes = maxFusedPoints_ * 3 * sizeof(float);
+    float* d_scratch = nullptr;
+    unsigned int* d_newIdx = nullptr;
+    if (cudaMalloc(&d_scratch, ptsBytes) != cudaSuccess) {
+        return ResultStatus::fail("removePoints: scratch allocation failed");
+    }
+    if (cudaMalloc(&d_newIdx, n * sizeof(unsigned int)) != cudaSuccess) {
+        cudaFree(d_scratch);
+        return ResultStatus::fail("removePoints: map allocation failed");
+    }
+    cudaMemcpyAsync(d_newIdx, newIdx.data(), n * sizeof(unsigned int),
+                    cudaMemcpyHostToDevice, stream);
+
+    const unsigned int gridPts = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const size_t gridHash = (capacity_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const size_t keptBytes = newCount * 3 * sizeof(float);
+
+    // ① xyz 压缩 → scratch → 拷回常驻缓冲（DeviceContext 指针保持稳定）
+    compactArrayKernel<<<gridPts, BLOCK_SIZE, 0, stream>>>(
+        d_fusedXyz_, d_scratch, d_newIdx, n);
+    cudaMemcpyAsync(d_fusedXyz_, d_scratch, keptBytes,
+                    cudaMemcpyDeviceToDevice, stream);
+    // ② normal 同映射压缩（点-法线关联保全）
+    compactArrayKernel<<<gridPts, BLOCK_SIZE, 0, stream>>>(
+        d_fusedNormal_, d_scratch, d_newIdx, n);
+    cudaMemcpyAsync(d_fusedNormal_, d_scratch, keptBytes,
+                    cudaMemcpyDeviceToDevice, stream);
+    // ③ 哈希槽重映射（幸存改指/移除清键）
+    remapHashKernel<<<gridHash, BLOCK_SIZE, 0, stream>>>(
+        d_keys_, d_fusedIdx_, d_newIdx, capacity_);
+    // ④ 设备端计数器置新值（编辑期无并发 fuse，非原子写安全）
+    cudaMemcpyAsync(d_fusedPointCount_, &newCount, sizeof(unsigned int),
+                    cudaMemcpyHostToDevice, stream);
+
+    cudaStreamSynchronize(stream);
+    cudaFree(d_scratch);
+    cudaFree(d_newIdx);
+
+    h_fusedPointCount_ = newCount;
+    h_voxelCount_ = newCount;                // 体素↔代表点 1:1
+
+    CALIB_LOG_INFO("removePoints: removed {} points, {} remain (voxels={})",
+                   sorted.size(), newCount, h_voxelCount_);
+    return ResultStatus::ok();
+}

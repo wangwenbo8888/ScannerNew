@@ -49,6 +49,10 @@ struct LaserCloudFuseCuda::Impl {
                   const cv::Matx33d& R, const cv::Vec3d& T,
                   cv::cuda::Stream& stream);
 
+    // --- removePoints（编辑账本，.cu 实现） ---
+    ResultStatus removePointsImpl(const std::vector<uint32_t>& indices,
+                                  cudaStream_t stream);
+
     // --- clear ---
     void clearImpl(cudaStream_t stream);
 };

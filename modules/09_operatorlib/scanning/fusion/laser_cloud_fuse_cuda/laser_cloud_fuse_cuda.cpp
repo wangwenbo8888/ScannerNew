@@ -4,6 +4,7 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>
 #include <chrono>
 #include <stdexcept>
 
@@ -148,6 +149,20 @@ LaserCloudFuseDeviceContext LaserCloudFuseCuda::GetDeviceContext() const {
     return ctx;
 }
 
+// ============================================================
+// removePoints（05 D4 编辑账本·激光云侧）
+// ============================================================
+
+ResultStatus LaserCloudFuseCuda::removePoints(const std::vector<uint32_t>& indices,
+                                              cv::cuda::Stream& stream) {
+    return pImpl_->removePointsImpl(indices, cv::cuda::StreamAccessor::getStream(stream));
+}
+
+ResultStatus LaserCloudFuseCuda::removePoints(const std::vector<uint32_t>& indices) {
+    cv::cuda::Stream stream;
+    return pImpl_->removePointsImpl(indices, cv::cuda::StreamAccessor::getStream(stream));
+}
+
 void LaserCloudFuseCuda::SetParams(const LaserCloudFuseCUDAParams& params) {
     params.validate();
     pImpl_->params_ = params;
@@ -189,6 +204,12 @@ void LaserCloudFuseCuda::Warmup(const calib::WarmupConfig&) {}
 size_t LaserCloudFuseCuda::GetVoxelCount() const noexcept { return 0; }
 size_t LaserCloudFuseCuda::GetFusedPointCount() const noexcept { return 0; }
 LaserCloudFuseDeviceContext LaserCloudFuseCuda::GetDeviceContext() const { return {}; }
+ResultStatus LaserCloudFuseCuda::removePoints(const std::vector<uint32_t>&, cv::cuda::Stream&) {
+    return ResultStatus::fail("BUILD_CUDA is OFF");
+}
+ResultStatus LaserCloudFuseCuda::removePoints(const std::vector<uint32_t>&) {
+    return ResultStatus::fail("BUILD_CUDA is OFF");
+}
 void LaserCloudFuseCuda::SetParams(const LaserCloudFuseCUDAParams& p) { p.validate(); }
 const LaserCloudFuseCUDAParams& LaserCloudFuseCuda::GetParams() const {
     static LaserCloudFuseCUDAParams p; return p;

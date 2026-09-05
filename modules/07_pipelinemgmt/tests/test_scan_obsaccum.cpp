@@ -173,3 +173,50 @@ TEST(FrameObsAccumTest, NullLaserFrame) {
     EXPECT_EQ(snap.obs[0].laserCacheSlot, FrameObs::kNoLaserSlot);
     EXPECT_TRUE(snap.laserFrames.empty());
 }
+
+// —— 编辑账本（05 D4·obs 侧，实施计划 P2）——
+
+// 剔除后 snapshot 出口过滤已删 id；恢复（undo 路径）后回到全量
+//（makeObs id 公式＝100*frameId+i：帧1→{100,101}，帧2→{200,201,202}）
+TEST(FrameObsAccumTest, ExcludeMarkerObsFiltersSnapshot) {
+    FrameObsAccumulator acc(1 << 20);
+    acc.push(makeObs(1, 2), {});                      // ids 100,101
+    acc.push(makeObs(2, 3), {});                      // ids 200,201,202
+    ASSERT_EQ(acc.frameCount(), 2u);
+
+    acc.excludeMarkerObs({101, 202}, true);
+    EXPECT_EQ(acc.excludedMarkerObsCount(), 2u);
+
+    auto snap = acc.snapshot();
+    ASSERT_EQ(snap.obs.size(), 2u);
+    ASSERT_EQ(snap.obs[0].markerObs.size(), 1u);      // 100 留
+    EXPECT_EQ(snap.obs[0].markerObs[0].globalId, 100);
+    ASSERT_EQ(snap.obs[1].markerObs.size(), 2u);      // 200,201 留
+    EXPECT_EQ(snap.obs[1].markerObs[0].globalId, 200);
+    EXPECT_EQ(snap.obs[1].markerObs[1].globalId, 201);
+
+    acc.excludeMarkerObs({101, 202}, false);          // undo 恢复
+    EXPECT_EQ(acc.excludedMarkerObsCount(), 0u);
+    auto snap2 = acc.snapshot();
+    ASSERT_EQ(snap2.obs[0].markerObs.size(), 2u);
+    ASSERT_EQ(snap2.obs[1].markerObs.size(), 3u);
+}
+
+// 未知 id 幂等；负 id（链断观测）不参与；clear 清剔除集
+TEST(FrameObsAccumTest, ExcludeMarkerObsIdempotentAndClear) {
+    FrameObsAccumulator acc(1 << 20);
+    acc.push(makeObs(1, 2), {});
+
+    acc.excludeMarkerObs({999}, true);                // 未知 id
+    EXPECT_EQ(acc.excludedMarkerObsCount(), 1u);
+    EXPECT_EQ(acc.snapshot().obs[0].markerObs.size(), 2u);  // 不影响现有
+
+    acc.excludeMarkerObs({-1}, true);                 // 负 id 忽略
+    EXPECT_EQ(acc.excludedMarkerObsCount(), 1u);
+
+    acc.excludeMarkerObs({999}, true);                // 重复剔除幂等
+    EXPECT_EQ(acc.excludedMarkerObsCount(), 1u);
+
+    acc.clear();
+    EXPECT_EQ(acc.excludedMarkerObsCount(), 0u);
+}

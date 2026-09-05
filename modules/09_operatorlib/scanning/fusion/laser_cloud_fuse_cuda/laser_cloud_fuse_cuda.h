@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstddef>
 #include "common/calib_types.h"
+#include "common/result.h"
 #include "common/scanner_api.h"
 #include "common/version.h"
 
@@ -97,6 +98,16 @@ public:
 
     LaserCloudFuseCudaResult Execute(const cv::cuda::GpuMat& d_points3d,
                  const cv::Matx33d& R, const cv::Vec3d& T);
+
+    /// 编辑账本移除（05 D4 双账本·激光云侧，实施计划 P2）：按下标移除融合点
+    /// ——设备端压缩（点/法线同映射保全关联、幸存体素饱和计数保留、体素随
+    /// 代表点整体摘除）。indices 为融合点下标（GetDeviceContext()
+    /// .fusedPointCount 界内；编辑会话期下标稳定）。空=幂等 ok；越界=fail
+    /// 整批不动；重复去重；全删=等价 Clear。移除后幸存点按原序前移（下标
+    /// 重排，调用方重新取 DeviceContext/快照）。
+    ResultStatus removePoints(const std::vector<uint32_t>& indices,
+                              cv::cuda::Stream& stream);
+    ResultStatus removePoints(const std::vector<uint32_t>& indices);
 
     void Destroy();
 

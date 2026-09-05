@@ -63,6 +63,19 @@ FrameObsAccumulator::Snapshot FrameObsAccumulator::snapshot() const {
     std::lock_guard<std::mutex> lock(mu_);
     Snapshot s;
     s.obs = obsList_;
+    if (!excludedIds_.empty()) {
+        // GBA 出口过滤：已剔除 globalId 的观测不进快照（05 D4 第二账本）
+        for (auto& fo : s.obs) {
+            if (fo.markerObs.empty()) continue;
+            std::vector<MarkerObs> kept;
+            kept.reserve(fo.markerObs.size());
+            for (const auto& mo : fo.markerObs) {
+                if (mo.globalId >= 0 && excludedIds_.count(mo.globalId) > 0) continue;
+                kept.push_back(mo);
+            }
+            fo.markerObs = std::move(kept);
+        }
+    }
     s.laserFrames = laserFrames_;
     return s;
 }
@@ -71,8 +84,23 @@ void FrameObsAccumulator::clear() {
     std::lock_guard<std::mutex> lock(mu_);
     obsList_.clear();
     laserFrames_.clear();
+    excludedIds_.clear();
     usedBytes_ = 0;
     degradedLaser_.store(false, std::memory_order_relaxed);
+}
+
+void FrameObsAccumulator::excludeMarkerObs(const std::vector<int>& globalIds, bool removed) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (int id : globalIds) {
+        if (id < 0) continue;              // 链断观测不参与
+        if (removed) excludedIds_.insert(id);
+        else         excludedIds_.erase(id);
+    }
+}
+
+size_t FrameObsAccumulator::excludedMarkerObsCount() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return excludedIds_.size();
 }
 
 Scanner::Result FrameObsAccumulator::saveCheckpoint(const std::string& path) const {

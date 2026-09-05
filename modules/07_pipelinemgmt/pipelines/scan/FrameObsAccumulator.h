@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include "pipelines/scan/ScanTypes.h"
@@ -50,10 +51,21 @@ public:
     /// 快照回填（restore 路径：替换 obsList_/laserFrames_/降级标志；预算不变）
     void replace(Snapshot&& snap, bool degraded);
 
+    // —— 编辑账本（05 D4 双账本·obs 侧，实施计划 P2）——
+    /// 按 globalId 剔除/恢复逐帧观测：snapshot()（GBA 输入）出口过滤已剔除
+    /// id 的 MarkerObs（激光帧缓存不动）；removed=false 恢复（undo 路径）；
+    /// 未知 id 幂等；id<0（链断观测）不参与剔除。clear() 同步清剔除集；
+    /// 检查点 save/load 不含剔除集（崩溃恢复后需重放剔除——编辑会话与
+    /// 检查点不并发的口径下可接受）。
+    void excludeMarkerObs(const std::vector<int>& globalIds, bool removed);
+    /// 当前剔除 id 数（观测口径：会话统计/排障）
+    size_t excludedMarkerObsCount() const;
+
 private:
     mutable std::mutex mu_;                  // push(写) 与 snapshot(读) 互斥
     std::vector<FrameObs> obsList_;
     std::vector<std::vector<float>> laserFrames_;
+    std::set<int> excludedIds_;              // 编辑剔除的 marker globalId（GBA 出口过滤）
     size_t budgetBytes_;
     size_t usedBytes_ = 0;
     std::atomic<bool> degradedLaser_{false}; // 只置位不复位（clear 复位）

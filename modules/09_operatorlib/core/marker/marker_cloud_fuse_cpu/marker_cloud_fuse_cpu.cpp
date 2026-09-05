@@ -382,6 +382,57 @@ ResultStatus MarkerCloudFuseCPU::seed(const std::vector<MarkerCloudPoint>& pts) 
 }
 
 // ============================================================
+// removePoints（05 D4 编辑账本·融合云侧）
+// ============================================================
+
+ResultStatus MarkerCloudFuseCPU::removePoints(const std::vector<uint32_t>& indices) {
+    Impl& im = *pImpl_;
+    if (indices.empty()) return ResultStatus::ok();   // 幂等
+
+    // 去重排序＋越界校验（整批原子：任一越界 fail，状态不动）
+    std::vector<uint32_t> sorted = indices;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    for (uint32_t i : sorted)
+        if (i >= im.fusedPoints_.size())
+            return ResultStatus::fail("removePoints: index out of range");
+    auto isRemoved = [&sorted](uint32_t idx) {
+        return std::binary_search(sorted.begin(), sorted.end(), idx);
+    };
+
+    // ① 收集幸存体素（槽↔代表点一一对应）：随代表点摘除整个体素
+    struct KeepRec { uint64_t key; uint32_t fi; uint32_t cnt; };
+    std::vector<KeepRec> keep;
+    keep.reserve(im.size_);
+    for (size_t s = 0; s < im.capacity_; ++s) {
+        if (im.tags_[s] == 0) continue;
+        if (isRemoved(im.fusedIdx_[s])) continue;
+        keep.push_back({im.keys_[s], im.fusedIdx_[s], im.counts_[s]});
+    }
+
+    // ② 压缩代表点向量，建旧→新下标映射
+    std::vector<uint32_t> oldToNew(im.fusedPoints_.size(), 0);
+    std::vector<MarkerCloudPoint> kept;
+    kept.reserve(im.fusedPoints_.size() - sorted.size());
+    for (size_t i = 0; i < im.fusedPoints_.size(); ++i) {
+        if (isRemoved(static_cast<uint32_t>(i))) continue;
+        oldToNew[i] = static_cast<uint32_t>(kept.size());
+        kept.push_back(im.fusedPoints_[i]);
+    }
+
+    // ③ 原容量重建哈希：幸存体素重放置（计数保留），移除体素位留空
+    std::fill(im.tags_.begin(), im.tags_.end(), static_cast<uint8_t>(0));
+    im.size_ = 0;
+    for (const auto& k : keep)
+        im.placeSlot(k.key, oldToNew[k.fi], k.cnt);
+    im.fusedPoints_ = std::move(kept);
+
+    CALIB_LOG_INFO("removePoints: removed {} points, {} remain (voxels={})",
+                   sorted.size(), im.fusedPoints_.size(), im.size_);
+    return ResultStatus::ok();
+}
+
+// ============================================================
 // capacity / clear
 // ============================================================
 
