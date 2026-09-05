@@ -333,13 +333,77 @@ void OSGWidget::fitCameraToRoot()
     }
 }
 
+void OSGWidget::fitCloudOptimal(const std::vector<osg::Vec3>& points)
+{
+    if (points.empty() || !m_viewer.valid() || !m_gw.valid()) return;
+
+    // 质心＋PCA 协方差
+    Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+    for (const auto& p : points) mean += Eigen::Vector3d(p.x(), p.y(), p.z());
+    mean /= static_cast<double>(points.size());
+    Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+    for (const auto& p : points) {
+        const Eigen::Vector3d d(p.x() - mean.x(), p.y() - mean.y(), p.z() - mean.z());
+        cov += d * d.transpose();
+    }
+    cov /= static_cast<double>(points.size());
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+    const auto& eig = solver.eigenvectors();          // 列升序：col(0)最小＝法向，col(2)最大＝面内主轴
+    osg::Vec3d normal(eig.col(0)(0), eig.col(0)(1), eig.col(0)(2));
+    osg::Vec3d upv(eig.col(2)(0), eig.col(2)(1), eig.col(2)(2));
+    if (normal.length2() < 1e-20 || upv.length2() < 1e-20) return;
+    normal.normalize();
+    upv.normalize();                                  // 面内主轴⊥法向（对称阵特征向量正交）
+    if (std::fabs(normal * upv) > 0.99) upv = osg::Vec3d(0, 0, 1) - normal * (normal * osg::Vec3d(0, 0, 1));
+
+    // 包围球（相对质心）
+    double r2 = 0.0;
+    for (const auto& p : points) {
+        const osg::Vec3d d(p.x() - mean.x(), p.y() - mean.y(), p.z() - mean.z());
+        r2 = std::max(r2, static_cast<double>(d * d));
+    }
+    const double r = std::sqrt(r2);
+    if (!(r > 0.0)) return;
+    placeOptimalCamera(osg::Vec3d(mean.x(), mean.y(), mean.z()), normal, upv, r);
+    JMW_LOG_INFO("03-OSGWidget", "[fitCloudOptimal] {} 点 半径{:.1f}mm（法向面视）",
+                 points.size(), r);
+}
+
+void OSGWidget::placeOptimalCamera(const osg::Vec3d& ctr, const osg::Vec3d& normal,
+                                   const osg::Vec3d& upv, double radiusMm)
+{
+    if (!m_viewer.valid() || !m_gw.valid() || !(radiusMm > 0.0)) return;
+    constexpr double kVfovDeg = 30.0;
+    constexpr double kPi = 3.14159265358979323846;
+    const auto* traits = m_gw->getTraits();
+    const double aspect = static_cast<double>(traits->width) / static_cast<double>(traits->height);
+    const double halfV = kVfovDeg * 0.5 * kPi / 180.0;
+    const double halfH = std::atan(std::tan(halfV) * aspect);
+    const double half = std::min(halfV, halfH);
+    const double dist = (radiusMm / std::sin(half)) * 1.08;
+
+    const osg::Vec3d eye = ctr + normal * dist;      // 沿法向外退（面视主平面）
+
+    const double zNear = std::max(dist - radiusMm, radiusMm * 1e-3) * 0.5;   // 紧致近裁剪（深度精度）
+    const double zFar = (dist + radiusMm) * 10.0;
+    m_viewer->getCamera()->setProjectionMatrixAsPerspective(kVfovDeg, aspect, zNear, zFar);
+    m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
+
+    m_viewLocked = false;
+    osg::ref_ptr<osgGA::TrackballManipulator> manip = new osgGA::TrackballManipulator;
+    manip->setAllowThrow(false);
+    manip->setHomePosition(eye, ctr, upv, false);
+    m_viewer->setCameraManipulator(manip);
+    manip->home(0);
+}
+
 void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points)
 {
     if (points.empty()) return;
 
     osg::ref_ptr<osg::Geode> geode = buildCloudGeode(points, nullptr);
     m_root->addChild(geode.get());
-    fitCameraToRoot();
+    fitCloudOptimal(points);
 }
 
 void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points,
@@ -349,6 +413,7 @@ void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points,
 
     osg::ref_ptr<osg::Geode> geode = buildCloudGeode(points, &colors);
     m_root->addChild(geode.get());
+    fitCloudOptimal(points);
 }
 
 // ============================================================================
@@ -781,6 +846,46 @@ void OSGWidget::streamNextBatch()
         JMW_LOG_INFO("03-OSGWidget", "[OSGWidget] PLY 流式加载完成: {} 点 / {} ms（{} 点/秒）",
                      m_streamLoaded, ms,
                      ms > 0 ? static_cast<long long>(m_streamLoaded) * 1000 / ms : 0);
+        // 最优取景（2026-09-05）：PCA 累计器（质心/协方差）＋包围盒角半径——
+        // 与 fitCloudOptimal 同一落位（流式路径原先只转朝向不配距离/居中）
+        if (m_pcaCount > 3 && m_streamBBoxValid) {
+            const osg::Vec3d meanV = m_pcaSum / static_cast<double>(m_pcaCount);   // m_pcaSum=osg::Vec3d
+            const double mx = meanV.x(), my = meanV.y(), mz = meanV.z();
+            const double n = static_cast<double>(m_pcaCount);
+            Eigen::Matrix3d cov;
+            cov << m_pcaSumXX / n - mx * mx,
+                   m_pcaSumXY / n - mx * my,
+                   m_pcaSumXZ / n - mx * mz,
+                   m_pcaSumXY / n - mx * my,
+                   m_pcaSumYY / n - my * my,
+                   m_pcaSumYZ / n - my * mz,
+                   m_pcaSumXZ / n - mx * mz,
+                   m_pcaSumYZ / n - my * mz,
+                   m_pcaSumZZ / n - mz * mz;
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+            const auto& eig = solver.eigenvectors();
+            osg::Vec3d normal(eig.col(0)(0), eig.col(0)(1), eig.col(0)(2));
+            osg::Vec3d upv(eig.col(2)(0), eig.col(2)(1), eig.col(2)(2));
+            normal.normalize();
+            upv.normalize();
+            if (std::fabs(normal * upv) > 0.99)
+                upv = osg::Vec3d(0, 0, 1) - normal * (normal * osg::Vec3d(0, 0, 1));
+            // 包围半径：bbox 角点到质心最大距离（对角近似）
+            double r2 = 0.0;
+            const osg::Vec3d ctrMean(mx, my, mz);
+            for (int cx = 0; cx < 2; ++cx)
+                for (int cy = 0; cy < 2; ++cy)
+                    for (int cz = 0; cz < 2; ++cz) {
+                        const osg::Vec3d corner(
+                            cx ? static_cast<double>(m_streamBBoxMax.x()) : static_cast<double>(m_streamBBoxMin.x()),
+                            cy ? static_cast<double>(m_streamBBoxMax.y()) : static_cast<double>(m_streamBBoxMin.y()),
+                            cz ? static_cast<double>(m_streamBBoxMax.z()) : static_cast<double>(m_streamBBoxMin.z()));
+                        const osg::Vec3d d = corner - ctrMean;
+                        r2 = std::max(r2, static_cast<double>(d * d));
+                    }
+            placeOptimalCamera(ctrMean, normal, upv, std::sqrt(r2));
+            JMW_LOG_INFO("03-OSGWidget", "[流式完成·最优取景] 半径{:.1f}mm", std::sqrt(r2));
+        }
     }
 }
 
