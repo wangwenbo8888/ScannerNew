@@ -5,6 +5,7 @@
 #include "CameraControl.h"
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
+#include <atomic>
 #include <chrono>
 #include <cstring>
 
@@ -62,13 +63,29 @@ private:
             return;
         }
 
+        // —— 严格帧号配对（用户口径 2026-09-05）：左右 GetFrameID 相等才交付，
+        // 保奇偶分派（激光 T/V 左斜/右斜组别）与立体同刻性；不等则丢落后侧
+        // 图像（保留超前侧待追平）——防单侧丢帧后左右错刻配对（立体错配/
+        // 左右斜组别翻转）。两相机帧号若不同值起步/持续漂移会持续不配，
+        // 由下方计数日志暴露（实机观察口径）——
+        if (leftBuf.frameId != rightBuf.frameId) {
+            auto& behind = (leftBuf.frameId < rightBuf.frameId) ? leftBuf : rightBuf;
+            behind.image.release();
+            behind.ready.store(false, std::memory_order_release);
+            static std::atomic<uint64_t> s_mismatchDrops{0};
+            if (s_mismatchDrops.fetch_add(1) % 100 == 0) {
+                JMW_LOG_WARN("08-CameraControl",
+                             "[CameraControl] 帧号不配丢组（累计 {}）：L={} R={}",
+                             s_mismatchDrops.load(), leftBuf.frameId, rightBuf.frameId);
+            }
+            return;
+        }
+
         leftBuf.ready.store(false, std::memory_order_release);
         rightBuf.ready.store(false, std::memory_order_release);
 
-        uint64_t fid = std::max(leftBuf.frameId, rightBuf.frameId);
-
         hal::StereoFrame frame;
-        frame.frameId = fid;
+        frame.frameId = leftBuf.frameId;   // 严格配对下左右相等
         frame.timestamp = 0;
         frame.leftGray  = leftBuf.image.clone();
         frame.rightGray = rightBuf.image.clone();
