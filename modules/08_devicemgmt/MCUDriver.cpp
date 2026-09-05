@@ -75,6 +75,9 @@ void MCUDriver::setWireTap(std::function<void(bool, const std::string&)> tap) {
 }
 
 void MCUDriver::notifyTap(bool tx, const std::string& data) {
+    // 上下位机全帧留痕（用户口径 2026-09-05：联调期默认可见——TX 三处/RX 三处
+    // 全经此单点；协议稳定后可降 JMW_LOG_DEBUG 减噪）
+    JMW_LOG_INFO("08-MCUDriver", "[{}] {}", tx ? "TX→MCU" : "RX←MCU", data);
     std::lock_guard<std::mutex> lock(tapMtx_);
     if (wireTap_) wireTap_(tx, data);
 }
