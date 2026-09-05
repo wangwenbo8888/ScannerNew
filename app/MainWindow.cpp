@@ -1600,12 +1600,11 @@ QWidget *MainWindow::createBottomToolBar()
     // —— 三栏选择模型（05 定稿 D3）三组互斥按钮＋操作组（用户口径 2026-09-05）——
     struct SelBtn { QString iconBlack; QString tip; };
     QList<SelBtn> selButtons = {
-        // 组1 对象类型（栏3，四选一）：点云 / 标志点 / 标志点加点云 / 三角面
-        //（点云/三角面无专属图标资产——暂以最近似图占位，设计出图后替换）
+        // 组1 对象类型（栏3，三选一；2026-09-05 裁定：激光点改称点云、三角面
+        // 不可编辑——三钮口径对齐 D3）
         {":/icons/resources/icons/点云和三角面选择 (1).svg", QStringLiteral("点云：仅圈选激光点云（点云）点")},
         {":/icons/resources/icons/标记点选择 (1).svg", QStringLiteral("标志点：仅圈选标志点")},
         {":/icons/resources/icons/标记点和点云三角面选择 (1).svg", QStringLiteral("标志点加点云：同时圈选标志点与点云")},
-        {":/icons/resources/icons/icon/bottom/surfaceselect (1).svg", QStringLiteral("三角面：圈选三角网格面")},
         // 组2 选择类型（栏2）：贯穿 / 只取表面
         {":/icons/resources/icons/贯穿选择 (1).svg", QStringLiteral("贯穿：曲线内任意深度的点全部选中")},
         {":/icons/resources/icons/表面选择 (1).svg", QStringLiteral("只取表面：仅选中视线方向最近的表面层")},
@@ -1620,7 +1619,7 @@ QWidget *MainWindow::createBottomToolBar()
         {":/icons/resources/icons/icon/bottom/delete (3).svg", QStringLiteral("删除：圈选并删除所选点（Ctrl+Z 撤销）")},
     };
 
-    // 三栏互斥（QButtonGroup 各组独占）；操作组（索引 8-12）非 checkable
+    // 三栏互斥（QButtonGroup 各组独占）；操作组（索引 7-11）非 checkable
     QButtonGroup* objTypeGroup = new QButtonGroup(container);
     QButtonGroup* toolGroup = new QButtonGroup(container);
     QButtonGroup* depthGroup = new QButtonGroup(container);
@@ -1643,10 +1642,10 @@ QWidget *MainWindow::createBottomToolBar()
         btn->setIcon(QIcon(pix));
         btn->setIconSize(QSize(28, 28));
         btn->setContentsMargins(0, 0, 0, 0);
-        if (i <= 7) {                                 // 三栏＝可选中互斥（组分辖）
+        if (i <= 6) {                                 // 三栏＝可选中互斥（组分辖）
             btn->setCheckable(true);
-            if (i <= 3) objTypeGroup->addButton(btn, i);
-            else if (i <= 5) depthGroup->addButton(btn, i);
+            if (i <= 2) objTypeGroup->addButton(btn, i);
+            else if (i <= 4) depthGroup->addButton(btn, i);
             else toolGroup->addButton(btn, i);
             // 选中态视觉反馈：checked 切 (3) 号图标（暗红激活态），弹回换常态图
             QString iconOn = selButtons[i].iconBlack;
@@ -1661,9 +1660,9 @@ QWidget *MainWindow::createBottomToolBar()
         }
         // 初始不选（用户口径 2026-09-05：启动悬浮条无选中态；三栏选择仅圈选
         // 流程中生效——圈选结束回工具默认套索，见 lassoCompleted 接线）
-        // 操作组（索引 8-12）暂隐藏（用户口径 2026-09-05：三栏先行；P4 编辑
+        // 操作组（索引 7-11）暂隐藏（用户口径 2026-09-05：三栏先行；P4 编辑
         // 会话接线时随功能恢复显示——钮与接线保留，仅 hide）
-        if (i >= 8) btn->hide();
+        if (i >= 7) btn->hide();
         // tip 强制显示（2026-09-05）：无边框半透明悬浮窗下 QToolTip 自动机制
         // 不触发——开 WA_Hover，经 MainWindow::eventFilter 于 HoverEnter 立即
         // showText（见 eventFilter "selectionButton" 分支）
@@ -1672,7 +1671,7 @@ QWidget *MainWindow::createBottomToolBar()
         containerLayout->addWidget(btn);
         m_selectionButtons.append(btn);
 
-        if (i == 3 || i == 5) {                       // 组间分隔（组1|组2|组3）
+        if (i == 2 || i == 4) {                       // 组间分隔（组1|组2|组3）
             QFrame *separator = new QFrame();
             separator->setFixedWidth(1);
             separator->setFixedHeight(28);
@@ -1684,28 +1683,28 @@ QWidget *MainWindow::createBottomToolBar()
     layout->addWidget(container);
     layout->addStretch();
 
-    // 对象类型组（索引 0-3）→ 圈选目标掩码（D3 栏3：点云/三角面＝Clouds，
-    // 标志点＝Markers，标志点加点云＝两者）
-    if (m_3dView && m_selectionButtons.size() > 3)
+    // 对象类型组（索引 0-2）→ 圈选目标掩码（D3 栏3：0 点云＝Clouds，
+    // 1 标志点＝Markers，2 标志点加点云＝两者）
+    if (m_3dView && m_selectionButtons.size() > 2)
     {
         connect(objTypeGroup, &QButtonGroup::idToggled, this, [this](int id, bool on) {
             if (!on || !m_3dView) return;
             using LT = OSGWidget::LassoTarget;
             const int mask = (id == 1) ? LT::LassoMarkers
                           : (id == 2) ? (LT::LassoMarkers | LT::LassoClouds)
-                                      : LT::LassoClouds;      // 0 点云 / 3 三角面
+                                      : LT::LassoClouds;      // 0 点云
             m_3dView->setLassoTargets(mask);
         });
-        // 选择类型组（索引 4 贯穿 / 5 只取表面）→ 深度模式（D3 栏2）
+        // 选择类型组（索引 3 贯穿 / 4 只取表面）→ 深度模式（D3 栏2）
         connect(depthGroup, &QButtonGroup::idToggled, this, [this](int id, bool on) {
             if (!on || !m_3dView) return;
-            m_3dView->setLassoFirstLayer(id == 5);
+            m_3dView->setLassoFirstLayer(id == 4);
         });
     }
 
-    // 套索（索引 6）/多段线（索引 7）→ 圈选＋删除确认流（左键落点/右键或双击
+    // 套索（索引 5）/多段线（索引 6）→ 圈选＋删除确认流（左键落点/右键或双击
     // 闭合→弹「确认删除」；删除钮在操作组隐藏期间由此承载删除入口）
-    for (const int idx : {6, 7}) {
+    for (const int idx : {5, 6}) {
         if (m_selectionButtons.size() > idx)
         {
             connect(m_selectionButtons[idx], &QPushButton::clicked, this, [this]()
@@ -1728,19 +1727,19 @@ QWidget *MainWindow::createBottomToolBar()
                 // checked=true）——三组各自临时解除互斥→清全部选中→恢复互斥
                 for (QButtonGroup* g : {m_objBtnGroup, m_toolBtnGroup, m_depthBtnGroup})
                     if (g) g->setExclusive(false);
-                for (int i = 0; i <= 7; ++i)
+                for (int i = 0; i <= 6; ++i)
                     if (m_selectionButtons.size() > i) m_selectionButtons[i]->setChecked(false);
                 for (QButtonGroup* g : {m_objBtnGroup, m_toolBtnGroup, m_depthBtnGroup})
                     if (g) g->setExclusive(true);
-                JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 三栏复位完成（0-7 全清）");
+                JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 三栏复位完成（0-6 全清）");
             });
         });
     }
 
-    // 删除（索引 12）— lasso-to-delete mode
-    if (m_selectionButtons.size() > 12)
+    // 删除（索引 11）— lasso-to-delete mode
+    if (m_selectionButtons.size() > 11)
     {
-        connect(m_selectionButtons[12], &QPushButton::clicked, this, [this]()
+        connect(m_selectionButtons[11], &QPushButton::clicked, this, [this]()
         {
             m_3dView->enterLassoDeleteMode();
         });

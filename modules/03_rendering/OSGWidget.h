@@ -218,7 +218,7 @@ private:
     bool m_lassoDeleteMode = false;
     int m_lassoTargets = LassoMarkers | LassoClouds;   // 对象类型过滤（setLassoTargets）
     bool m_lassoFirstLayer = false;                    // 深度模式（栏2：只取表面）
-    double m_lassoFirstLayerTolMm = 20.0;              // 表面层厚度（mm——厚噪点云需大值；实测 5mm 仅切 0.8% 不可见）
+    double m_lassoFirstLayerTolMm = 1.0;               // 表面层厚度（mm——2026-09-05 裁定：统一 1mm；SelectionService 同款默认）
     osg::ref_ptr<osg::Camera> m_lassoCamera;
     osg::ref_ptr<osg::Geometry> m_lassoGeom;
     osg::ref_ptr<osg::Vec3Array> m_lassoVerts;
