@@ -30,7 +30,10 @@
 #include <QResizeEvent>
 #include <QTimer>
 #include <QScrollArea>
+#include <QButtonGroup>
+#include <QCursor>
 #include <QShortcut>
+#include <QToolTip>
 #include <QMessageBox>
 #include <QMenu>
 #include <QFileDialog>
@@ -1555,32 +1558,82 @@ QWidget *MainWindow::createBottomToolBar()
     containerLayout->setSpacing(2);
     containerLayout->setAlignment(Qt::AlignVCenter);
 
-    struct SelBtn { QString iconBlack; };
+    // —— 三栏选择模型（05 定稿 D3）三组互斥按钮＋操作组（用户口径 2026-09-05）——
+    struct SelBtn { QString iconBlack; QString tip; };
     QList<SelBtn> selButtons = {
-        {"allselect (3)"}, {"antiselect (1)"}, {"cancelselect (3)"},
-        {"cloudandtriangleselect (1)"}, {"markandtriangleselect"},
-        {"lasso (3)"}, {"markselect (1)"},
-        {"surfaceselect (1)"},{"throwselect (1)"},
-        {"delete (3)"},
+        // 组1 对象类型（栏3，四选一）：点云 / 标志点 / 标志点加点云 / 三角面
+        //（点云/三角面无专属图标资产——暂以最近似图占位，设计出图后替换）
+        {":/icons/resources/icons/点云和三角面选择 (1).svg", QStringLiteral("点云：仅圈选激光点云（点云）点")},
+        {":/icons/resources/icons/标记点选择 (1).svg", QStringLiteral("标志点：仅圈选标志点")},
+        {":/icons/resources/icons/标记点和点云三角面选择 (1).svg", QStringLiteral("标志点加点云：同时圈选标志点与点云")},
+        {":/icons/resources/icons/icon/bottom/surfaceselect (1).svg", QStringLiteral("三角面：圈选三角网格面")},
+        // 组2 选择类型（栏2）：贯穿 / 只取表面
+        {":/icons/resources/icons/贯穿选择 (1).svg", QStringLiteral("贯穿：曲线内任意深度的点全部选中")},
+        {":/icons/resources/icons/表面选择 (1).svg", QStringLiteral("只取表面：仅选中视线方向最近的表面层")},
+        // 组3 工具类型（栏1）：贯穿 / 套索 / 多段线（图标仿套索三态新制 2026-09-05）
+        {":/icons/resources/icons/icon/bottom/lasso (1).svg", QStringLiteral("套索：按住左键自由手绘闭合曲线圈选")},
+        {":/icons/resources/icons/icon/bottom/polyline (1).svg", QStringLiteral("多段线：逐点落子画折线，双击/回车闭合圈选")},
+        // 操作组：全选 / 反选 / 撤销选择 / 抛弃 / 删除
+        {":/icons/resources/icons/全选 (1).svg", QStringLiteral("全选：选中全部可选对象")},
+        {":/icons/resources/icons/反选 (1).svg", QStringLiteral("反选：反转当前选中集")},
+        {":/icons/resources/icons/撤销选择 (1).svg", QStringLiteral("取消选择：清空当前选中集")},
+        {":/icons/resources/icons/icon/bottom/throwselect (1).svg", QStringLiteral("抛弃所选：丢弃所选对象")},
+        {":/icons/resources/icons/icon/bottom/delete (3).svg", QStringLiteral("删除：圈选并删除所选点（Ctrl+Z 撤销）")},
     };
+
+    // 三栏互斥（QButtonGroup 各组独占）；操作组（索引 8-12）非 checkable
+    QButtonGroup* objTypeGroup = new QButtonGroup(container);
+    QButtonGroup* toolGroup = new QButtonGroup(container);
+    QButtonGroup* depthGroup = new QButtonGroup(container);
+    m_objBtnGroup = objTypeGroup;      // 圈选结束复位用（临时解除互斥再清选中）
+    m_toolBtnGroup = toolGroup;
+    m_depthBtnGroup = depthGroup;
 
     for (int i = 0; i < selButtons.size(); ++i) {
         QPushButton *btn = new QPushButton();
         btn->setObjectName("selectionButton");
         btn->setFixedSize(40, 40);
-        btn->setStyleSheet("border: none; margin: 0px; padding: 0px;");
-        
-        QPixmap pix = renderSvg(QString(":/icons/resources/icons/icon/bottom/%1.svg").arg(selButtons[i].iconBlack), 28);
-        
+        btn->setToolTip(selButtons[i].tip);
+        // 选中态视觉：底色淡红高亮＋圆角（配合 toggled 换 (3) 号图标双通道）
+        btn->setStyleSheet(
+            "QPushButton { border: none; margin: 0px; padding: 0px; background: transparent; }"
+            "QPushButton:checked { background: rgba(144,0,33,0.15); border-radius: 6px; }"
+            "QPushButton:hover { background: rgba(0,0,0,0.06); border-radius: 6px; }");
+
+        QPixmap pix = renderSvg(selButtons[i].iconBlack, 28);
         btn->setIcon(QIcon(pix));
         btn->setIconSize(QSize(28, 28));
         btn->setContentsMargins(0, 0, 0, 0);
-        btn->setStyleSheet("border: none; margin: 0px; padding: 0px;");
-        if (i == 0) btn->setProperty("active", true);
+        if (i <= 7) {                                 // 三栏＝可选中互斥（组分辖）
+            btn->setCheckable(true);
+            if (i <= 3) objTypeGroup->addButton(btn, i);
+            else if (i <= 5) depthGroup->addButton(btn, i);
+            else toolGroup->addButton(btn, i);
+            // 选中态视觉反馈：checked 切 (3) 号图标（暗红激活态），弹回换常态图
+            QString iconOn = selButtons[i].iconBlack;
+            iconOn.replace(" (1)", " (3)");
+            QPixmap pixOn = renderSvg(iconOn, 28);
+            QIcon iconNormal = QIcon(pix);
+            QIcon iconActive = QIcon(pixOn);
+            btn->setIcon(iconNormal);
+            connect(btn, &QPushButton::toggled, this, [btn, iconNormal, iconActive](bool on) {
+                btn->setIcon(on ? iconActive : iconNormal);
+            });
+        }
+        // 初始不选（用户口径 2026-09-05：启动悬浮条无选中态；三栏选择仅圈选
+        // 流程中生效——圈选结束回工具默认套索，见 lassoCompleted 接线）
+        // 操作组（索引 8-12）暂隐藏（用户口径 2026-09-05：三栏先行；P4 编辑
+        // 会话接线时随功能恢复显示——钮与接线保留，仅 hide）
+        if (i >= 8) btn->hide();
+        // tip 强制显示（2026-09-05）：无边框半透明悬浮窗下 QToolTip 自动机制
+        // 不触发——开 WA_Hover，经 MainWindow::eventFilter 于 HoverEnter 立即
+        // showText（见 eventFilter "selectionButton" 分支）
+        btn->setAttribute(Qt::WA_Hover, true);
+        btn->installEventFilter(this);
         containerLayout->addWidget(btn);
         m_selectionButtons.append(btn);
 
-        if (i == 1 || i == 4 || i == 8) {
+        if (i == 3 || i == 5) {                       // 组间分隔（组1|组2|组3）
             QFrame *separator = new QFrame();
             separator->setFixedWidth(1);
             separator->setFixedHeight(28);
@@ -1592,10 +1645,44 @@ QWidget *MainWindow::createBottomToolBar()
     layout->addWidget(container);
     layout->addStretch();
 
-    // Wire up the delete button (index 9) — lasso-to-delete mode
-    if (m_selectionButtons.size() > 9)
+    // 套索（索引 6）/多段线（索引 7）→ 圈选＋删除确认流（左键落点/右键或双击
+    // 闭合→弹「确认删除」；删除钮在操作组隐藏期间由此承载删除入口）
+    for (const int idx : {6, 7}) {
+        if (m_selectionButtons.size() > idx)
+        {
+            connect(m_selectionButtons[idx], &QPushButton::clicked, this, [this]()
+            {
+                if (m_3dView) m_3dView->enterLassoDeleteMode();
+            });
+        }
+    }
+
+    // 圈选流程结束（确认删除/取消均发 lassoCompleted）→ 工具组回无选中初始态
+    //——用户口径 2026-09-05（启动与流程结束均无选中）；singleShot(0) 延后一拍
+    // 避开模态弹窗销毁期的状态覆盖
+    if (m_3dView && m_selectionButtons.size() > 7)
     {
-        connect(m_selectionButtons[9], &QPushButton::clicked, this, [this]()
+        connect(m_3dView, &OSGWidget::lassoCompleted, this, [this]()
+        {
+            JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 收到——三栏复位（流程节点留痕）");
+            QTimer::singleShot(0, this, [this]() {
+                // 互斥组内 setChecked(false) 会被独占语义挡下（实测日志：复位后仍
+                // checked=true）——三组各自临时解除互斥→清全部选中→恢复互斥
+                for (QButtonGroup* g : {m_objBtnGroup, m_toolBtnGroup, m_depthBtnGroup})
+                    if (g) g->setExclusive(false);
+                for (int i = 0; i <= 7; ++i)
+                    if (m_selectionButtons.size() > i) m_selectionButtons[i]->setChecked(false);
+                for (QButtonGroup* g : {m_objBtnGroup, m_toolBtnGroup, m_depthBtnGroup})
+                    if (g) g->setExclusive(true);
+                JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 三栏复位完成（0-7 全清）");
+            });
+        });
+    }
+
+    // 删除（索引 12）— lasso-to-delete mode
+    if (m_selectionButtons.size() > 12)
+    {
+        connect(m_selectionButtons[12], &QPushButton::clicked, this, [this]()
         {
             m_3dView->enterLassoDeleteMode();
         });
@@ -1678,6 +1765,20 @@ void MainWindow::setActiveButton(QPushButton *btn, QList<QPushButton*> group)
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 {
+    // 悬浮条选择钮：HoverEnter 强制弹 tip（QToolTip 自动机制在无边框半透明
+    // 悬浮窗下不触发——用户实测 2026-09-05）
+    if (obj->objectName() == "selectionButton") {
+        QWidget* w = qobject_cast<QWidget*>(obj);
+        if (w) {
+            if (event->type() == QEvent::HoverEnter && !w->toolTip().isEmpty()) {
+                QToolTip::showText(QCursor::pos(), w->toolTip(), w);
+            } else if (event->type() == QEvent::HoverLeave) {
+                QToolTip::hideText();
+            }
+        }
+        return QMainWindow::eventFilter(obj, event);
+    }
+
     if (obj->objectName() == "floatingToolbar") {
         if (event->type() == QEvent::MouseButtonPress) {
             QMouseEvent *mouseEvent = static_cast<QMouseEvent*>(event);

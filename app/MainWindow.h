@@ -107,6 +107,9 @@ protected:
     QTreeWidgetItem *m_markerRootItem = nullptr;     // 标记点列表根（动态挂扫描会话节点）
     QTreeWidgetItem *m_markerCurrentItem = nullptr;  // 当前扫描会话节点（实时计数落点）
     int m_markerScanSeq = 0;                         // 会话序号（标记点 001、002…）
+    QButtonGroup *m_toolBtnGroup = nullptr;          // 三栏互斥组（圈选结束复位需临时解除互斥）
+    QButtonGroup *m_objBtnGroup = nullptr;           // 对象类型组（同上）
+    QButtonGroup *m_depthBtnGroup = nullptr;         // 选择类型组（同上）
     QWidget *m_floatingToolbar;
 
     AppContext *m_appCtx = nullptr;
