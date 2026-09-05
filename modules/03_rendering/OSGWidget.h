@@ -100,6 +100,11 @@ public:
     void undoDelete();
     void enterLassoDeleteMode();
 
+    // 圈选目标类型（05 D3 栏3·对象类型过滤——显示级删除链用；缺省全开）
+    enum LassoTarget { LassoNone = 0, LassoMarkers = 1, LassoClouds = 2 };
+    void setLassoTargets(int mask) { m_lassoTargets = mask; }
+    int lassoTargets() const { return m_lassoTargets; }
+
     // Debug: validate projection matrix math
     void debugValidateProjection();
 
@@ -188,6 +193,7 @@ private:
     // 2D screen lasso (selection mode)
     bool m_lassoMode = false;
     bool m_lassoDeleteMode = false;
+    int m_lassoTargets = LassoMarkers | LassoClouds;   // 对象类型过滤（setLassoTargets）
     osg::ref_ptr<osg::Camera> m_lassoCamera;
     osg::ref_ptr<osg::Geometry> m_lassoGeom;
     osg::ref_ptr<osg::Vec3Array> m_lassoVerts;
@@ -294,7 +300,7 @@ private:
     osg::ref_ptr<osg::Vec3Array> m_cloudNormals;
     osg::ref_ptr<osg::Vec4Array> m_cloudColors;
     osg::ref_ptr<osg::Vec3Array> m_markerCoords;
-    osg::ref_ptr<osg::Vec4Array> m_markerColors;
+    osg::ref_ptr<osg::Vec4ubArray> m_markerColors;
 
     // 坐标轴
     osg::ref_ptr<osg::Geode> m_axesGeode;

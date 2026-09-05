@@ -97,8 +97,7 @@ void OSGWidget::setCenterOverlayVisible(bool visible)
            visible ? 1 : 0, m_centerOverlayCamera->getNumParents());
 }
 
-void OSGWidget::clearScene()
-{
+void OSGWidget::clearScene(){
     // 诊断（2026-08-31"停止后点消失"）：清场动作留痕——谁在扫描停止链上清场景
     JMW_LOG_INFO("03-OSGWidget", "[OSGWidget] clearScene 执行（场景子节点={} 被清）",
                  m_root->getNumChildren());
@@ -732,6 +731,8 @@ void OSGWidget::streamNextBatch()
     geode->addDrawable(geom.get());
     geode->getOrCreateStateSet()->setAttribute(new osg::Point(1.0f));
 
+    // 批容器记账（挂 m_streamCloudRoot 而非直挂 m_root——loadedCloudPoints
+    // 等离线工具经容器遍历读取；clearScene 摘除后失效自证）
     m_root->addChild(geode.get());
 
     m_streamLoaded += batch;
@@ -1372,11 +1373,26 @@ void OSGWidget::highlightSelectedPoints()
         if (y < minY) minY = y; if (y > maxY) maxY = y;
     }
 
-    for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci)
-    {
-        osg::Geode* geode = m_root->getChild(ci)->asGeode();
-        if (!geode) continue;
+    // 场景 Geode 收集（递归入 Group——标志点/激光云挂 m_markerRoot/m_laserRoot
+    // 容器下，直接子遍历看不见；2026-09-05「圈选标志点不删」根因之一）。
+    // 分类：m_markerRoot 子树＝Markers；其余（流式/导入/快照云、网格）＝Clouds
+    //（对象类型栏 D3 栏3 过滤——m_lassoTargets 掩码，缺省全开）
+    std::vector<std::pair<osg::Geode*, int>> geodes;   // (geode, LassoTarget)
+    std::function<void(osg::Node*, int)> collect = [&](osg::Node* n, int cat) {
+        if (!n) return;
+        if (osg::Geode* g = n->asGeode()) { geodes.emplace_back(g, cat); return; }
+        if (osg::Group* grp = n->asGroup())
+            for (unsigned int k = 0; k < grp->getNumChildren(); ++k)
+                collect(grp->getChild(k), cat);
+    };
+    for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci) {
+        osg::Node* child = m_root->getChild(ci);
+        collect(child, child == m_markerRoot.get() ? LassoMarkers : LassoClouds);
+    }
 
+    for (const auto& [geode, cat] : geodes)
+    {
+        if (!(m_lassoTargets & cat)) continue;        // 对象类型过滤（栏3）
         for (unsigned int di = 0; di < geode->getNumDrawables(); ++di)
         {
             osg::Geometry* geom = geode->getDrawable(di)->asGeometry();
@@ -1520,11 +1536,24 @@ void OSGWidget::deletePointsInPolyline()
         if (y < minY) minY = y; if (y > maxY) maxY = y;
     }
 
-    for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci)
-    {
-        osg::Geode* geode = m_root->getChild(ci)->asGeode();
-        if (!geode) continue;
+    // 场景 Geode 收集（递归入 Group——同 highlightSelectedPoints；带对象类型
+    // 分类：m_markerRoot 子树＝Markers，其余＝Clouds——栏3 过滤）
+    std::vector<std::pair<osg::Geode*, int>> geodes;
+    std::function<void(osg::Node*, int)> collect = [&](osg::Node* n, int cat) {
+        if (!n) return;
+        if (osg::Geode* g = n->asGeode()) { geodes.emplace_back(g, cat); return; }
+        if (osg::Group* grp = n->asGroup())
+            for (unsigned int k = 0; k < grp->getNumChildren(); ++k)
+                collect(grp->getChild(k), cat);
+    };
+    for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci) {
+        osg::Node* child = m_root->getChild(ci);
+        collect(child, child == m_markerRoot.get() ? LassoMarkers : LassoClouds);
+    }
 
+    for (const auto& [geode, cat] : geodes)
+    {
+        if (!(m_lassoTargets & cat)) continue;        // 对象类型过滤（栏3）
         for (unsigned int di = 0; di < geode->getNumDrawables(); ++di)
         {
             osg::Geometry* geom = geode->getDrawable(di)->asGeometry();
@@ -1902,12 +1931,13 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
         ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
 
         m_markerCoords = new osg::Vec3Array;
-        m_markerColors = new osg::Vec4Array;
+        m_markerColors = new osg::Vec4ubArray;
         m_leftCamViewApplied = false;    // 新会话首点——左相机视角重新设置
     }
 
     m_markerCoords->assign(markers.begin(), markers.end());
-    m_markerColors->resize(markers.size(), osg::Vec4(1.0f, 1.0f, 1.0f, 1.0f));  // 白（贴图调制）
+    m_markerColors = new osg::Vec4ubArray;
+    m_markerColors->resize(markers.size(), osg::Vec4ub(255, 255, 255, 255));  // 白（贴图调制；Vec4ub——套索命中/删除链颜色路径统一）
     m_markerGeom->setVertexArray(m_markerCoords);
     m_markerGeom->setColorArray(m_markerColors);
     m_markerGeom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);

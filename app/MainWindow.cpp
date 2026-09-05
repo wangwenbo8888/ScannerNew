@@ -1053,12 +1053,21 @@ QWidget *MainWindow::createToolBar()
                                    "QMenu::item:selected { background: #e0e0e0; }");
 
                 menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9"), [this]() {
-                    QString path = QFileDialog::getOpenFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9"), "", "Marker Files (*.json *.txt)");
+                    QString path = QFileDialog::getOpenFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9"), "",
+                        "Marker/PLY (*.json *.txt *.ply);;All Files (*.*)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
                     std::vector<cv::Point3f> markers;
-                    if (Scanner::data::fileio::importMarkers(spath, markers))
+                    if (Scanner::data::fileio::importMarkers(spath, markers)) {
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9 %1 \xe4\xb8\xaa").arg(markers.size()));
+                        // 上屏：同心圆标志点（相机自动取景到标志点包围球）
+                        if (m_3dView && !markers.empty()) {
+                            std::vector<osg::Vec3> pts;
+                            pts.reserve(markers.size());
+                            for (const auto& p : markers) pts.emplace_back(p.x, p.y, p.z);
+                            m_3dView->loadMarkerPoints(pts);
+                        }
+                    }
                     else
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe5\xa4\xb1\xe8\xb4\xa5"));
                 });
@@ -1674,6 +1683,20 @@ QWidget *MainWindow::createBottomToolBar()
 
     layout->addWidget(container);
     layout->addStretch();
+
+    // 对象类型组（索引 0-3）→ 圈选目标掩码（D3 栏3：点云/三角面＝Clouds，
+    // 标志点＝Markers，标志点加点云＝两者）
+    if (m_3dView && m_selectionButtons.size() > 3)
+    {
+        connect(objTypeGroup, &QButtonGroup::idToggled, this, [this](int id, bool on) {
+            if (!on || !m_3dView) return;
+            using LT = OSGWidget::LassoTarget;
+            const int mask = (id == 1) ? LT::LassoMarkers
+                          : (id == 2) ? (LT::LassoMarkers | LT::LassoClouds)
+                                      : LT::LassoClouds;      // 0 点云 / 3 三角面
+            m_3dView->setLassoTargets(mask);
+        });
+    }
 
     // 套索（索引 6）/多段线（索引 7）→ 圈选＋删除确认流（左键落点/右键或双击
     // 闭合→弹「确认删除」；删除钮在操作组隐藏期间由此承载删除入口）
