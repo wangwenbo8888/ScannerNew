@@ -822,14 +822,16 @@ void ScanChains::runRegistration(const data::EnhancedFrame& frame, ScanLaneOps& 
         result.markers = toPoints(ids);
         return;
     }
-    JMW_LOG_WARN("07-ScanChains", "[ScanChains] frame_fuse 兜底亦失败（{}），沿用快照 R/T", ff.message);
+    JMW_LOG_WARN("07-ScanChains", "[ScanChains] frame_fuse 兜底亦失败（{}），本帧不发点", ff.message);
 
-    // —— 再失败：沿用快照 R/T，降级 ——（调试 2026-08-31：无 ID 也发点——
-    // 配准失败帧此前 markers 空 → 融合无点 → 3D 恒无显示；先保显示，配准
-    // 质量问题（法线/阈值/快照链）另行治理）
+    // —— 再失败：不发点（用户口径 2026-09-05，回退 2026-08-31「先保显示」放宽）：
+    // 配准彻底失败的帧，观测多为伪标志点（面片扫描掩膜漏线碎片——roisL 67 vs
+    // 正常 13）或位姿失配点，沿用旧 R/T 入云即污染融合云——标志点计数无界增长
+    // 的根因；R/T 沿用快照保位姿连续，markers 置空——融合云/3D 显示保持既有内容。
+    // 根治待 09 mask_separation 线点分离改进（另行立项）——
     fillRT(result, matxFromArr9(prev->R), vec3FromArr3(prev->T));
     result.quality = Scanner::QualityFlag::Degraded;
-    result.markers = toPoints(std::vector<int>(n, -1));   // globalId=-1（链断）
+    result.markers.clear();
 }
 
 } // namespace Scanner::pipeline
