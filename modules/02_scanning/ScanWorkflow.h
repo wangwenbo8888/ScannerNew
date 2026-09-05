@@ -33,6 +33,11 @@
 #include <memory>
 #include <atomic>
 
+namespace Scanner::pipeline {
+struct IMarkerFuse;              // 05 P4 编辑账本窄出口（定义在 07 FuseConsumer.h）
+class FrameObsAccumulator;
+}
+
 // 前向声明（07 流水线对象；定义见 modules/07_pipelinemgmt/pipelines/scan/）
 namespace Scanner::pipeline {
 class ScanPipeline;
@@ -82,6 +87,12 @@ public:
                           double temperatureC, uint64_t frameId);
     /// enrich fail 丢帧累计（挂 10 故障桥的口径源）
     uint64_t droppedSessionFrames() const;
+
+    // —— 编辑账本窄出口（05 P4：就绪态编辑会话作用融合云/obs）——
+    /// 标志点融合累积器（会话私有件；未装配/已停=空）
+    Scanner::pipeline::IMarkerFuse* markerFuse();
+    /// 逐帧观测累加器（GBA 输入账本；未装配/已停=空）
+    Scanner::pipeline::FrameObsAccumulator* obsAccumulator();
 
     /// 逐帧观测累加器出口（app 收尾 GBA 消费；pipeline_ 未装配/已停＝未定义——
     /// 调方保证仅在会话 stop 后、对象存活期内访问）

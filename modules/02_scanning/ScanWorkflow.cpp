@@ -184,6 +184,14 @@ uint64_t ScanWorkflow::droppedSessionFrames() const {
     return session_.droppedFrames();
 }
 
+// —— 编辑账本窄出口（05 P4）——
+Scanner::pipeline::IMarkerFuse* ScanWorkflow::markerFuse() {
+    return pipeline_ ? pipeline_->markerFuse() : nullptr;
+}
+Scanner::pipeline::FrameObsAccumulator* ScanWorkflow::obsAccumulator() {
+    return pipeline_ ? &pipeline_->obs() : nullptr;
+}
+
 // ============================================================================
 // 激光温度表装载——06 仓库档表 JSON → 09 LaserPlaneMapTempTable
 // 格式与 laser_match_scan::LoadTempTable 同源：{"table":[{temperature,mapData}]}

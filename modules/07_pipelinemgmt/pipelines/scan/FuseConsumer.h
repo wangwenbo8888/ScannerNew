@@ -41,6 +41,12 @@ struct IMarkerFuse {
     virtual void fuse(const std::vector<calib::MarkerPoint3D>& markers,
                       const double R[9], const double T[3]) = 0;
     virtual const std::vector<calib::MarkerCloudPoint>& fusedPoints() const = 0;
+    /// 编辑账本移除（05 D4·融合云侧，P2 契约透传）：默认 fail——测试假实现
+    /// 可不覆写；生产适配器透传 09 MarkerCloudFuseCPU::removePoints
+    virtual calib::ResultStatus removePoints(const std::vector<uint32_t>& indices) {
+        (void)indices;
+        return calib::ResultStatus::fail("IMarkerFuse: removePoints 未实现");
+    }
 };
 
 #ifdef JMW_BUILD_CUDA

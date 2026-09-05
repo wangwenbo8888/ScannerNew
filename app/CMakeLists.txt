@@ -53,6 +53,8 @@ set(MOD_WORKFLOWS
     ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibrationWorkflow.h
     ${CMAKE_SOURCE_DIR}/modules/04_postprocessing/PostProcessWorkflow.cpp
     ${CMAKE_SOURCE_DIR}/modules/04_postprocessing/PostProcessWorkflow.h
+    ${CMAKE_SOURCE_DIR}/modules/05_editing/EditWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/05_editing/EditWorkflow.h
 )
 
 set(MOD_RENDERING
@@ -85,6 +87,7 @@ target_include_directories(scan_demo PRIVATE
     ${CMAKE_SOURCE_DIR}/modules/01_calibration
     ${CMAKE_SOURCE_DIR}/modules/02_scanning
     ${CMAKE_SOURCE_DIR}/modules/03_rendering
+    ${CMAKE_SOURCE_DIR}/modules/05_editing
     ${CMAKE_SOURCE_DIR}/modules/06_fileio
     ${CMAKE_SOURCE_DIR}/modules/04_postprocessing
     ${OSG_ROOT}/include
@@ -97,6 +100,7 @@ target_link_libraries(scan_demo PRIVATE
     mod_fileio
     mod_pipelinemgmt
     mod_observability
+    mod_editing
     Qt5::Widgets
     Qt5::OpenGL
     Qt5::Svg

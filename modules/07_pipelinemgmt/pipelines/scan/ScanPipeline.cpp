@@ -89,6 +89,11 @@ public:
         return op_.GetFusedPoints();
     }
 
+    /// 编辑账本移除透传（05 D4·P4：undo 恢复经 fuse 回插）
+    calib::ResultStatus removePoints(const std::vector<uint32_t>& indices) override {
+        return op_.removePoints(indices);
+    }
+
 private:
     // 体素 0.5mm→5mm（2026-08-31 真机）：重建点帧间漂移 1~3mm（y 差 1~3px
     // 量级），0.5mm 格子下同一标志点每帧进新体素=点数无限膨胀（扫描中持续

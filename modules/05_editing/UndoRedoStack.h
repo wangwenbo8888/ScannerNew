@@ -19,14 +19,20 @@
 #include <functional>
 #include <vector>
 
+#include <opencv2/core.hpp>
+
 #include "base/types.h"
 
 namespace Scanner::edit {
 
-// 一批软删除（两组下标＝账本身份；会话期下标稳定见 SelectionService.h）
+// 一批软删除（P4 扩展：账本作用以 globalId 稳定身份为准——融合云下标会因
+// 前序删除而前移；恢复（undo）需点位数据经融合回插）
 struct DeleteBatch {
-    std::vector<uint32_t> markerIdx;
-    std::vector<uint32_t> laserIdx;
+    std::vector<uint32_t> markerIdx;      // 选择时刻的融合云下标（留档；作用时经映射换算）
+    std::vector<uint32_t> laserIdx;       // 激光侧（P4 暂空——激光云编辑后续批次）
+    std::vector<int32_t> markerGlobalIds; // obs 剔除/账本映射的稳定身份
+    std::vector<cv::Point3f> markerPts;   // 删除时点位（undo 恢复回插）
+    std::vector<cv::Vec3f> markerNormals; // 删除时法线（同上）
 
     size_t pointCount() const { return markerIdx.size() + laserIdx.size(); }
     bool empty() const { return markerIdx.empty() && laserIdx.empty(); }
