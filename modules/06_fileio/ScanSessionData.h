@@ -41,6 +41,9 @@ private:
     size_t ringSlots_;
     SlotRing<EnhancedFrame> ring_;
     std::atomic<uint64_t> droppedFrames_{0};   // enrich fail 丢帧计数
+    bool tierLogFirst_ = true;             // 会话首帧选档留痕（pushFrame 单线程约定）
+    int lastStereoTier_ = -9;              // 上次留痕的立体档（档变再打）
+    int lastLaserTier_ = -9;               // 上次留痕的激光档
 };
 
 } // namespace Scanner::data
