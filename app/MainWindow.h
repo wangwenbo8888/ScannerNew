@@ -104,7 +104,7 @@ protected:
     QLabel *m_projectName;
     QTreeWidget *m_projectTree;
     QTreeWidgetItem *m_cloudItem001;
-    QTreeWidgetItem *m_markerRootItem;   // 标记点列表根（扫描中实时计数）
+    QTreeWidgetItem *m_markerItem001;   // 标记点 001 子项（扫描中实时计数）
     QWidget *m_floatingToolbar;
 
     AppContext *m_appCtx = nullptr;
