@@ -1004,7 +1004,10 @@ void OSGWidget::mouseReleaseEvent(QMouseEvent *event)
 void OSGWidget::mouseDoubleClickEvent(QMouseEvent *event)
 {
     if (m_lassoMode)
+    {
+        closeLasso();                       // 双击闭合（多段线工具口径，2026-09-05）
         return;
+    }
     if (!m_gw.valid()) return;
     m_gw->getEventQueue()->mouseDoubleButtonPress(event->pos().x(), event->pos().y(),
         osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON);
@@ -1251,6 +1254,8 @@ void OSGWidget::debugValidateProjection()
 
 void OSGWidget::closeLasso()
 {
+    JMW_LOG_INFO("03-OSGWidget", "[closeLasso] 进入（点数={} delete模式={}）",
+                 m_lassoPoints.valid() ? m_lassoPoints->size() : 0, m_lassoDeleteMode);
     if (!m_lassoPoints.valid() || m_lassoPoints->size() < 3)
     {
         exitLassoMode();
