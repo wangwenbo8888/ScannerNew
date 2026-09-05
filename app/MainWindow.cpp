@@ -202,6 +202,15 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                 f.write(out);
                             }
                         }
+                        // 工程树实时计数（节流 1/30 信号）：标记点列表=融合云
+                        // 瞬时点数；点云数据=同值（扫描中 pcb 未落库，用实时值）
+                        static std::atomic<uint64_t> s_treeTicks{0};
+                        if (s_treeTicks.fetch_add(1) % 30 == 0) {
+                            if (m_markerRootItem)
+                                m_markerRootItem->setText(0, QStringLiteral("标记点列表 (%1)").arg(pts.size()));
+                            if (m_cloudItem001)
+                                m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)").arg(pts.size()));
+                        }
                         if (!m_3dView || pts.empty()) return;
                         std::vector<osg::Vec3> markers;
                         markers.reserve(pts.size());
@@ -1254,13 +1263,14 @@ QWidget *MainWindow::createProjectSection()
     m_projectTree->setIndentation(16);
     m_projectTree->setStyleSheet("QTreeWidget { border: none; margin: 0px; padding: 0px; } QTreeWidget::item { padding: 0px; margin: 0px; }");
 
-    QTreeWidgetItem *markerRoot = new QTreeWidgetItem(QStringList() << QStringLiteral("标记点列表 (124)"));
+    QTreeWidgetItem *markerRoot = new QTreeWidgetItem(QStringList() << QStringLiteral("标记点列表 (0)"));
     markerRoot->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 14)));
     QTreeWidgetItem *m1 = new QTreeWidgetItem(markerRoot, QStringList() << QStringLiteral("标记点 001"));
     m1->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 11)));
     QTreeWidgetItem *m2 = new QTreeWidgetItem(markerRoot, QStringList() << QStringLiteral("标记点 002"));
     m2->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 11)));
     m_projectTree->addTopLevelItem(markerRoot);
+    m_markerRootItem = markerRoot;   // 扫描中实时计数刷新（2026-09-01 用户口径）
 
     QTreeWidgetItem *cloudRoot = new QTreeWidgetItem(QStringList() << QStringLiteral("点云/三角面列表"));
     cloudRoot->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/cloudlist-black-11.svg", 14)));
