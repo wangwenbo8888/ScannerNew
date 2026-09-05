@@ -105,6 +105,12 @@ public:
     void setLassoTargets(int mask) { m_lassoTargets = mask; }
     int lassoTargets() const { return m_lassoTargets; }
 
+    // 圈选深度模式（D3 栏2：贯穿=圈中即选；只取表面=仅视图向最近层
+    // minDepth＋容差带内的点——遮挡跨几何生效）；容差单位 mm
+    void setLassoFirstLayer(bool on) { m_lassoFirstLayer = on; }
+    bool lassoFirstLayer() const { return m_lassoFirstLayer; }
+    void setLassoFirstLayerTolerance(double mm) { m_lassoFirstLayerTolMm = mm > 0 ? mm : 5.0; }
+
     // Debug: validate projection matrix math
     void debugValidateProjection();
 
@@ -120,6 +126,16 @@ private:
     void closeLasso();
     void updateLassoGeometry();
     void deletePointsInPolyline();
+
+    // 圈选命中收集（高亮/删除共用）：多边形内顶点＋屏幕像素＋视图向深度
+    //（对象类型掩码生效；m_lassoFirstLayer 时再经 filterLassoFirstLayer）
+    struct LassoHit { osg::Geometry* geom; unsigned int vi; int px, py; float depth; };
+    void collectLassoHits(const osg::Vec2Array* poly, std::vector<LassoHit>& hits);
+    // 只取表面（D3 栏2·射线首交语义）：每个屏幕像素射线仅保留最近点
+    //（容差带内并列保留——近重复点）；跨几何生效
+    void filterLassoFirstLayer(std::vector<LassoHit>& hits);
+    void applyLassoHighlight(const std::vector<LassoHit>& hits);
+    void applyLassoDelete(const std::vector<LassoHit>& hits);
     bool isPointInPolygon2D(const osg::Vec2d& point, const osg::Vec2Array& polygon);
     void highlightSelectedPoints();
     void clearHighlight();
@@ -194,6 +210,8 @@ private:
     bool m_lassoMode = false;
     bool m_lassoDeleteMode = false;
     int m_lassoTargets = LassoMarkers | LassoClouds;   // 对象类型过滤（setLassoTargets）
+    bool m_lassoFirstLayer = false;                    // 深度模式（栏2：只取表面）
+    double m_lassoFirstLayerTolMm = 20.0;              // 表面层厚度（mm——厚噪点云需大值；实测 5mm 仅切 0.8% 不可见）
     osg::ref_ptr<osg::Camera> m_lassoCamera;
     osg::ref_ptr<osg::Geometry> m_lassoGeom;
     osg::ref_ptr<osg::Vec3Array> m_lassoVerts;

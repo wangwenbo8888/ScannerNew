@@ -1349,20 +1349,23 @@ bool OSGWidget::isPointInPolygon2D(const osg::Vec2d& point, const osg::Vec2Array
     return inside;
 }
 
-void OSGWidget::highlightSelectedPoints()
-{
-    if (m_selectedPolylines.empty() || !m_viewer.valid())
-        return;
+// ---- 圈选命中收集（高亮/删除共用；含栏3 对象类型过滤与视图向深度）----
+void OSGWidget::collectLassoHits(const osg::Vec2Array* poly, std::vector<LassoHit>& hits) {
+    hits.clear();
+    if (!poly || poly->size() < 3 || !m_viewer.valid()) return;
 
-    osg::Vec2Array* poly = m_selectedPolylines.back().get();
-    if (!poly || poly->size() < 3)
-        return;
-
-    osg::Matrix mvp = computeRenderingMVP(m_hitTestProj, m_hitTestView);
+    const osg::Matrix mvp = computeRenderingMVP(m_hitTestProj, m_hitTestView);
+    // GL 列向量约定的 view（同 computeRenderingMVP 的转置逻辑）：深度取其
+    // 行 2——原始 OSG 行向量矩阵须用列 2，此处先转置统一（2026-09-05 深度
+    // 过滤无效根因：约定混用）
+    osg::Matrix viewGL;
+    for (int r = 0; r < 4; ++r)
+        for (int cc = 0; cc < 4; ++cc)
+            viewGL(r, cc) = m_hitTestView(cc, r);
     const int vpw = m_hitTestVpw;
     const int vph = m_hitTestVph;
 
-    // 命中预筛加速（同 deletePointsInPolyline：包围盒预筛+预取边数组）
+    // 多边形屏幕包围盒预筛（域外一次淘汰）
     double minX = 1e30, minY = 1e30, maxX = -1e30, maxY = -1e30;
     const size_t nEdges = poly->size();
     std::vector<double> px(nEdges), py(nEdges);
@@ -1373,11 +1376,9 @@ void OSGWidget::highlightSelectedPoints()
         if (y < minY) minY = y; if (y > maxY) maxY = y;
     }
 
-    // 场景 Geode 收集（递归入 Group——标志点/激光云挂 m_markerRoot/m_laserRoot
-    // 容器下，直接子遍历看不见；2026-09-05「圈选标志点不删」根因之一）。
-    // 分类：m_markerRoot 子树＝Markers；其余（流式/导入/快照云、网格）＝Clouds
-    //（对象类型栏 D3 栏3 过滤——m_lassoTargets 掩码，缺省全开）
-    std::vector<std::pair<osg::Geode*, int>> geodes;   // (geode, LassoTarget)
+    // 场景 Geode 收集（递归入 Group——标志点/激光云挂容器下；分类：
+    // m_markerRoot 子树＝Markers，其余＝Clouds——栏3 掩码过滤）
+    std::vector<std::pair<osg::Geode*, int>> geodes;
     std::function<void(osg::Node*, int)> collect = [&](osg::Node* n, int cat) {
         if (!n) return;
         if (osg::Geode* g = n->asGeode()) { geodes.emplace_back(g, cat); return; }
@@ -1390,73 +1391,187 @@ void OSGWidget::highlightSelectedPoints()
         collect(child, child == m_markerRoot.get() ? LassoMarkers : LassoClouds);
     }
 
-    for (const auto& [geode, cat] : geodes)
-    {
-        if (!(m_lassoTargets & cat)) continue;        // 对象类型过滤（栏3）
-        for (unsigned int di = 0; di < geode->getNumDrawables(); ++di)
-        {
-            osg::Geometry* geom = geode->getDrawable(di)->asGeometry();
+    hits.reserve(1024);
+    for (const auto& kv : geodes) {
+        if (!(m_lassoTargets & kv.second)) continue;   // 栏3 对象类型过滤
+        for (unsigned int di = 0; di < kv.first->getNumDrawables(); ++di) {
+            osg::Geometry* geom = kv.first->getDrawable(di)->asGeometry();
             if (!geom) continue;
-
             osg::Vec3Array* verts = dynamic_cast<osg::Vec3Array*>(geom->getVertexArray());
             osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(geom->getColorArray());
-            if (!verts || !colors || verts->size() != colors->size())
-                continue;
-
-            bool alreadyHighlighted = false;
-            for (auto& h : m_highlights)
-            {
-                if (h.geom == geom) { alreadyHighlighted = true; break; }
-            }
-            if (alreadyHighlighted) continue;
-
-            HighlightEntry entry;
-            entry.geom = geom;
-            entry.indices.reserve(verts->size() / 16 + 16);
-            entry.originalColors.reserve(verts->size() / 16 + 16);
+            if (!verts || !colors || verts->size() != colors->size()) continue;
 
             const unsigned int nVerts = static_cast<unsigned int>(verts->size());
-            for (unsigned int vi = 0; vi < nVerts; ++vi)
-            {
+            for (unsigned int vi = 0; vi < nVerts; ++vi) {
                 const osg::Vec3& vp = (*verts)[vi];
                 float cx = mvp(0,0)*vp.x() + mvp(0,1)*vp.y() + mvp(0,2)*vp.z() + mvp(0,3);
                 float cy = mvp(1,0)*vp.x() + mvp(1,1)*vp.y() + mvp(1,2)*vp.z() + mvp(1,3);
                 float cw = mvp(3,0)*vp.x() + mvp(3,1)*vp.y() + mvp(3,2)*vp.z() + mvp(3,3);
                 if (cw < 1e-10f && cw > -1e-10f) continue;
                 if (cw < 0.0f) { cx = -cx; cy = -cy; cw = -cw; }
-
                 const float sx = (cx / cw) * vpw * 0.5f;
                 const float sy = (cy / cw) * vph * 0.5f;
-
-                if (sx < minX || sx > maxX || sy < minY || sy > maxY)
-                    continue;                      // 包围盒外：一次淘汰
-
+                if (sx < minX || sx > maxX || sy < minY || sy > maxY) continue;
                 bool inside = false;
                 for (size_t i = 0, j = nEdges - 1; i < nEdges; j = i++) {
                     if ((py[i] > sy) != (py[j] > sy) &&
                         (sx < (px[j] - px[i]) * (sy - py[i]) / (py[j] - py[i]) + px[i]))
                         inside = !inside;
                 }
-                if (inside) {
-                    entry.indices.push_back(vi);
-                    entry.originalColors.push_back((*colors)[vi]);
-                }
-            }
-
-            if (!entry.indices.empty())
-            {
-                osg::ref_ptr<osg::Vec4ubArray> newColors = new osg::Vec4ubArray(*colors);
-                for (unsigned int vi : entry.indices)
-                    (*newColors)[vi] = osg::Vec4ub(0, 0, 255, 255);
-                newColors->dirty();
-                geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
-                geom->dirtyDisplayList();
-                m_highlights.push_back(std::move(entry));
+                if (!inside) continue;
+                // 视图向深度（GL 约定行 2；前向为正＝-z_eye）＋屏幕像素（射线分桶键）
+                const float viewZ = viewGL(2,0)*vp.x() + viewGL(2,1)*vp.y()
+                                  + viewGL(2,2)*vp.z() + viewGL(2,3);
+                hits.push_back({geom, vi, (int)sx, (int)sy, -viewZ});
             }
         }
     }
 }
 
+// 只取表面（D3 栏2·射线首交语义，深度图＋滑窗最小滤波版）：
+//   ① 命中点栅格化成视口深度图（每像素取最近）
+//   ② 半径 kRadiusPx 的方形最小滤波（分离水平/垂直两趟——O(视口×窗口)，
+//     与命中数无关；覆盖子像素错位）
+//   ③ 保留 ⇔ 点深 ≤ 邻域最小＋margin（噪声/近重复层内不算遮挡）
+//   性能：30M 云百万级命中从十分钟级 → 秒级（无逐点邻域扫描、无 map）
+void OSGWidget::filterLassoFirstLayer(std::vector<LassoHit>& hits) {
+    if (hits.empty()) return;
+    constexpr int kRadiusPx = 4;                        // 屏幕邻域半径（px）
+    const float margin = static_cast<float>(m_lassoFirstLayerTolMm);  // 深度差门槛
+    const auto t0 = std::chrono::steady_clock::now();
+
+    const int w = std::max(1, m_hitTestVpw);
+    const int h = std::max(1, m_hitTestVph);
+    const float kInf = 1e30f;
+
+    // ① 深度图
+    std::vector<float> zmin(static_cast<size_t>(w) * h, kInf);
+    for (const auto& hit : hits) {
+        int x = hit.px, y = hit.py;
+        if (x < 0) x = 0; else if (x >= w) x = w - 1;
+        if (y < 0) y = 0; else if (y >= h) y = h - 1;
+        const size_t idx = static_cast<size_t>(y) * w + x;
+        if (hit.depth < zmin[idx]) zmin[idx] = hit.depth;
+    }
+
+    // ② 分离式方形最小滤波（水平→垂直，窗口 2R+1）
+    std::vector<float> ztmp(static_cast<size_t>(w) * h, kInf);
+    std::vector<float> znb(static_cast<size_t>(w) * h, kInf);
+    for (int y = 0; y < h; ++y) {
+        float* row = &zmin[static_cast<size_t>(y) * w];
+        float* out = &ztmp[static_cast<size_t>(y) * w];
+        for (int x = 0; x < w; ++x) {
+            float m2 = kInf;
+            const int x0 = std::max(0, x - kRadiusPx), x1 = std::min(w - 1, x + kRadiusPx);
+            for (int xx = x0; xx <= x1; ++xx) m2 = std::min(m2, row[xx]);
+            out[x] = m2;
+        }
+    }
+    for (int x = 0; x < w; ++x) {
+        const int y0max = h - 1;
+        for (int y = 0; y < h; ++y) {
+            float m2 = kInf;
+            const int y0 = std::max(0, y - kRadiusPx), y1 = std::min(y0max, y + kRadiusPx);
+            for (int yy = y0; yy <= y1; ++yy)
+                m2 = std::min(m2, ztmp[static_cast<size_t>(yy) * w + x]);
+            znb[static_cast<size_t>(y) * w + x] = m2;
+        }
+    }
+
+    // ③ 判定
+    std::vector<LassoHit> kept;
+    kept.reserve(hits.size());
+    size_t occluded = 0;
+    for (auto& hit : hits) {
+        int x = hit.px, y = hit.py;
+        if (x < 0) x = 0; else if (x >= w) x = w - 1;
+        if (y < 0) y = 0; else if (y >= h) y = h - 1;
+        if (hit.depth <= znb[static_cast<size_t>(y) * w + x] + margin) kept.push_back(hit);
+        else ++occluded;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
+    JMW_LOG_WARN("03-OSGWidget",
+                 "[只取表面·深度图] 命中={} 保留={} 遮挡剔除={} 视口{}x{} 用时{:.0f}ms（半径{}px 深度差{}mm）",
+                 hits.size(), kept.size(), occluded, w, h, ms, kRadiusPx, margin);
+    hits.swap(kept);
+}
+
+void OSGWidget::applyLassoHighlight(const std::vector<LassoHit>& hits) {
+    std::map<osg::Geometry*, std::vector<unsigned int>> byGeom;
+    for (const auto& h : hits) {
+        bool already = false;
+        for (auto& e : m_highlights)
+            if (e.geom == h.geom) { already = true; break; }
+        if (already) continue;                        // 已高亮几何跳过（原语义）
+        byGeom[h.geom].push_back(h.vi);
+    }
+    for (auto& kv : byGeom) {
+        osg::Geometry* geom = kv.first;
+        auto* colors = dynamic_cast<osg::Vec4ubArray*>(geom->getColorArray());
+        if (!colors) continue;
+        HighlightEntry entry;
+        entry.geom = geom;
+        entry.indices = kv.second;
+        entry.originalColors.reserve(kv.second.size());
+        osg::ref_ptr<osg::Vec4ubArray> newColors = new osg::Vec4ubArray(*colors);
+        for (unsigned int vi : kv.second) {
+            entry.originalColors.push_back((*colors)[vi]);
+            (*newColors)[vi] = osg::Vec4ub(0, 0, 255, 255);
+        }
+        newColors->dirty();
+        geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
+        geom->dirtyDisplayList();
+        m_highlights.push_back(std::move(entry));
+    }
+}
+
+void OSGWidget::highlightSelectedPoints() {
+    std::vector<LassoHit> hits;
+    collectLassoHits(m_selectedPolylines.empty()
+                         ? nullptr : m_selectedPolylines.back().get(), hits);
+    if (m_lassoFirstLayer) filterLassoFirstLayer(hits);
+    applyLassoHighlight(hits);
+}
+
+void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
+    std::map<osg::Geometry*, std::vector<unsigned int>> byGeom;
+    for (const auto& h : hits) byGeom[h.geom].push_back(h.vi);
+    for (auto& kv : byGeom) {
+        osg::Geometry* geom = kv.first;
+        auto* colors = dynamic_cast<osg::Vec4ubArray*>(geom->getColorArray());
+        if (!colors) continue;
+        std::vector<osg::Vec4ub> orig;
+        orig.reserve(kv.second.size());
+        osg::ref_ptr<osg::Vec4ubArray> newColors = new osg::Vec4ubArray(*colors);
+        for (unsigned int vi : kv.second) {
+            orig.push_back((*colors)[vi]);
+            (*newColors)[vi] = osg::Vec4ub(0, 0, 0, 0);   // alpha=0 软删（GL_BLEND）
+        }
+        pushDeleteUndo(geom, kv.second, orig);
+        newColors->dirty();
+        geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
+        geom->dirtyDisplayList();
+        osg::StateSet* ss = geom->getOrCreateStateSet();
+        ss->setMode(GL_BLEND, osg::StateAttribute::ON);
+        osg::ref_ptr<osg::BlendFunc> bf = new osg::BlendFunc();
+        bf->setFunction(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        ss->setAttribute(bf);
+    }
+}
+
+void OSGWidget::deletePointsInPolyline() {
+    std::vector<LassoHit> hits;
+    collectLassoHits(m_selectedPolylines.empty()
+                         ? nullptr : m_selectedPolylines.back().get(), hits);
+    JMW_LOG_WARN("03-OSGWidget",
+                 "[deletePointsInPolyline] 命中={} 首层={} 目标掩码={}（1=标志点 2=云）",
+                 hits.size(), m_lassoFirstLayer, m_lassoTargets);
+    if (m_lassoFirstLayer) filterLassoFirstLayer(hits);
+    applyLassoDelete(hits);
+    update();
+    m_selectedPolylines.clear();
+}
 void OSGWidget::clearHighlight()
 {
     for (auto& entry : m_highlights)
@@ -1510,115 +1625,7 @@ void OSGWidget::undoDelete()
     }
     m_deleteHistory.pop_back();
 }
-void OSGWidget::deletePointsInPolyline()
-{
-    if (!m_viewer.valid() || m_selectedPolylines.empty())
-        return;
-
-    osg::Vec2Array* poly = m_selectedPolylines.back().get();
-    if (!poly || poly->size() < 3)
-        return;
-
-    osg::Matrix mvp = computeRenderingMVP(m_hitTestProj, m_hitTestView);
-    const int vpw = m_hitTestVpw;
-    const int vph = m_hitTestVph;
-
-    // 命中预筛加速：①多边形屏幕包围盒（域外点一次比较淘汰——大点云场景淘汰
-    // 95%+ 顶点，免进 O(边数) 射线法）②预拷贝边数组到连续 vector<double>（消除
-    // ref_ptr 寻址与 float/double 混转）③命中容器 reserve（免反复扩容拷贝）
-    double minX = 1e30, minY = 1e30, maxX = -1e30, maxY = -1e30;
-    const size_t nEdges = poly->size();
-    std::vector<double> px(nEdges), py(nEdges);
-    for (size_t i = 0; i < nEdges; ++i) {
-        const double x = (*poly)[i].x(), y = (*poly)[i].y();
-        px[i] = x; py[i] = y;
-        if (x < minX) minX = x; if (x > maxX) maxX = x;
-        if (y < minY) minY = y; if (y > maxY) maxY = y;
-    }
-
-    // 场景 Geode 收集（递归入 Group——同 highlightSelectedPoints；带对象类型
-    // 分类：m_markerRoot 子树＝Markers，其余＝Clouds——栏3 过滤）
-    std::vector<std::pair<osg::Geode*, int>> geodes;
-    std::function<void(osg::Node*, int)> collect = [&](osg::Node* n, int cat) {
-        if (!n) return;
-        if (osg::Geode* g = n->asGeode()) { geodes.emplace_back(g, cat); return; }
-        if (osg::Group* grp = n->asGroup())
-            for (unsigned int k = 0; k < grp->getNumChildren(); ++k)
-                collect(grp->getChild(k), cat);
-    };
-    for (unsigned int ci = 0; ci < m_root->getNumChildren(); ++ci) {
-        osg::Node* child = m_root->getChild(ci);
-        collect(child, child == m_markerRoot.get() ? LassoMarkers : LassoClouds);
-    }
-
-    for (const auto& [geode, cat] : geodes)
-    {
-        if (!(m_lassoTargets & cat)) continue;        // 对象类型过滤（栏3）
-        for (unsigned int di = 0; di < geode->getNumDrawables(); ++di)
-        {
-            osg::Geometry* geom = geode->getDrawable(di)->asGeometry();
-            if (!geom) continue;
-
-            osg::Vec3Array* verts = dynamic_cast<osg::Vec3Array*>(geom->getVertexArray());
-            osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(geom->getColorArray());
-            if (!verts || !colors || verts->size() != colors->size())
-                continue;
-
-            std::vector<unsigned int> delIndices;
-            std::vector<osg::Vec4ub> delOrigColors;
-            delIndices.reserve(verts->size() / 16 + 16);
-            delOrigColors.reserve(verts->size() / 16 + 16);
-
-            const unsigned int nVerts = static_cast<unsigned int>(verts->size());
-            for (unsigned int vi = 0; vi < nVerts; ++vi)
-            {
-                const osg::Vec3& vp = (*verts)[vi];
-                float cx = mvp(0,0)*vp.x() + mvp(0,1)*vp.y() + mvp(0,2)*vp.z() + mvp(0,3);
-                float cy = mvp(1,0)*vp.x() + mvp(1,1)*vp.y() + mvp(1,2)*vp.z() + mvp(1,3);
-                float cw = mvp(3,0)*vp.x() + mvp(3,1)*vp.y() + mvp(3,2)*vp.z() + mvp(3,3);
-                if (cw < 1e-10f && cw > -1e-10f) continue;
-                if (cw < 0.0f) { cx = -cx; cy = -cy; cw = -cw; }
-
-                const float sx = (cx / cw) * vpw * 0.5f;
-                const float sy = (cy / cw) * vph * 0.5f;
-
-                if (sx < minX || sx > maxX || sy < minY || sy > maxY)
-                    continue;                      // 包围盒外：一次淘汰（原逐边射线法的主开销）
-
-                // 内联射线法（原 isPointInPolygon2D——语义不变，去函数调用/寻址开销）
-                bool inside = false;
-                for (size_t i = 0, j = nEdges - 1; i < nEdges; j = i++) {
-                    if ((py[i] > sy) != (py[j] > sy) &&
-                        (sx < (px[j] - px[i]) * (sy - py[i]) / (py[j] - py[i]) + px[i]))
-                        inside = !inside;
-                }
-                if (inside) {
-                    delIndices.push_back(vi);
-                    delOrigColors.push_back((*colors)[vi]);
-                }
-            }
-            if (!delIndices.empty())
-            {
-                pushDeleteUndo(geom, delIndices, delOrigColors);
-                osg::ref_ptr<osg::Vec4ubArray> newColors = new osg::Vec4ubArray(*colors);
-                for (unsigned int vi : delIndices)
-                    (*newColors)[vi] = osg::Vec4ub(0, 0, 0, 0);
-                newColors->dirty();
-                geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
-                geom->dirtyDisplayList();
-                osg::StateSet* ss = geom->getOrCreateStateSet();
-                ss->setMode(GL_BLEND, osg::StateAttribute::ON);
-                osg::ref_ptr<osg::BlendFunc> bf = new osg::BlendFunc();
-                bf->setFunction(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                ss->setAttribute(bf);
-            }
-        }
-    }
-
-    update();
-    m_selectedPolylines.clear();
-}
-
+// ---- 圈选命中收集（高亮/删除共用；含栏3 对象类型过滤与视图向深度）----
 void OSGWidget::createCenterOverlay()
 {
     if (!m_viewer.valid())

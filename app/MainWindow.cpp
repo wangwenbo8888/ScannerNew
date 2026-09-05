@@ -1696,6 +1696,11 @@ QWidget *MainWindow::createBottomToolBar()
                                       : LT::LassoClouds;      // 0 点云 / 3 三角面
             m_3dView->setLassoTargets(mask);
         });
+        // 选择类型组（索引 4 贯穿 / 5 只取表面）→ 深度模式（D3 栏2）
+        connect(depthGroup, &QButtonGroup::idToggled, this, [this](int id, bool on) {
+            if (!on || !m_3dView) return;
+            m_3dView->setLassoFirstLayer(id == 5);
+        });
     }
 
     // 套索（索引 6）/多段线（索引 7）→ 圈选＋删除确认流（左键落点/右键或双击
