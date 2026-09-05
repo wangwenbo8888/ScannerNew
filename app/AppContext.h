@@ -77,6 +77,20 @@ public:
     Scanner::Result stopScanSession();
     /// 扫描会话是否活跃（Running/Paused——按钮启停切换判据）
     bool isScanSessionActive() const;
+
+    // —— 就绪态（05 D2/D8，实施计划 P3）——
+    /// 停止采集但**保活会话**：设备侧灭灯停采（stopCapture），管线 pause——
+    /// 融合累积器/obs 账本/渲染推送链全保留（编辑会话数据源）。三出口：
+    /// resumeScanSession 续采 / pause 态进编辑（P4） / stopScanSession 完成
+    /// 扫描（合账落库＋销毁）。
+    Scanner::Result pauseScanSession();
+    /// 续采（就绪态出口①）：管线 resume＋按当前模式重启采集（灯组）
+    Scanner::Result resumeScanSession();
+    /// 是否处于就绪态（Paused）
+    bool isScanSessionPaused() const;
+    /// 编辑会话门禁（app 级——10 状态机就绪态扩展另行；现查就绪＋标志点云
+    /// 非空，激光云非空检查待 P4 接 ILaserFuse 出口后补）
+    bool canEnterEditSession() const;
     /// 会话终止/装配失败回调（**后台线程调用**——UI 侧自行切线程；可空）。
     /// ok=false＝后台装配失败（gate 已回滚待机，UI 需复原扫描按钮态）
     void setScanSessionEndedHandler(std::function<void(bool ok)> h) {
@@ -127,6 +141,7 @@ private:
     // Workflow
     std::unique_ptr<Scanner::workflow::WorkflowContext>     wfCtx_;
     std::unique_ptr<Scanner::workflow::ScanWorkflow>        scanWf_;
+    Scanner::ScanMode lastScanMode_ = Scanner::ScanMode::MarkerOnly;   // 续采重启灯组用（pause 保活后模式不变）
     std::unique_ptr<Scanner::workflow::CalibrationWorkflow> calibWf_;
     std::unique_ptr<Scanner::workflow::PostProcessWorkflow> postWf_;
 

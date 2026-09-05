@@ -401,6 +401,7 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
     // 命令通道点火（门禁/前置/装配失败均带因返回；各"不走打印点"已落日志）
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
     scanWf_->setScanMode(mode);
+    lastScanMode_ = mode;                       // 就绪态续采重启灯组依据（P3）
     const auto modeName = mode == Scanner::ScanMode::MarkerOnly ? "标点扫描(A)" : "面片扫描(B)";
     auto gr = commandGate_->submit("start_scan", static_cast<int64_t>(mode));
     if (!gr.success) {
@@ -442,6 +443,47 @@ bool AppContext::isScanSessionActive() const {
     using Scanner::workflow::WorkflowState;
     const auto st = scanWf_->getState();
     return st == WorkflowState::Running || st == WorkflowState::Paused;
+}
+
+// ============================================================================
+// 就绪态（05 D2/D8，实施计划 P3）——停采集保活会话：编辑会话的数据源基础
+// ============================================================================
+Scanner::Result AppContext::pauseScanSession() {
+    if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
+    if (!isScanSessionActive()) return Scanner::Result::fail("无活跃扫描会话");
+    if (isScanSessionPaused()) return Scanner::Result::ok("已处于就绪态");
+    // 设备侧停止采集（N11H0 灭灯；相机流保留——预览续走，扫描环 Overwrite 自弃）
+    if (deviceManager_) deviceManager_->stopCapture();
+    const auto r = scanWf_->pause();
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 就绪态（停止采集保活）：{}（融合云/obs 账本保留）",
+                 r.success ? "ok" : r.message);
+    return r;
+}
+
+Scanner::Result AppContext::resumeScanSession() {
+    if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
+    if (!isScanSessionPaused()) return Scanner::Result::fail("非就绪态（无暂停会话）");
+    const auto r = scanWf_->resume();
+    if (!r.success) return r;
+    // 续采：按当前模式重启采集（灯组同 startScanSession 口径）
+    if (deviceManager_) {
+        const bool laserOn = (lastScanMode_ != Scanner::ScanMode::MarkerOnly);
+        deviceManager_->startCapture(laserOn);
+    }
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（就绪态出口①）：ok");
+    return Scanner::Result::ok("续采中");
+}
+
+bool AppContext::isScanSessionPaused() const {
+    if (!scanWf_) return false;
+    return scanWf_->getState() == Scanner::workflow::WorkflowState::Paused;
+}
+
+bool AppContext::canEnterEditSession() const {
+    // app 级门禁（10 状态机就绪态扩展另行）：就绪态＋标志点融合云非空
+    if (!isScanSessionPaused()) return false;
+    if (!sceneFeed_) return false;
+    return !sceneFeed_->latestMarkers().empty();
 }
 
 void AppContext::shutdown() {

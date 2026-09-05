@@ -968,19 +968,49 @@ QWidget *MainWindow::createToolBar()
             const QString title = mesh ? QStringLiteral("面片扫描") : QStringLiteral("标点扫描");
             connect(btn, &QPushButton::clicked, this, [this, myIdx, title]() {
                 if (!m_appCtx) return;
-                // 会话活跃（无论哪键起的）：先停＋复原"活跃键"视觉
                 if (m_appCtx->isScanSessionActive()) {
-                    auto sr = m_appCtx->stopScanSession();
-                    if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                     const bool wasSelf = (m_activeScanToolIdx == myIdx);
-                    m_activeScanToolIdx = -1;
-                    if (wasSelf) {   // 再点自己＝纯停止
-                        statusBar()->showMessage(sr.success
-                            ? QStringLiteral("扫描停止中——会话合账")
-                            : QString::fromStdString("停止被拒: " + sr.message));
-                        return;
+                    if (m_appCtx->isScanSessionPaused()) {
+                        // —— 就绪态（P3）：本键＝续采（出口①）；他键＝完成旧会话
+                        //    （合账落库，出口③雏形）＋启动新模式 ——
+                        if (wasSelf) {
+                            auto rr = m_appCtx->resumeScanSession();
+                            if (rr.success) {
+                                setScanButtonVisual(myIdx, true);
+                                statusBar()->showMessage(QString::fromStdString(rr.message) +
+                                                         QStringLiteral("——再点停止采集"));
+                            } else {
+                                statusBar()->showMessage(
+                                    QString::fromStdString("续采被拒: " + rr.message));
+                            }
+                            return;
+                        }
+                        auto sr = m_appCtx->stopScanSession();
+                        if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                        m_activeScanToolIdx = -1;
+                        if (!sr.success)
+                            statusBar()->showMessage(
+                                QString::fromStdString("完成被拒: " + sr.message));
+                        // 落下：继续启动新模式
+                    } else {
+                        // —— 运行态：本键＝停止采集→就绪（保活，05 D2 编辑时机）；
+                        //    他键＝完整停旧（模式切换）—— ——
+                        if (wasSelf) {
+                            auto pr = m_appCtx->pauseScanSession();
+                            statusBar()->showMessage(pr.success
+                                ? QStringLiteral("已停止采集（就绪）——再点续采")
+                                : QString::fromStdString("停止被拒: " + pr.message));
+                            if (pr.success) setScanButtonVisual(myIdx, false);   // 就绪＝复原（会话保活）
+                            return;
+                        }
+                        auto sr = m_appCtx->stopScanSession();
+                        if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                        m_activeScanToolIdx = -1;
+                        if (!sr.success)
+                            statusBar()->showMessage(
+                                QString::fromStdString("停止被拒: " + sr.message));
+                        // 落下：停旧启新（模式切换）
                     }
-                    // 点的是另一键：停旧后继续启动新模式（落下）
                 }
                 const auto mode = title == QStringLiteral("面片扫描")
                                       ? Scanner::ScanMode::MarkerPlusLaser
