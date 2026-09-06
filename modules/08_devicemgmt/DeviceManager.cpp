@@ -417,11 +417,8 @@ std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
     return {{"N10", [this](McuDone cb) {
                  mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
              }},
-            {"N11H1", [this](McuDone cb) {
-                 mcu_->startScan(std::move(cb));   // 重启触发（2026-09-06 实测：N11H0
-             }},                                    // 停触发后仅 N10 不恢复——MCU 停在
-            {"FLUSH", [this](McuDone cb) {          // 「已停」态；须 N11H1（首次启动
-                 mcu_->flushWrites(300);            // 亦无害——MCU 幂等确认）
+            {"FLUSH", [this](McuDone cb) {
+                 mcu_->flushWrites(300);        // 有界：残余慢写最多 300ms
                  cb(true, "");
              }}};
 }
