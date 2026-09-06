@@ -2230,13 +2230,19 @@ void OSGWidget::setLeftCameraView()
     if (!bs.valid() || bs.radius() <= 0) return;
 
     const osg::Vec3d c(bs.center());
-    const double dist = bs.radius() * 1.2;   // 取景距离 2.0r→1.2r（点占屏更大）
+    // 取景距离＝按有效半视场（含宽高比）留边 15%（2026-09-06 用户口径：1.2r
+    // 过近看不清工件全貌；与 placeOptimalCamera 同式——工件全貌入画且留余量）
+    constexpr double kPi = 3.14159265358979323846;
+    const auto* traits = m_gw->getTraits();
+    const double aspect = static_cast<double>(traits->width) / static_cast<double>(traits->height);
+    const double halfV = 30.0 * 0.5 * kPi / 180.0;
+    const double halfH = std::atan(std::tan(halfV) * aspect);
+    const double half = std::min(halfV, halfH);
+    const double dist = (bs.radius() / std::sin(half)) * 1.15;
     const osg::Vec3d eye(c.x(), c.y(), c.z() - dist);
     const osg::Vec3d up(0.0, -1.0, 0.0);
 
     const double r = bs.radius();
-    const osg::GraphicsContext::Traits* traits = m_gw->getTraits();
-    const double aspect = static_cast<double>(traits->width) / static_cast<double>(traits->height);
     m_viewer->getCamera()->setProjectionMatrixAsPerspective(30.0, aspect, r * 0.01, r * 100.0);
     m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
 
