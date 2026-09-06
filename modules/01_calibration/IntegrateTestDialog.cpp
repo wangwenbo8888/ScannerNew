@@ -35,9 +35,9 @@ IntegrateTestDialog::~IntegrateTestDialog()
 }
 
 // ============================================================================
-// 设置 CameraControl
+// 设置相机（08 契约接口——2026-09-05 跨层封装收口）
 // ============================================================================
-void IntegrateTestDialog::setCameraControl(Scanner::device::CameraControl* cam)
+void IntegrateTestDialog::setCameraControl(Scanner::hal::IScannerCamera* cam)
 {
     m_cam = cam;
 

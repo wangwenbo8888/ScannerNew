@@ -21,7 +21,7 @@
 - 分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`
   - 06 只链 base＋nlohmann_json
   - 07（mod_pipelinemgmt）链 base＋mod_fileio＋mod_operatorlib——五流水线对象消费容器与算子
-  - 08 的 HardwareMonitor 源码 include 06 的 DeviceStateCache，链接符号由 app 侧汇聚解析
+  - 08 只链 base＋Qt SerialPort——HardwareMonitor 状态落经 `IDeviceStateSink` 契约接口（06 实现类 include 已清账 d5948e5，app 装配注入）
   - 10 链 base＋spdlog
 - 全量 ctest **95/95 绿**（Debug＋Release 双绿）
 - `factory_calib/` 为独立厂家标定子工程（已交付，AI 只读保护区）

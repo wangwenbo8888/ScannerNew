@@ -18,7 +18,7 @@
 #include "jmw_logging.h"
 #include "base/EventBus.h"
 #include "modules/08_devicemgmt/DeviceManager.h"
-#include "modules/08_devicemgmt/CameraControl.h"   // 门面相机工厂构造体（注入式）
+#include "modules/08_devicemgmt/CameraFactory.h"   // 相机工厂契约（实现细节收在 08）
 #include "modules/08_devicemgmt/HardwareMonitor.h"
 #include "modules/08_devicemgmt/SelfCheckCollector.h"
 #include "WorkflowContext.h"
@@ -192,11 +192,8 @@ void AppContext::initialize() {
     // IHealthProvider 注入移至 HAL 段之后（adapter 持 hwMonitor 裸指针——需其先在）
 
     // === HAL ===（A-T17 三行门面：设备对象【相机+MCU】收进 DeviceManager；
-    // HardwareMonitor 为巡检件留本层——门面不管它）
-    Scanner::device::StereoPairConfig camCfg;
-    camCfg.deviceIndexLeft = 0;
-    camCfg.deviceIndexRight = 1;
-    camCfg.rotateRight180 = true;
+    // HardwareMonitor 为巡检件留本层——门面不管它。相机经 08 工厂契约构造
+    // ——实现类/配置细节不漏到装配根（跨层封装收口 2026-09-05））
     Scanner::device::DeviceConfig devCfg;
     devCfg.serialPort = "auto";   // 串口自动搜（MCUDriver 逐口发 N12Z1 探测应答认定）；固定口填 "COMx"
     // protocol 默认 V3、baud 115200（DeviceConfig 缺省即产线口径）
@@ -213,8 +210,9 @@ void AppContext::initialize() {
                          : Scanner::Result::fail("状态门禁拒绝: " + op);
         },
         eventBus_.get(),
-        [camCfg]() -> std::unique_ptr<Scanner::hal::IScannerCamera> {
-            return std::make_unique<Scanner::device::CameraControl>(camCfg);
+        []() -> std::unique_ptr<Scanner::hal::IScannerCamera> {
+            // 左右设备序号 0/1＋右图 180° 旋转（原 AppContext 内联配置口径）
+            return Scanner::device::createGalaxyStereoCamera(0, 1, true);
         });
     // 设备启动（open+自检）后台化：此处不再阻塞主窗口——main 在 window.show() 后
     // 调 startDevicesAsync()（相机枚举+自动搜口实测 ~5s，同步跑=白屏等）

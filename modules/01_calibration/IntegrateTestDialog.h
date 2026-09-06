@@ -2,7 +2,9 @@
 // ============================================================================
 // IntegrateTestDialog.h — 集成测试对话框
 //
-// 集成 CameraControl 采集、参数调节、图像显示、标定操作的测试界面。
+// 集成相机采集、参数调节、图像显示、标定操作的测试界面。
+// 跨层封装收口（2026-09-05）：经 08 契约接口 IScannerCamera 访问相机——
+// 不再 include 实现类 CameraControl（穿透门面违规清账）。
 // ============================================================================
 
 #include <QDialog>
@@ -15,7 +17,7 @@
 #include <QSpinBox>
 #include <QTimer>
 
-#include "modules/08_devicemgmt/CameraControl.h"
+#include "modules/08_devicemgmt/IScannerCamera.h"
 
 class IntegrateTestDialog : public QDialog
 {
@@ -25,7 +27,7 @@ public:
     explicit IntegrateTestDialog(QWidget *parent = nullptr);
     ~IntegrateTestDialog();
 
-    void setCameraControl(Scanner::device::CameraControl* cam);
+    void setCameraControl(Scanner::hal::IScannerCamera* cam);
 
 private slots:
     void onOpenCamera();
@@ -42,8 +44,8 @@ private:
 
     void setupUILayout();
 
-    // Camera
-    Scanner::device::CameraControl* m_cam = nullptr;
+    // Camera（08 契约接口——实现由装配根注入）
+    Scanner::hal::IScannerCamera* m_cam = nullptr;
 
     // Control panel
     QTextEdit*  m_textEditInfo;

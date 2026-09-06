@@ -4,6 +4,7 @@ set(GALAXY_SDK_DIR "C:/Program Files/Daheng Imaging/GalaxySDK/Development/C++ SD
 
 add_library(mod_devicemgmt STATIC
     CameraControl.cpp
+    CameraFactory.cpp
     MCUDriver.cpp
     HardwareMonitor.cpp
 )
