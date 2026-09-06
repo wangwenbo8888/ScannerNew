@@ -9,6 +9,7 @@
 
 #include "base/types.h"
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -66,6 +67,8 @@ public:
     // —— 相机装机口径（config/camera.json 启动读取；缺文件用内置默认）——
     /// 预览节流帧率（MainWindow 相机预览监视弹窗消费节流用）
     int cameraPreviewFps() const { return cameraPreviewFps_; }
+    /// 实测接收帧率（08 DeviceManager 测量，AppContext 转发——主界面帧率卡）
+    int cameraMeasuredFps() const;
 
     // Infra
     Scanner::infra::EventBus* eventBus() { return eventBus_.get(); }

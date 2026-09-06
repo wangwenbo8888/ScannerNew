@@ -639,6 +639,20 @@ void MainWindow::showCameraMonitor() {
         });
     }
     m_appCtx->setDebugFrameTap([this](const Scanner::hal::StereoFrame& f) {
+        // 接收帧率计数（节流前每帧计数——给帧号行用）
+        static std::atomic<uint64_t> s_rxCnt{0};
+        static auto s_lastRxTick = std::chrono::steady_clock::now();
+        static std::atomic<uint64_t> s_rxFps{0};
+        ++s_rxCnt;
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - s_lastRxTick >= std::chrono::seconds(1)) {
+                s_rxFps.store(s_rxCnt.exchange(0) * 1000 /
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - s_lastRxTick).count());
+                s_lastRxTick = now;
+            }
+        }
         // 时间基准节流（2026-09-05）：帧率上限＝config/camera.json previewFps
         //（原帧计数法绑定 30fps 流假设——不同帧率下预览 fps 漂移）
         using clock = std::chrono::steady_clock;
@@ -658,9 +672,27 @@ void MainWindow::showCameraMonitor() {
                                           .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
                 m_camRight->setPixmap(QPixmap::fromImage(camMatToImage(r))
                                            .scaled(m_camRight->size(), Qt::KeepAspectRatio));
+                // 流水线消费帧率（1s 计算一次——帧计数差分）
+                static uint64_t lastPipelineCnt = 0;
+                static auto lastCalc = std::chrono::steady_clock::now();
+                static double pipelineFps = 0.0;
+                {
+                    const auto now2 = std::chrono::steady_clock::now();
+                    if (now2 - lastCalc >= std::chrono::seconds(1)) {
+                        if (m_appCtx && m_appCtx->scanWorkflow()) {
+                            const uint64_t cur = m_appCtx->scanWorkflow()->processedFrameCount();
+                            const double sec = std::chrono::duration<double>(now2 - lastCalc).count();
+                            pipelineFps = sec > 0 ? (cur - lastPipelineCnt) / sec : 0;
+                            lastPipelineCnt = cur;
+                        }
+                        lastCalc = now2;
+                    }
+                }
                 if (m_camFrameLabel)
                     m_camFrameLabel->setText(
-                        QStringLiteral("左帧号: %1    右帧号: %2    偏移: %3")
+                        QStringLiteral("接收: %1 fps    流水线: %2 fps    左帧号: %3    右帧号: %4    偏移: %5")
+                            .arg(s_rxFps.load())
+                            .arg(pipelineFps, 0, 'f', 1)
                             .arg(static_cast<qulonglong>(fidL))
                             .arg(static_cast<qulonglong>(fidR))
                             .arg(static_cast<qulonglong>(fidL) - static_cast<qulonglong>(fidR)));
@@ -2146,13 +2178,11 @@ void MainWindow::updateInfoSection()
 
     // 3. 帧率 — 从 DeviceStateCache 或 FrameBuffer 水位
     if (m_infoFpsLabel) {
-        double fps = dsc ? dsc->getFps("Camera") : 0.0;
-        if (fps > 0.0) {
-            m_infoFpsLabel->setText(QString::number(static_cast<int>(fps)) + " fps");
-        } else if (m_appCtx && m_appCtx->frameBuffer()) {
-            // 回退: 用 FrameBuffer 水位推算
-            int level = m_appCtx->frameBuffer()->getBufferLevel();
-            m_infoFpsLabel->setText(level > 0 ? QString::number(level) + " f" : "-- fps");
+        // 实测接收帧率（2026-09-06 改：原 DeviceStateCache.getFps 为硬件设定值
+        // 恒 60 不反映实际——改为配对交付差分实测）
+        const int fps = m_appCtx ? m_appCtx->cameraMeasuredFps() : 0;
+        if (fps > 0) {
+            m_infoFpsLabel->setText(QString::number(fps) + " fps");
         } else {
             m_infoFpsLabel->setText("-- fps");
         }

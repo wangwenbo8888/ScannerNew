@@ -779,7 +779,22 @@ Result DeviceManager::setCameraExposure(double ms) {
 Result DeviceManager::startFrameStream(hal::FrameCallback cb) {
     if (!camera_ || !camera_->isOpen()) return Result::fail("相机未就绪");
     post([this, cb = std::move(cb)]() mutable {
-        frameCb_ = std::move(cb);                    // 帧出口记账归逻辑线程属主
+        // 帧出口包一层计数（帧率测量归 08——封装性：计数在设备管理层，上层只读）
+        frameCb_ = [this, userCb = std::move(cb)](const hal::StereoFrame& f) {
+            const auto now = std::chrono::steady_clock::now();
+            const uint64_t cnt = m_rxCnt_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (m_lastFpsTick_.time_since_epoch().count() == 0) {
+                m_lastFpsTick_ = now;
+            } else if (now - m_lastFpsTick_ >= std::chrono::seconds(1)) {
+                const double sec =
+                    std::chrono::duration<double>(now - m_lastFpsTick_).count();
+                m_measuredFps.store(sec > 0 ? static_cast<int>(cnt / sec) : 0,
+                                    std::memory_order_relaxed);
+                m_rxCnt_.store(0, std::memory_order_relaxed);
+                m_lastFpsTick_ = now;
+            }
+            userCb(f);      // 转发上层回调
+        };
         if (camera_ && camera_->isOpen()) camera_->startAsyncCapture(frameCb_);
     });
     return Result::ok("已编队");

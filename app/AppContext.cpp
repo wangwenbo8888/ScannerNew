@@ -489,6 +489,10 @@ bool AppContext::isScanSessionActive() const {
 // ============================================================================
 // 就绪态（05 D2/D8，实施计划 P3）——停采集保活会话：编辑会话的数据源基础
 // ============================================================================
+int AppContext::cameraMeasuredFps() const {
+    return deviceManager_ ? deviceManager_->measuredCameraFps() : 0;
+}
+
 Scanner::Result AppContext::pauseScanSession() {
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
     if (!isScanSessionActive()) return Scanner::Result::fail("无活跃扫描会话");

@@ -64,6 +64,7 @@
 #include "serial/McuFrame.h"  // TempFrame（getLastTemperatures 返回值）
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <map>
@@ -175,6 +176,8 @@ public:
     //    采集期参数变更重发同样生效；缺省 true=账本全参（面片扫描 B 模式）
     void startCapture(bool laserOn = true);
     void stopCapture();
+    /// 实测相机帧率（配对交付差分 1s 窗口——帧回调链内计数，UI 只读）
+    int measuredCameraFps() const { return m_measuredFps.load(std::memory_order_relaxed); }
 
     // —— 灯光直控（用户按钮直调；编队逻辑线程执行，不启停采集）——
     /// N10 灯字段即时生效：bgOn/laserOn=true 取账本值、false 置 0（底层通用口）
@@ -273,6 +276,9 @@ private:
 
     // —— 运行时记账（逻辑线程属主；跨线程读口走上方快照）——
     hal::FrameCallback frameCb_;                // startFrameStream 登记的帧出口
+    std::atomic<uint64_t> m_rxCnt_{0};          // 帧回调计数（帧率差分——相机线程写）
+    std::atomic<int> m_measuredFps{0};          // 实测帧率（1s 窗口差分——UI 读）
+    std::chrono::steady_clock::time_point m_lastFpsTick_{};  // 差分基点（相机线程）
     serial::TempFrame lastTemps_{};             // 逻辑线程账本（快照源）
     TimestampMs tempRxTime_ = 0;                // 最近 T 帧到达时刻（v2 兜底判据）
     std::function<void(bool)> warmupDone_;      // 当前预热完成回调（onStable/onTimeout 消费）
