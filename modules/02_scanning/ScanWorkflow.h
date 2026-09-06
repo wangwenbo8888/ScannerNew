@@ -35,6 +35,7 @@
 
 namespace Scanner::pipeline {
 struct IMarkerFuse;              // 05 P4 编辑账本窄出口（定义在 07 FuseConsumer.h）
+struct ILaserFuse;               // 05 P4 编辑账本窄出口·激光侧（同上）
 class FrameObsAccumulator;
 }
 
@@ -91,6 +92,10 @@ public:
     // —— 编辑账本窄出口（05 P4：就绪态编辑会话作用融合云/obs）——
     /// 标志点融合累积器（会话私有件；未装配/已停=空）
     Scanner::pipeline::IMarkerFuse* markerFuse();
+#ifdef JMW_BUILD_CUDA
+    /// 激光融合累积器（05 P4 激光侧；未装配/已停=空）
+    Scanner::pipeline::ILaserFuse* laserFuse();
+#endif
     /// 逐帧观测累加器（GBA 输入账本；未装配/已停=空）
     Scanner::pipeline::FrameObsAccumulator* obsAccumulator();
 

@@ -188,6 +188,11 @@ uint64_t ScanWorkflow::droppedSessionFrames() const {
 Scanner::pipeline::IMarkerFuse* ScanWorkflow::markerFuse() {
     return pipeline_ ? pipeline_->markerFuse() : nullptr;
 }
+#ifdef JMW_BUILD_CUDA
+Scanner::pipeline::ILaserFuse* ScanWorkflow::laserFuse() {
+    return pipeline_ ? pipeline_->laserFuse() : nullptr;
+}
+#endif
 Scanner::pipeline::FrameObsAccumulator* ScanWorkflow::obsAccumulator() {
     return pipeline_ ? &pipeline_->obs() : nullptr;
 }

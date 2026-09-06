@@ -119,11 +119,17 @@ void FuseConsumer::processOne(FrameResult& fr) {
             CloudViewHandle h;
             h.hostMarker = &deps_.markerFuse->fusedPoints();
             h.deviceLaser = nullptr;
-            h.hostLaser = laserXyz.empty() ? nullptr : laserXyz.data();  // 激光 host 块
-            h.laserCount = laserXyz.size() / 3;
+            // 激光显示推融合云累计值（体素去重后单调不减——修复「点数忽
+            // 大忽小」：旧版推当帧块，T/V 交替 79K/124K 跳变）
+            std::vector<float> fusedXyz;
+#ifdef JMW_BUILD_CUDA
+            if (deps_.laserFuse) fusedXyz = deps_.laserFuse->downloadFusedXyz();
+#endif
+            h.hostLaser = fusedXyz.empty() ? nullptr : fusedXyz.data();  // 激光 host 块
+            h.laserCount = fusedXyz.size() / 3;
             // 显示链观测（节流同频）：融合云点数——0=融合无产出；>0=断在
             // 下游（SceneFeed/UI）
-            JMW_LOG_INFO("07-ScanChains", "[FuseConsumer] 推送渲染: 融合云={} 点 激光={} 点（帧 {}）",
+            JMW_LOG_INFO("07-ScanChains", "[FuseConsumer] 推送渲染: 融合云={} 点 激光融合云={} 点（帧 {}）",
                          deps_.markerFuse->fusedPoints().size(), h.laserCount, n);
             deps_.sceneFeed->pushCloudSnapshot(h);
         }

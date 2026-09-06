@@ -55,6 +55,16 @@ struct ILaserFuse {
     virtual ~ILaserFuse() = default;
     virtual void fuse(const GpuPointCloudBlock& block,
                       const double R[9], const double T[3]) = 0;
+    /// 融合云累计点数（体素去重后；显示计数用——默认 0 兼容测试假实现）
+    virtual size_t fusedPointCount() const { return 0; }
+    /// 融合云 host 下载（交错 xyz，3N floats；默认空兼容测试假实现）
+    virtual std::vector<float> downloadFusedXyz() const { return {}; }
+    /// 编辑账本移除（05 双账本·激光云侧）：按下标移除融合点——默认 fail
+    /// （测试假实现可不覆写）；生产适配器透传 09 LaserCloudFuseCuda::removePoints
+    virtual calib::ResultStatus removePoints(const std::vector<uint32_t>& indices) {
+        (void)indices;
+        return calib::ResultStatus::fail("ILaserFuse: removePoints 未实现");
+    }
 };
 
 /// 激光块 → host float xyz 下载函数（生产默认 GpuMat::download；测试假注入）

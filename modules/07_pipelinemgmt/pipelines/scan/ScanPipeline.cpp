@@ -24,6 +24,7 @@
 
 #ifdef JMW_BUILD_CUDA
 #include <opencv2/core/cuda.hpp>
+#include <cuda_runtime.h>
 #include "scanning/fusion/laser_cloud_fuse_cuda/laser_cloud_fuse_cuda.h"
 #include "scanning/fusion/laser_cloud_normal_cuda/laser_cloud_normal_cuda.h"
 #endif
@@ -130,6 +131,29 @@ public:
         } catch (const std::exception& e) {
             JMW_LOG_ERROR("07-ScanPipeline", "[ScanPipeline] laser 融合适配器异常: {}", e.what());
         }
+    }
+
+    size_t fusedPointCount() const override {
+        return fuse_.GetFusedPointCount();
+    }
+
+    std::vector<float> downloadFusedXyz() const override {
+        // 09 算子融合云设备端布局：d_fusedXyz 交错 xyz（fi*3+0/1/2）
+        const auto ctx = fuse_.GetDeviceContext();
+        if (!ctx.d_fusedXyz || ctx.fusedPointCount == 0) return {};
+        std::vector<float> host(ctx.fusedPointCount * 3);
+        if (cudaMemcpy(host.data(), ctx.d_fusedXyz,
+                       host.size() * sizeof(float),
+                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+            JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] laser 融合云下载失败");
+            return {};
+        }
+        return host;
+    }
+
+    calib::ResultStatus removePoints(const std::vector<uint32_t>& indices) override {
+        // 透传 09 LaserCloudFuseCuda::removePoints（设备端压缩＋法线同映射）
+        return fuse_.removePoints(indices);
     }
 
 private:

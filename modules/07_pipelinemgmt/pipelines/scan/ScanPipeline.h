@@ -90,6 +90,11 @@ public:
     /// 编辑账本访问（05 P4）：标志点融合累积器（未 start/已停=空；窄接口
     /// IMarkerFuse——removePoints/fusedPoints 供编辑会话作用）
     IMarkerFuse* markerFuse() { return markerFuse_; }
+#ifdef JMW_BUILD_CUDA
+    /// 编辑账本访问（05 P4·激光侧）：激光融合累积器（未 start/已停=空；
+    /// 窄接口 ILaserFuse——removePoints/downloadFusedXyz 供编辑会话作用）
+    ILaserFuse* laserFuse() { return laserFuse_; }
+#endif
 
     // —— P3 可观测（渲染加固计划）：app 装配喂 HardwareMonitor ——
     /// 已融合消费帧数（FuseConsumer::consumed；未启动=0）

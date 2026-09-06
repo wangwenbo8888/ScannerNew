@@ -106,6 +106,8 @@ public:
 
     /// 可见标志点数（软删后 alpha>0 顶点折算——左侧统计栏刷新用）
     size_t visibleMarkerCount() const;
+    /// 可见激光点数（软删 alpha=0 不计——05 P4b 激光侧计数口径）
+    size_t visibleLaserCount() const;
 
     /// 显示级软删的标志点融合云下标集（退出编辑时 MainWindow 路由到真账本——
     /// P4b 物理化口。每圈选删除追加；undoDelete 不回收（物理化前保留原序；
@@ -114,6 +116,9 @@ public:
     /// 清空时机：applyMarkerDeletes 物理化后／clearScene
     std::vector<uint32_t> pendingMarkerDeleteIndices() const { return m_pendingMarkerDel; }
     void clearPendingMarkerDeletes() { m_pendingMarkerDel.clear(); }
+    /// 显示级删除的激光融合云下标（05 P4b 激光侧物理化口）
+    std::vector<uint32_t> pendingCloudDeleteIndices() const { return m_pendingCloudDel; }
+    void clearPendingCloudDeletes() { m_pendingCloudDel.clear(); }
     void deleteSelectedPoints();
     void undoDelete();
     void enterLassoDeleteMode();
@@ -347,6 +352,7 @@ private:
     osg::ref_ptr<osg::Vec3Array> m_markerCoords;
     osg::ref_ptr<osg::Vec4ubArray> m_markerColors;
     std::vector<uint32_t> m_pendingMarkerDel;   // 显示级删除的融合云下标（物理化口 P4b）
+    std::vector<uint32_t> m_pendingCloudDel;    // 显示级删除的激光融合云下标（物理化口 P4b·激光侧）
 
     // 坐标轴
     osg::ref_ptr<osg::Geode> m_axesGeode;

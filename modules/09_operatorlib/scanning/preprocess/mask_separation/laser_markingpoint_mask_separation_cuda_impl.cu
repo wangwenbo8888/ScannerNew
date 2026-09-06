@@ -341,6 +341,26 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
         result.d_markingPointMask = std::make_shared<cv::cuda::GpuMat>(d_marking_final.clone());
         result.d_combinedMask = std::make_shared<cv::cuda::GpuMat>(d_combined.clone());
 
+        // —— 分步诊断（2026-09-06 激光掩膜全零排查）：Step1 二值像素＋Step2
+        //    像素＋combined 像素＋laser_mask 像素（每 30 帧打一条）
+        {
+            static std::atomic<uint64_t> s_diagCnt{0};
+            if (s_diagCnt.fetch_add(1) % 30 == 0) {
+                cv::Mat hBinary, hStep2, hCombined, hLaser;
+                d_binary.download(hBinary, stream);
+                d_step2_mask.download(hStep2, stream);
+                d_combined.download(hCombined, stream);
+                d_laser_mask.download(hLaser, stream);
+                stream.waitForCompletion();
+                CALIB_LOG_INFO(
+                    "Separation 分步: step1_binary={}px step2={}px combined={}px "
+                    "laser_mask={}px threshold={}",
+                    cv::countNonZero(hBinary), cv::countNonZero(hStep2),
+                    cv::countNonZero(hCombined), cv::countNonZero(hLaser),
+                    params_.threshold);
+            }
+        }
+
         CALIB_LOG_INFO("Pipeline timings (ms): upload={:.3f} step1={:.3f} "
             "step2={:.3f} step3={:.3f} step4={:.3f} step5={:.3f} "
             "step6={:.3f} total={:.3f}",

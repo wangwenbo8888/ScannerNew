@@ -20,6 +20,8 @@
 #include "base/EventBus.h" // P2 渲染事件桥：faultSink lambda 需完整类型（publish）
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
+#include "modules/08_devicemgmt/ParamStore.h"      // ParamEntry::Source
+#include "modules/08_devicemgmt/DeviceManager.h"   // setParam 三路联动（完整类型）
 
 #include <algorithm>
 #include <chrono>
@@ -259,11 +261,17 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                 f.write(out);
                             }
                         }
-                        if (!m_3dView || pts.empty()) return;
+                        if (!m_3dView) return;
+                        // 激光计数合账（可见数口径：软删 alpha=0 不计——
+                        // 「点云数据 001」显示 标记/激光——激光不进 PointCloudBuffer）
                         std::vector<osg::Vec3> laser;
                         laser.reserve(pts.size());
                         for (const auto& p : pts) laser.emplace_back(p.x, p.y, p.z);
                         m_3dView->loadLaserPoints(laser);
+                        m_laserPtsShown = static_cast<int>(m_3dView->visibleLaserCount());
+                        if (m_cloudItem001)
+                            m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
+                                                        .arg(m_laserPtsShown));
                     });
             connect(feed, &SceneFeedAdapter::freezeChanged, this,
                     [this](bool frozen) {
@@ -666,7 +674,37 @@ void MainWindow::showCameraMonitor() {
         const cv::Mat r = f.rightGray.clone();
         const auto fidL = f.frameIdLeft;
         const auto fidR = f.frameIdRight;
-        QMetaObject::invokeMethod(this, [this, l, r, fidL, fidR]() {
+
+        // 激光线宽度测量（2026-09-06）：采样列，逐列垂直方向找亮像素连续段
+        // ——水平激光线的「厚度」即列方向亮段长度；取中位数（排除背景/噪声）
+        int laserWidth = 0;
+        {
+            const cv::Mat& img = l;   // 左图
+            if (!img.empty()) {
+                std::vector<int> runs;
+                const int cols = img.cols;
+                const int step = std::max(1, cols / 100);
+                for (int x = 0; x < cols; x += step) {
+                    int maxRun = 0, curRun = 0;
+                    for (int y = 0; y < img.rows; ++y) {
+                        if (img.at<uint8_t>(y, x) > 150) {
+                            ++curRun;
+                            if (curRun > maxRun) maxRun = curRun;
+                        } else {
+                            curRun = 0;
+                        }
+                    }
+                    if (maxRun > 2 && maxRun < img.rows / 10)
+                        runs.push_back(maxRun);
+                }
+                if (!runs.empty()) {
+                    std::sort(runs.begin(), runs.end());
+                    laserWidth = runs[runs.size() / 2];
+                }
+            }
+        }
+
+        QMetaObject::invokeMethod(this, [this, l, r, fidL, fidR, laserWidth]() {
             if (m_camDlg && m_camDlg->isVisible()) {
                 m_camLeft->setPixmap(QPixmap::fromImage(camMatToImage(l))
                                           .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
@@ -690,7 +728,8 @@ void MainWindow::showCameraMonitor() {
                 }
                 if (m_camFrameLabel)
                     m_camFrameLabel->setText(
-                        QStringLiteral("接收: %1 fps    流水线: %2 fps    左帧号: %3    右帧号: %4    偏移: %5")
+                        QStringLiteral("激光线宽: %1 px    接收: %2 fps    流水线: %3 fps    左帧号: %4    右帧号: %5    偏移: %6")
+                            .arg(laserWidth)
                             .arg(s_rxFps.load())
                             .arg(pipelineFps, 0, 'f', 1)
                             .arg(static_cast<qulonglong>(fidL))
@@ -1045,23 +1084,46 @@ QWidget *MainWindow::createToolBar()
                 auto materializeEdits = [this]() {
                     if (!m_3dView) return;
                     const auto pending = m_3dView->pendingMarkerDeleteIndices();
-                    if (pending.empty()) return;
-                    auto* sw = m_appCtx ? m_appCtx->scanWorkflow() : nullptr;
-                    auto* fuse = sw ? sw->markerFuse() : nullptr;
-                    auto* obs = sw ? sw->obsAccumulator() : nullptr;
-                    if (!fuse || !obs) return;
-                    // 融合云物理移除（越界批原子——快照与云间下标漂移时整批不动）
-                    const auto st = fuse->removePoints(pending);
-                    if (!st.success) {
-                        JMW_LOG_WARN("app-MainWindow", "[编辑物理化] 融合云移除失败: {}", st.message);
-                        return;
+                    if (!pending.empty()) {
+                        auto* sw = m_appCtx ? m_appCtx->scanWorkflow() : nullptr;
+                        auto* fuse = sw ? sw->markerFuse() : nullptr;
+                        auto* obs = sw ? sw->obsAccumulator() : nullptr;
+                        if (!fuse || !obs) return;
+                        // 融合云物理移除（越界批原子——快照与云间下标漂移时整批不动）
+                        const auto st = fuse->removePoints(pending);
+                        if (!st.success) {
+                            JMW_LOG_WARN("app-MainWindow", "[编辑物理化] 融合云移除失败: {}", st.message);
+                            return;
+                        }
+                        // obs 剔除（下标＝globalId——快照构建时恒等）
+                        obs->excludeMarkerObs(
+                            std::vector<int>(pending.begin(), pending.end()), true);
+                        m_3dView->clearPendingMarkerDeletes();
+                        JMW_LOG_INFO("app-MainWindow", "[编辑物理化] {} 点真删完成（融合云+obs）",
+                                     pending.size());
                     }
-                    // obs 剔除（下标＝globalId——快照构建时恒等）
-                    obs->excludeMarkerObs(
-                        std::vector<int>(pending.begin(), pending.end()), true);
-                    m_3dView->clearPendingMarkerDeletes();
-                    JMW_LOG_INFO("app-MainWindow", "[编辑物理化] {} 点真删完成（融合云+obs）",
-                                 pending.size());
+                    // —— 激光侧（05 P4b）：显示级删除 → 09 融合云物理移除 ——
+                    const auto pendingCloud = m_3dView->pendingCloudDeleteIndices();
+                    if (!pendingCloud.empty()) {
+                        auto* sw = m_appCtx ? m_appCtx->scanWorkflow() : nullptr;
+#ifdef JMW_BUILD_CUDA
+                        auto* lfuse = sw ? sw->laserFuse() : nullptr;
+#else
+                        auto* lfuse = static_cast<Scanner::pipeline::ILaserFuse*>(nullptr);
+#endif
+                        if (lfuse) {
+                            const auto stc = lfuse->removePoints(pendingCloud);
+                            if (stc.success) {
+                                m_3dView->clearPendingCloudDeletes();
+                                JMW_LOG_INFO("app-MainWindow",
+                                             "[编辑物理化·激光] {} 点真删完成（融合云）",
+                                             pendingCloud.size());
+                            } else {
+                                JMW_LOG_WARN("app-MainWindow",
+                                             "[编辑物理化·激光] 融合云移除失败: {}", stc.message);
+                            }
+                        }
+                    }
                 };
                 if (m_appCtx->isScanSessionActive()) {
                     const bool wasSelf = (m_activeScanToolIdx == myIdx);
@@ -1501,7 +1563,8 @@ QWidget *MainWindow::createParamSection()
         {QStringLiteral("参数6：细节保留"), 10, 0, 100}
     };
 
-    for (const auto &s : sliders) {
+    for (int si = 0; si < sliders.size(); ++si) {
+        const auto &s = sliders[si];
         QWidget *row = new QWidget();
         row->setMinimumHeight(40);
         QVBoxLayout *rowLayout = new QVBoxLayout(row);
@@ -1536,6 +1599,21 @@ QWidget *MainWindow::createParamSection()
             valueLbl->setText(QString::number(val));
         });
         controlLayout->addWidget(valueLbl);
+
+        // 参数1（曝光/亮度）→ 三路联动（用户口径 2026-09-06）：
+        //   补光灯 B / 激光线 L＝滑条值直接映射（0~100）
+        //   相机曝光＝滑条值×100 µs（100µs~10000µs，即 0.1ms~10ms）
+        if (si == 0) {
+            QObject::connect(slider, &QSlider::valueChanged, this, [this](int val) {
+                auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+                if (!dm) return;
+                auto src = Scanner::device::ParamEntry::Source::Ui;
+                const double exposureUs = std::max(100.0, static_cast<double>(val) * 100.0);
+                dm->setParam("exposure",  exposureUs / 1000.0, src);   // µs→ms
+                dm->setParam("laserLevel", static_cast<double>(val), src);
+                dm->setParam("bgLight",  static_cast<double>(val), src);
+            });
+        }
 
         rowLayout->addLayout(controlLayout);
         slidersLayout->addWidget(row);
@@ -1840,6 +1918,12 @@ QWidget *MainWindow::createBottomToolBar()
                                   .arg(m_markerScanSeq, 3, 10, QChar('0'))
                                   .arg(vis));
                 }
+                // 点云计数同步可见激光数（05 P4b 激光侧——软删立即反映）
+                if (m_cloudItem001 && m_3dView) {
+                    m_laserPtsShown = static_cast<int>(m_3dView->visibleLaserCount());
+                    m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
+                                                .arg(m_laserPtsShown));
+                }
                 JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 三栏复位完成（0-6 全清）");
             });
         });
@@ -2038,7 +2122,8 @@ void MainWindow::startInfoTimer()
             m_3dView->loadCloudSnapshot(version, points, colors);
             lastCount = curCount;
             if (m_cloudItem001)
-                m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)").arg(curCount));
+                m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
+                                            .arg(std::max(curCount, m_laserPtsShown)));
         }
     });
     cloudTimer->start(500);

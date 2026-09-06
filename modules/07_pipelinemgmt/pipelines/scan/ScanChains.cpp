@@ -25,6 +25,10 @@
 #include "core/laser/undistort_cuda/undistort_points_cuda.h"
 #include "scanning/laser/laser_match_scan/laser_match_scan_cuda.h"
 #include "scanning/laser/epipolar_pair_cpu/epipolar_pair_cpu.h"   // 同行配对（还账收编）
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <unordered_map>
 #include "scanning/preprocess/mask_separation/laser_markingpoint_mask_separation_cuda.h"
 // ---- 09 P 核链算子 ----
 #include "core/marker/edge_match/edge_match_cpu.h"
@@ -150,6 +154,10 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
         // A=纯点图模式（spotThreshold=100 直接阈值化——算法在算子内，07 只传模式）
         calib::LaserMarkingSeparationParams sepParams;
         if (!cfg_.enableLaser) sepParams.spotThreshold = 100;
+        else sepParams.threshold = 150;  // 2026-09-06 定值：原始图激光>150（宽
+                                           // 13px 可测）；Gaussian 模糊后中心约
+                                           // 170-180，阈值 180 恰在边缘部分帧
+                                           // 漏检——降至 150 与线宽测量对齐
         ops->sep      = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
         ops->ccl      = std::make_unique<calib::RegionAnalyzerCUDA>(
             calib::RegionAnalyzerParams{100, 2025, 0});   // 真标志点 φ17px≈227px²
@@ -254,6 +262,9 @@ ScanChains::Hooks ScanChains::assemble() {
 
         // 1) 掩膜分离（统一走 sep 算子——A 模式算子内 spot 模式直通阈值化，
         // B 模式线点形态学；还账后 07 不再持图像处理原语 2026-09-01）
+        // 2026-09-06 B 模式绕过分离分类：laser_mask 恒 0（形态学不认当前激光
+        // 线形态）——改用 combinedMask（Step3 输出）直喂 Steger；标志点由
+        // CCL 侧 d_markingPointMask 照常走 P 链，互不干扰
         calib::LaserMarkingSeparationResult sepL, sepR;
         try {
             sepL = ops.sep->Execute(frame->grayL, stream);
@@ -265,6 +276,11 @@ ScanChains::Hooks ScanChains::assemble() {
             if (!sepR.success) {
                 JMW_LOG_WARN("07-ScanChains", "[ScanChains] mask_separation R 失败: {}", sepR.message);
                 return false;
+            }
+            // B 模式：laserMask 绕过——用 combinedMask 当 laser 输入
+            if (cfg_.enableLaser) {
+                if (sepL.d_combinedMask) sepL.d_laserMask = sepL.d_combinedMask;
+                if (sepR.d_combinedMask) sepR.d_laserMask = sepR.d_combinedMask;
             }
         } catch (const std::exception& e) {
             JMW_LOG_ERROR("07-ScanChains", "[ScanChains] mask_separation 异常: {}", e.what());
@@ -399,34 +415,31 @@ ScanChains::Hooks ScanChains::assemble() {
                 // 面片扫描内左/右斜帧的细分派
                 const bool leftSkewFrame = (frame->frameId % 2) == 0;
 
-                // —— 激光左右匹配：同行配对走 09 算子（epipolar_pair_cpu——
-                // 还账 2026-09-01：算法收编算子内，07 仅编排：下载→算子→上传）
+                // —— 激光左右匹配（2026-09-06 用户口径：先出链路效果不看精度）——
+                // 最简固定视差：L 矫正点直接减 30px 视差作 R 匹配，跳过极线插值＋
+                // 匹配（后续接查表匹配后替换回正规链路）
                 cv::cuda::GpuMat d_mL, d_mR, d_mId;
                 {
-                    cv::Mat hL, hR, hLid;
-                    eiL.d_interpPoints->download(hL, stream);
-                    eiR.d_interpPoints->download(hR, stream);
-                    eiL.d_interp_line_ids->download(hLid, stream);
+                    cv::Mat hL;
+                    unL.d_rectifiedPoints->download(hL, stream);
                     const std::vector<cv::Point2f> vL(hL.ptr<cv::Point2f>(),
                                                       hL.ptr<cv::Point2f>() + hL.total());
-                    const std::vector<cv::Point2f> vR(hR.ptr<cv::Point2f>(),
-                                                      hR.ptr<cv::Point2f>() + hR.total());
-                    const std::vector<int> vId(hLid.ptr<int>(),
-                                               hLid.ptr<int>() + hLid.total());
-                    auto pr = ops.epipolarPair->Execute(vL, vR, vId);
-                    if (!pr.success) {
-                        JMW_LOG_INFO("07-ScanChains", "[ScanChains] 激光同行配对失败（{}）——本帧降级",
-                                     pr.message);
-                        return 0;
-                    }
-                    JMW_LOG_INFO("07-ScanChains", "[ScanChains] 激光帧#{}（{}斜，{}斜参数）同行配对 {} 点",
-                                 frame->frameId, leftSkewFrame ? "左" : "右",
-                                 leftSkewFrame ? "左" : "左(暂)",
-                                 pr.matchedIds.size());
-                    const int n = static_cast<int>(pr.matchedIds.size());
-                    d_mL.upload(cv::Mat(n, 1, CV_32FC2, pr.matchedLeft.data()), stream);
-                    d_mR.upload(cv::Mat(n, 1, CV_32FC2, pr.matchedRight.data()), stream);
-                    d_mId.upload(cv::Mat(n, 1, CV_32SC1, pr.matchedIds.data()), stream);
+                    if (vL.empty()) return 0;
+                    constexpr float kDisparity = 30.0f;
+                    std::vector<cv::Point2f> matchedL(vL);
+                    std::vector<cv::Point2f> matchedR;
+                    matchedR.reserve(vL.size());
+                    for (const auto& p : vL)
+                        matchedR.emplace_back(p.x - kDisparity, p.y);
+                    std::vector<int> matchedIds(vL.size());
+                    for (size_t i = 0; i < vL.size(); ++i) matchedIds[i] = static_cast<int>(i);
+                    const int n = static_cast<int>(vL.size());
+                    JMW_LOG_INFO("07-ScanChains",
+                                 "[ScanChains] 激光帧#{}（{}斜）固定视差重建 {} 点",
+                                 frame->frameId, leftSkewFrame ? "左" : "右", n);
+                    d_mL.upload(cv::Mat(n, 1, CV_32FC2, matchedL.data()), stream);
+                    d_mR.upload(cv::Mat(n, 1, CV_32FC2, matchedR.data()), stream);
+                    d_mId.upload(cv::Mat(n, 1, CV_32SC1, matchedIds.data()), stream);
                 }
 
                 auto rc = ops.recon->Execute(d_mL, d_mR, d_mId,
@@ -436,6 +449,30 @@ ScanChains::Hooks ScanChains::assemble() {
                     return -1;
                 }
                 if (rc.validCount == 0 || !hasPts(rc.d_points3d)) return 0;
+
+                // —— 调试导出（2026-09-06）：重建激光点写 PLY（exe 目录
+                //    laser_recon_debug.ply 覆盖写——用户导入软件人工核对）
+                {
+                    cv::Mat h3d;
+                    rc.d_points3d->download(h3d, stream);
+                    stream.waitForCompletion();
+                    if (!h3d.empty()) {
+                        std::ofstream f("laser_recon_debug.ply", std::ios::trunc);
+                        if (f.is_open()) {
+                            f << "ply\nformat ascii 1.0\n";
+                            f << "element vertex " << h3d.total() << "\n";
+                            f << "property float x\nproperty float y\nproperty float z\n";
+                            f << "end_header\n";
+                            const cv::Vec3f* p3 = h3d.ptr<cv::Vec3f>();
+                            for (size_t k = 0; k < h3d.total(); ++k)
+                                f << std::fixed << std::setprecision(3)
+                                  << p3[k][0] << " " << p3[k][1] << " " << p3[k][2] << "\n";
+                            JMW_LOG_INFO("07-ScanChains",
+                                         "[ScanChains] 激光重建导出 laser_recon_debug.ply（{} 点）",
+                                         h3d.total());
+                        }
+                    }
+                }
 
                 // 6) 激光块入池（池耗尽=降级无激光，帧仍有效）
                 if (deps_.laserPool) {

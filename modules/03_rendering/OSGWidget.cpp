@@ -1659,6 +1659,11 @@ void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
             for (unsigned int vi : kv.second)
                 m_pendingMarkerDel.push_back(vi / divisor);
         }
+        // 激光几何 → 记录融合云下标（P4b 激光侧：顶点 1:1，显示序＝融合序）
+        if (geom == m_laserGeom.get()) {
+            for (unsigned int vi : kv.second)
+                m_pendingCloudDel.push_back(vi);
+        }
 
         std::vector<osg::Vec4ub> orig;
         orig.reserve(kv.second.size());
@@ -1709,6 +1714,24 @@ size_t OSGWidget::visibleMarkerCount() const
         const auto* ps = m_markerGeom->getPrimitiveSet(0);
         if (ps && ps->getMode() == osg::PrimitiveSet::QUADS) visible /= 4;
     }
+    return visible;
+}
+
+size_t OSGWidget::visibleLaserCount() const
+{
+    // 软删计数（05 P4b 激光侧）：alpha>0 顶点数（逐顶点色 1:1＝点数）
+    if (!m_laserGeom.valid()) return 0;
+    const auto* colors =
+        dynamic_cast<const osg::Vec4ubArray*>(m_laserGeom->getColorArray());
+    if (!colors) {
+        // 无逐顶点色（旧态）＝顶点计数兜底
+        const auto* verts =
+            dynamic_cast<const osg::Vec3Array*>(m_laserGeom->getVertexArray());
+        return verts ? verts->size() : 0;
+    }
+    size_t visible = 0;
+    for (const auto& c : *colors)
+        if (c.a() > 0) ++visible;
     return visible;
 }
 
@@ -2236,14 +2259,25 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
         pointSize->setSize(2.0f);
         m_laserRoot->getOrCreateStateSet()->setAttribute(pointSize);
         m_laserRoot->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
-        // 颜色=导入点云默认色（LeadScan 浅蓝 0.529/0.808/0.980——用户口径同源）
-        auto* lc = new osg::Vec4Array(1);
-        (*lc)[0] = osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f);
-        m_laserGeom->setColorArray(lc, osg::Array::BIND_OVERALL);
+        // 混合开：软删 alpha=0 隐藏（05 P4b 激光删除链——旧版 BIND_OVERALL
+        // 单色无逐顶点色，套索删除 dynamic_cast 失败直接跳过＝删了没反应）
+        m_laserRoot->getOrCreateStateSet()->setMode(GL_BLEND, osg::StateAttribute::ON);
+        osg::ref_ptr<osg::BlendFunc> lbf = new osg::BlendFunc;
+        lbf->setFunction(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        m_laserRoot->getOrCreateStateSet()->setAttribute(lbf);
         m_laserCoords = new osg::Vec3Array;
     }
     m_laserCoords->assign(laser.begin(), laser.end());
     m_laserGeom->setVertexArray(m_laserCoords);
+    // 逐顶点色：默认=导入点云色（LeadScan 浅蓝——用户口径同源）；待物理化
+    // 删除的下标 alpha=0 隐藏（周期重推不复活——物理化在就绪态续采/完成前）
+    auto* lc = new osg::Vec4ubArray(laser.size());
+    const osg::Vec4ub kLaserColor(134, 206, 250, 255);
+    lc->assign(laser.size(), kLaserColor);
+    for (uint32_t vi : m_pendingCloudDel)
+        if (vi < lc->size()) (*lc)[vi] = osg::Vec4ub(0, 0, 0, 0);
+    lc->dirty();
+    m_laserGeom->setColorArray(lc, osg::Array::BIND_PER_VERTEX);
     if (m_laserGeom->getNumPrimitiveSets() == 0)
         m_laserGeom->addPrimitiveSet(new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)laser.size()));
     else
