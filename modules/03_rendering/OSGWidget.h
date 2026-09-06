@@ -118,6 +118,11 @@ public:
     bool lassoFirstLayer() const { return m_lassoFirstLayer; }
     void setLassoFirstLayerTolerance(double mm) { m_lassoFirstLayerTolMm = mm > 0 ? mm : 5.0; }
 
+    /// 集合最优取景（2026-09-05）：PCA 主平面法向面视＋上向＝面内主轴，
+    /// 按有效半视场（含宽高比）填充 ~92%，near/far 紧致（深度精度）——
+    /// 点云/标志点集合通用（导入路径调用）
+    void fitCloudOptimal(const std::vector<osg::Vec3>& points);
+
     // Debug: validate projection matrix math
     void debugValidateProjection();
 
@@ -156,9 +161,6 @@ private:
     osg::ref_ptr<osg::Geode> buildCloudGeode(const std::vector<osg::Vec3>& points,
                                              const std::vector<osg::Vec4ub>* colors);
     void fitCameraToRoot();                               // 相机定位到场景包围球（原 loadPointCloud 尾块）
-    /// 导入云最优取景（2026-09-05）：PCA 主平面法向面视＋上向＝面内主轴，
-    /// 按有效半视场（含宽高比）填充 ~92%，near/far 紧致（深度精度）
-    void fitCloudOptimal(const std::vector<osg::Vec3>& points);
     /// 最优取景落位（fitCloudOptimal/流式加载完成共用）：给定中心/法向/上向/
     /// 包围半径——fov30 有效半视场填充，Trackball home
     void placeOptimalCamera(const osg::Vec3d& ctr, const osg::Vec3d& normal,
