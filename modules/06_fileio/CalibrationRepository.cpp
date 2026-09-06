@@ -189,6 +189,9 @@ Scanner::Result CalibrationRepository::write(const std::string& payloadJson, cv:
     }
 
     // 原子落盘：tmp 写全 → remove 目标（Windows rename 不覆盖既有）→ rename
+    //（config/ 目录不存在则先建——2026-09-06 标定档归 config 口径）
+    if (const auto parent = std::filesystem::path(path).parent_path(); !parent.empty())
+        std::filesystem::create_directories(parent);
     const std::string tmpPath = path + ".tmp";
     try {
         std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);

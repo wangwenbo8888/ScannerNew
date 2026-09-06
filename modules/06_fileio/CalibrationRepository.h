@@ -27,8 +27,9 @@ struct ReadyReport {
 class CalibrationRepository {
 public:
     // 写入端（01 适配 ICalibRepoWriter）：解析→校验→填内存→临时文件+原子改名落盘
+    //（默认路径 config/——装机口径目录 2026-09-06；laser_calib.json 按同目录合并）
     Scanner::Result write(const std::string& payloadJson, cv::Size imageSize,
-                          const std::string& path = "calibration.json");
+                          const std::string& path = "config/calibration.json");
     Scanner::Result load(const std::string& path);
     // typed getters（T7/T8 实现）
     StereoData stereo() const;

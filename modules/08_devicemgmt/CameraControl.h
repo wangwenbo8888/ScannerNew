@@ -24,8 +24,7 @@ struct StereoPairConfig {
     int deviceIndexLeft  = 0;
     int deviceIndexRight = 1;
     bool rotateRight180  = true;
-    double defaultExposureMs = 10.0;
-    std::string triggerSource = "Line2";
+    std::string triggerSource = "Line2";   // 硬件触发源（装机接线口径——config/camera.json）
 };
 
 // ============================================================================

@@ -17,6 +17,10 @@
 #include "base/EventBus.h" // P2 渲染事件桥：faultSink lambda 需完整类型（publish）
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <osg/Vec3>
@@ -623,14 +627,21 @@ void MainWindow::showCameraMonitor() {
         });
     }
     m_appCtx->setDebugFrameTap([this](const Scanner::hal::StereoFrame& f) {
-        if (++m_camFrameSkip < 3) return;        // 节流：≈10fps
-        m_camFrameSkip = 0;
+        // 时间基准节流（2026-09-05）：帧率上限＝config/camera.json previewFps
+        //（原帧计数法绑定 30fps 流假设——不同帧率下预览 fps 漂移）
+        using clock = std::chrono::steady_clock;
+        const auto now = clock::now();
+        thread_local auto lastPreview = clock::time_point{};
+        const auto minInterval = std::chrono::microseconds(
+            1000000 / std::max(1, m_appCtx ? m_appCtx->cameraPreviewFps() : 10));
+        if (now - lastPreview < minInterval) return;
+        lastPreview = now;
         const cv::Mat l = f.leftGray.clone();    // 深拷脱离 ring 复用
         const cv::Mat r = f.rightGray.clone();
         QMetaObject::invokeMethod(this, [this, l, r]() {
             if (m_camDlg && m_camDlg->isVisible()) {
                 m_camLeft->setPixmap(QPixmap::fromImage(camMatToImage(l))
-                                         .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
+                                          .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
                 m_camRight->setPixmap(QPixmap::fromImage(camMatToImage(r))
                                           .scaled(m_camRight->size(), Qt::KeepAspectRatio));
             }

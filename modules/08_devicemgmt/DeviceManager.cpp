@@ -576,7 +576,7 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
 
         // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V2 L50（auto 搜口已探测合一
         // 发过且回显命中——通常此处直接判过；manual 口/回显未达时补发兜底），
-        // 停留 5 秒 → N11 H0 收口（停扫描，固件关灯）
+        // 停留 1 秒（2026-09-06 用户口径，原 5 秒）→ N11 H0 收口（停扫描，固件关灯）
         hal::CaptureParams on{};
         on.freqHz = 50; on.bgLight = 50; on.laserSelectA = 1; on.laserSelectB = 2; on.laserLevel = 50;
         selfCheck_.expectEcho = "N10 H50 B50 T1 V2 L50";
@@ -604,9 +604,10 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
             selfCheck_.stageStartMs = nowMs_;      // ——灯败与相机验证独立，原直跳 stage2
         }                                          //   会漏 startAsyncCapture→相机恒 0 帧）
         break;
-    case 1:  // 补光灯/激光器亮 5 秒（停留窗口；不起相机流——相机 USB 流量会
-             // 干扰 CH343 串口收发，2026-08-30 真机实测灭灯帧被丢的诱因）
-        if (nowMs_ - selfCheck_.stageStartMs >= 5000) {
+    case 1:  // 补光灯/激光器亮 1 秒（停留窗口；不起相机流——相机 USB 流量会
+             // 干扰 CH343 串口收发，2026-08-30 真机实测灭灯帧被丢的诱因。
+             // 5s→1s：用户口径 2026-09-06）
+        if (nowMs_ - selfCheck_.stageStartMs >= 1000) {
             selfCheck_.stage = 2;
             selfCheck_.stageStartMs = nowMs();
         }

@@ -63,6 +63,10 @@ public:
     Scanner::device::DeviceManager*    deviceManager() { return deviceManager_.get(); }
     Scanner::device::HardwareMonitor*  hwMonitor()     { return hwMonitor_.get(); }
 
+    // —— 相机装机口径（config/camera.json 启动读取；缺文件用内置默认）——
+    /// 预览节流帧率（MainWindow 相机预览监视弹窗消费节流用）
+    int cameraPreviewFps() const { return cameraPreviewFps_; }
+
     // Infra
     Scanner::infra::EventBus* eventBus() { return eventBus_.get(); }
 
@@ -142,6 +146,7 @@ private:
     std::unique_ptr<Scanner::workflow::WorkflowContext>     wfCtx_;
     std::unique_ptr<Scanner::workflow::ScanWorkflow>        scanWf_;
     Scanner::ScanMode lastScanMode_ = Scanner::ScanMode::MarkerOnly;   // 续采重启灯组用（pause 保活后模式不变）
+    int cameraPreviewFps_ = 10;        // 相机装机口径（config/camera.json；缺省 10fps）
     std::unique_ptr<Scanner::workflow::CalibrationWorkflow> calibWf_;
     std::unique_ptr<Scanner::workflow::PostProcessWorkflow> postWf_;
 

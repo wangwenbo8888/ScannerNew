@@ -1,0 +1,10 @@
+{
+  "_说明": "相机装机口径配置（AppContext 启动读取；文件缺失用内置默认并 WARN）。曝光/频率/补光/激光等运行时参数归 08 ParamStore 账本，不放本文件。",
+  "camera": {
+    "deviceIndexLeft": 0,
+    "deviceIndexRight": 1,
+    "rotateRight180": true,
+    "triggerSource": "Line2",
+    "previewFps": 10
+  }
+}

@@ -114,6 +114,7 @@ target_link_libraries(scan_demo PRIVATE
     ${OSG_ROOT}/lib/OpenThreads.lib
     Eigen3::Eigen
     ${OpenCV_LIBS}
+    nlohmann_json::nlohmann_json
 )
 
 target_compile_definitions(scan_demo PRIVATE
@@ -126,7 +127,16 @@ target_compile_definitions(scan_demo PRIVATE
 # ============================================================================
 add_custom_command(TARGET scan_demo POST_BUILD
     COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/copy_dlls.bat" "$<TARGET_FILE_DIR:scan_demo>" "$<CONFIG>"
-    COMMENT "Copying DLLs to output directory..."
+    # camera.json＝装机口径（每次覆盖同步）；标定两档＝出厂基线（仅缺失时播种
+    # ——不覆盖：exe 侧重标定后的本地档优先于仓库基线）
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/config/camera.json"
+            "$<TARGET_FILE_DIR:scan_demo>/config/camera.json"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:scan_demo>/config"
+    COMMAND cmd /c "if not exist \"$<TARGET_FILE_DIR:scan_demo>/config/calibration.json\" copy /Y \"${CMAKE_SOURCE_DIR}/config/calibration.json\" \"$<TARGET_FILE_DIR:scan_demo>/config/calibration.json\""
+    COMMAND cmd /c "if not exist \"$<TARGET_FILE_DIR:scan_demo>/config/laser_calib.json\" copy /Y \"${CMAKE_SOURCE_DIR}/config/laser_calib.json\" \"$<TARGET_FILE_DIR:scan_demo>/config/laser_calib.json\""
+    COMMENT "Copying DLLs + config to output directory..."
 )
 
 # ============================================================================

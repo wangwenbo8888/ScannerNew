@@ -7,6 +7,10 @@
 #include "FrameBuffer.h"
 #include "PointCloudBuffer.h"
 #include "DeviceStateCache.h"
+
+#include <algorithm>
+#include <fstream>
+#include <nlohmann/json.hpp>
 #include "sched/CpuTopology.h"   // 自检起点 CPU 拓扑记录（2026-09-01）
 #include "CalibrationRepository.h"
 #include "StateMachine.h"
@@ -51,7 +55,9 @@ void AppContext::initialize() {
     pointCloudBuffer_ = std::make_unique<Scanner::data::PointCloudBuffer>();
     deviceStateCache_ = std::make_unique<Scanner::data::DeviceStateCache>();
     calibRepo_ = std::make_unique<Scanner::data::CalibrationRepository>();
-    if (const auto lr = calibRepo_->load("calibration.json"); !lr.success)
+    // 标定档案归 config/（2026-09-06 口径：相机 calibration.json＋同目录
+    // laser_calib.json 工厂档自动合并——CalibrationRepository 按父目录找）
+    if (const auto lr = calibRepo_->load("config/calibration.json"); !lr.success)
         JMW_LOG_INFO("app-AppContext", "[AppContext] 启动未装载标定仓库档（{}）——首次标定后生成", lr.message);
 
     // === Service ===
@@ -193,7 +199,42 @@ void AppContext::initialize() {
 
     // === HAL ===（A-T17 三行门面：设备对象【相机+MCU】收进 DeviceManager；
     // HardwareMonitor 为巡检件留本层——门面不管它。相机经 08 工厂契约构造
-    // ——实现类/配置细节不漏到装配根（跨层封装收口 2026-09-05））
+    // ——实现类/配置细节不漏到装配根（跨层封装收口 2026-09-05）。
+    // 装机口径自 config/camera.json（缺文件用内置默认＋WARN））
+    struct CameraSetupCfg {
+        int deviceIndexLeft = 0;
+        int deviceIndexRight = 1;
+        bool rotateRight180 = true;
+        std::string triggerSource = "Line2";
+        int previewFps = 10;
+    };
+    CameraSetupCfg camCfg;
+    {
+        std::ifstream f("config/camera.json");
+        if (!f.is_open()) {
+            JMW_LOG_WARN("app-AppContext",
+                         "[AppContext] config/camera.json 不存在——相机装机口径用内置默认（exe 目录 config/ 下可覆盖）");
+        } else {
+            try {
+                nlohmann::json j;
+                f >> j;
+                const auto& c = j.at("camera");
+                camCfg.deviceIndexLeft = c.value("deviceIndexLeft", camCfg.deviceIndexLeft);
+                camCfg.deviceIndexRight = c.value("deviceIndexRight", camCfg.deviceIndexRight);
+                camCfg.rotateRight180 = c.value("rotateRight180", camCfg.rotateRight180);
+                camCfg.triggerSource = c.value("triggerSource", camCfg.triggerSource);
+                camCfg.previewFps = c.value("previewFps", camCfg.previewFps);
+                JMW_LOG_INFO("app-AppContext",
+                             "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={}",
+                             camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
+                             camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps);
+            } catch (const std::exception& e) {
+                JMW_LOG_WARN("app-AppContext",
+                             "[AppContext] camera.json 解析失败（{}）——用内置默认", e.what());
+            }
+        }
+    }
+    cameraPreviewFps_ = std::max(1, camCfg.previewFps);
     Scanner::device::DeviceConfig devCfg;
     devCfg.serialPort = "auto";   // 串口自动搜（MCUDriver 逐口发 N12Z1 探测应答认定）；固定口填 "COMx"
     // protocol 默认 V3、baud 115200（DeviceConfig 缺省即产线口径）
@@ -210,9 +251,11 @@ void AppContext::initialize() {
                          : Scanner::Result::fail("状态门禁拒绝: " + op);
         },
         eventBus_.get(),
-        []() -> std::unique_ptr<Scanner::hal::IScannerCamera> {
-            // 左右设备序号 0/1＋右图 180° 旋转（原 AppContext 内联配置口径）
-            return Scanner::device::createGalaxyStereoCamera(0, 1, true);
+        [camCfg]() -> std::unique_ptr<Scanner::hal::IScannerCamera> {
+            // 装机口径自 config/camera.json（捕获值构造）
+            return Scanner::device::createGalaxyStereoCamera(
+                camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
+                camCfg.rotateRight180, camCfg.triggerSource);
         });
     // 设备启动（open+自检）后台化：此处不再阻塞主窗口——main 在 window.show() 后
     // 调 startDevicesAsync()（相机枚举+自动搜口实测 ~5s，同步跑=白屏等）
