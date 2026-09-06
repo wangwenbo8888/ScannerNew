@@ -420,7 +420,7 @@ std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
             {"FLUSH", [this](McuDone cb) {
                  mcu_->flushWrites(300);        // 有界：残余慢写最多 300ms
                  cb(true, "");
-            }}};
+             }}};
 }
 
 void DeviceManager::enterScanOnLogic() {

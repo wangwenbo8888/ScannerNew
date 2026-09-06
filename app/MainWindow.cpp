@@ -12,6 +12,9 @@
 #include "stubs/camera_calib_workflow.h"
 #include "stubs/laser_calib_workflow.h"
 #include "stubs/scan_workflow.h"
+#include "ScanWorkflow.h"       // 02（编辑物理化访问链 markerFuse/obsAccumulator——P4b）
+#include "pipelines/scan/FuseConsumer.h"       // 07 IMarkerFuse（removePoints 契约）
+#include "pipelines/scan/FrameObsAccumulator.h" // 07 obs（excludeMarkerObs 契约）
 #include "file_io.h"
 #include "PerfMonitor.h"   // A-T17：updateInfoSection 内 perfMonitor()->poll() 需完整类型
 #include "base/EventBus.h" // P2 渲染事件桥：faultSink lambda 需完整类型（publish）
@@ -987,12 +990,38 @@ QWidget *MainWindow::createToolBar()
             const QString title = mesh ? QStringLiteral("面片扫描") : QStringLiteral("标点扫描");
             connect(btn, &QPushButton::clicked, this, [this, myIdx, title]() {
                 if (!m_appCtx) return;
+                // —— 编辑成果物理化（P4b 2026-09-06）：就绪态续采/完成前，把悬浮
+                //    工具栏的显示级删除（alpha=0）路由到真账本——融合云移除＋obs
+                //    剔除，编辑从此真实有效（非显示级掩盖）——
+                auto materializeEdits = [this]() {
+                    if (!m_3dView) return;
+                    const auto pending = m_3dView->pendingMarkerDeleteIndices();
+                    if (pending.empty()) return;
+                    auto* sw = m_appCtx ? m_appCtx->scanWorkflow() : nullptr;
+                    auto* fuse = sw ? sw->markerFuse() : nullptr;
+                    auto* obs = sw ? sw->obsAccumulator() : nullptr;
+                    if (!fuse || !obs) return;
+                    // 融合云物理移除（越界批原子——快照与云间下标漂移时整批不动）
+                    const auto st = fuse->removePoints(pending);
+                    if (!st.success) {
+                        JMW_LOG_WARN("app-MainWindow", "[编辑物理化] 融合云移除失败: {}", st.message);
+                        return;
+                    }
+                    // obs 剔除（下标＝globalId——快照构建时恒等）
+                    obs->excludeMarkerObs(
+                        std::vector<int>(pending.begin(), pending.end()), true);
+                    m_3dView->clearPendingMarkerDeletes();
+                    JMW_LOG_INFO("app-MainWindow", "[编辑物理化] {} 点真删完成（融合云+obs）",
+                                 pending.size());
+                };
                 if (m_appCtx->isScanSessionActive()) {
                     const bool wasSelf = (m_activeScanToolIdx == myIdx);
                     if (m_appCtx->isScanSessionPaused()) {
                         // —— 就绪态（P3）：本键＝续采（出口①）；他键＝完成旧会话
                         //    （合账落库，出口③雏形）＋启动新模式 ——
+                        // （续采/完成前先物理化编辑成果）
                         if (wasSelf) {
+                            materializeEdits();
                             auto rr = m_appCtx->resumeScanSession();
                             if (rr.success) {
                                 setScanButtonVisual(myIdx, true);
@@ -1004,6 +1033,7 @@ QWidget *MainWindow::createToolBar()
                             }
                             return;
                         }
+                        materializeEdits();
                         auto sr = m_appCtx->stopScanSession();
                         if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                         m_activeScanToolIdx = -1;

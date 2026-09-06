@@ -1646,6 +1646,20 @@ void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
         osg::Geometry* geom = kv.first;
         auto* colors = dynamic_cast<osg::Vec4ubArray*>(geom->getColorArray());
         if (!colors) continue;
+
+        // 标志点几何 → 记录融合云下标（P4b 物理化口：圆盘 4 顶点/盘 ÷4；点精灵 1:1）
+        if (geom == m_markerGeom.get() && !kv.second.empty()) {
+            // 判断圆盘/精灵版：首个图元模式
+            bool isDisc = false;
+            if (m_markerGeom->getNumPrimitiveSets() > 0) {
+                const auto* ps = m_markerGeom->getPrimitiveSet(0);
+                isDisc = ps && ps->getMode() == osg::PrimitiveSet::QUADS;
+            }
+            const uint32_t divisor = isDisc ? 4 : 1;
+            for (unsigned int vi : kv.second)
+                m_pendingMarkerDel.push_back(vi / divisor);
+        }
+
         std::vector<osg::Vec4ub> orig;
         orig.reserve(kv.second.size());
         osg::ref_ptr<osg::Vec4ubArray> newColors = new osg::Vec4ubArray(*colors);

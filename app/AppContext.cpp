@@ -493,10 +493,11 @@ Scanner::Result AppContext::pauseScanSession() {
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
     if (!isScanSessionActive()) return Scanner::Result::fail("无活跃扫描会话");
     if (isScanSessionPaused()) return Scanner::Result::ok("已处于就绪态");
-    // 设备侧停止采集（N11H0 灭灯；相机流保留——预览续走，扫描环 Overwrite 自弃）
+    // 停采集保活（用户口径 2026-09-06）：N11 H0 停触发＋灭灯（协议正确口径）
+    //——相机流保留（startAsyncCapture 不停），管线暂停自丢帧
     if (deviceManager_) deviceManager_->stopCapture();
     const auto r = scanWf_->pause();
-    JMW_LOG_INFO("app-AppContext", "[AppContext] 就绪态（停止采集保活）：{}（融合云/obs 账本保留）",
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 就绪态（N11H0 停触发灭灯）：{}（融合云/obs 账本保留）",
                  r.success ? "ok" : r.message);
     return r;
 }
@@ -506,12 +507,12 @@ Scanner::Result AppContext::resumeScanSession() {
     if (!isScanSessionPaused()) return Scanner::Result::fail("非就绪态（无暂停会话）");
     const auto r = scanWf_->resume();
     if (!r.success) return r;
-    // 续采：按当前模式重启采集（灯组同 startScanSession 口径）
+    // 续采：N10 参数组帧重启灯组＋触发（用户口径：N10 即隐含触发，无需 N11H1）
     if (deviceManager_) {
         const bool laserOn = (lastScanMode_ != Scanner::ScanMode::MarkerOnly);
         deviceManager_->startCapture(laserOn);
     }
-    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（就绪态出口①）：ok");
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（就绪态出口①·N10 重启灯组触发）：ok");
     return Scanner::Result::ok("续采中");
 }
 
