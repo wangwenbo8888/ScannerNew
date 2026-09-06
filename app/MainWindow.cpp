@@ -1068,12 +1068,13 @@ QWidget *MainWindow::createToolBar()
                     std::vector<cv::Point3f> markers;
                     if (Scanner::data::fileio::importMarkers(spath, markers)) {
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9 %1 \xe4\xb8\xaa").arg(markers.size()));
-                        // 上屏：同心圆标志点（相机自动取景到标志点包围球）
+                        // 上屏：定向圆盘（世界系固定朝向——文件无法线，圆盘默认
+                        // 朝上 +Z，不随视角转；相机自动取景到标志点包围球）
                         if (m_3dView && !markers.empty()) {
                             std::vector<osg::Vec3> pts;
                             pts.reserve(markers.size());
                             for (const auto& p : markers) pts.emplace_back(p.x, p.y, p.z);
-                            m_3dView->loadMarkerPoints(pts);
+                            m_3dView->loadMarkerPoints(pts, std::vector<osg::Vec3>());
                         }
                     }
                     else
