@@ -48,10 +48,17 @@ public:
     // LeadScan 移植：加载网格文件（STL/OBJ，带光照材质）
     bool loadMesh(const QString& filepath);
 
-    // LeadScan 移植：加载标志点
+    // LeadScan 移植：加载标志点（点精灵版——无法线数据时的回退）
     void loadMarkerPoints(const std::vector<osg::Vec3>& markers,
                           const osg::Vec4& color = osg::Vec4(1.0f, 0.0f, 0.0f, 1.0f));
     void loadLaserPoints(const std::vector<osg::Vec3>& laser);   // 激光点云（青色小点，host 块直推）
+
+    /// 定向圆盘版（2026-09-05）：按重建法线做**世界系固定朝向**圆盘——标志点
+    /// 与法线不随视角变化（侧看变扁＝物理正确；点精灵版永远正对相机为旧观感）。
+    /// normals 与 markers 等长（缺失/零向量回退点精灵样式朝上）；圆盘半径
+    /// m_markerDiscRadiusMm（默认 2.5mm）。
+    void loadMarkerPoints(const std::vector<osg::Vec3>& markers,
+                          const std::vector<osg::Vec3>& normals);
 
     // LeadScan 移植：自动相机定位到场景包围球
     void autoFitCamera();
@@ -347,7 +354,8 @@ private:
 
     // —— 扫描视角跟随（UI 线程属主）——
     bool m_autoViewFit = true;                      // 总开关（默认开）
-    bool m_leftCamViewApplied = false;              // 左相机视角已设（标志点会话首点设一次；重建后重置）
+    bool m_leftCamViewApplied = false;                  // 左相机视角已设（标志点会话首点设一次；重建后重置）
+    float m_markerDiscRadiusMm = 2.5f;                  // 定向圆盘半径（世界系 mm）
     osg::ref_ptr<osg::Group> m_markerBbGroup;       // 标志点 billboard 容器（同心圆贴图朝屏）
     osg::ref_ptr<osg::Texture2D> m_markerTexture;   // 同心圆纹理（内白外黑）
     osg::ref_ptr<osg::Geode> m_pcbGeode;            // PointCloudBuffer 直读点云 geode（原子替换用）

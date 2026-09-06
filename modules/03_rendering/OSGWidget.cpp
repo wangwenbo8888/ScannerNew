@@ -1982,7 +1982,7 @@ bool OSGWidget::loadMesh(const QString& filepath)
 }
 
 // ============================================================================
-// LeadScan 移植：加载标志点
+// LeadScan 移植：加载标志点（点精灵版——无法线数据时的回退）
 // ============================================================================
 void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
                                  const osg::Vec4& color)
@@ -2063,6 +2063,117 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
     // 扫描视图跟框（生长感知+节流+交互避让；取景=左相机视角）——每次标志点
     // 到达都检查：半径带外（±20%）重设视角。此前"首点一次制"在场景含残留
     // 大物体时取景过远，点过小"看不见"，须导入触发 fit 才可见（2026-08-31）
+    maybeAutoFrame();
+}
+
+// ============================================================================
+// 定向圆盘版（2026-09-05）：按重建法线做世界系固定朝向圆盘——标志点与法线
+// 不随视角变化（转视角盘不动、侧看变扁＝物理正确）；点精灵版永远正对相机为
+// 旧观感。每标志点一 quad（4 顶点同盘），套索命中/alpha0 删除对 4 顶点全生效。
+// ============================================================================
+void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
+                                 const std::vector<osg::Vec3>& normals)
+{
+    if (markers.empty()) return;
+
+    if (!m_markerRoot || m_markerRoot->getNumParents() == 0) {
+        // 重建判定/贴图同点精灵版（复用同心圆贴图）
+        m_markerRoot = new osg::Group;
+        m_markerGeode = new osg::Geode;
+        m_markerGeom = new osg::Geometry;
+        m_markerGeom->setUseVertexBufferObjects(true);
+        m_markerGeom->setUseDisplayList(false);
+        m_markerGeom->setDataVariance(osg::Object::DYNAMIC);
+        m_markerGeode->addDrawable(m_markerGeom);
+        m_markerRoot->addChild(m_markerGeode);
+        m_root->addChild(m_markerRoot);
+
+        const int S = 64;
+        QImage q(S, S, QImage::Format_RGBA8888);
+        q.fill(Qt::transparent);
+        {
+            QPainter p(&q);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(15, 15, 15, 255));
+            p.drawEllipse(2, 2, S - 4, S - 4);
+            const int inner = S * 36 / 60;   // 内径 = 外径 × 0.6
+            p.setBrush(QColor(250, 250, 250, 255));
+            p.drawEllipse((S - inner) / 2, (S - inner) / 2, inner, inner);
+        }
+        m_markerTexture = new osg::Texture2D;
+        osg::ref_ptr<osg::Image> img = new osg::Image;
+        auto* px = new unsigned char[S * S * 4];
+        std::memcpy(px, q.constBits(), static_cast<size_t>(S * S * 4));
+        img->setImage(S, S, 1, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, px, osg::Image::USE_NEW_DELETE);
+        m_markerTexture->setImage(img.get());
+        m_markerTexture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+        m_markerTexture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
+
+        osg::StateSet* ss = m_markerRoot->getOrCreateStateSet();
+        ss->setTextureAttributeAndModes(0, m_markerTexture.get(), osg::StateAttribute::ON);
+        ss->setMode(GL_BLEND, osg::StateAttribute::ON);
+        ss->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
+        ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+        m_markerCoords = new osg::Vec3Array;
+        m_markerColors = new osg::Vec4ubArray;
+        m_leftCamViewApplied = false;
+    }
+
+    // 圆盘几何：中心＋重建法线 → 切平面基（t,b）→ 四角 quad
+    const float r = m_markerDiscRadiusMm;
+    const size_t n = markers.size();
+    osg::ref_ptr<osg::Vec3Array> verts = new osg::Vec3Array;
+    osg::ref_ptr<osg::Vec3Array> norms = new osg::Vec3Array;
+    osg::ref_ptr<osg::Vec4ubArray> cols = new osg::Vec4ubArray;
+    osg::ref_ptr<osg::Vec2Array> uv = new osg::Vec2Array;
+    osg::ref_ptr<osg::DrawElementsUShort> quads =
+        new osg::DrawElementsUShort(osg::PrimitiveSet::QUADS);
+    verts->reserve(n * 4);
+    norms->reserve(n * 4);
+    cols->reserve(n * 4);
+    uv->reserve(n * 4);
+    quads->reserve(n * 4);
+
+    for (size_t i = 0; i < n; ++i) {
+        osg::Vec3 nr(0.0f, 0.0f, 1.0f);
+        if (i < normals.size()) {
+            osg::Vec3 cand(normals[i][0], normals[i][1], normals[i][2]);
+            if (cand.length2() > 1e-12f) { cand.normalize(); nr = cand; }
+        }
+        // 切平面基：参考轴取 z，近平行时退 x
+        osg::Vec3 ref(0.0f, 0.0f, 1.0f);
+        if (std::fabs(nr * ref) > 0.99f) ref = osg::Vec3(1.0f, 0.0f, 0.0f);
+        osg::Vec3 t = ref ^ nr;                   // 叉积＝切向
+        t.normalize();
+        const osg::Vec3 b = nr ^ t;
+
+        const osg::Vec3& c = markers[i];
+        const osg::Vec3 tR = t * r, bR = b * r;
+        const unsigned short base = static_cast<unsigned short>(i * 4);
+        // 四角（面向法线正方向的绕序）
+        verts->push_back(c - tR - bR); uv->push_back(osg::Vec2(0, 0));
+        verts->push_back(c + tR - bR); uv->push_back(osg::Vec2(1, 0));
+        verts->push_back(c + tR + bR); uv->push_back(osg::Vec2(1, 1));
+        verts->push_back(c - tR + bR); uv->push_back(osg::Vec2(0, 1));
+        for (int k = 0; k < 4; ++k) {
+            norms->push_back(nr);
+            cols->push_back(osg::Vec4ub(255, 255, 255, 255));   // 白（贴图调制）
+            quads->push_back(base + k);
+        }
+    }
+
+    m_markerGeom->setVertexArray(verts.get());
+    m_markerGeom->setNormalArray(norms.get());
+    m_markerGeom->setNormalBinding(osg::Geometry::BIND_PER_VERTEX);
+    m_markerGeom->setColorArray(cols.get());
+    m_markerGeom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
+    m_markerGeom->setTexCoordArray(0, uv.get());
+    m_markerGeom->removePrimitiveSet(0, m_markerGeom->getNumPrimitiveSets());
+    m_markerGeom->addPrimitiveSet(quads.get());
+
+    m_markerCoords = verts;                       // 圈选命中读顶点（4/盘）
+    m_markerColors = cols;
     maybeAutoFrame();
 }
 

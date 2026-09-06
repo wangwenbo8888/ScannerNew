@@ -181,7 +181,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
     if (m_appCtx && m_3dView) {
         if (auto* feed = m_appCtx->sceneFeed()) {
             connect(feed, &SceneFeedAdapter::markerCloudUpdated, this,
-                    [this](const std::vector<cv::Point3f>& pts) {
+                    [this](const std::vector<cv::Point3f>& pts, const std::vector<cv::Vec3f>& normals) {
                         // 显示链终点观测（节流 1/30）：信号到 UI 的点数；同步导出
                         // PLY 快照（exe 目录 markers_snapshot.ply——数据正确性人工
                         // 核对用，覆盖写）
@@ -220,7 +220,15 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         std::vector<osg::Vec3> markers;
                         markers.reserve(pts.size());
                         for (const auto& p : pts) markers.emplace_back(p.x, p.y, p.z);
-                        m_3dView->loadMarkerPoints(markers);   // 专用标志点几何（原地更新）
+                        std::vector<osg::Vec3> norms;
+                        if (normals.size() == pts.size()) {
+                            norms.reserve(normals.size());
+                            for (const auto& nn : normals)
+                                norms.emplace_back(nn[0], nn[1], nn[2]);
+                        }
+                        // 定向圆盘（法线世界系固定朝向——2026-09-05 口径；
+                        // 法线缺失时圆盘回退朝上）
+                        m_3dView->loadMarkerPoints(markers, norms);
                     });
             // 激光点云（host 块直推——FuseConsumer 下载的当帧激光块）
             connect(feed, &SceneFeedAdapter::laserCloudUpdated, this,
@@ -1986,16 +1994,22 @@ void MainWindow::updateInfoSection()
 
     // === 先更新 CPU 和内存（纯 Windows API，不依赖任何框架组件）===
     if (m_infoCpuLabel) {
-        // PDH 计数器直读（2026-09-01）：GetSystemTimes 差分实测恒 0（多核语义
-        // 陷阱），换 \\Processor Information(_Total)\\% Processor Utility 直出
+        // 双计数器（2026-09-05 实测定口径）：显示＝% Processor Utility 钳位
+        // [0,100]——实测任务管理器（Win10/11）＝效用口径封顶 100（TM=100 时
+        // Utility=121.6/Time=75.4，三方对齐判定）；Time 留诊断日志比对。
+        //（原 GetSystemTimes 差分实测恒 0——多核语义陷阱，2026-09-01 弃）
         static PDH_HQUERY hQuery = nullptr;
-        static PDH_HCOUNTER hCpu = nullptr;
+        static PDH_HCOUNTER hCpuTime = nullptr;     // % Processor Time（日志比对）
+        static PDH_HCOUNTER hCpuUtil = nullptr;     // % Processor Utility（显示）
         static bool pdhFailed = false;
         if (!hQuery && !pdhFailed) {
             if (PdhOpenQueryW(nullptr, 0, &hQuery) == ERROR_SUCCESS &&
                 PdhAddEnglishCounterW(hQuery,
+                    L"\\Processor Information(_Total)\\% Processor Time",
+                    0, &hCpuTime) == ERROR_SUCCESS &&
+                PdhAddEnglishCounterW(hQuery,
                     L"\\Processor Information(_Total)\\% Processor Utility",
-                    0, &hCpu) == ERROR_SUCCESS) {
+                    0, &hCpuUtil) == ERROR_SUCCESS) {
                 // 首次收集建立基线
                 PdhCollectQueryData(hQuery);
             } else {
@@ -2003,16 +2017,25 @@ void MainWindow::updateInfoSection()
                 hQuery = nullptr;
             }
         }
-        double usage = 0.0;
-        if (hQuery && hCpu && PdhCollectQueryData(hQuery) == ERROR_SUCCESS) {
+        double busy = 0.0, utility = 0.0;
+        if (hQuery && PdhCollectQueryData(hQuery) == ERROR_SUCCESS) {
             PDH_FMT_COUNTERVALUE val;
-            if (PdhGetFormattedCounterValue(hCpu, PDH_FMT_DOUBLE, nullptr, &val) ==
-                ERROR_SUCCESS) {
-                usage = val.doubleValue;
-            }
+            if (hCpuTime &&
+                PdhGetFormattedCounterValue(hCpuTime, PDH_FMT_DOUBLE, nullptr, &val) ==
+                    ERROR_SUCCESS)
+                busy = val.doubleValue;
+            if (hCpuUtil &&
+                PdhGetFormattedCounterValue(hCpuUtil, PDH_FMT_DOUBLE, nullptr, &val) ==
+                    ERROR_SUCCESS)
+                utility = val.doubleValue;
         }
+        double usage = utility;                    // TM 口径＝Utility 封顶 100
         if (usage < 0) usage = 0; if (usage > 100) usage = 100;
         m_infoCpuLabel->setText(QString::number(usage, 'f', 1) + " %");
+        if (infoVerbose) {
+            JMW_LOG_INFO("app-MainWindow", "[CPU口径] Time={:.1f}% Utility={:.1f}% 显示={:.1f}%",
+                         busy, utility, usage);
+        }
     }
 
     if (m_infoMemLabel) {

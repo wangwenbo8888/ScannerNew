@@ -14,10 +14,12 @@
 #include <QMetaType>
 
 Q_DECLARE_METATYPE(std::vector<cv::Point3f>)
+Q_DECLARE_METATYPE(std::vector<cv::Vec3f>)
 
 SceneFeedAdapter::SceneFeedAdapter(QObject* parent) : QObject(parent) {
     // queued signal 跨线程传自定义类型须注册（一次性）
     qRegisterMetaType<std::vector<cv::Point3f>>("std::vector<cv::Point3f>");
+    qRegisterMetaType<std::vector<cv::Vec3f>>("std::vector<cv::Vec3f>");
 }
 
 void SceneFeedAdapter::pushPostureView(const Scanner::Pose& /*live*/,
@@ -44,17 +46,20 @@ void SceneFeedAdapter::pushCloudSnapshot(Scanner::pipeline::CloudViewHandle clou
     // 地址（FuseConsumer 适配器保证调用期间有效）；数百点级，廉价。
     // deviceLaser 恒 nullptr（契约现状——激光互操作 P4 另立计划）。
     std::vector<cv::Point3f> pts;
+    std::vector<cv::Vec3f> normals;                // 与 pts 等长对齐（定向圆盘渲染）
     std::vector<Scanner::data::MarkerRecord> recs;
     if (cloud.hostMarker) {
         const auto& src =
             *static_cast<const std::vector<calib::MarkerCloudPoint>*>(cloud.hostMarker);
         pts.reserve(src.size());
+        normals.reserve(src.size());
         recs.reserve(src.size());
         uint32_t idx = 0;                         // globalId=下标（07 seed 对接口径同源）
         for (const auto& p : src) {
             if (!(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)))
                 continue;                         // 入口先滤一道（P1 同款防御）
             pts.emplace_back(p.x, p.y, p.z);
+            normals.emplace_back(p.nx, p.ny, p.nz);
             Scanner::data::MarkerRecord r;
             r.globalId = idx++;
             r.pos = cv::Point3f(p.x, p.y, p.z);
@@ -66,7 +71,7 @@ void SceneFeedAdapter::pushCloudSnapshot(Scanner::pipeline::CloudViewHandle clou
         std::lock_guard<std::mutex> lock(markersMtx_);
         latestMarkers_ = std::move(recs);
     }
-    emit markerCloudUpdated(pts);                 // queued → UI 线程
+    emit markerCloudUpdated(pts, normals);        // queued → UI 线程
 
     // 激光 host 块（n×3 float 平铺——调用线程立即值拷贝后 queued）
     if (cloud.hostLaser && cloud.laserCount > 0) {
