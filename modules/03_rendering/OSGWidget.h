@@ -103,6 +103,9 @@ public:
     void enterLassoMode();
     void exitLassoMode();
     bool isLassoMode() const { return m_lassoMode; }
+
+    /// 可见标志点数（软删后 alpha>0 顶点折算——左侧统计栏刷新用）
+    size_t visibleMarkerCount() const;
     void deleteSelectedPoints();
     void undoDelete();
     void enterLassoDeleteMode();

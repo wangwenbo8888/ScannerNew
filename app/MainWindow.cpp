@@ -1736,13 +1736,14 @@ QWidget *MainWindow::createBottomToolBar()
     }
 
     // 圈选流程结束（确认删除/取消均发 lassoCompleted）→ 工具组回无选中初始态
+    //＋左侧统计栏刷新（可见标志点数——软删后 alpha>0 折算，2026-09-06）
     //——用户口径 2026-09-05（启动与流程结束均无选中）；singleShot(0) 延后一拍
     // 避开模态弹窗销毁期的状态覆盖
     if (m_3dView && m_selectionButtons.size() > 7)
     {
         connect(m_3dView, &OSGWidget::lassoCompleted, this, [this]()
         {
-            JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 收到——三栏复位（流程节点留痕）");
+            JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 收到——三栏复位＋统计刷新（流程节点留痕）");
             QTimer::singleShot(0, this, [this]() {
                 // 互斥组内 setChecked(false) 会被独占语义挡下（实测日志：复位后仍
                 // checked=true）——三组各自临时解除互斥→清全部选中→恢复互斥
@@ -1752,6 +1753,14 @@ QWidget *MainWindow::createBottomToolBar()
                     if (m_selectionButtons.size() > i) m_selectionButtons[i]->setChecked(false);
                 for (QButtonGroup* g : {m_objBtnGroup, m_toolBtnGroup, m_depthBtnGroup})
                     if (g) g->setExclusive(true);
+                // 统计栏同步可见数（删除已生效——软删 alpha=0 不计入）
+                if (m_markerCurrentItem && m_3dView) {
+                    const size_t vis = m_3dView->visibleMarkerCount();
+                    m_markerCurrentItem->setText(
+                        0, QStringLiteral("标记点 %1 (%2)")
+                                  .arg(m_markerScanSeq, 3, 10, QChar('0'))
+                                  .arg(vis));
+                }
                 JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 三栏复位完成（0-6 全清）");
             });
         });
@@ -1766,11 +1775,18 @@ QWidget *MainWindow::createBottomToolBar()
         });
     }
 
-    // Ctrl+Z undo
+    // Ctrl+Z undo（统计栏同步——恢复点后可见数变化，2026-09-06）
     QShortcut* undoShortcut = new QShortcut(QKeySequence(Qt::CTRL + Qt::Key_Z), this);
     connect(undoShortcut, &QShortcut::activated, this, [this]()
     {
         m_3dView->undoDelete();
+        if (m_markerCurrentItem && m_3dView) {
+            const size_t vis = m_3dView->visibleMarkerCount();
+            m_markerCurrentItem->setText(
+                0, QStringLiteral("标记点 %1 (%2)")
+                          .arg(m_markerScanSeq, 3, 10, QChar('0'))
+                          .arg(vis));
+        }
     });
 
     return bar;

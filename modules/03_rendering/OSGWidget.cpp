@@ -1677,6 +1677,27 @@ void OSGWidget::deletePointsInPolyline() {
     update();
     m_selectedPolylines.clear();
 }
+size_t OSGWidget::visibleMarkerCount() const
+{
+    // 软删计数：标志点几何 alpha>0 顶点数（点精灵版＝顶点数；圆盘版＝4 顶点/盘
+    // 折半为盘数——两版按当前几何类型换算）
+    if (!m_markerGeom.valid()) return 0;
+    const auto* colors =
+        dynamic_cast<const osg::Vec4ubArray*>(m_markerGeom->getColorArray());
+    const auto* verts =
+        dynamic_cast<const osg::Vec3Array*>(m_markerGeom->getVertexArray());
+    if (!colors || !verts || colors->size() != verts->size()) return 0;
+    size_t visible = 0;
+    for (const auto& c : *colors)
+        if (c.a() > 0) ++visible;
+    // 圆盘版 4 顶点/盘（有图元且为 QUADS 类型时折算）
+    if (m_markerGeom->getNumPrimitiveSets() > 0) {
+        const auto* ps = m_markerGeom->getPrimitiveSet(0);
+        if (ps && ps->getMode() == osg::PrimitiveSet::QUADS) visible /= 4;
+    }
+    return visible;
+}
+
 void OSGWidget::clearHighlight()
 {
     for (auto& entry : m_highlights)
