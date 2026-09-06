@@ -86,6 +86,8 @@ private:
 
         hal::StereoFrame frame;
         frame.frameId = leftBuf.frameId;   // 严格配对下左右相等
+        frame.frameIdLeft = leftBuf.frameId;    // 原始帧号（调试显示）
+        frame.frameIdRight = rightBuf.frameId;
         frame.timestamp = 0;
         frame.leftGray  = leftBuf.image.clone();
         frame.rightGray = rightBuf.image.clone();

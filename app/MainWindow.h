@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QMainWindow>
 #include <QPushButton>
@@ -92,7 +92,8 @@ protected:
     int m_activeScanToolIdx = -1;     // 当前活跃扫描键（2/3；-1=无——停止复原用）
     QDialog *m_camDlg = nullptr;      // 相机预览监视弹窗（调试，懒建）
     QLabel *m_camLeft = nullptr;      // 左相机图
-    QLabel *m_camRight = nullptr;     // 右相机图
+    QLabel *m_camRight = nullptr;
+    QLabel *m_camFrameLabel = nullptr; // 左右帧号＋偏移显示（调试）     // 右相机图
     int m_camFrameSkip = 0;           // （已退役 2026-09-05：预览节流改时间基准 previewFps——成员待清）
     QList<QPushButton*> m_navLeftButtons;
     QList<QPushButton*> m_navRightButtons;

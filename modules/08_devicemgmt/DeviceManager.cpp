@@ -417,8 +417,11 @@ std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
     return {{"N10", [this](McuDone cb) {
                  mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
              }},
-            {"FLUSH", [this](McuDone cb) {
-                 mcu_->flushWrites(300);        // 有界：残余慢写最多 300ms
+            {"N11H1", [this](McuDone cb) {
+                 mcu_->startScan(std::move(cb));   // 重启触发（2026-09-06 实测：N11H0
+             }},                                    // 停触发后仅 N10 不恢复——MCU 停在
+            {"FLUSH", [this](McuDone cb) {          // 「已停」态；须 N11H1（首次启动
+                 mcu_->flushWrites(300);            // 亦无害——MCU 幂等确认）
                  cb(true, "");
              }}};
 }
@@ -527,12 +530,15 @@ void DeviceManager::stopCapture() {
 
 void DeviceManager::startCaptureOnLogic() {
     if (mode_->isCapturing()) return;            // 幂等：黑板同值直返
-    // 命令组 [N10(账本全参)→N11H1]（A-T17 修复：原仅发 N11H1，N10 断链）——
-    // 组成功回调才擦板+开流；任一步 3 败由 sendSeq 短路+Fault
+    // —— 启动顺序（2026-09-06 帧号错位根因修正）：**相机先启→再发 N10** ——
+    // 原序（N10→回调→startStream）在 N10 到达后 MCU 立即触发，而相机尚在
+    // 配置中（左 42ms/右 82ms 后才就绪）——左比右多吃 2~3 个触发脉冲，
+    // GetFrameID 偏移恒 2~3，严格配对全丢（实测 L=92 R=89）。
+    // 改序后两台相机同时等触发，N10 到达时同步收第一个脉冲 → 偏移 ±1。
+    startStreamIfReady();                        // ① 相机先就绪等触发
     sendSeq(captureSeqSteps(), [this](bool ok) {
         if (!ok) return;
         mode_->setCapturing(true);
-        startStreamIfReady();
     });
 }
 

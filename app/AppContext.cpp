@@ -507,12 +507,14 @@ Scanner::Result AppContext::resumeScanSession() {
     if (!isScanSessionPaused()) return Scanner::Result::fail("非就绪态（无暂停会话）");
     const auto r = scanWf_->resume();
     if (!r.success) return r;
-    // 续采：N10 参数组帧重启灯组＋触发（用户口径：N10 即隐含触发，无需 N11H1）
+    // 续采：N10 重启灯组参数＋N11 H1 重启触发（2026-09-06 实测：首次启动
+    // N10 即够——MCU 从默认态进入触发；但 N11H0 停触发后仅 N10 不够，
+    // MCU 停在「已停」态——串口无声根因；须补 N11H1 才恢复触发）
     if (deviceManager_) {
         const bool laserOn = (lastScanMode_ != Scanner::ScanMode::MarkerOnly);
-        deviceManager_->startCapture(laserOn);
+        deviceManager_->startCapture(laserOn);   // N10→N11H1→FLUSH（captureSeqSteps）
     }
-    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（就绪态出口①·N10 重启灯组触发）：ok");
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（N10 参数＋N11H1 重启触发）：ok");
     return Scanner::Result::ok("续采中");
 }
 

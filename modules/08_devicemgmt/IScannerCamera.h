@@ -16,6 +16,8 @@ namespace Scanner::hal {
 // ============================================================================
 struct StereoFrame {
     FrameId frameId = 0;
+    FrameId frameIdLeft = 0;    // 左相机原始帧号（调试——相机预览显示用）
+    FrameId frameIdRight = 0;   // 右相机原始帧号（同上）
     TimestampMs timestamp = 0;
     cv::Mat leftGray;   // 左图灰度 CV_8UC1
     cv::Mat rightGray;  // 右图灰度 CV_8UC1

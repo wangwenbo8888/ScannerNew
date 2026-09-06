@@ -620,10 +620,19 @@ void MainWindow::showCameraMonitor() {
             l->setAlignment(Qt::AlignCenter);
             l->setStyleSheet("background:#202225;");
         }
-        auto* lay = new QHBoxLayout(m_camDlg);
-        lay->setContentsMargins(4, 4, 4, 4);
-        lay->addWidget(m_camLeft);
-        lay->addWidget(m_camRight);
+        m_camFrameLabel = new QLabel(m_camDlg);
+        m_camFrameLabel->setStyleSheet(
+            "color:#3c7ad9; font-family:Consolas; font-size:12px; padding:2px 8px;");
+        // 单一 QVBoxLayout：上层图片行（QHBoxLayout）＋底部帧号行
+        auto* vLay = new QVBoxLayout(m_camDlg);
+        vLay->setContentsMargins(4, 4, 4, 2);
+        vLay->setSpacing(2);
+        auto* imgLay = new QHBoxLayout();
+        imgLay->setContentsMargins(0, 0, 0, 0);
+        imgLay->addWidget(m_camLeft);
+        imgLay->addWidget(m_camRight);
+        vLay->addLayout(imgLay);
+        vLay->addWidget(m_camFrameLabel);
         // 关闭即摘分路（帧回调不再进 UI）
         connect(m_camDlg, &QDialog::finished, this, [this]() {
             if (m_appCtx) m_appCtx->setDebugFrameTap(nullptr);
@@ -641,12 +650,20 @@ void MainWindow::showCameraMonitor() {
         lastPreview = now;
         const cv::Mat l = f.leftGray.clone();    // 深拷脱离 ring 复用
         const cv::Mat r = f.rightGray.clone();
-        QMetaObject::invokeMethod(this, [this, l, r]() {
+        const auto fidL = f.frameIdLeft;
+        const auto fidR = f.frameIdRight;
+        QMetaObject::invokeMethod(this, [this, l, r, fidL, fidR]() {
             if (m_camDlg && m_camDlg->isVisible()) {
                 m_camLeft->setPixmap(QPixmap::fromImage(camMatToImage(l))
                                           .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
                 m_camRight->setPixmap(QPixmap::fromImage(camMatToImage(r))
-                                          .scaled(m_camRight->size(), Qt::KeepAspectRatio));
+                                           .scaled(m_camRight->size(), Qt::KeepAspectRatio));
+                if (m_camFrameLabel)
+                    m_camFrameLabel->setText(
+                        QStringLiteral("左帧号: %1    右帧号: %2    偏移: %3")
+                            .arg(static_cast<qulonglong>(fidL))
+                            .arg(static_cast<qulonglong>(fidR))
+                            .arg(static_cast<qulonglong>(fidL) - static_cast<qulonglong>(fidR)));
             }
         }, Qt::QueuedConnection);
     });
