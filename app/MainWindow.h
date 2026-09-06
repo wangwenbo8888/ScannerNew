@@ -130,9 +130,6 @@ protected:
     QLabel *m_infoTempLabel = nullptr;
     QLabel *m_infoCpuLabel = nullptr;
     QLabel *m_infoMemLabel = nullptr;
-    double m_prevCpuIdle = 0;
-    double m_prevCpuKernel = 0;
-    double m_prevCpuUser = 0;
 
     void startInfoTimer();
     void updateInfoSection();

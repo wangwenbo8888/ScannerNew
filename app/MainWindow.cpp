@@ -1920,20 +1920,8 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 // ============================================================================
 void MainWindow::startInfoTimer()
 {
-    // 初始化 CPU 时间戳
-    FILETIME idleTime, kernelTime, userTime;
-    if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
-        auto toU64 = [](const FILETIME& ft) -> uint64_t {
-            ULARGE_INTEGER u;
-            u.LowPart = ft.dwLowDateTime;
-            u.HighPart = ft.dwHighDateTime;
-            return u.QuadPart;
-        };
-        m_prevCpuIdle = static_cast<double>(toU64(idleTime));
-        m_prevCpuKernel = static_cast<double>(toU64(kernelTime));
-        m_prevCpuUser = static_cast<double>(toU64(userTime));
-    }
-
+    // CPU 采集走 PDH（updateInfoSection 头部双计数器）——GetSystemTimes 时间戳
+    // 基线随旧差分块一并移除（2026-09-06）
     m_infoTimer = new QTimer(this);
     connect(m_infoTimer, &QTimer::timeout, this, &MainWindow::updateInfoSection);
     m_infoTimer->start(1000);
@@ -2120,37 +2108,9 @@ void MainWindow::updateInfoSection()
         }
     }
 
-    // 5. CPU 占用率 — Windows API
-    if (m_infoCpuLabel) {
-        FILETIME idleTime, kernelTime, userTime;
-        if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
-            auto toU64 = [](const FILETIME& ft) -> uint64_t {
-                ULARGE_INTEGER u;
-                u.LowPart = ft.dwLowDateTime;
-                u.HighPart = ft.dwHighDateTime;
-                return u.QuadPart;
-            };
-            double idle = static_cast<double>(toU64(idleTime));
-            double kernel = static_cast<double>(toU64(kernelTime));
-            double user = static_cast<double>(toU64(userTime));
-
-            double idleDiff = idle - m_prevCpuIdle;
-            double kernelDiff = kernel - m_prevCpuKernel;
-            double userDiff = user - m_prevCpuUser;
-            double total = kernelDiff + userDiff;
-
-            m_prevCpuIdle = idle;
-            m_prevCpuKernel = kernel;
-            m_prevCpuUser = user;
-
-            double usage = (total > 0) ? ((total - idleDiff) / total * 100.0) : 0.0;
-            if (usage < 0) usage = 0;
-            if (usage > 100) usage = 100;
-            m_infoCpuLabel->setText(QString::number(usage, 'f', 1) + " %");
-        } else {
-            m_infoCpuLabel->setText("-- %");
-        }
-    }
+    // 5. CPU 占用率——唯一写入点在函数头部（PDH 双计数器 Utility 钳位口径）。
+    //    原 GetSystemTimes 差分块已删（2026-09-06：双重写入每拍覆盖 PDH 结果，
+    //    面板恒显示忙时口径——「与任务管理器不一致」真凶）。
 
     // 6. 内存状态
     if (m_infoMemLabel) {
