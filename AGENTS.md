@@ -72,7 +72,7 @@ JEAMMWARE260705/
 | 05 | `editing` | 桩 | — |
 | 06 | `fileio` | ✅ 承重 | 库 `mod_fileio`：SlotRing / RingBuffer / FrameBuffer / PointCloudBuffer（点云仓库）/ DeviceStateCache / EnhancedFrame / CycleUnit / FrameEnricher / CalibrationRepository（JSON 单文件＋readyForScan 门禁）/ ScanSessionData / CalibSessionData / Sink 契约三接口 / IWorkflow / ParameterManager / file_io（`Scanner::data::fileio`） |
 | 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology / PCoreBroker / GpuSlotService / IFrameSource / FrameResultQueue / SchedulerRuntime）＋五流水线对象（A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）＋装配公共件；命名空间 `Scanner::pipeline` |
-| 08 | `devicemgmt` | ✅（真机联调待做） | 库 `mod_devicemgmt`：serial/ 协议层三小层（SerialPort / FrameCodec / CommandChannel / McuFrame）＋DeviceManager 总门面（逻辑线程 post 编队 / 故障 8 码 / ParamStore / WarmupSequence / ModeController）＋按键链（KeyManager / MenuLogic / KeySemantics）＋CameraControl＋MCUDriver（typed N10–N16）＋HardwareMonitor＋SelfCheckCollector（PDH/NVML） |
+| 08 | `devicemgmt` | ✅（真机联调待做） | 库 `mod_devicemgmt`：serial/ 协议层三小层（SerialPort / FrameCodec / CommandChannel / McuFrame）＋DeviceManager 总门面（逻辑线程 post 编队 / 故障 8 码 / ParamStore / WarmupSequence / ModeController）＋按键链（KeySemantics 直收 MCU 手势 / MenuLogic）＋CameraControl＋MCUDriver（typed N10/N11H0/N12T/N13S＋G01–G03 上行）＋HardwareMonitor＋SelfCheckCollector（PDH/NVML） |
 | 09 | `operatorlib` | ✅ 全部算子 | 单库 `mod_operatorlib`，命名空间 `calib::`（见 §4.3）；GBA 含软先验、marker_cloud_fuse 含 seed()。待建：网格四族算子（07-E 消费） |
 | 10 | `observability` | 部分实现 | 库 `mod_observability`：StateMachine/IState（7 态表驱动 CAS）＋CommandGate 统一命令通道（双口）＋FaultHandler＋ObsLogger/jmw_logging＋CrashHandler＋PerfMonitor。待接：08 故障桥两待办（10 文档 §2.4——param1 语义对齐＋完整链 app 桥）、UI 状态图标 |
 | 11 | `deploy` | 桩 | — |
