@@ -11,21 +11,15 @@ CommandChannel::CommandChannel(Deps d) : deps_(std::move(d)) {
     if (deps_.ackTimeoutMs < 1) deps_.ackTimeoutMs = 1;                        // 防 tick 活锁
 }
 
-uint16_t CommandChannel::nextSeq() {
-    const uint16_t s = seq_;
-    seq_ = static_cast<uint16_t>((seq_ + 1) % 256);
-    return s;
-}
-
-bool CommandChannel::writeFrame(uint16_t seq, const std::string& payload) {
-    const std::string frame = deps_.codec ? deps_.codec->encode(payload, seq) : payload;
+bool CommandChannel::writeFrame(const std::string& payload) {
+    const std::string frame = deps_.codec ? deps_.codec->encode(payload) : payload;
     return deps_.write ? deps_.write(frame) : false;
 }
 
 void CommandChannel::send(const std::string& payload, DoneCb onDone) {
-    if (!deps_.reliable) {  // v2 降级：发不等/不挂表/不判败
-        writeFrame(nextSeq(), payload);
-        if (onDone) onDone(true, "未确认");
+    if (!deps_.reliable) {  // 盲发：写失败即败（D8）——批2 此分支成为唯一形态
+        const bool ok = writeFrame(payload);
+        if (onDone) onDone(ok, ok ? "未确认" : payload);
         return;
     }
     bool evicted = false;
@@ -36,18 +30,18 @@ void CommandChannel::send(const std::string& payload, DoneCb onDone) {
         evicted = true;
     }
     PendingCmd e;
-    e.seq = nextSeq();
+    e.seq = 0;   // 260831 无 seq（机制批2 整删——表项 seq 恒 0）
     e.payload = payload;
     e.onDone = std::move(onDone);
     e.attempts = 1;
     e.dueMs = deps_.nowMs() + deps_.ackTimeoutMs;
-    writeFrame(e.seq, payload);
+    writeFrame(payload);
     table_.push_back(std::move(e));
     if (evicted) failEntry(std::move(victim));  // 先挂新再补发被逐回调（回调内可再 send）
 }
 
 void CommandChannel::sendFireAndForget(const std::string& payload) {
-    writeFrame(nextSeq(), payload);
+    writeFrame(payload);
 }
 
 void CommandChannel::sendGroup(std::vector<std::string> payloads, DoneCb onGroupDone) {
@@ -102,7 +96,7 @@ void CommandChannel::tick() {
         }
         const uint16_t seq = table_[idx].seq;      // 拷贝字段——write 期间不持表内引用
         const std::string payload = table_[idx].payload;  //（write 可重入 send/onAck 改表）
-        writeFrame(seq, payload);                  // 重传（write 失败同计数——尝试已消耗）
+        writeFrame(payload);                       // 重传（write 失败同计数——尝试已消耗）
         for (size_t i = 0; i < table_.size(); ++i) {  // 按 seq 重取（重入已销项则跳过）
             if (table_[i].seq != seq) continue;
             PendingCmd& e = table_[i];             // 此引用不再跨 writeFrame 持有

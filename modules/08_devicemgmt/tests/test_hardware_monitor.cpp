@@ -69,10 +69,11 @@ struct LocalFakeCam : Scanner::hal::IScannerCamera {
     std::string getPlatform() const override { return "Windows"; }
 };
 
-serial::TempFrame makeTemps(double c0, double c1, double c2, double c3, uint8_t ch) {
+// 260831：G02 恒 4 路——无 channels 位；ts>0 视为已收帧（有帧即在线）
+serial::TempFrame makeTemps(double c0, double c1, double c2, double c3) {
     serial::TempFrame tf{};
     tf.celsius[0] = c0; tf.celsius[1] = c1; tf.celsius[2] = c2; tf.celsius[3] = c3;
-    tf.channels = ch;
+    tf.ts = 1;
     return tf;
 }
 
@@ -118,7 +119,7 @@ TEST(HardwareMonitorTest, McuTempRowsWritten) {
     DeviceStateCache dsc;
     HardwareMonitor mon;
     mon.setDeviceStateSink(&dsc);
-    const auto tf = makeTemps(25.1, 26.2, 27.3, 28.4, 4);
+    const auto tf = makeTemps(25.1, 26.2, 27.3, 28.4);
     mon.setLastTemps([tf] { return tf; });
     mon.start(50);
     ASSERT_TRUE(waitUntil([&] { return dsc.getState("MCU").state == DeviceState::Connected; }))
@@ -191,8 +192,9 @@ TEST(HardwareMonitorTest, SnapshotWithSelfCheck) {
     EXPECT_DOUBLE_EQ(m.captureFps, 10.0);
 }
 
-// 7. 垫片行为延续：注入源空不写 MCU 行；channels 按位裁剪（2 路只写 T0/T1）
-TEST(HardwareMonitorTest, NoSourceNoMcuRowAndChannelClip) {
+// 7. 垫片行为延续：注入源空/未收帧（ts=0）不写 MCU 行；有帧恒写四路
+//    （260831 G02 固定 4 路——原 channels 按位裁剪已删）
+TEST(HardwareMonitorTest, NoSourceNoMcuRowAndAlwaysFourRows) {
     DeviceStateCache dsc;
     HardwareMonitor mon;
     mon.setDeviceStateSink(&dsc);
@@ -202,13 +204,13 @@ TEST(HardwareMonitorTest, NoSourceNoMcuRowAndChannelClip) {
     EXPECT_EQ(dsc.getState("MCU").state, DeviceState::Offline);
     EXPECT_EQ(dsc.getState("MCU_T0").state, DeviceState::Offline);
 
-    const auto tf2 = makeTemps(11.0, 12.0, 0.0, 0.0, 2);
+    const auto tf2 = makeTemps(11.0, 12.0, 0.0, 0.0);
     mon.setLastTemps([tf2] { return tf2; });
     mon.start(50);
     ASSERT_TRUE(waitUntil([&] { return dsc.getState("MCU_T1").state == DeviceState::Connected; }));
     mon.stop();
     EXPECT_DOUBLE_EQ(dsc.getState("MCU_T0").temperature, 11.0);
     EXPECT_DOUBLE_EQ(dsc.getState("MCU_T1").temperature, 12.0);
-    EXPECT_EQ(dsc.getState("MCU_T2").state, DeviceState::Offline);  // 超出 channels 不写
-    EXPECT_EQ(dsc.getState("MCU_T3").state, DeviceState::Offline);
+    EXPECT_EQ(dsc.getState("MCU_T2").state, DeviceState::Connected);   // 恒四路：T2/T3 也写
+    EXPECT_EQ(dsc.getState("MCU_T3").state, DeviceState::Connected);
 }

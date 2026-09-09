@@ -1,10 +1,6 @@
 // ============================================================================
-// McuFrame.cpp — 上行帧载荷解析实现（v3 默认口径，契约见 McuFrame.h）
-//
-// 入参载荷已由 FrameCodec 剥去 '$'/seq/crc/';'（如完整帧 "$T25.3,24.80AF1;"
-// 的载荷是 "T25.3,24.8"）。凡前缀/长度/字符集/数值非法一律 false，out 先归零。
+// McuFrame.cpp — G01/G02/G03 载荷解析（协议 260831；契约见 McuFrame.h）
 // ============================================================================
-
 #include "McuFrame.h"
 
 #include <charconv>
@@ -14,92 +10,70 @@ namespace Scanner::device::serial {
 
 namespace {
 
-// 整串消费式浮点（from_chars：locale 无关、拒 '+'/前导空白；溢出/残留/非有限全拒）
+// 整串消费式浮点（from_chars：locale 无关；溢出/残留/非有限全拒）
 bool parseDoubleFull(const std::string& s, double& out) {
     if (s.empty()) return false;
-    const char* b = s.data();
-    const char* e = b + s.size();
     double v = 0.0;
-    const auto r = std::from_chars(b, e, v);
-    if (r.ec != std::errc{} || r.ptr != e || !std::isfinite(v)) return false;
+    const auto r = std::from_chars(s.data(), s.data() + s.size(), v);
+    if (r.ec != std::errc{} || r.ptr != s.data() + s.size() || !std::isfinite(v)) return false;
     out = v;
     return true;
 }
 
-// 纯十进制数字串 → uint32（from_chars：拒空串/符号/非数字/溢出；指针距离判全消费）
-bool parseU32Full(const std::string& s, uint32_t& out) {
+// 纯十进制数字串 → uint64
+bool parseU64Full(const std::string& s, uint64_t& out) {
     if (s.empty()) return false;
-    const char* b = s.data();
-    const char* e = b + s.size();
-    uint32_t v = 0;
-    const auto r = std::from_chars(b, e, v, 10);
-    if (r.ec != std::errc{} || r.ptr != e) return false;
-    out = v;
-    return true;
-}
-
-// 纯 hex 字符串 → uint32（拒空串/非 hex 字符/溢出；限长由调用方保证）
-bool parseHexFull(const std::string& s, uint32_t& out) {
-    if (s.empty()) return false;
-    const char* b = s.data();
-    const char* e = b + s.size();
-    uint32_t v = 0;
-    const auto r = std::from_chars(b, e, v, 16);
-    if (r.ec != std::errc{} || r.ptr != e) return false;
+    uint64_t v = 0;
+    const auto r = std::from_chars(s.data(), s.data() + s.size(), v, 10);
+    if (r.ec != std::errc{} || r.ptr != s.data() + s.size()) return false;
     out = v;
     return true;
 }
 
 } // namespace
 
-bool parseTempPayload(const std::string& payload, TempFrame& out) {
-    out = TempFrame{};
-    if (payload.size() < 2 || payload[0] != 'T') return false;
-    size_t n = 0, start = 1;
-    for (size_t i = 1; i <= payload.size(); ++i) {
-        if (i == payload.size() || payload[i] == ',') {
-            if (i == start || n >= 4) return false;   // 空字段 / 超 4 通道
-            double v = 0.0;
-            if (!parseDoubleFull(payload.substr(start, i - start), v)) return false;
-            out.celsius[n++] = v;
-            start = i + 1;
-        }
-    }
-    out.channels = static_cast<uint8_t>(n);
-    return true;
-}
-
-bool parseKeyPayload(const std::string& payload, RawKeyEvent& out) {
-    out = RawKeyEvent{};
-    if (payload.size() < 5 || payload[0] != 'K' || payload[3] != ',') return false;
-    switch (payload[1]) {
+// "G01 U1" —— 指令字＋空格＋键字母＋手势位（1=单击 2=双击 3=长按）；
+// 索引钉死：[0..3]="G01 " 前缀、[4]=键字母、[5]=手势位（批1-A 原版误检 [3]
+// （空格）恒拒——批1-C 修正）
+bool parseGesturePayload(const std::string& payload, GestureEvent& out) {
+    out = GestureEvent{};
+    if (payload.size() != 6 || payload.compare(0, 4, "G01 ") != 0) return false;
+    switch (payload[4]) {
         case 'U': out.key = KeyId::Up; break;
         case 'L': out.key = KeyId::Left; break;
         case 'M': out.key = KeyId::Middle; break;
         case 'R': out.key = KeyId::Right; break;
         default: return false;
     }
-    if (payload[2] != '0' && payload[2] != '1') return false;
-    out.pressed = (payload[2] == '1');
-    return parseU32Full(payload.substr(4), out.mcuMs);
-}
-
-bool parseStatusPayload(const std::string& payload, StatusFrame& out) {
-    out = StatusFrame{};
-    if (payload.size() < 2 || payload.size() > 3 || payload[0] != 'S') return false;
-    uint32_t v = 0;
-    if (!parseHexFull(payload.substr(1), v)) return false;
-    out.code = static_cast<uint8_t>(v);
+    if (payload[5] < '1' || payload[5] > '3') return false;
+    out.gesture = static_cast<Gesture>(payload[5] - '0');
     return true;
 }
 
-bool parseAckPayload(const std::string& payload, AckFrame& out) {
-    out = AckFrame{};
-    if (payload.size() < 2 || payload.size() > 3 || payload[0] != 'A') return false;
-    uint32_t v = 0;
-    if (!parseHexFull(payload.substr(1), v)) return false;
-    out.ackedSeq = static_cast<uint16_t>(v);
-    return true;
+// "G02 A25.3 B25.4 C26.0 D24.5" —— 四路必齐（协议恒 4 路），A/B/C/D 序逐项消费；
+// 缺路/键错/非法值一律 false。
+bool parseTempPayload(const std::string& payload, TempFrame& out) {
+    out = TempFrame{};
+    if (payload.size() < 4 || payload.compare(0, 4, "G02 ") != 0) return false;
+    const char kKeys[4] = {'A', 'B', 'C', 'D'};
+    size_t pos = 4;
+    for (int i = 0; i < 4; ++i) {
+        if (pos + 1 >= payload.size() || payload[pos] != kKeys[i]) return false;
+        size_t end = payload.find(' ', pos + 1);
+        if (end == std::string::npos) end = payload.size();
+        double v = 0.0;
+        if (!parseDoubleFull(payload.substr(pos + 1, end - pos - 1), v)) return false;
+        out.celsius[i] = v;
+        pos = (end == payload.size()) ? end : end + 1;
+    }
+    return pos == payload.size();
+}
+
+// "G03 S500" —— 指令字＋空格＋S＋十进制计数
+bool parseShotCountPayload(const std::string& payload, ShotCountFrame& out) {
+    out = ShotCountFrame{};
+    if (payload.size() < 6 || payload.compare(0, 4, "G03 ") != 0 || payload[4] != 'S') return false;
+    return parseU64Full(payload.substr(5), out.count);
 }
 
 } // namespace Scanner::device::serial

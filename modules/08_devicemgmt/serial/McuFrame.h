@@ -1,11 +1,11 @@
 #pragma once
 // ============================================================================
-// McuFrame.h — MCU 上行帧类型 + 分流双有界环（设计方案 §2.4）
+// McuFrame.h — MCU 上行帧类型 + 分流双有界环（协议 260831 口径）
 //
-// 事件环（K/S/A，容量64，满丢新+计数）；遥测环（T，容量8，满丢新）。
-// SPSC：串口rx线程生产 / 逻辑线程消费。协议默认口径见 §8（未定稿，改只改这里）。
+// 上行三类：G01 手势 / G02 四路温度 / G03 触发计数（协议说明.md §三）。
+// 环：手势/计数事件环容量 64，温度遥测环容量 8（满丢新+计数）。
+// SPSC：串口 rx 线程生产 / 逻辑线程消费。
 // ============================================================================
-
 #include "base/types.h"
 #include <array>
 #include <atomic>
@@ -14,33 +14,27 @@
 
 namespace Scanner::device::serial {
 
-enum class KeyId : uint8_t { Up, Left, Middle, Right };   // U/L/M/R
-enum class FrameKind : uint8_t { Temperature, Key, Status, Ack };
+enum class KeyId : uint8_t { Up, Left, Middle, Right };   // G01 键 U/L/M/R
+enum class Gesture : uint8_t { Short = 1, Double = 2, Hold = 3 };  // G01 手势位
 
-struct TempFrame   { double celsius[4]; uint8_t channels; uint16_t seq; TimestampMs ts; };
-struct RawKeyEvent { KeyId key; bool pressed; uint32_t mcuMs; uint16_t seq; TimestampMs ts; };
-struct StatusFrame { uint8_t code; uint16_t seq; TimestampMs ts; };  // 码表待协议方（§8-8 占位）
-struct AckFrame    { uint16_t ackedSeq; uint16_t seq; };
+struct TempFrame      { double celsius[4]; TimestampMs ts; };      // G02 恒 4 路
+struct GestureEvent   { KeyId key; Gesture gesture; TimestampMs ts; };  // G01（MCU 已判手势）
+struct ShotCountFrame { uint64_t count; TimestampMs ts; };         // G03 硬件触发计数
 
-// —— 载荷解析（v3 默认口径；v2 由 MCUDriver 兜底路径绕过）——
-// T: "$T25.3,24.8<seq><crc>;"  K: "$KM1,1234<seq><crc>;"  S: "$S0A<seq><crc>;"  A: "$A0B<seq><crc>;"
+// —— 载荷解析（入参已由 FrameCodec 剥去 ';'；非法一律 false，out 先归零）——
+// G01: "G01 U1"   G02: "G02 A25.3 B25.4 C26.0 D24.5"   G03: "G03 S500"
+bool parseGesturePayload(const std::string& payload, GestureEvent& out);
 bool parseTempPayload(const std::string& payload, TempFrame& out);
-bool parseKeyPayload(const std::string& payload, RawKeyEvent& out);
-bool parseStatusPayload(const std::string& payload, StatusFrame& out);
-bool parseAckPayload(const std::string& payload, AckFrame& out);
+bool parseShotCountPayload(const std::string& payload, ShotCountFrame& out);
 
-// —— 满环丢新有界环（08 自带轻量实现——分层铁律 C2）——
-// 口径（D-T12a）：满环时生产者放弃本帧（不写槽不推 head_），dropCount_++，
-// push 返回 false。理由：① 生产者永不碰 head_——旧版满丢最旧需生产者推 head_，
-// 与消费者 pop 的 head_.store 竞争、还可能覆写消费者正在读的槽（竞态根除）；
-// ② 事件环 64 深下丢新=用户这一下没反应可重按（安全），丢旧=丢老事件。
+// —— 满环丢新有界环（同旧实现，口径 D-T12a）——
 template <typename T, size_t N>
 class SpscRing {
 public:
-    bool push(T v) {               // 生产者：满则丢新（返回 false，未入队）
+    bool push(T v) {
         if (full()) { dropCount_.fetch_add(1, std::memory_order_relaxed); return false; }
         buf_[tail_] = std::move(v); tail_.store((tail_+1)%N); return true; }
-    bool pop(T& out) {             // 消费者
+    bool pop(T& out) {
         if (empty()) return false; out = std::move(buf_[head_]); head_.store((head_+1)%N); return true; }
     bool empty() const { return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire); }
     uint64_t dropped() const { return dropCount_.load(std::memory_order_relaxed); }

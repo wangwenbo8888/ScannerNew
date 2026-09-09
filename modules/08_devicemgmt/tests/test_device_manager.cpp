@@ -1,21 +1,20 @@
 // ============================================================================
-// test_device_manager.cpp — DeviceManager 门面集成测（D-T12b T1–T14 + D-T13 F1–F7）
+// test_device_manager.cpp — DeviceManager 门面集成测（协议 260831 批1-C 适配）
 //
-// 全链真件（MCUDriver/KeyManager/KeySemantics/MenuLogic/ParamStore/Warmup/
-// ModeController 全真配），假件仅两处边界：
-//   - MockMcu：writeOverride 记下行帧 + 可配置自动 ACK 回执（收到 "$Nxx..seq..;"
-//     解析 seq 回 "$A<seq>" 帧，经 DeviceManager::testInjectRaw 回灌）；
+// 全链真件（MCUDriver/KeySemantics/MenuLogic/ParamStore/Warmup/ModeController
+// 全真配），假件仅两处边界：
+//   - MockMcu：writeOverride 记下行帧（盲发无 ACK——无回灌机制）；
 //   - FakeCamera：IScannerCamera 全接口空壳，isOpen 可拨（掉线模拟）。
-// manualTick=true：不起逻辑线程，logicTick() 手动驱动；KeyManager/Warmup 时基
-// 用真实系统钟（手势静默窗/预热窗以小阈值+毫秒级 sleep 换确定论）。
-// 用例语义 = 08 设计方案 §7 集成行（T1–T12）+ T13/T14（并发冒烟/标定组链）+
-// F1–F7（§6.2 故障 8 码：掉线边沿/心跳/温度双警/预热超时/K 环溢/seq 跳变）。
+// manualTick=true：不起逻辑线程，logicTick() 手动驱动。上行帧经 testInjectRaw
+// 回灌（"G01 U1;"=上键短按——手势判定归 MCU G01，PC 侧无判定；KeyManager 已退役）。
+// 用例编号承接 D-T12b T1–T14 + D-T13 F1–F7：T10（ACK 重传）/T11（v2 兜底）/
+// F7（seq 跳变）随 ACK/seq 机制退役删（批2 补直发版）；T9 改 close/reopen 无残留；
+// T12 改 enterScan 单步 N10 落板；T14 改 enterCalibration 纯软件落板。
 // ============================================================================
 
 #include <gtest/gtest.h>
 
 #include "modules/08_devicemgmt/DeviceManager.h"
-#include "modules/08_devicemgmt/serial/FrameCodec.h"
 
 #include <atomic>
 #include <chrono>
@@ -26,12 +25,14 @@
 #include <vector>
 
 using namespace Scanner::device;
-using FCodec = Scanner::device::serial::FrameCodec;
 using Scanner::Event;
 using Scanner::EventType;
 using Scanner::Result;
 
 namespace {
+
+// 账本默认值组帧的 N10（freqHz 60 / bgLight 10 / laserLevel 40 / T1V1C0D0）
+const char* kN10Default = "N10 H60 B10 T1 V1 C0 D0 L40";
 
 void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
@@ -53,7 +54,7 @@ struct EventRecorder {
             if (e.type == t) ++n;
         return n;
     }
-    // UserDefined 按 param1 计数（menuSelect ③/④ 出口——Important #4 去污染后）
+    // UserDefined 按 param1 计数（menuSelect ③/④ 出口）
     int userParam(int64_t p1) const {
         std::lock_guard<std::mutex> lock(m);
         int n = 0;
@@ -74,7 +75,7 @@ struct EventRecorder {
 // DevFault 码 → int64（断言简写）
 constexpr int64_t FC(DevFault f) { return static_cast<int64_t>(f); }
 
-// —— 假相机：全接口空壳 + isOpen 可控（T8 掉线模拟）——
+// —— 假相机：全接口空壳 + isOpen 可控（T8/F1 掉线模拟）——
 struct FakeCamera : Scanner::hal::IScannerCamera {
     bool openOk = true;
     bool openState = false;
@@ -115,23 +116,13 @@ struct FakeCamera : Scanner::hal::IScannerCamera {
     std::string getPlatform() const override { return "Windows"; }
 };
 
-// —— 假 MCU：记全部下行帧 + 可配置自动 ACK（noAck 前缀命中的命令不回执）——
+// —— 假 MCU：记全部下行帧（盲发无 ACK——写即成功，无回灌）——
 struct MockMcu {
-    DeviceManager* dm = nullptr;                  // ACK 回灌目标（open 后指向当前门面）
+    DeviceManager* dm = nullptr;                  // 接缝保留（回灌口径批2 复核）
     std::vector<std::string> frames;
-    std::vector<std::string> noAck;               // 不 ACK 的载荷前缀（如 "N10"）
-    FCodec enc{FCodec::Version::V3};
 
     bool write(const std::string& f) {
         frames.push_back(f);
-        if (!dm || f.empty() || f.front() != '$' || f.back() != ';') return true;  // v2 裸帧无 ACK
-        const std::string body = f.substr(1, f.size() - 2);                        // payload+seq+crc
-        if (body.size() < 6) return true;
-        const std::string payload = body.substr(0, body.size() - 6);
-        const std::string seqHex = body.substr(body.size() - 6, 2);
-        for (const auto& p : noAck)
-            if (payload.rfind(p, 0) == 0) return true;                             // 命中不回执
-        dm->testInjectRaw(enc.encode("A" + seqHex, 0));                            // 回执 ACK
         return true;
     }
     int count(const std::string& sub) const {
@@ -143,67 +134,38 @@ struct MockMcu {
 };
 
 // —— 测试配置（manualTick + 小阈值换快用例）——
-DeviceConfig makeCfg(FCodec::Version v = FCodec::Version::V3) {
+DeviceConfig makeCfg() {
     DeviceConfig c;
     c.serialPort = "COM_TEST";
     c.baud = 115200;
-    c.protocol = v;
-    c.ackTimeoutMs = 100;
-    c.keys = GestureThresholds{10, 60, 60, 150};              // 消抖/短按/双击窗/长按
+    c.tempReportPeriodMs = 100;
     c.warmup = WarmupConfig{100, 0.1, 2.0, 3000};             // 稳定窗 100ms
     c.manualTick = true;
     return c;
 }
 
-// —— 按键/温度注入工具（v3 帧经 testInjectRaw；手势经 MCU 时刻域合成）——
+// —— 上行注入工具（裸 ';' 帧；手势=G01 单帧——MCU 已判 S/D/H）——
 struct Kit {
-    FCodec enc{FCodec::Version::V3};
     DeviceManager* dm = nullptr;
-    uint16_t seq = 16;
-    uint32_t mcu = 100;
 
-    void raw(const std::string& payload) { dm->testInjectRaw(enc.encode(payload, seq++)); }
-    void ev(char k, bool pressed, uint32_t t) {
-        raw(std::string{'K', k, static_cast<char>(pressed ? '1' : '0'), ','} + std::to_string(t));
+    void raw(const std::string& payload) { dm->testInjectRaw(payload + ";"); }
+    void gesture(char key, int g) {              // g：1=短按 2=双击 3=长按
+        raw("G01 " + std::string{key} + std::to_string(g));
+        dm->logicTick();                         // pump+派发同拍落地
     }
-    // 短按：按下→30ms 松开→静默窗到期（tick 判 S）
-    void shortPress(char k) {
-        ev(k, true, mcu);
-        ev(k, false, mcu + 30);
-        mcu += 1000;
-        dm->logicTick();
-        sleepMs(90);
-        dm->logicTick();
-        dm->logicTick();                                      // 追一拍消化命令 ACK
-    }
-    // 双击：两对按压松开（事件驱动判 D）
-    void doublePress(char k) {
-        ev(k, true, mcu);
-        ev(k, false, mcu + 30);
-        ev(k, true, mcu + 60);
-        ev(k, false, mcu + 90);
-        mcu += 1000;
-        dm->logicTick();
-        dm->logicTick();
-    }
-    // 长按：仅按下，holdMs 到期（tick 判 H）
-    void holdPress(char k) {
-        ev(k, true, mcu);
-        mcu += 1000;
-        dm->logicTick();
-        sleepMs(190);
-        dm->logicTick();
-        dm->logicTick();
-    }
-    void temp(double c) {
-        raw("T" + std::to_string(c));
+    void gShort(char k) { gesture(k, 1); }
+    void gDouble(char k) { gesture(k, 2); }
+    void gHold(char k) { gesture(k, 3); }
+    void temp(double c) {                        // G02 四路同值（双警/Warmup 取 celsius[0]）
+        const std::string v = std::to_string(c);
+        raw("G02 A" + v + " B" + v + " C" + v + " D" + v);
         dm->logicTick();
     }
 };
 
 } // namespace
 
-// —— T1：相机打开失败 → open fail + 倒序关闭无崩 + Fault 事件（MCU 未开无自检帧）——
+// —— T1：相机打开失败 → open fail + 倒序关闭无崩 + Fault 事件（MCU 未开无命令帧）——
 TEST(DeviceManager, T1_OpenFailCameraRollbackAndFault) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -223,7 +185,7 @@ TEST(DeviceManager, T1_OpenFailCameraRollbackAndFault) {
     EXPECT_FALSE(r.success);
     EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
     EXPECT_FALSE(dm.isCameraOpen());
-    EXPECT_TRUE(mock.frames.empty());                          // MCU 未开：连 N12 Z1 都没发
+    EXPECT_TRUE(mock.frames.empty());                          // 相机败先返：N12 都没发
 }                                                              // 析构倒序收尾——无崩即过
 
 // —— T2：门禁拒切扫描 → enterScan 返回后无任何命令组下行帧 ——
@@ -243,7 +205,8 @@ TEST(DeviceManager, T2_GateRejectEnterScanNoFrames) {
     EXPECT_EQ(mock.count("N11"), 0);
     EXPECT_EQ(mock.count("N13"), 0);
     dm.logicTick();                                            // 补一拍证明确无任务落地
-    EXPECT_EQ(mock.frames.size(), 1u);                        // 仅 open 的 N12Z1
+    ASSERT_EQ(mock.frames.size(), 1u);                        // 仅 open 的 N12 T100
+    EXPECT_EQ(mock.frames[0], "N12 T100;");
     EXPECT_EQ(rec.count(EventType::StateChanged), 0);          // 黑板未动
 }
 
@@ -267,8 +230,8 @@ TEST(DeviceManager, T3_WarmupStableCallbackOnce) {
         ++cbCount;
         cbVal = stable;
     });
-    dm.logicTick();                                            // 编队任务落地（N14T42 下发）
-    EXPECT_EQ(mock.count("N14T42"), 1);                        // 加热命令已发
+    dm.logicTick();                                            // 编队任务落地（N13 S42 下发）
+    EXPECT_EQ(mock.count("N13 S42"), 1);                       // 加热命令已发
 
     kit.temp(20.0);
     sleepMs(30);
@@ -310,12 +273,11 @@ TEST(DeviceManager, T4_WarmupTimeoutCallbackOnceNoStopHeat) {
     }
     EXPECT_EQ(cbCount, 1);
     EXPECT_FALSE(cbVal);
-    EXPECT_EQ(mock.count("N14T42"), 1);
-    EXPECT_EQ(mock.count("N14T0"), 0);                         // 超时不停加热
+    EXPECT_EQ(mock.count("N13 S42"), 1);
+    EXPECT_EQ(mock.count("N13 S0"), 0);                         // 超时不停加热
 }
 
-// —— T5：中键短按启停（N11 H1/H0 按黑板）+ 直调幂等（连按同值不乱）——
-//      A-T17 修复后启采集=命令组 [N10(账本)→N11H1]：幂等断言同时覆盖 N10 ——
+// —— T5：中键短按启停（启=N10 停=N11 H0 按黑板）+ 直调幂等（连按同值不乱）——
 TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -329,32 +291,30 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    kit.shortPress('M');                                       // 主层中键短按 → 启采集（组：N10→N11H1）
-    EXPECT_EQ(mock.count("N11H1"), 1);
-    EXPECT_EQ(mock.count("N10H50B60T1V1L60"), 1);             // 每次启采集先 N10（账本默认全参）
+    kit.gShort('M');                                           // 主层中键短按 → 启采集（单步 N10=启采）
+    EXPECT_EQ(mock.count(kN10Default), 1);
+    EXPECT_EQ(mock.count("N11 H1"), 0);                        // 260831：无 N11 H1
     EXPECT_TRUE(dm.isCapturing());
-    kit.shortPress('M');                                       // 再按 → 停采集（单发 N11H0）
-    EXPECT_EQ(mock.count("N11H0"), 1);
+    kit.gShort('M');                                           // 再按 → 停采集（单发 N11 H0）
+    EXPECT_EQ(mock.count("N11 H0"), 1);
     EXPECT_FALSE(dm.isCapturing());
 
-    dm.startCapture();                                         // 直调重复启：幂等无新帧
+    dm.startCapture();                                         // 直调重复启
     dm.logicTick();
-    EXPECT_EQ(mock.count("N11H1"), 2);                         // 组链一拍内完成（ACK 泵链推进）
-    EXPECT_EQ(mock.count("N10H50B60T1V1L60"), 2);
+    EXPECT_EQ(mock.count(kN10Default), 2);                     // 盲发即回调——一拍内完成
     EXPECT_TRUE(dm.isCapturing());
-    dm.startCapture();                                         // 采集已开：幂等无新 N10/N11
+    dm.startCapture();                                         // 采集已开：幂等无新 N10
     dm.logicTick();
-    EXPECT_EQ(mock.count("N11H1"), 2);
-    EXPECT_EQ(mock.count("N10H50B60T1V1L60"), 2);
+    EXPECT_EQ(mock.count(kN10Default), 2);
     dm.stopCapture();                                          // 直调重复停：幂等无新帧
     dm.logicTick();
     dm.stopCapture();
     dm.logicTick();
-    EXPECT_EQ(mock.count("N11H0"), 2);
+    EXPECT_EQ(mock.count("N11 H0"), 2);
     EXPECT_FALSE(dm.isCapturing());
 }
 
-// —— T5b（A-T17 N10 断链修复钉死）：setParam 改账后 startCapture →
+// —— T5b（A-T17 钉死·260831 适配）：setParam 改账后 startCapture →
 //      N10 全参自 ParamStore 账本组帧（非 MCU 默认参数）——
 TEST(DeviceManager, T5b_StartCaptureN10FromParamAccount) {
     Scanner::infra::EventBus bus;
@@ -371,8 +331,8 @@ TEST(DeviceManager, T5b_StartCaptureN10FromParamAccount) {
     dm.logicTick();
     dm.startCapture();
     dm.logicTick();
-    EXPECT_EQ(mock.count("N10H90B60T1V1L60"), 1);              // N10 帧含 H90（账本值）
-    EXPECT_EQ(mock.count("N11H1"), 1);
+    EXPECT_EQ(mock.count("N10 H90 B10 T1 V1 C0 D0 L40"), 1);   // N10 帧含 H90（账本值）
+    EXPECT_EQ(mock.count("N11 H1"), 0);                        // 无 N11 H1（启采=N10 本身）
     EXPECT_TRUE(dm.isCapturing());
 }
 
@@ -393,54 +353,54 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     auto st = [&] { return dm.menuState(); };
 
     EXPECT_EQ(st().layer, 1);
-    kit.shortPress('U');                                       // 上键短按 L1：进菜单（cursor 复位①）
+    kit.gShort('U');                                           // 上键短按 L1：进菜单（cursor 复位①）
     EXPECT_EQ(st().layer, 2);
     EXPECT_EQ(st().cursor, 1);
-    for (int i = 0; i < 4; ++i) kit.shortPress('R');           // 右键短按×4：1→2→3→4→1 环绕
+    for (int i = 0; i < 4; ++i) kit.gShort('R');               // 右键短按×4：1→2→3→4→1 环绕
     EXPECT_EQ(st().cursor, 1);
-    kit.shortPress('L');                                       // 左键短按：1→4 环绕
+    kit.gShort('L');                                           // 左键短按：1→4 环绕
     EXPECT_EQ(st().cursor, 4);
-    kit.doublePress('M');                                      // 中键双击：模式光标 3→1→2→3
+    kit.gDouble('M');                                          // 中键双击：模式光标 3→1→2→3
     EXPECT_EQ(st().modeCursor, 1);
-    kit.doublePress('M');
+    kit.gDouble('M');
     EXPECT_EQ(st().modeCursor, 2);
-    kit.doublePress('M');
+    kit.gDouble('M');
     EXPECT_EQ(st().modeCursor, 3);
     const int post0 = rec.userParam(4);
-    kit.shortPress('M');                                       // 中键短按 L2 选中④：派后处理工作流（UserDefined p1=4）
+    kit.gShort('M');                                           // 中键短按 L2 选中④：派后处理工作流（UserDefined p1=4）
     EXPECT_EQ(rec.userParam(4), post0 + 1);
-    kit.shortPress('U');                                       // 上键短按 L2：退菜单
+    kit.gShort('U');                                           // 上键短按 L2：退菜单
     EXPECT_EQ(st().layer, 1);
 
-    kit.doublePress('U');                                      // 上键双击：None→View
+    kit.gDouble('U');                                          // 上键双击：None→View
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::View);
-    kit.shortPress('R');                                       // View 上下文：暂仅日志（曝光不动）
+    kit.gShort('R');                                           // View 上下文：暂仅日志（曝光不动）
     const double base = dm.getParam("exposure").value;
-    kit.doublePress('U');                                      // View→Brightness
+    kit.gDouble('U');                                          // View→Brightness
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::Brightness);
-    kit.shortPress('R');                                       // 右键短按：曝光 +1ms（相机直设）
+    kit.gShort('R');                                           // 右键短按：曝光 +1ms（相机直设）
     EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, base + 1.0);
-    kit.shortPress('L');                                       // 左键短按：曝光 -1ms
+    kit.gShort('L');                                           // 左键短按：曝光 -1ms
     EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, base);
-    kit.doublePress('U');                                      // Brightness→None
+    kit.gDouble('U');                                          // Brightness→None
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::None);
 
-    kit.shortPress('L');                                       // 主层无上下文左右：无效丢弃
+    kit.gShort('L');                                           // 主层无上下文左右：无效丢弃
     EXPECT_EQ(st().layer, 1);
-    kit.doublePress('L');                                      // 双击/长按预留/无效手势全丢弃不崩
-    kit.doublePress('R');
-    kit.holdPress('U');
-    kit.holdPress('M');
-    kit.holdPress('L');
-    kit.holdPress('R');
+    kit.gDouble('L');                                          // 双击/长按协议可达未定义手势全丢弃不崩
+    kit.gDouble('R');
+    kit.gHold('U');
+    kit.gHold('M');
+    kit.gHold('L');
+    kit.gHold('R');
     EXPECT_EQ(st().layer, 1);
     // 快照一致性：末拍刷新后 menuState()（互斥快照口）= 逻辑线程账本状态
     EXPECT_EQ(dm.menuState().layer, 1);
     EXPECT_EQ(dm.menuState().adjustCtx, MenuState::AdjustCtx::None);
 }
 
-// —— T7：按键洪峰 100 帧 → 环有效容量 63（SpscRing<64> 满判 tail+1==head）收敛
-//      （满丢新）→ ≥60 原始事件被消化（31 对完整手势）、无崩溃 ——
+// —— T7：手势洪峰 100 帧 → 手势环有效容量 63（SpscRing<64> 满丢新）收敛——
+//      63 个 U1 手势全派发（进/出菜单交替——幂等不崩）、无崩溃 ——
 TEST(DeviceManager, T7_KeyFlood100NoCrash) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -452,25 +412,16 @@ TEST(DeviceManager, T7_KeyFlood100NoCrash) {
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     kit.dm = &dm;
-    mock.noAck = {"N11"};                                      // 关 ACK：每次启采集都发 H1（计消化数）
     ASSERT_TRUE(dm.open().success);
 
-    uint32_t t = 100;
-    for (int i = 0; i < 50; ++i) {                             // 50 对按下/松开 = 100 个 K 帧
-        kit.ev('M', true, t);
-        kit.ev('M', false, t + 30);
-        t += 1000;
-    }
-    dm.logicTick();                                            // 环容量 64：仅前 64 事件入环
-    sleepMs(90);                                               // 末对静默窗到期
-    dm.logicTick();                                            // 手势 drain → 各组手势派发拍同步发 N11H1
-    dm.logicTick();                                            // A-T17 组链：ACK 泵消化 → 链发 N10
-    // 每消化一对手势产生一组 [N11H1→N10]（2026-08-22 真机裁定序：N11H1"按上次参数"
-    // 会重置灯态，N10 必须在后）：N11H1 在派发拍同步落帧（≥30 ⇔ ≥60 原始事件处理）；
-    // N10 经 ACK 泵链推进——洪峰下 CommandChannel 挂表容量有限，组基本在链前被
-    // 逐出判超时（容量策略「满：最旧先判超时」），N10 可为 0——本测只证洪峰不崩
-    EXPECT_GE(mock.count("N11H1"), 30);
-    EXPECT_FALSE(dm.isCapturing());
+    for (int i = 0; i < 100; ++i) kit.raw("G01 U1;");          // 100 手势帧（上键短按）
+    dm.logicTick();                                            // 环容 64：仅前 63 入环（37 丢新）
+    // 63 个 U1 手势同拍全派发：1st 进菜单→2nd 退菜单…（奇数 63 → 终态 layer 2）；
+    // U 键无采集副作用；溢出 Fault 钉死在 F6——本测只证洪峰不崩
+    EXPECT_EQ(mock.count("N10 ") + mock.count("N11 H0"), 0);
+    EXPECT_EQ(dm.menuState().layer, 2);
+    dm.logicTick();                                            // 再拍无残留不崩
+    EXPECT_EQ(dm.menuState().layer, 2);
 }
 
 // —— T8：采集中相机掉线 → Fault 且无自主停采（只报不动手：无 N11 H0）——
@@ -498,13 +449,14 @@ TEST(DeviceManager, T8_CameraDisconnectDuringCaptureFaultNoAutoStop) {
     fake->openState = false;                                   // 相机掉线
     dm.logicTick();                                            // 下一拍巡检点
     EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
-    EXPECT_EQ(mock.count("N11H1"), 1);
-    EXPECT_EQ(mock.count("N11H0"), 0);                         // 无自主停采
+    EXPECT_EQ(mock.count(kN10Default), 1);                     // 启采那帧 N10
+    EXPECT_EQ(mock.count("N11 H0"), 0);                        // 无自主停采
     EXPECT_FALSE(dm.isDeviceReady());
 }
 
-// —— T9：v2→close→v3 开关切换重连（v2 匿名按键丢、v3 手势链活）——
-TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
+// —— T9：close→reopen 无残留（原 v2/v3 切换用例随协议版本退役删）——
+//      手势链活 → close → reopen：N12 重发、无残留采集态、手势链仍活 ——
+TEST(DeviceManager, T9_CloseReopenGestureChainAlive) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
@@ -513,132 +465,46 @@ TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
     auto write = [&](const std::string& f) { return mock.write(f); };
 
     {
-        DeviceConfig v2 = makeCfg(FCodec::Version::V2);
-        DeviceManager dm(v2, gateOk, &bus, nullptr, write);
+        DeviceConfig cfg = makeCfg();
+        DeviceManager dm(cfg, gateOk, &bus, nullptr, write);
         mock.dm = &dm;
+        kit.dm = &dm;
         ASSERT_TRUE(dm.open().success);
-        dm.testInjectRaw("K1;");                               // v2 匿名按键：构不出 RawKeyEvent → 丢
-        dm.logicTick();
-        EXPECT_EQ(dm.menuState().layer, 1);                    // 无任何手势副作用
-        EXPECT_EQ(mock.count("N11"), 0);
-    }                                                          // close（析构）
+        kit.gShort('M');                                       // 启采集（手势链活）
+        EXPECT_TRUE(dm.isCapturing());
+        ASSERT_TRUE(dm.close().success);                       // close：N11 H0 收口+状态复位
+        EXPECT_FALSE(dm.isCapturing());                        // D8 最小版：黑板复位
+        EXPECT_EQ(mock.count("N11 H0"), 1);
+    }                                                          // 析构 close 幂等
 
-    DeviceConfig v3 = makeCfg(FCodec::Version::V3);
-    DeviceManager dm(v3, gateOk, &bus, nullptr, write);
-    mock.dm = &dm;
-    kit.dm = &dm;
-    ASSERT_TRUE(dm.open().success);
-    kit.shortPress('M');                                       // v3 手势链正常
-    EXPECT_EQ(mock.count("N11H1"), 1);
-    EXPECT_TRUE(dm.isCapturing());
+    DeviceConfig cfg2 = makeCfg();
+    DeviceManager dm2(cfg2, gateOk, &bus, nullptr, write);
+    mock.dm = &dm2;
+    kit.dm = &dm2;
+    ASSERT_TRUE(dm2.open().success);
+    EXPECT_EQ(mock.count("N12 T100"), 2);                      // 两次 open 各下发一次
+    EXPECT_FALSE(dm2.isCapturing());                           // 无残留采集态
+    kit.gShort('M');                                           // 手势链仍活
+    EXPECT_TRUE(dm2.isCapturing());
 }
 
-// —— T10：ACK 丢失 → 1+3 重传后 Fault；期间 logicTick 非阻塞可推进 ——
-TEST(DeviceManager, T10_AckLossRetransmitNonBlocking) {
+// —— T12：enterScan 单步 N10 → 擦板+采集开+StateChanged 恰一次（原 ACK 组链
+//      中段对照随无 ACK 机制退役删——组失败路径批2 直发版补）——
+TEST(DeviceManager, T12_EnterScanSingleN10Commit) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     DeviceConfig cfg = makeCfg();
-    cfg.ackTimeoutMs = 30;
-    DeviceManager dm(cfg, gateOk, &bus, nullptr,
-                     [&](const std::string& f) { return mock.write(f); });
-    mock.dm = &dm;
-    mock.noAck = {"N11"};                                      // 模拟 ACK 石沉大海
-    ASSERT_TRUE(dm.open().success);
-
-    dm.startCapture();
-    dm.logicTick();                                            // 编队任务落地（N11H1 首发）
-    EXPECT_EQ(mock.count("N11H1"), 1);
-    const auto t0 = std::chrono::steady_clock::now();          // 非阻塞证明：连 10 拍立即返回
-    for (int i = 0; i < 10; ++i) dm.logicTick();
-    const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - t0)
-                        .count();
-    EXPECT_LT(dt, 500);
-    EXPECT_EQ(mock.count("N11H1"), 1);                         // 无时间推进 → 无重传
-
-    for (int i = 0; i < 50 && mock.count("N11H1") < 4; ++i) {  // 重传×3 + 3 败收口
-        sleepMs(5);
-        dm.logicTick();
-    }
-    EXPECT_EQ(mock.count("N11H1"), 4);
-    EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
-    EXPECT_FALSE(dm.isCapturing());
-}
-
-// —— T11：v2 降级全链——启停立返 ok「未确认」无重传、被动收温、断流 1.2s N15 兜底 ——
-TEST(DeviceManager, T11_V2DegradedFullChain) {
-    Scanner::infra::EventBus bus;
-    EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.record(e); });
-    MockMcu mock;
-    DeviceConfig cfg = makeCfg(FCodec::Version::V2);
     DeviceManager dm(cfg, gateOk, &bus, nullptr,
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    dm.startCapture();                                         // v2：编队执行 send 内立即回调 ok「未确认」
+    EXPECT_TRUE(dm.enterScan().success);                       // 门禁过（编队执行）
     dm.logicTick();
-    EXPECT_TRUE(dm.isCapturing());
-    EXPECT_EQ(mock.count("N11H1"), 1);
-    for (int i = 0; i < 10; ++i) {
-        sleepMs(10);
-        dm.logicTick();
-    }
-    EXPECT_EQ(mock.count("N11H1"), 1);                         // 无 ACK 不重传不判败
-    EXPECT_EQ(rec.count(EventType::FaultOccurred), 0);
-
-    dm.testInjectRaw("T25.3;");                                // v2 被动收现状 T 帧（单路）
-    dm.logicTick();
-    EXPECT_EQ(dm.getLastTemperatures().channels, 1);
-    EXPECT_DOUBLE_EQ(dm.getLastTemperatures().celsius[0], 25.3);
-
-    for (int i = 0; i < 70; ++i) {                             // 断流 ~1.4s → 兜底查询恰一次
-        sleepMs(20);
-        dm.logicTick();
-    }
-    EXPECT_EQ(mock.count("N15V2"), 1);
-}
-
-// —— T12：enterScan 命令组中段 3 败 → 不擦板+Fault；对照全 ACK → 擦板+采集开 ——
-TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
-    Scanner::infra::EventBus bus;
-    EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.record(e); });
-    MockMcu mock;
-    DeviceConfig cfg = makeCfg();
-    cfg.ackTimeoutMs = 50;
-    DeviceManager dm(cfg, gateOk, &bus, nullptr,
-                     [&](const std::string& f) { return mock.write(f); });
-    mock.dm = &dm;
-    mock.noAck = {"N11H1"};                                    // N11H1 ACK 丢失 → 组中段 3 败
-    ASSERT_TRUE(dm.open().success);
-
-    dm.toIdle();                                               // N13E1 全 ACK → 落板待机
-    dm.logicTick();
-    ASSERT_EQ(dm.mode(), DeviceMode::Idle);
-    EXPECT_EQ(mock.count("N13E1"), 1);
-
-    dm.enterScan();                                            // 组：N13E0→N11H1(3败)→N10 短路
-    for (int i = 0; i < 80 && mock.count("N11H1") < 4; ++i) {
-        sleepMs(5);
-        dm.logicTick();
-    }
-    EXPECT_EQ(mock.count("N11H1"), 4);                         // N11H1 首发+重传×3
-    EXPECT_EQ(mock.count("N13E0"), 1);
-    EXPECT_EQ(mock.count("N10"), 0);                           // 组短路：N10 未发
-    EXPECT_EQ(dm.mode(), DeviceMode::Idle);                    // 黑板不落 Scanning
-    EXPECT_FALSE(dm.isCapturing());
-    EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
-    EXPECT_EQ(rec.count(EventType::StateChanged), 0);          // toIdle=same-mode 落板不广播（D-T9 口径）
-
-    mock.noAck.clear();                                        // 对照：全 ACK 路径
-    dm.enterScan();
-    for (int i = 0; i < 10; ++i) dm.logicTick();
-    EXPECT_EQ(mock.count("N10H50B60T1V1L60"), 1);             // N10 全参自 ParamStore 账本（首段短路 0 + 本段 1）
-    EXPECT_EQ(mock.count("N11H1"), 5);                         // 首段 4（3 败）+ 本段 1（全 ACK）
+    EXPECT_EQ(mock.count(kN10Default), 1);                     // 启采=单步 N10（账本全参）
+    EXPECT_EQ(mock.count("N11 H1"), 0);                        // 260831：无 N11 H1
     EXPECT_EQ(dm.mode(), DeviceMode::Scanning);
     EXPECT_TRUE(dm.isCapturing());
     EXPECT_EQ(rec.count(EventType::StateChanged), 1);          // commit(Scanning) 落板广播恰一次
@@ -646,8 +512,7 @@ TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
 
 // —— T13（Critical #1 回归）：双线程真并发冒烟——manualTick=false 起真逻辑线程，
 //      另一线程连发 50 次 setParam+startCapture/stopCapture 交替（+并发 getParam
-//      快照读），2s 后 close 停线程清队——无死锁无崩溃（互踩冒烟；TSAN 级
-//      确定性验证归 T18 收口）——
+//      快照读），2s 后 close 停线程清队——无死锁无崩溃 ——
 TEST(DeviceManager, T13_ConcurrentPostSmoke) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -675,46 +540,39 @@ TEST(DeviceManager, T13_ConcurrentPostSmoke) {
     stopFlag.store(true);
     worker.join();
     EXPECT_TRUE(dm.close().success);                           // 停线程+清队+关 MCU 无死锁
-    EXPECT_GE(mock.count("N11H1") + mock.count("N11H0"), 1);   // 任务确有落地
+    EXPECT_GE(mock.count("N10 ") + mock.count("N11 H0"), 1);   // 任务确有落地
     EXPECT_GE(dm.getParam("bgLight").value, 0.0);              // 快照口仍可读
 }
 
-// —— T14（Important #3 补缺）：enterCalibration 组链——N16 3 败→不擦板+Fault；
-//      全 ACK→commit Calibrating+StateChanged 恰一次（MCU open 失败回滚分支由
-//      T1 相机败回滚用例+代码审查双覆盖——writeOverride 测试模式 open 恒成功）——
-TEST(DeviceManager, T14_EnterCalibrationGroupChain) {
+// —— T14（Important #3 补缺·260831 适配）：enterCalibration 纯软件落板——
+//      无任何新下行帧（原 N16 组链已删）+commit Calibrating+StateChanged 恰一次；
+//      再入 same-mode commit 不广播（D-T9）——
+TEST(DeviceManager, T14_EnterCalibrationPureSoftware) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     DeviceConfig cfg = makeCfg();
-    cfg.ackTimeoutMs = 50;
     DeviceManager dm(cfg, gateOk, &bus, nullptr,
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
-    mock.noAck = {"N16"};                                      // N16 ACK 丢失 → 组 3 败
     ASSERT_TRUE(dm.open().success);
+    const size_t framesBefore = mock.frames.size();            // open 的 N12 之后
 
     EXPECT_TRUE(dm.enterCalibration().success);                // 门禁过（编队执行）
-    for (int i = 0; i < 80 && mock.count("N16B1") < 4; ++i) {  // 首发+重传×3
-        sleepMs(5);
-        dm.logicTick();
-    }
-    EXPECT_EQ(mock.count("N16B1"), 4);
-    EXPECT_EQ(dm.mode(), DeviceMode::Idle);                    // 黑板不落 Calibrating
-    EXPECT_EQ(rec.count(EventType::StateChanged), 0);
-    EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
-
-    mock.noAck.clear();                                        // 对照：全 ACK 路径
-    EXPECT_TRUE(dm.enterCalibration().success);
-    for (int i = 0; i < 10; ++i) dm.logicTick();
-    EXPECT_EQ(mock.count("N16B1"), 5);                         // 前段 4 + 本段 1
-    EXPECT_EQ(dm.mode(), DeviceMode::Calibrating);             // 组成功才擦板
+    dm.logicTick();
+    EXPECT_EQ(mock.frames.size(), framesBefore);               // 纯软件落板：无任何新下行帧
+    EXPECT_EQ(dm.mode(), DeviceMode::Calibrating);
     EXPECT_EQ(rec.count(EventType::StateChanged), 1);          // 落板广播恰一次
+
+    EXPECT_TRUE(dm.enterCalibration().success);                // 再入：same-mode 不广播
+    dm.logicTick();
+    EXPECT_EQ(mock.frames.size(), framesBefore);
+    EXPECT_EQ(rec.count(EventType::StateChanged), 1);
 }
 
 // ============================================================================
-// D-T13：故障 8 码接线（设计方案 §6.2 十类事故 → 8 码；边沿纪律=恢复清锚）
+// D-T13：故障 8 码接线（设计方案 §6.2；边沿纪律=恢复清锚）
 // ============================================================================
 
 // —— F1（#1）：非采集中相机掉线 → 0x0801 恰一次；再拍不重复；恢复→再掉→再触发 ——
@@ -762,17 +620,18 @@ TEST(DeviceManager, F2_HeartbeatTimeoutEdgeAndRecover) {
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     kit.dm = &dm;
-    ASSERT_TRUE(dm.open().success);                            // N12Z1 ACK 回灌 → lastRx>0
+    ASSERT_TRUE(dm.open().success);
 
-    dm.logicTick();                                            // 距末帧 <100ms：无声警
-    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 0);
+    kit.raw("G02 A20 B20 C20 D20");                            // 首帧 → lastRx>0（心跳武装）
+    dm.logicTick();
+    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 0);       // 距末帧 <100ms：无声警
     sleepMs(150);
     dm.logicTick();                                            // 超时 → 边沿一次
     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
     dm.logicTick();                                            // 锁定不重复
     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
 
-    kit.raw("T20.0");                                          // 恢复帧（任意有效帧清锚）
+    kit.raw("G03 S1");                                         // 恢复帧（任意完整帧清锚）
     dm.logicTick();
     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
     sleepMs(150);
@@ -819,10 +678,12 @@ TEST(DeviceManager, F4_TempSpikeEdge) {
 
     kit.temp(25.0);                                            // 基线帧（无前帧无警）
     EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 0);
-    kit.temp(30.0);                                            // 相邻帧 |Δ5|/<1s → 速率远超 2℃/s
+    sleepMs(5);
+    kit.temp(30.0);                                            // 相邻帧 |Δ5|/几十ms → 速率远超 2℃/s
     EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 1);
     kit.temp(30.0);                                            // 平稳帧（Δ=0）→ 清锚
     EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 1);
+    sleepMs(5);
     kit.temp(36.0);                                            // 再跳 → 再触发
     EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 2);
 }
@@ -848,11 +709,12 @@ TEST(DeviceManager, F5_WarmupTimeoutFault) {
     }
     EXPECT_EQ(cbCount, 1);
     EXPECT_EQ(rec.fault(FC(DevFault::WarmupTimeout)), 1);      // D-T13：超时补 Fault
-    EXPECT_EQ(mock.count("N14T0"), 0);                         // 只报不停加热
+    EXPECT_EQ(mock.count("N13 S0"), 0);                        // 只报不停加热
 }
 
-// —— F6（#6）：按键洪峰挤爆 K 环 → keyDrop 增长 → 0x0806 一次；无增量不重复 ——
-TEST(DeviceManager, F6_KeyRingOverflowFault) {
+// —— F6（#6）：手势洪峰挤爆 G01 环 → gestureRingDropped 增长 → 0x0806 一次；
+//      无增量不重复 ——
+TEST(DeviceManager, F6_GestureRingOverflowFault) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
@@ -865,40 +727,9 @@ TEST(DeviceManager, F6_KeyRingOverflowFault) {
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    uint32_t t = 100;
-    for (int i = 0; i < 50; ++i) {                             // 100 K 帧 > 环容 63 → 丢新
-        kit.ev('M', true, t);
-        kit.ev('M', false, t + 30);
-        t += 1000;
-    }
-    dm.logicTick();                                            // 泵消化 + 巡检报溢
+    for (int i = 0; i < 100; ++i) kit.raw("G01 U1;");          // 100 手势帧 > 环容 63 → 丢新
+    dm.logicTick();                                            // 泵消化 63 + 巡检报溢
     EXPECT_GE(rec.fault(FC(DevFault::KeyRingOverflow)), 1);
     dm.logicTick();                                            // 增量 0 → 不再报
     EXPECT_EQ(rec.fault(FC(DevFault::KeyRingOverflow)), 1);
-}
-
-// —— F7（#9）：T 帧 seq 跳变 → 对账计数增长 → 0x0808 一次；连续 seq 不重复 ——
-TEST(DeviceManager, F7_SeqGapFault) {
-    Scanner::infra::EventBus bus;
-    EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.record(e); });
-    MockMcu mock;
-    Kit kit;
-    DeviceConfig cfg = makeCfg();
-    cfg.seqGapWarn = 1;                                        // 测试注入：1 跳即警
-    DeviceManager dm(cfg, gateOk, &bus, nullptr,
-                     [&](const std::string& f) { return mock.write(f); });
-    mock.dm = &dm;
-    kit.dm = &dm;
-    ASSERT_TRUE(dm.open().success);
-
-    dm.testInjectRaw(kit.enc.encode("T25.0", 10));             // 对账基线
-    dm.logicTick();
-    EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 0);
-    dm.testInjectRaw(kit.enc.encode("T25.0", 16));             // v3 下 seq 10→16 跳变
-    dm.logicTick();
-    EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 1);
-    dm.testInjectRaw(kit.enc.encode("T25.0", 17));             // 连续 → 无增量不重复
-    dm.logicTick();
-    EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 1);
 }

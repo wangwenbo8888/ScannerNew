@@ -293,7 +293,7 @@ void ScannerWindow::onStartScanner()
         if (m_appCtx && m_appCtx->scanWorkflow()) {     // ② 扫描链
             const auto t = dm->getLastTemperatures();
             const double tempC =
-                (t.channels & 0x01) ? t.celsius[0] : 25.0;
+                (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
             m_appCtx->scanWorkflow()->pushSessionFrame(frame.leftGray, frame.rightGray,
                                                        tempC, frame.frameId);
         }

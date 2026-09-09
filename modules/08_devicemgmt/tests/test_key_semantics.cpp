@@ -22,7 +22,7 @@
 
 using namespace Scanner::device;
 using serial::KeyId;
-using Gest = KeyGesture::G;
+using Gest = serial::Gesture;   // 260831：G01 手势位 1/2/3（MCU 已判）
 using Ctx = MenuState::AdjustCtx;
 
 namespace {
@@ -40,7 +40,7 @@ struct Counters {
     }
 };
 
-KeyGesture kg(KeyId k, Gest g) { return KeyGesture{k, g, 0}; }   // mcuMs 裁判不读
+serial::GestureEvent kg(KeyId k, Gest g) { return serial::GestureEvent{k, g, 0}; }   // ts 裁判不读
 
 MenuState ms(int layer, Ctx ctx = Ctx::None) {
     MenuState m;

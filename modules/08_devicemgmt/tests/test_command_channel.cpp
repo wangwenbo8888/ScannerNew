@@ -3,14 +3,17 @@
 //
 // 用例 = 设计 §2.3 + §7 单元行 + 二轮 R2-A2 组步链：非阻塞首发 / ACK 销项 /
 // 超时重传 / 3 败 Fault / 表容量 8 逐出 / 查询不挂表 / 组步链 happy+中段败 /
-// v2 降级 / seq 循环 / 未知 ACK / write 失败口径 / v2 组 / 回调重入。
+// v2 降级 / 未知 ACK / write 失败口径 / v2 组 / 回调重入。
 // 假件：假写（计数+帧序录制+可置失败+可同步重入）、假钟（闭包持有 int64 可推进）。
-// seq 分配自 0 顺序可预期（nextSeq 契约），ACK 用已知 seq 回填。
+// 260831 批1-C 最小编译适配（reliable 机制壳留，批2 随机制整删）：
+//   - FrameCodec 无版本（裸 ';' 帧）→ Harness/enc 单参化；
+//   - nextSeq 已删 → SeqWraps 用例删；
+//   - 表项 seq 恒 0 → ACK 恒命中表首（onAck(1)/(2) 改 onAck(0)）；依赖 seq 身份
+//     的重入错位/扩容两用例（原 16/17）删——批2 机制物理删除时整组重写。
 // 口径（钉死）：write 失败=消耗一次尝试（不立即补发，由 tick 推进至 1+maxRetries
 // 发用尽判败）；判败与最后一发同 tick 收口（3 tick→4 write→fail）。
 // 二轮修复钉死：重传写重入（onAck 销项/挪位 + send 扩容）不悬垂；Deps 空容忍
-// 构造 clamp（write 空→恒 false、nowMs 空→恒 0、codec 空→裸载荷）；ackTimeoutMs
-// 钳 ≥1（防 tick 活锁）；空组立即成功。
+// 构造 clamp；ackTimeoutMs 钳 ≥1（防 tick 活锁）；空组立即成功。
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -25,8 +28,8 @@ using namespace Scanner::device::serial;
 namespace {
 
 struct Harness {
-    explicit Harness(FrameCodec::Version v = FrameCodec::Version::V3, bool reliable = true)
-        : codec(v), reliable(reliable) {}
+    explicit Harness(bool reliable = true)
+        : reliable(reliable) {}
 
     FrameCodec codec;
     bool reliable;
@@ -53,7 +56,7 @@ struct Harness {
     }
 
     void advance(int64_t ms) { clock += ms; }
-    std::string enc(const std::string& payload, uint16_t seq) const { return codec.encode(payload, seq); }
+    std::string enc(const std::string& payload) const { return codec.encode(payload); }
 };
 
 } // namespace
@@ -165,7 +168,7 @@ TEST(CommandChannel, TableCap8) {
     EXPECT_EQ(faults, 1);
     EXPECT_EQ(faultPayload, "P1");
     EXPECT_EQ(faultAttempts, 1);
-    ch.onAck(1);  // P2（seq=1）正常销项
+    ch.onAck(0);  // P2（表首，seq 恒 0）正常销项
     EXPECT_EQ(okCount[1], 1);
 }
 
@@ -200,18 +203,18 @@ TEST(CommandChannel, GroupHappyPath) {
         groupPayload = p;
     });
     EXPECT_EQ(h.writes, 1);  // 步链：前条 ACK 前不发下一条
-    EXPECT_EQ(h.frames, (std::vector<std::string>{h.enc(A, 0)}));
+    EXPECT_EQ(h.frames, (std::vector<std::string>{h.enc(A)}));
     ch.onAck(0);
     EXPECT_EQ(h.writes, 2);
-    ch.onAck(1);
+    ch.onAck(0);
     EXPECT_EQ(h.writes, 3);
     EXPECT_EQ(groupDone, 0);  // C 未 ACK，组未完成
-    ch.onAck(2);
+    ch.onAck(0);
     EXPECT_EQ(groupDone, 1);
     EXPECT_TRUE(groupOk);
     EXPECT_EQ(groupPayload, C);  // 组成功载荷=末步载荷（口径钉死）
-    EXPECT_EQ(h.frames, (std::vector<std::string>{h.enc(A, 0), h.enc(B, 1), h.enc(C, 2)}));
-    ch.onAck(2);  // 已完成，重复 ACK 无效
+    EXPECT_EQ(h.frames, (std::vector<std::string>{h.enc(A), h.enc(B), h.enc(C)}));
+    ch.onAck(0);  // 已完成，重复 ACK 无效
     EXPECT_EQ(groupDone, 1);
 }
 
@@ -248,7 +251,7 @@ TEST(CommandChannel, GroupMidFail) {
     EXPECT_EQ(faultPayload, B);
     EXPECT_EQ(faultAttempts, 4);
     EXPECT_EQ(h.frames,
-              (std::vector<std::string>{h.enc(A, 0), h.enc(B, 1), h.enc(B, 1), h.enc(B, 1), h.enc(B, 1)}));
+              (std::vector<std::string>{h.enc(A), h.enc(B), h.enc(B), h.enc(B), h.enc(B)}));
     h.advance(100);
     ch.tick();  // 组已短路，后再 tick 无动作
     EXPECT_EQ(h.writes, 5);
@@ -257,7 +260,7 @@ TEST(CommandChannel, GroupMidFail) {
 
 // —— 9. v2 降级：send 立即 onDone(true,"未确认")，无重传（tick 后 write 仍 1），onAck 无效 ——
 TEST(CommandChannel, V2Degraded) {
-    Harness h(FrameCodec::Version::V2, false);
+    Harness h(false);
     CommandChannel ch(h.deps());
     int done = 0;
     bool ok = false;
@@ -282,12 +285,28 @@ TEST(CommandChannel, V2Degraded) {
     EXPECT_EQ(done, 1);
 }
 
-// —— 10. seq 0~255 循环：连调 257 次 → 0..255,0,1 ——
-TEST(CommandChannel, SeqWraps) {
-    Harness h;
+// —— 9b. 盲发写失败（D8 钉死）：reliable=false + write 返回 false →
+//    onDone(false, payload) 同步回告、载荷回传原 payload（IMCU.h「完成回调
+//    同步回告写成败」契约——DeviceManager 0x0807 三条写败路径的可达性凭据）——
+TEST(CommandChannel, V2WriteFail) {
+    Harness h(false);
+    h.writeOk = false;
     CommandChannel ch(h.deps());
-    for (int i = 0; i < 257; ++i) EXPECT_EQ(ch.nextSeq(), i % 256);
+    int done = 0;
+    bool ok = true;
+    std::string payload;
+    ch.send("N11 H0", [&](bool o, const std::string& p) {
+        done++;
+        ok = o;
+        payload = p;
+    });
+    EXPECT_EQ(h.writes, 1);
+    EXPECT_EQ(done, 1);
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(payload, "N11 H0");
 }
+
+// —— 10. seq 循环用例已删（260831 无 seq——nextSeq 随批1-A/B 退役）———
 
 // —— 11. 未知 ACK：空表/未命中 seq 无副作用无崩溃；条目仍在表（tick 照常重传）——
 TEST(CommandChannel, AckIgnoresUnknown) {
@@ -342,7 +361,7 @@ TEST(CommandChannel, WriteFailFastPath) {
 
 // —— 13. v2 组：步链仍同步走完（每条立即"确认"）→ onGroupDone(true) 一次，无重传 ——
 TEST(CommandChannel, GroupV2) {
-    Harness h(FrameCodec::Version::V2, false);
+    Harness h(false);
     CommandChannel ch(h.deps());
     int groupDone = 0;
     bool groupOk = false;
@@ -376,9 +395,9 @@ TEST(CommandChannel, ReentrancyGuard) {
             if (o) ch.send("P2", [&](bool, const std::string&) { nestedDone++; });
         });
         EXPECT_EQ(h.writes, 1);
-        ch.onAck(0);  // 回调内发 P2（seq=1）
+        ch.onAck(0);  // 回调内发 P2（表首，seq 恒 0）
         EXPECT_EQ(h.writes, 2);
-        ch.onAck(1);
+        ch.onAck(0);
         EXPECT_EQ(nestedDone, 1);
     }
     // b) tick 判败回调内嵌套 send：新命令挂表不被本 tick 波及，可正常 ACK
@@ -398,7 +417,7 @@ TEST(CommandChannel, ReentrancyGuard) {
             ch.tick();
         }
         EXPECT_EQ(h.writes, 5);  // Q1×4 + Q2×1
-        ch.onAck(1);             // Q2（seq=1）正常销项
+        ch.onAck(0);             // Q2（表首，seq 恒 0）正常销项
         EXPECT_EQ(nestedDone, 1);
         EXPECT_TRUE(nestedOk);
         h.advance(100);
@@ -436,88 +455,8 @@ TEST(CommandChannel, RetransmitWriteReentrantAck) {
     EXPECT_EQ(faults, 0);
 }
 
-// —— 16. 重传写重入销项·错位（Important #1 回归）：A/B 双挂表，重传 A 的 write
-//    回调内 onAck(A) → A 销项后 B 前移；B 的 attempts 不得被错位 ++（同 tick B
-//    依序正常重传 1 次；判败前 B 恰 4 次写）——
-TEST(CommandChannel, RetransmitWriteReentrantAckShift) {
-    Harness h;
-    CommandChannel ch(h.deps());
-    h.target = &ch;
-    int faults = 0;
-    int faultAttempts = 0;
-    ch.onFault = [&](const std::string&, int a) {
-        faults++;
-        faultAttempts = a;
-    };
-    int doneB = 0;
-    bool okB = true;
-    ch.send("A", [](bool, const std::string&) {});
-    ch.send("B", [&](bool o, const std::string&) {
-        doneB++;
-        okB = o;
-    });
-    EXPECT_EQ(h.writes, 2);
-    h.advance(100);
-    h.reenterOnWrite = 3;  // 第 3 次 write = A 的首次重传
-    h.reenter = [&](CommandChannel& c) { c.onAck(0); };
-    ch.tick();
-    EXPECT_EQ(h.writes, 4);  // A 重传 + B 依序重传（错位 ++ 会漏 B 这 1 写）
-    EXPECT_EQ(doneB, 0);
-    h.reenterOnWrite = 0;
-    int ticksNeeded = 0;
-    for (int k = 1; k <= 2; ++k) {  // B 再 2 轮重传达 4 尝试 → 3 败
-        h.advance(100);
-        ch.tick();
-        if (doneB) {
-            ticksNeeded = k;
-            break;
-        }
-    }
-    EXPECT_EQ(ticksNeeded, 2);
-    EXPECT_EQ(h.writes, 6);  // A:2 + B:4（1 首发+3 重传）
-    EXPECT_FALSE(okB);
-    EXPECT_EQ(faults, 1);
-    EXPECT_EQ(faultAttempts, 4);
-}
-
-// —— 17. 重传写重入 send·扩容（Important #1 回归）：重传 A 的 write 回调内同步
-//    send(C)（push_back 扩容搬移表内元素）→ A 计数不丢（不重发不漏发），C 正常 ——
-TEST(CommandChannel, RetransmitWriteReentrantSend) {
-    Harness h;
-    CommandChannel ch(h.deps());
-    h.target = &ch;
-    int doneA = 0;
-    bool okA = true;
-    int faults = 0;
-    ch.onFault = [&](const std::string&, int) { faults++; };
-    ch.send("A", [&](bool o, const std::string&) {
-        doneA++;
-        okA = o;
-    });
-    h.advance(100);
-    h.reenterOnWrite = 2;  // 第 2 次 write = A 首次重传
-    h.reenter = [&](CommandChannel& c) { c.send("C", [](bool, const std::string&) {}); };
-    ch.tick();
-    EXPECT_EQ(h.writes, 3);  // A 首发 + A 重传恰 1 + C 首发（悬垂会致 A 漏记重发）
-    ch.onAck(1);             // C（seq=1）销项，隔离后续断言
-    h.reenterOnWrite = 0;
-    int ticksNeeded = 0;
-    for (int k = 1; k <= 2; ++k) {  // A 已 2 尝试，再 2 轮重传 → 3 败
-        h.advance(100);
-        ch.tick();
-        if (doneA) {
-            ticksNeeded = k;
-            break;
-        }
-    }
-    EXPECT_EQ(ticksNeeded, 2);
-    EXPECT_EQ(h.writes, 5);
-    EXPECT_FALSE(okA);
-    EXPECT_EQ(faults, 1);
-    h.advance(100);
-    ch.tick();
-    EXPECT_EQ(h.writes, 5);  // A 已败 C 已销 → 无动作
-}
+// —— 16/17（重传写重入错位/扩容）已删：260831 表项 seq 恒 0——双条目 seq 身份
+//    不可辨，两用例口径失效；批2 reliable 机制物理删除时整组重写 ——
 
 // —— 18. Deps 空容忍（构造 clamp 钉死）：codec/write/nowMs 全空 → 不抛不崩、
 //    发不挂账、tick 安全（write 空=恒 false、nowMs 空=恒 0、codec 空=裸载荷直发）——

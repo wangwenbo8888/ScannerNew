@@ -1,113 +1,66 @@
-// ============================================================================
-// test_mcu_frame.cpp — 上行载荷解析 + SpscRing 满丢新/空读 单测（S-T1；D-T12a 口径）
-//
-// 解析用例基于 v3 默认口径（载荷已剥去 '$'/seq/crc/';'）；
-// 环的并发正确性由 T12 集成测覆盖，此处单线程验证语义。
-// ============================================================================
-
+// test_mcu_frame.cpp — G01/G02/G03 解析器合法/非法 ＋ SpscRing 满丢新
+#include "serial/McuFrame.h"
 #include <gtest/gtest.h>
 
-#include "modules/08_devicemgmt/serial/McuFrame.h"
+namespace sd = Scanner::device::serial;
 
-using namespace Scanner::device::serial;
-
-// —— parseTempPayload：T 后 1~4 个逗号分隔浮点 ——
-TEST(McuFrameParse, TempLegal) {
-    TempFrame f;
-    ASSERT_TRUE(parseTempPayload("T25.3,24.8", f));
-    EXPECT_EQ(f.channels, 2);
-    EXPECT_DOUBLE_EQ(f.celsius[0], 25.3);
-    EXPECT_DOUBLE_EQ(f.celsius[1], 24.8);
+TEST(G01Parse, AllTwelveGestures) {
+    const char* keys[] = {"U", "L", "M", "R"};
+    for (int k = 0; k < 4; ++k)
+        for (int g = 1; g <= 3; ++g) {
+            sd::GestureEvent ev;
+            ASSERT_TRUE(sd::parseGesturePayload("G01 " + std::string(keys[k]) + std::to_string(g), ev));
+            EXPECT_EQ(static_cast<int>(ev.key), k);
+            EXPECT_EQ(static_cast<int>(ev.gesture), g);
+        }
 }
 
-TEST(McuFrameParse, TempIllegal) {
-    TempFrame f;
-    EXPECT_FALSE(parseTempPayload("T25.x", f));       // 非数字
-    EXPECT_FALSE(parseTempPayload("T1,2,3,4,5", f));  // 超 4 通道
-    EXPECT_FALSE(parseTempPayload("T25.3,", f));      // 尾部空字段
-    EXPECT_FALSE(parseTempPayload("X25.3", f));       // 前缀非 T
+TEST(G01Parse, RejectsMalformed) {
+    sd::GestureEvent ev;
+    EXPECT_FALSE(sd::parseGesturePayload("G01 U0", ev));    // 手势位 0 非法
+    EXPECT_FALSE(sd::parseGesturePayload("G01 U4", ev));    // 手势位 4 非法
+    EXPECT_FALSE(sd::parseGesturePayload("G01 X1", ev));    // 未知键
+    EXPECT_FALSE(sd::parseGesturePayload("G01U1", ev));     // 缺空格
+    EXPECT_FALSE(sd::parseGesturePayload("K M1", ev));      // 旧 K 帧
+    EXPECT_FALSE(sd::parseGesturePayload("", ev));
 }
 
-// —— parseTempPayload 严格性（S-T5 前置清理：from_chars 口径——locale 无关，
-//    拒 '+'/前导空白/inf/nan/内嵌 NUL 残留；strtod 曾全部放过）——
-TEST(McuFrameParse, TempStrictRejects) {
-    TempFrame f;
-    EXPECT_FALSE(parseTempPayload("T+25.3", f));                     // '+' 前缀
-    EXPECT_FALSE(parseTempPayload("T 25.3", f));                     // 前导空白
-    EXPECT_FALSE(parseTempPayload("Tinf", f));                       // 非有限
-    EXPECT_FALSE(parseTempPayload("Tnan", f));                       // 非有限
-    EXPECT_FALSE(parseTempPayload("T1e999", f));                     // 溢出
-    EXPECT_FALSE(parseTempPayload(std::string("T25.3\0x", 7), f));   // 内嵌 NUL 残留
+TEST(G02Parse, FourChannels) {
+    sd::TempFrame t;
+    ASSERT_TRUE(sd::parseTempPayload("G02 A25.3 B25.4 C26.0 D24.5", t));
+    EXPECT_DOUBLE_EQ(t.celsius[0], 25.3);
+    EXPECT_DOUBLE_EQ(t.celsius[1], 25.4);
+    EXPECT_DOUBLE_EQ(t.celsius[2], 26.0);
+    EXPECT_DOUBLE_EQ(t.celsius[3], 24.5);
 }
 
-// —— parseKeyPayload：K+键号(U/L/M/R)+按下(0/1)+','+毫秒 ——
-TEST(McuFrameParse, KeyLegal) {
-    RawKeyEvent e;
-    ASSERT_TRUE(parseKeyPayload("KM1,1234", e));
-    EXPECT_EQ(e.key, KeyId::Middle);
-    EXPECT_TRUE(e.pressed);
-    EXPECT_EQ(e.mcuMs, 1234u);
+TEST(G02Parse, RejectsMalformed) {
+    sd::TempFrame t;
+    EXPECT_FALSE(sd::parseTempPayload("G02 A25.3 B25.4 C26.0", t));      // 缺 D 路
+    EXPECT_FALSE(sd::parseTempPayload("G02 A25.3 B25.4 C26.0 D", t));    // D 空值
+    EXPECT_FALSE(sd::parseTempPayload("T25.3,24.8", t));                 // 旧 T 帧
+    EXPECT_FALSE(sd::parseTempPayload("G02 A25.3 B25.4 C26.0 E24.5", t));// 键错
+    EXPECT_FALSE(sd::parseTempPayload("G02 A B C D", t));                // 非数值
 }
 
-TEST(McuFrameParse, KeyIllegal) {
-    RawKeyEvent e;
-    EXPECT_FALSE(parseKeyPayload("KX1,1234", e));   // 键号非法
-    EXPECT_FALSE(parseKeyPayload("KM2,1234", e));   // 按下位非 0/1
-    EXPECT_FALSE(parseKeyPayload("KM1,12a4", e));   // 毫秒非纯数字
-    EXPECT_FALSE(parseKeyPayload("KM1", e));        // 缺逗号段
+TEST(G03Parse, CountAndMalformed) {
+    sd::ShotCountFrame f;
+    ASSERT_TRUE(sd::parseShotCountPayload("G03 S500", f));
+    EXPECT_EQ(f.count, 500u);
+    EXPECT_TRUE(sd::parseShotCountPayload("G03 S0", f));                  // 0 合法
+    EXPECT_EQ(f.count, 0u);
+    EXPECT_FALSE(sd::parseShotCountPayload("G03 S", f));
+    EXPECT_FALSE(sd::parseShotCountPayload("G03 S-1", f));
+    EXPECT_FALSE(sd::parseShotCountPayload("S0A", f));                    // 旧 S 帧
 }
 
-// —— parseStatusPayload：S 后 1~2 个 hex 字符 ——
-TEST(McuFrameParse, StatusLegal) {
-    StatusFrame f;
-    ASSERT_TRUE(parseStatusPayload("S0A", f));
-    EXPECT_EQ(f.code, 0x0A);
-    StatusFrame g;
-    ASSERT_TRUE(parseStatusPayload("S3", g));
-    EXPECT_EQ(g.code, 0x3);
-}
-
-TEST(McuFrameParse, StatusIllegal) {
-    StatusFrame f;
-    EXPECT_FALSE(parseStatusPayload("S0A2", f));  // 超 2 个 hex 字符
-    EXPECT_FALSE(parseStatusPayload("SG", f));    // 非 hex 字符
-    EXPECT_FALSE(parseStatusPayload("S", f));     // 无载荷
-}
-
-// —— parseAckPayload：A 后 1~2 个 hex 字符 = 被确认命令 seq ——
-TEST(McuFrameParse, AckLegal) {
-    AckFrame f;
-    ASSERT_TRUE(parseAckPayload("A0B", f));
-    EXPECT_EQ(f.ackedSeq, 0x0B);
-    AckFrame g;
-    ASSERT_TRUE(parseAckPayload("AF", g));
-    EXPECT_EQ(g.ackedSeq, 0xF);
-}
-
-TEST(McuFrameParse, AckIllegal) {
-    AckFrame f;
-    EXPECT_FALSE(parseAckPayload("A0BC", f));  // 超 2 个 hex 字符
-    EXPECT_FALSE(parseAckPayload("AZ", f));    // 非 hex 字符
-    EXPECT_FALSE(parseAckPayload("B0B", f));   // 前缀非 A
-}
-
-// —— SpscRing：满丢新 + 空读 false（浪费一格：N=4 稳态存 3）——
-TEST(SpscRing, FullDropsNewest) {
-    SpscRing<int, 4> ring;
-    for (int v = 1; v <= 3; ++v) EXPECT_TRUE(ring.push(v));
-    EXPECT_FALSE(ring.push(4));                // 满环丢新：不入队
-    EXPECT_FALSE(ring.push(5));
-    EXPECT_EQ(ring.dropped(), 2u);             // 第 4/5 次各丢一个新帧
-    int out = 0;
-    EXPECT_TRUE(ring.pop(out)); EXPECT_EQ(out, 1);   // 旧序 N-1 条
-    EXPECT_TRUE(ring.pop(out)); EXPECT_EQ(out, 2);
-    EXPECT_TRUE(ring.pop(out)); EXPECT_EQ(out, 3);
-    EXPECT_FALSE(ring.pop(out));               // 取尽
-}
-
-TEST(SpscRing, PopEmptyReturnsFalse) {
-    SpscRing<int, 4> ring;
-    int out = -1;
-    EXPECT_TRUE(ring.empty());
-    EXPECT_FALSE(ring.pop(out));
+TEST(SpscRing, FullDropsNew) {
+    sd::SpscRing<int, 3> r;
+    EXPECT_TRUE(r.push(1)); EXPECT_TRUE(r.push(2));
+    EXPECT_FALSE(r.push(3));                       // 容量 3 有效 2，满丢新
+    EXPECT_EQ(r.dropped(), 1u);
+    int v = 0;
+    EXPECT_TRUE(r.pop(v)); EXPECT_EQ(v, 1);
+    EXPECT_TRUE(r.push(4));
+    EXPECT_FALSE(r.empty());
 }

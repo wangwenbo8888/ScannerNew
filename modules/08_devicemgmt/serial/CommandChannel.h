@@ -4,7 +4,8 @@
 // 非阻塞铁律：send 立即返回——ACK 消费(onAck)与超时判定(tick)都在逻辑线程
 // 自己的分流/tick 里做；send 内等待=自锁（A1 审查修正）。
 // 单线程属主：所有公开方法仅逻辑线程调用（无锁设计）。
-// v2 降级（reliable=false）：send 发不等/不挂表/不判败（恒 ok「未确认」）。
+// v2 降级（reliable=false）：发不等不挂表；写失败即败（D8）——onDone(false,payload)
+// 同步回告，写成功 onDone(true,"未确认")。
 // 命令组步链（R2-A2）：前一条 ACK 完成回调里发下一条；任一步 3 败整组短路
 // （组失败回调一次，不发后续）；组全 ACK 组成功回调一次。已发命令幂等无回滚。
 // 口径：write 失败=消耗一次尝试（不立即补发，tick 推进）；判败与最后一发同
@@ -50,7 +51,6 @@ public:
     void tick();
 
     FaultCb onFault;                                       // 故障出口（可空）
-    uint16_t nextSeq();                                    // 0~255 循环（组帧用）
 
 private:
     static constexpr size_t kTableCap = 8;                 // 待确认表容量（满则最旧先判超时）
@@ -67,7 +67,7 @@ private:
     uint16_t seq_ = 0;
     std::vector<PendingCmd> table_;                        // 挂表序（front=最旧）
 
-    bool writeFrame(uint16_t seq, const std::string& payload);  // 组帧+写（失败=尝试已消耗）
+    bool writeFrame(const std::string& payload);            // 组帧+写（失败=尝试已消耗）
     void failEntry(PendingCmd e);                          // onDone(false)+onFault（先销项后调用）
 };
 

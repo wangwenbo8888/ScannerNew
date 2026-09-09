@@ -52,21 +52,21 @@ void HardwareMonitor::monitorLoop() {
         // 1. 心跳检查（注入回调；超时判定与发 Fault 归 DeviceManager——巡检只调）
         if (heartbeatCheck_) heartbeatCheck_();
 
-        // 2. MCU 温度行（改注入：有帧即在线；channels 按位写 MCU_T0..T3，首路
-        //    同步写 MCU 行兼容 MainWindow 读法；注入源空不写——垫片行为延续）
+        // 2. MCU 温度行（改注入：有帧即在线——260831 G02 恒 4 路（ts>0=已收帧），
+        //    写 MCU_T0..T3 四行 + 首路同步写 MCU 行兼容 MainWindow 读法；
+        //    注入源空不写——垫片行为延续）
         if (getLastTemps_ && stateSink_) {
-            serial::TempFrame tf = getLastTemps_();
-            const int n = std::min<int>(tf.channels, 4);
-            for (int i = 0; i < n; ++i) {
-                data::DeviceStateInfo info;
-                info.deviceId = "MCU_T" + std::to_string(i);
-                info.deviceType = "MCU";
-                info.state = DeviceState::Connected;
-                info.temperature = tf.celsius[i];
-                info.timestamp = ts;
-                stateSink_->pushState(info);
-            }
-            if (n > 0) {
+            const serial::TempFrame tf = getLastTemps_();
+            if (tf.ts > 0) {
+                for (int i = 0; i < 4; ++i) {
+                    data::DeviceStateInfo info;
+                    info.deviceId = "MCU_T" + std::to_string(i);
+                    info.deviceType = "MCU";
+                    info.state = DeviceState::Connected;
+                    info.temperature = tf.celsius[i];
+                    info.timestamp = ts;
+                    stateSink_->pushState(info);
+                }
                 data::DeviceStateInfo first;
                 first.deviceId = "MCU";
                 first.deviceType = "MCU";

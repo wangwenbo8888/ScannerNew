@@ -416,7 +416,7 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
         // ② 扫描链：02 会话环（enrich 出口查表→SlotRing；非扫描期该口自弃）
         if (scanWf_) {
             const auto t = dm->getLastTemperatures();
-            const double tempC = (t.channels & 0x01) ? t.celsius[0] : 25.0;
+            const double tempC = (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
             scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId);
         }
         // ③ 调试分路：相机预览监视弹窗（相机 SDK 线程直调；订阅方切线程+节流自理）

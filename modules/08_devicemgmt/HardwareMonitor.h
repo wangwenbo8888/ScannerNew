@@ -45,8 +45,8 @@ public:
     void setCamera(hal::IScannerCamera* cam) { camera_ = cam; }
 
     // MCU 温度快照注入（删 IMCU 轮询的替代口）：DeviceManager::getLastTemperatures
-    // 直传。口径：有帧（channels>0）即在线——按位写 MCU_T0..T3 行 + 首路同步写
-    // MCU 行（MainWindow.cpp 现读法兼容）；注入源空则不写任何 MCU 行（垫片行为延续）
+    // 直传。口径：有帧（ts>0）即在线——G02 恒 4 路，写 MCU_T0..T3 四行 + 首路同步
+    // 写 MCU 行（MainWindow.cpp 现读法兼容）；注入源空或未收帧不写任何 MCU 行
     void setLastTemps(std::function<serial::TempFrame()> get) { getLastTemps_ = std::move(get); }
 
     // 心跳检查回调（R2-A1 巡检不发命令）：DeviceManager 注入（内部判超时发
