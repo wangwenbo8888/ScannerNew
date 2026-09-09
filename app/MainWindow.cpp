@@ -758,7 +758,9 @@ void MainWindow::setScanButtonVisual(int idx, bool active){
             " border: 1px solid #C0392B; border-radius: 4px; }"
             "QPushButton:hover { background-color: rgba(192,57,43,0.22); }");
     } else {
-        // 复原名对齐工具栏四模式键（协议批3：点云扫描已改名精细扫描＋新增深孔）
+        // 复原名对齐工具栏四模式键（协议批3：点云扫描已改名精细扫描＋新增深孔）。
+        // 兜底锚定：现调用方仅传 2-5（工具栏四模式键＋navBar 面片=3），idx>4 静默
+        // 落「深孔扫描」——加第 6 键须扩此处映射
         const QString name = (idx == 2) ? QStringLiteral("标点扫描")
                            : (idx == 3) ? QStringLiteral("面片扫描")
                            : (idx == 4) ? QStringLiteral("精细扫描")

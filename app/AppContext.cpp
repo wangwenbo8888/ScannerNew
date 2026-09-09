@@ -429,8 +429,9 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
     });
     // 灯型归采集组 N10（effectiveN10 按 ScanMode 组装四管掩码）——不预点亮：
     // 固件收到 N10 即按新参数调灯，预点亮会闪变；启采=N10 本身一次到位。
-    // 四模式灯型（D7 产线方案）：标点 T0V0C0D0（B 抬升 40/L=0）；面片 T1V1C0D0；
-    // 精细 T0V0C1D0；深孔 T0V0C0D1。⑨b：精细/深孔单管周期下 07 激光链
+    // 四模式灯型（D7 产线方案）：标点 T0V0C0D0（B 抬升 40/L=0——数值同源于 08
+    // DeviceManager.cpp 本地常量 kMarkerOnlyBg，日志文案不引跨层符号）；面片
+    // T1V1C0D0；精细 T0V0C1D0；深孔 T0V0C0D1。⑨b：精细/深孔单管周期下 07 激光链
     // 「偶L奇R」配对假设未验证——本批仅 08/UI 映射就位
     dm->startCapture(mode);
     switch (mode) {

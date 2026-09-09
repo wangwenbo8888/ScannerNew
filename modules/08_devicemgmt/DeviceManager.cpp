@@ -27,6 +27,10 @@ int64_t nowMs() {
 
 constexpr size_t kPostQueueCap = 64;          // 编队队列容量（满丢新+warn——Critical #1）
 
+// MarkerOnly（A 标点）灯型补光抬升基线：2026-08 真机标点检测成功配置（cpp 内散布
+// 魔数归一于此；AppContext 日志文案/测试期望帧中的 40 为同源数值——注释指向本常量）
+constexpr int kMarkerOnlyBg = 40;
+
 // Fault 码表归头文件 DevFault；调用点统一经 code() 取值
 constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 
@@ -55,7 +59,7 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
     hal::CaptureParams p;
     p.freqHz = static_cast<int>(params.get("freqHz").value);
     p.bgLight = (mode == Scanner::ScanMode::MarkerOnly)
-                    ? 40                                        // A 模式补光抬升基线（真机成功配置）
+                    ? kMarkerOnlyBg                          // A 模式补光抬升基线（真机成功配置）
                     : static_cast<int>(params.get("bgLight").value);
     p.laserLevel = (mode == Scanner::ScanMode::MarkerOnly)
                        ? 0
@@ -152,9 +156,9 @@ Result DeviceManager::open() {
     // 配置快照（一次性）——串口/周期/门限的运行依据；真机排障第一落脚点
     JMW_LOG_INFO("08-DeviceManager",
         "[DeviceManager] open 配置: 串口={} 波特率={} 温度周期={}ms "
-        "心跳阈={}ms 温度上限={}℃ 乱跳={}℃/s",
+        "心跳阈={}ms 温度上限={}℃ 乱跳(绝对差值)={}℃",
         cfg_.serialPort, cfg_.baud, cfg_.tempReportPeriodMs,
-        cfg_.heartbeatTimeoutMs, cfg_.tempMaxC, cfg_.tempSpikeC);
+        cfg_.heartbeatTimeoutMs, cfg_.tempMaxC, cfg_.tempSpikeAbsC);
     // ① 相机（工厂缺省=不接相机）与 ② MCU 自动搜口并行——两链路无共享资源，
     //    串行白等（相机枚举 ~0.5s + 搜口 ~0.05s → 并行取大者）
     Result camR = Result::ok();
@@ -213,12 +217,28 @@ Result DeviceManager::open() {
     // ⑦ N12 温度周期下发（盲发无 ACK）：真机 auto 搜口探测已发 N12 T100 且命中
     //    口已生效——此处按配置定版（manual 口路径则为本会话首帧）；测试模式经
     //    writeOverride 记帧。写权交接口径：探测（open 线程经写线程出帧）后
-    //    resetSerialWriteOwner 登记复位（R2-A1），此后下行全走 MCUDriver 写线程
+    //    resetSerialWriteOwner 登记复位（R2-A1），此后下行全走 MCUDriver 写线程。
+    //    批1 的 ≥50ms 临时钳已删（0x0804 改绝对差值判据后风暴根因消除——终态=
+    //    specs 域 5-1000＋MCUDriver 钳，单一出口见 sendN12Clamped）
     mcu_->resetSerialWriteOwner();
-    // 0x0804 速率判据×短周期故障风暴守门——批4 改绝对差值判据后移除：
-    // 现判据 2.0℃/s 在 T<50ms 时 1LSB 抖动即风暴，故下限临时钳 ≥50ms
-    int periodMs = cfg_.tempReportPeriodMs < 50 ? 50 : cfg_.tempReportPeriodMs;
-    mcu_->setTempReportPeriod(periodMs, nullptr);
+    sendN12Clamped(cfg_.tempReportPeriodMs, nullptr);
+    // D8 恢复路径（批4）：黑板非 Idle/采集中重开——按 lastCaptureMode_ 重发 N10
+    //    参数重同步（正常 close→open 黑板已被 close 复位不触发；此为重开期间黑板
+    //    被外部置非 Idle 的防御分支）。插在逻辑线程起前：params_/mode_ 尚单线程
+    //    时刻无竞态；写权已归 MCUDriver 写线程
+    if (mode_->mode() != DeviceMode::Idle || mode_->isCapturing()) {
+        JMW_LOG_INFO("08-DeviceManager",
+            "[DeviceManager] 重开重同步: 黑板 mode={} capturing={}——按 lastCaptureMode 重发 N10",
+            static_cast<int>(mode_->mode()), mode_->isCapturing());
+        mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_),
+                               [this](bool ok, const std::string& p) {
+            if (!ok) publishFault(code(DevFault::CmdNoAck), "N10 重开重同步 " + p);
+        });
+    }
+    // 0x0802 武装（批4：open 成功即武装——全程无帧也纳入巡检；旧武装门 lastRx>0
+    // 致 MCU 一步不出帧的「死链」永不告警）。lastRx>0 后按末帧计时（见 logicTick ⑥）
+    serialArmed_ = true;
+    serialArmedAtMs_ = nowMs();
     // ⑥ 逻辑线程（manualTick=true 测试跳过）。灯态策略：open 不发 N10（灯不亮）——
     // 灯只在 startCapture（N10 七参=启采）时亮、stopCapture（N11 H0）熄灯收口
     if (!cfg_.manualTick) {
@@ -255,18 +275,26 @@ Result DeviceManager::close() {
         camera_->stopAsyncCapture();            // 停采集流
         camera_->close();                       // 关相机
     }
-    // —— 状态复位（重开=全新会话）。D8 恢复路径（最小版）：ModeController 复位
-    //    待机——批4 补参数重同步 ——
+    // —— 状态复位（重开=全新会话）。D8 恢复路径（批4 补全）：ModeController 复位
+    //    待机＋旧温清零（lastTemps_/tempSnap_ 同步——防 reopen 后首帧前
+    //    getLastTemperatures 回上会话旧值，app 侧 ts>0 判定依赖）——
     (void)mode_->request(DeviceMode::Idle, "close_reset");   // 门禁拒也复位（退出场景）
     mode_->commit(DeviceMode::Idle);            // same-mode 不广播
     mode_->setCapturing(false);
     pendingGestures_.clear();
+    lastTemps_ = serial::TempFrame{};           // 旧温清零（账本）
+    {
+        std::lock_guard<std::mutex> lock(tempSnapMtx_);
+        tempSnap_ = serial::TempFrame{};        // 旧温清零（快照同步——读口同拍归零）
+    }
+    serialArmed_ = false;                       // 0x0802 武装随会话撤（reopen 再武装）
+    serialArmedAtMs_ = 0;
     camFaultLatched_ = false;
     camWasOpen_ = false;
     serialSilentLatched_ = false;
     tempHotLatched_ = false;
     tempSpikeLatched_ = false;
-    prevTempsValid_ = false;
+    prevTempsValid_ = false;                    // 0x0804 差值锚清（reopen 首帧无前帧）
     opened_ = false;
     return Result::ok();
 }
@@ -298,14 +326,20 @@ void DeviceManager::logicTick() {
         camFaultLatched_ = true;
         publishFault(code(DevFault::CameraLost), "相机掉线（isOpen 翻 false；只报不停手）");
     }
-    // ⑥ 串口无声（#2≡#10 心跳丢失同源）：收到过帧（lastRx>0）后停更超
-    //    heartbeatTimeoutMs → 边沿一次；再收到任何完整帧即恢复清锚
-    if (const int64_t lastRx = static_cast<int64_t>(mcu_->lastRxTime()); lastRx > 0) {
-        if (now - lastRx > static_cast<int64_t>(cfg_.heartbeatTimeoutMs)) {
+    // ⑥ 串口无声（#2≡#10 心跳丢失同源）：open 成功即武装（serialArmed_，批4——
+    //    旧口径武装门 lastRx>0 导致「全程无帧」的死链永不告警）；距末帧（无帧则
+    //    距武装时刻）超 heartbeatTimeoutMs → 边沿一次；再收到任何完整帧即恢复清锚。
+    //    D9 自适应线索（登记不实现）：超时判据可选 max(10×N12 周期, 10000) 自适应
+    if (serialArmed_) {
+        const int64_t lastRx = static_cast<int64_t>(mcu_->lastRxTime());
+        const int64_t ref = (lastRx > 0) ? lastRx : serialArmedAtMs_;
+        if (now - ref > static_cast<int64_t>(cfg_.heartbeatTimeoutMs)) {
             if (!serialSilentLatched_) {
                 serialSilentLatched_ = true;
                 publishFault(code(DevFault::SerialSilent),
-                             "串口无声(心跳丢失) 距末帧 " + std::to_string(now - lastRx) + "ms");
+                             std::string(lastRx > 0 ? "串口无声(心跳丢失) 距末帧 "
+                                                    : "串口无声(全程无帧) 距武装 ")
+                                 + std::to_string(now - ref) + "ms");
             }
         } else {
             serialSilentLatched_ = false;       // 心跳恢复清锚
@@ -643,6 +677,16 @@ void DeviceManager::dispatchGesture(const serial::GestureEvent& ev) {
 // 参数下发（ParamStore Dispatch：exposure 相机直设 / N10 组参）+ 快照双口
 // ============================================================================
 
+// N12 T 单一下发出口（open 定版/param dispatch 改参共用——批3 审查发现 dispatch
+// 裸发绕过 open 守门后收敛于此，防两路口径再不对称）：值域钳 5-1000 与 specs 域＋
+// MCUDriver 层同域终态。批1 的 ≥50ms 临时钳已删（0x0804 改绝对差值判据后风暴
+// 根因消除）
+void DeviceManager::sendN12Clamped(int periodMs, McuDone cb) {
+    if (periodMs < 5) periodMs = 5;
+    if (periodMs > 1000) periodMs = 1000;
+    mcu_->setTempReportPeriod(periodMs, std::move(cb));
+}
+
 void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore::Done done) {
     if (key == "exposure") {
         if (camera_ && camera_->isOpen()) {
@@ -654,8 +698,8 @@ void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore
         return;
     }
     if (key == "tempReportPeriodMs") {            // N12 T（批3 入 specs；值域 5-1000
-        mcu_->setTempReportPeriod(static_cast<int>(v),   // 入口已在 setValue 钳）
-                                  [done](bool ok, const std::string&) { done(ok); });
+        sendN12Clamped(static_cast<int>(v),       // 入口已在 setValue 钳）——单一出口同 open
+                        [done](bool ok, const std::string&) { done(ok); });
         return;
     }
     // N10 组参：采集中任一变更即全参重发（N10=启采——参数即时生效）；空闲仅
@@ -768,27 +812,26 @@ void DeviceManager::checkTempFaults(const serial::TempFrame& t) {
     } else if (!over) {
         tempHotLatched_ = false;                // 全路回落清锚
     }
-    // #4 乱跳：相邻 G02 帧同路 |Δ|/Δt >tempSpikeC ℃/s → 边沿一次；次帧平稳清锚
-    //（dt 下钳 1ms：同拍连注两帧按 1ms 算——测试回灌口径）
+    // #4 乱跳（批4 绝对差值判据）：相邻 G02 帧同路 |Δ|>tempSpikeAbsC → 边沿一次；
+    //    次帧差值回落清锚（原「次帧平稳清锚」语义平移——判据换差值口径）。旧速率
+    //    判据 |Δ|/Δt>tempSpikeC 已删：上报周期敏感（G02@T=5ms 时 1LSB 抖动=20℃/s
+    //    必风暴），绝对差值去周期依赖
     if (prevTempsValid_) {
-        const int64_t dtMs =
-            std::max<int64_t>(1, static_cast<int64_t>(t.ts) - static_cast<int64_t>(prevTemps_.ts));
         bool spiky = false;
         double worst = 0.0;
         for (int i = 0; i < n; ++i) {
-            const double rate =
-                std::abs(t.celsius[i] - prevTemps_.celsius[i]) * 1000.0 / static_cast<double>(dtMs);
-            if (rate > cfg_.tempSpikeC) {
+            const double delta = std::abs(t.celsius[i] - prevTemps_.celsius[i]);
+            if (delta > cfg_.tempSpikeAbsC) {
                 spiky = true;
-                worst = std::max(worst, rate);
+                worst = std::max(worst, delta);
             }
         }
         if (spiky && !tempSpikeLatched_) {
             tempSpikeLatched_ = true;
             publishFault(code(DevFault::TempSpike),
-                         "温度乱跳: 峰值速率 " + std::to_string(worst) + "C/s");
+                         "温度乱跳: 峰值差值 " + std::to_string(worst) + "C");
         } else if (!spiky) {
-            tempSpikeLatched_ = false;          // 次帧平稳清锚
+            tempSpikeLatched_ = false;          // 次帧差值回落清锚
         }
     }
     prevTemps_ = t;

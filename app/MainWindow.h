@@ -77,8 +77,9 @@ private slots:
     void onReloadPointCloud();
     void onCalibDeviceClicked();
     void onScanClicked();
-    /// 单键扫描按钮态视觉：idx=2 标点/3 面片；active=红框"停止扫描"、false=复原。
-    /// 各键独立显示自己的会话态（活跃键记录 m_activeScanToolIdx）
+    /// 单键扫描按钮态视觉：idx=2 标点/3 面片/4 精细/5 深孔（四键 2-5）；active=
+    /// 红框"停止扫描"、false=复原。各键独立显示自己的会话态（活跃键记录
+    /// m_activeScanToolIdx）
     void setScanButtonVisual(int idx, bool active);
     /// 相机预览监视弹窗（调试）：扫描启动时弹出，实时显示左右相机灰度图
     /// （观察灯帧交替/标记点可见性）。数据走 AppContext 调试帧分路
@@ -89,7 +90,7 @@ protected:
     void closeEvent(QCloseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
-    int m_activeScanToolIdx = -1;     // 当前活跃扫描键（2/3；-1=无——停止复原用）
+    int m_activeScanToolIdx = -1;     // 当前活跃扫描键（2-5 四模式键；-1=无——停止复原用）
     QDialog *m_camDlg = nullptr;      // 相机预览监视弹窗（调试，懒建）
     QLabel *m_camLeft = nullptr;      // 左相机图
     QLabel *m_camRight = nullptr;

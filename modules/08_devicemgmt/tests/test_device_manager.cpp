@@ -10,6 +10,8 @@
 // 用例编号承接 D-T12b T1–T14 + D-T13 F1–F7：T10（ACK 重传）/T11（v2 兜底）/
 // F7（seq 跳变）随 ACK/seq 机制退役删（批2 补直发版）；T9 改 close/reopen 无残留；
 // T12 改 enterScan 单步 N10 落板；T14 改 enterCalibration 纯软件落板。
+// 批4 补：T9b/T9c（D8 恢复路径——同实例 reopen 清账＋重开重同步分支）；F2 改
+// open 即武装（serialArmed_）；F4 改绝对差值判据（tempSpikeAbsC）。
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -523,6 +525,80 @@ TEST(DeviceManager, T9_CloseReopenGestureChainAlive) {
     EXPECT_TRUE(dm2.isCapturing());
 }
 
+// —— T9b（批4·D8 恢复路径）：同实例 close→reopen——N12 重发、旧温清零（ts==0，
+//      含快照同步）、黑板 Idle/非采集、无自动 N10 重同步（重开重同步仅在黑板非
+//      Idle 时触发——见 T9c）；采集中 close → reopen 同样收敛（不复活采集）——
+TEST(DeviceManager, T9b_CloseReopenRecoveryPath) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    Kit kit;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                      [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    kit.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+    kit.temp(30.0);                                            // 旧会话温度（lastTemps_ 落账 ts>0）
+    EXPECT_GT(dm.getLastTemperatures().ts, 0);                 // 前提：旧温可见
+
+    ASSERT_TRUE(dm.close().success);                           // close：N11 H0+黑板复位+旧温清零
+    EXPECT_EQ(dm.getLastTemperatures().ts, 0);                 // 旧温清零（快照同拍归零）
+    EXPECT_FALSE(dm.isCapturing());
+    EXPECT_EQ(dm.mode(), DeviceMode::Idle);
+
+    ASSERT_TRUE(dm.open().success);                            // reopen（同实例）
+    EXPECT_EQ(mock.count("N12 T100"), 2);                      // N12 重发（两会话各一）
+    EXPECT_FALSE(dm.isCapturing());                            // 无残留采集态
+    EXPECT_EQ(dm.mode(), DeviceMode::Idle);
+    EXPECT_EQ(mock.count("N10 "), 0);                          // 黑板 Idle：无 N10 重同步帧
+    EXPECT_EQ(dm.getLastTemperatures().ts, 0);                 // reopen 首帧前不回旧温
+
+    // —— 采集中 close → reopen：同样收敛（MCU 收口靠 close 的 N11 H0，reopen 不
+    //    自动重启采集——重开重同步分支不触发）——
+    dm.startCapture(Scanner::ScanMode::FineScan);
+    dm.logicTick();
+    ASSERT_TRUE(dm.isCapturing());
+    const int n10Before = mock.count("N10 ");
+    ASSERT_TRUE(dm.close().success);
+    ASSERT_TRUE(dm.open().success);
+    EXPECT_FALSE(dm.isCapturing());
+    EXPECT_EQ(dm.mode(), DeviceMode::Idle);
+    EXPECT_EQ(mock.count("N12 T100"), 3);                      // 第三次 open 再重发
+    EXPECT_EQ(mock.count("N10 "), n10Before);                  // 无新增 N10（Idle 黑板不重同步）
+}
+
+// —— T9c（批4·D8 恢复路径·重开重同步分支）：close 后黑板被外部置非 Idle（如重开
+//      期间 UI 先行切扫描态）→ open 成功尾段按 lastCaptureMode_ 重发 N10 参数重同步
+//      ——防御分支（正常 close→open 黑板已复位不触发，见 T9b）——
+TEST(DeviceManager, T9c_ReopenResyncN10WhenBoardNonIdle) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                      [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+    dm.startCapture(Scanner::ScanMode::FineScan);              // lastCaptureMode_=精细（跨 close 保留）
+    dm.logicTick();
+    ASSERT_TRUE(dm.isCapturing());
+    ASSERT_TRUE(dm.close().success);                           // 黑板复位 Idle
+    EXPECT_TRUE(dm.enterScan().success);                       // 设备关期间黑板再入扫描
+    dm.logicTick();                                            // 落板（Scanning+capturing；N10 经 override 记帧）
+    ASSERT_EQ(dm.mode(), DeviceMode::Scanning);
+    const int n10Before = mock.count("N10 ");
+    ASSERT_GE(n10Before, 2);                                   // startCapture+enterScan 各一
+
+    ASSERT_TRUE(dm.open().success);                            // reopen：成功尾段见黑板非 Idle
+    EXPECT_EQ(mock.count("N10 "), n10Before + 1);              // 重开重同步：补发一帧 N10
+    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C1 D0 L40"), 3);   // 三帧同精细灯型（账本默认参）
+    EXPECT_EQ(mock.count("N12 T100"), 2);                      // N12 亦重发
+    EXPECT_TRUE(dm.isCapturing());                             // 黑板语义保持（MCU 已同步）
+}
+
 // —— T12：enterScan 单步 N10 → 擦板+采集开+StateChanged 恰一次（原 ACK 组链
 //      中段对照随无 ACK 机制退役删——组失败路径批2 直发版补）——
 TEST(DeviceManager, T12_EnterScanSingleN10Commit) {
@@ -642,8 +718,9 @@ TEST(DeviceManager, F1_CameraLostAnyTimeEdge) {
     EXPECT_EQ(rec.fault(FC(DevFault::CameraLost)), 2);
 }
 
-// —— F2（#2≡#10）：心跳超时 → 0x0802 边沿一次；恢复帧清锚后可再触发 ——
-TEST(DeviceManager, F2_HeartbeatTimeoutEdgeAndRecover) {
+// —— F2（#2≡#10）：open 即武装（批4——旧口径武装门 lastRx>0 致「全程无帧」
+//      永不告警）：无任何帧下超时 → 0x0802 边沿一次；恢复帧清锚后可再触发 ——
+TEST(DeviceManager, F2_HeartbeatTimeoutArmedAtOpen) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
@@ -652,16 +729,15 @@ TEST(DeviceManager, F2_HeartbeatTimeoutEdgeAndRecover) {
     DeviceConfig cfg = makeCfg();
     cfg.heartbeatTimeoutMs = 100;                              // 测试注入：100ms 判无声
     DeviceManager dm(cfg, gateOk, &bus, nullptr,
-                     [&](const std::string& f) { return mock.write(f); });
+                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     kit.dm = &dm;
-    ASSERT_TRUE(dm.open().success);
+    ASSERT_TRUE(dm.open().success);                            // open 成功即武装（无帧也巡检）
 
-    kit.raw("G02 A20 B20 C20 D20");                            // 首帧 → lastRx>0（心跳武装）
-    dm.logicTick();
-    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 0);       // 距末帧 <100ms：无声警
+    dm.logicTick();                                            // 距武装 <100ms：窗口内无警
+    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 0);
     sleepMs(150);
-    dm.logicTick();                                            // 超时 → 边沿一次
+    dm.logicTick();                                            // 全程无帧超时 → 边沿一次
     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
     dm.logicTick();                                            // 锁定不重复
     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
@@ -697,29 +773,30 @@ TEST(DeviceManager, F3_TempOverMaxEdge) {
     EXPECT_EQ(rec.fault(FC(DevFault::TempOverMax)), 2);
 }
 
-// —— F4（#4）：温度乱跳 → 0x0804 边沿一次；平稳帧清锚后可再触发 ——
-TEST(DeviceManager, F4_TempSpikeEdge) {
+// —— F4（#4）：温度乱跳绝对差值判据（批4：|Δ|>tempSpikeAbsC 默认 10℃/帧——
+//      去上报周期敏感）→ 0x0804 边沿一次；差值回落清锚后可再触发 ——
+TEST(DeviceManager, F4_TempSpikeAbsoluteDeltaEdge) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
     MockMcu mock;
     Kit kit;
-    DeviceConfig cfg = makeCfg();                              // tempSpikeC 默认 2.0℃/s
+    DeviceConfig cfg = makeCfg();                              // tempSpikeAbsC 默认 10℃
     DeviceManager dm(cfg, gateOk, &bus, nullptr,
-                     [&](const std::string& f) { return mock.write(f); });
+                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
     kit.temp(25.0);                                            // 基线帧（无前帧无警）
     EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 0);
-    sleepMs(5);
-    kit.temp(30.0);                                            // 相邻帧 |Δ5|/几十ms → 速率远超 2℃/s
+    kit.temp(30.0);                                            // |Δ5|<10：不报（旧速率判据会误报）
+    EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 0);
+    kit.temp(41.5);                                            // |Δ11.5|>10 → 边沿一次
     EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 1);
-    kit.temp(30.0);                                            // 平稳帧（Δ=0）→ 清锚
+    kit.temp(41.5);                                            // 差值回落（Δ=0）→ 清锚
     EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 1);
-    sleepMs(5);
-    kit.temp(36.0);                                            // 再跳 → 再触发
+    kit.temp(55.0);                                            // |Δ13.5|>10 → 再触发
     EXPECT_EQ(rec.fault(FC(DevFault::TempSpike)), 2);
 }
 

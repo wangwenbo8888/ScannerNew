@@ -15,7 +15,8 @@
 //     拒→不入队同步返回 fail；过→命令编队执行，返回 request 结果（组成败异步经
 //     Fault/StateChanged 观测）。相机三口的返回值=前置检查（无相机同步 fail，
 //     实际动作编队异步）。
-//   - open() 特例：N12 温度周期在起逻辑线程**前**发（盲发无 ACK）；close() 特例：
+//   - open() 特例：N12 温度周期在起逻辑线程**前**发（盲发无 ACK；D8 恢复路径批4：
+//     黑板非 Idle/采集中时按 lastCaptureMode_ 重发 N10 重同步）；close() 特例：
 //     停线程后余任务丢弃（退出场景不保送）。
 //   - 参数双口：getParam 读互斥保护快照（logicTick 每拍全量拷）；setParam 编队调
 //     账本 setValue。menuState()/getLastTemperatures() 同款互斥快照。
@@ -85,16 +86,19 @@ class KeySemantics;
 enum class DevFault : int64_t {
     CameraLost      = 0x0801,  // #1 相机掉线：任意时刻 isOpen 翻 false 边沿（原开过
                                //     才算；不限采集中；只报不停手）
-    SerialSilent    = 0x0802,  // #2≡#10 串口无声=通讯心跳丢失（同源合并）：收到过帧
-                               //     （lastRx>0）后停更超 heartbeatTimeoutMs；帧到清锚
+    SerialSilent    = 0x0802,  // #2≡#10 串口无声=通讯心跳丢失（同源合并）：open 成功即
+                               //     武装（serialArmed_ 锚，批4——旧武装门 lastRx>0 致
+                               //     「全程无帧」永不告警）；距末帧（无帧则距武装时刻）
+                               //     超 heartbeatTimeoutMs；帧到清锚
     TempOverMax     = 0x0803,  // #3 温度爆表：任一路 >tempMaxC；全路回落清锚
-    TempSpike       = 0x0804,  // #4 温度乱跳：相邻 G02 帧同路 |Δ|/Δt>tempSpikeC ℃/s；
-                               //     次帧平稳清锚
+    TempSpike       = 0x0804,  // #4 温度乱跳：相邻 G02 帧同路 |Δ|>tempSpikeAbsC（批4 改
+                               //     绝对差值判据——去上报周期敏感）；次帧差值回落清锚
     WarmupTimeout   = 0x0805,  // #5 预热超时：WarmupSequence onTimeout（只报不停加热）
     KeyRingOverflow = 0x0806,  // #6 手势队列挤爆：G01 手势环满丢新计数增长（事件型）
-    CmdNoAck        = 0x0807,  // #7 串口写失败（无 ACK 机制——盲发口径 D8）：命令发送
-                               //     失败收口归此码，detail 串区分命令名
-    SeqGap          = 0x0808,  // #9 闲置——G03 帧对账预留（枚举值保留，批4 接通）
+    CmdNoAck        = 0x0807,  // #7 串口写失败（无 ACK 机制——盲发口径 D8 终态）：命令
+                               //     发送失败收口归此码，detail 串区分命令名
+    SeqGap          = 0x0808,  // #9 闲置——G03 帧对账预留（D6：帧对账为后续新增功能，
+                               //     枚举值保留；巡检段已删，批4 grep 零残留）
     // —— 表外既有路径（0x081x 开机段）——
     CameraOpenFail  = 0x0810,  // open 一条龙相机打开失败（同步倒序关）
     McuOpenFail     = 0x0811,  // open 一条龙 MCU 串口打开失败（同步倒序关）
@@ -109,7 +113,9 @@ struct DeviceConfig {
     // —— 故障巡检阈值（§6.2；产线默认值，测试可注入小值换快用例）——
     int heartbeatTimeoutMs = 10000;  // 串口无声（#2/#10）：距末帧超此值报 0x0802
     double tempMaxC = 60.0;          // 温度爆表（#3）：任一路超此值报 0x0803
-    double tempSpikeC = 2.0;         // 温度乱跳（#4）：同路相邻帧速率超此 ℃/s 报 0x0804
+    double tempSpikeAbsC = 10.0;     // 温度乱跳（#4）：同路相邻 G02 帧绝对差值超此 ℃
+                                     //   报 0x0804（批4：旧速率判据 tempSpikeC 删——
+                                     //   G02@T=5ms 时 1LSB 抖动即 20℃/s 必风暴）
 };
 
 class DeviceManager {
@@ -226,6 +232,7 @@ private:
     void applyAdjust(int dir);                  // 调节步进 → MenuLogic+ParamStore
     void sendSeq(std::vector<SeqStep> steps, std::function<void(bool)> onDone);
     void onParamDispatch(const std::string& key, double v, ParamStore::Done done);
+    void sendN12Clamped(int periodMs, McuDone cb);   // N12 单一下发出口（open/dispatch 共用）
     void startStreamIfReady();
     void refreshParamSnapshot();                // 全参数拷入互斥快照
     // 切模式/启停的命令组主体（逻辑线程执行——门禁已在调用方线程过）
@@ -279,10 +286,13 @@ private:
     // —— 故障边沿锚（逻辑线程属主；恢复清锚防复报）——
     bool camFaultLatched_ = false;              // 0x0801 掉线锁（相机重开清锚）
     bool camWasOpen_ = false;                   // 0x0801 前置锚：相机曾开（open 成功即置）
+    bool serialArmed_ = false;                  // 0x0802 武装锚（批4：open 成功尾置 true、
+                                                //   close 清——全程无帧也纳入巡检）
+    int64_t serialArmedAtMs_ = 0;               // 0x0802 武装时刻（lastRx==0 时计时基准）
     bool serialSilentLatched_ = false;          // 0x0802 锁（再收到帧清锚）
     bool tempHotLatched_ = false;               // 0x0803 锁（全路回落清锚）
-    bool tempSpikeLatched_ = false;             // 0x0804 锁（次帧平稳清锚）
-    serial::TempFrame prevTemps_{};             // 0x0804 上一 G02 帧（速率分子/分母）
+    bool tempSpikeLatched_ = false;             // 0x0804 锁（次帧差值回落清锚）
+    serial::TempFrame prevTemps_{};             // 0x0804 上一 G02 帧（差值基线——批4 绝对差值判据）
     bool prevTempsValid_ = false;
     uint64_t lastKeyDrop_ = 0;                  // 0x0806 上拍手势环丢新计数（单调累计对齐）
     bool opened_ = false;
