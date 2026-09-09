@@ -42,7 +42,7 @@ inline std::vector<CommandGate::Spec> makeDefaultCommandSpecs() {
 
     CommandGate::Spec startScan;
     startScan.name = "start_scan";                      // S2→S4/S5；02-①
-    startScan.gateOp = "scan";                          // payload=ScanMode 0/1，状态机矩阵判
+    startScan.gateOp = "scan";                          // payload=ScanMode 四值（0-3），状态机矩阵判
     startScan.startedEvent = EventType::ScanStarted;
     startScan.finishedEvent = EventType::ScanStopped;
     specs.push_back(std::move(startScan));

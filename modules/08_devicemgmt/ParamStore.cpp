@@ -3,6 +3,9 @@
 // ============================================================================
 #include "ParamStore.h"
 
+#include <spdlog/spdlog.h>
+#include "jmw_logging.h"
+
 #include <cmath>
 
 namespace Scanner::device {
@@ -53,6 +56,17 @@ void ParamStore::bootstrap(Load load) {
     inflight_.clear();   // 会话重启语义：在途全废（gen 单调递增，迟到回调必失配作废）
     std::map<std::string, double> file;
     if (load) parseLedger(load(), file);
+    // —— 旧档迁移（批3：读时单向，不改档格式版本号）——
+    // laserSelectA/B：旧协议激光管选择键已作废（N10 四管掩码按 ScanMode 组装，
+    // 批1 已删参数）→ 丢弃＋info；laserLevel>100：旧档 0-255 量纲 → 钳 100＋warn
+    //（值域结果与 clampToSpec 同效，迁移只为日志留痕）
+    if (file.erase("laserSelectA") > 0 || file.erase("laserSelectB") > 0) {
+        JMW_LOG_INFO("08-ParamStore", "[ParamStore] 旧协议档键作废: laserSelectA/laserSelectB 已丢弃（四管掩码改按 ScanMode 组装）");
+    }
+    if (const auto ll = file.find("laserLevel"); ll != file.end() && ll->second > 100.0) {
+        ll->second = 100.0;
+        JMW_LOG_WARN("08-ParamStore", "[ParamStore] 旧档量纲迁移（0-255→0-100）: laserLevel 钳 100");
+    }
     for (const auto& [key, spec] : specs_) {
         const auto it = file.find(key);                        // 未知 key 天然忽略
         const double v = (it != file.end()) ? clampToSpec(spec, it->second) : spec.def;

@@ -51,6 +51,8 @@ public:
     // 开机装载：Load 有档→按档改账（source=Boot）；无档→默认值。档内未知
     // key/坏数值段忽略，越界钳回范围。逐参数广播 onParamChanged（含默认值项）。
     // 在途清空（会话重启语义）。
+    // 旧档迁移（批3·读时单向，不改档格式版本号）：laserSelectA/B 旧协议键
+    // 丢弃＋info；laserLevel>100 钳 100＋warn（0-255→0-100 量纲）。
     void bootstrap(Load load);
     // 设值（UI 滑条/按键步进两入口同此）：入口即钳→排队下发——ok 才改账
     // （改前查在途：同 key 在途新值直接覆盖旧在途回调失效——后值胜出）；

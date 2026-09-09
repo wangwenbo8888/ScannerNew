@@ -11,7 +11,8 @@
 //   且该边会直跳 S2 丢失「回前态续作」语义（§4.4）；S7 出口唯 SelfCheckPassed。
 //
 // 约定补充：
-//   · ScanStarted param：0→S4 / 1→S5，其余值拒绝（base ScanMode 契约仅 0/1）
+//   · ScanStarted param（base ScanMode 四值）：0→S4 / 1-3→S5（面片/精细/深孔均
+//     含激光形态并入 S5——⑨b 单管周期配对待裁决，暂不细分），其余值拒绝
 //   · S7 内再次 FaultOccurred / S1 内 DeviceDisconnected：无→边 fail 且状态不变
 //     （「保持」由非法转换不改状态保证；防风暴聚合计数归 T7 FaultHandler）
 //   · FaultCleared 入 FullMatrix 事件集以固化「旧故障恢复通道已死」（T7 前仅运行时 fail）
@@ -125,11 +126,18 @@ TEST(SM, ScanModeParamPicksS4S5) {
         EXPECT_EQ(sm.getCurrentState(), SystemState::ScanMarkerLaser);
         EXPECT_EQ(sm.getStateName(), "ScanMarkerLaser");
     }
-    // ScanMode 契约仅 0/1：非法模式参数拒绝、保持 S2
+    // ScanMode 四值（协议批3）：精细(2)/深孔(3)为含激光形态→S5（⑨b 暂并入，
+    // 周期模型裁决后如需细分再扩态）；契约外值（如 4）拒绝、保持 S2
+    for (int64_t p : {2, 3}) {
+        StateMachine sm;
+        driveTo(sm, SystemState::Standby);
+        ASSERT_TRUE(sm.transition(EventType::ScanStarted, p).success) << p;
+        EXPECT_EQ(sm.getCurrentState(), SystemState::ScanMarkerLaser) << p;
+    }
     {
         StateMachine sm;
         driveTo(sm, SystemState::Standby);
-        EXPECT_FALSE(sm.transition(EventType::ScanStarted, 2).success);
+        EXPECT_FALSE(sm.transition(EventType::ScanStarted, 4).success);
         EXPECT_EQ(sm.getCurrentState(), SystemState::Standby);
     }
 }
@@ -261,6 +269,8 @@ TEST(SM, FullMatrix) {
         {SystemState::Standby,         EventType::CalibStarted,        0, SystemState::Calibrating},
         {SystemState::Standby,         EventType::ScanStarted,         0, SystemState::ScanMarker},
         {SystemState::Standby,         EventType::ScanStarted,         1, SystemState::ScanMarkerLaser},
+        {SystemState::Standby,         EventType::ScanStarted,         2, SystemState::ScanMarkerLaser},
+        {SystemState::Standby,         EventType::ScanStarted,         3, SystemState::ScanMarkerLaser},
         {SystemState::Standby,         EventType::PostProcessStarted,  0, SystemState::PostProcessing},
         {SystemState::Standby,         EventType::FaultOccurred,       0, SystemState::FaultSelfCheck},
         {SystemState::Standby,         EventType::DeviceDisconnected,  0, SystemState::Init},
@@ -291,11 +301,11 @@ TEST(SM, FullMatrix) {
         return nullptr;
     };
 
-    // 两层 for 全组合：7 态 × 12 事件（ScanStarted 加验 param 0/1/2，其余事件
-    // param 无语义仅验 0）；正例断言 ok+目标态，非法组合断言 fail+状态不变
+    // 两层 for 全组合：7 态 × 12 事件（ScanStarted 加验 param 0-3＋契约外 4，
+    // 其余事件 param 无语义仅验 0）；正例断言 ok+目标态，非法组合断言 fail+状态不变
     for (SystemState s : kAllStates) {
         for (EventType ev : kEvents) {
-            const int64_t params[3] = {0, 1, 2};
+            const int64_t params[] = {0, 1, 2, 3, 4};
             for (int64_t p : params) {
                 if (ev != EventType::ScanStarted && p != 0) continue;
                 StateMachine sm;

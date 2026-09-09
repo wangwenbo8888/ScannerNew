@@ -743,8 +743,8 @@ void MainWindow::showCameraMonitor() {
     m_camDlg->activateWindow();
 }
 
-// 单键扫描按钮态视觉：idx=2 标点/3 面片——活跃＝红框＋红字"停止扫描"，
-// 停止＝复原黑字原名。各键独立（点哪键哪键变，另一键不动）
+// 单键扫描按钮态视觉：idx=2 标点/3 面片/4 精细/5 深孔——活跃＝红框＋红字"停止扫描"，
+// 停止＝复原黑字原名。各键独立（点哪键哪键变，其他键不动）
 void MainWindow::setScanButtonVisual(int idx, bool active){
     if (idx < 0 || idx >= m_toolButtons.size()) return;
     auto* btn = m_toolButtons[idx];
@@ -758,8 +758,12 @@ void MainWindow::setScanButtonVisual(int idx, bool active){
             " border: 1px solid #C0392B; border-radius: 4px; }"
             "QPushButton:hover { background-color: rgba(192,57,43,0.22); }");
     } else {
-        textLbl->setText(idx == 2 ? QStringLiteral("标点扫描")
-                                  : QStringLiteral("面片扫描"));
+        // 复原名对齐工具栏四模式键（协议批3：点云扫描已改名精细扫描＋新增深孔）
+        const QString name = (idx == 2) ? QStringLiteral("标点扫描")
+                           : (idx == 3) ? QStringLiteral("面片扫描")
+                           : (idx == 4) ? QStringLiteral("精细扫描")
+                                        : QStringLiteral("深孔扫描");
+        textLbl->setText(name);
         textLbl->setStyleSheet("");
         btn->setStyleSheet(
             "QPushButton { background-color: transparent; border: none; }"
@@ -1028,12 +1032,16 @@ QWidget *MainWindow::createToolBar()
     layout->setSpacing(32);
 
     struct ToolItem { QString icon; QString text; };
+    // 扫描四模式（协议批3·D7）：标点(2)=MarkerOnly / 面片(3)=MarkerPlusLaser /
+    // 精细(4)=FineScan（原「点云扫描」改名，C 管）/ 深孔(5)=DeepHoleScan（新增，
+    // D 管）；深孔 icon 复用 cloudscan（不新增美术资源，专属图标待设计）
     QList<ToolItem> items = {
         {"filemanager-black-14", QStringLiteral("文件管理")},
         {"equipcalib-black-14", QStringLiteral("校准设备")},
         {"markscan-black-14", QStringLiteral("标点扫描")},
         {"meshscan-black-14", QStringLiteral("面片扫描")},
-        {"cloudscan-black-14", QStringLiteral("点云扫描")},
+        {"cloudscan-black-14", QStringLiteral("精细扫描")},
+        {"cloudscan-black-14", QStringLiteral("深孔扫描")},
         {"both-black-14", QStringLiteral("正反扫描")},
         {"slicerscan-black-14", QStringLiteral("切面扫描")},
         {"projmanager-black-14", QStringLiteral("重置项目")}
@@ -1070,13 +1078,16 @@ QWidget *MainWindow::createToolBar()
             connect(btn, &QPushButton::clicked, this, &MainWindow::onCalibDeviceClicked);
         }
 
-        // 标点扫描（i==2）/面片扫描（i==3）：各自独立启停——点哪个键哪个键变红
-        // （另一键不动）；扫描中点另一键＝停旧启新（模式切换）
-        if (i == 2 || i == 3) {
-            const bool mesh = (i == 3);
+        // 扫描四模式键（i==2 标点/3 面片/4 精细/5 深孔）：各自独立启停——点哪
+        // 键哪键变红（其他键不动）；扫描中点另一键＝停旧启新（模式切换）
+        if (i >= 2 && i <= 5) {
             const int myIdx = i;
-            const QString title = mesh ? QStringLiteral("面片扫描") : QStringLiteral("标点扫描");
-            connect(btn, &QPushButton::clicked, this, [this, myIdx, title]() {
+            const QString title = items[i].text;
+            const auto mode = (i == 2) ? Scanner::ScanMode::MarkerOnly
+                          : (i == 3) ? Scanner::ScanMode::MarkerPlusLaser
+                          : (i == 4) ? Scanner::ScanMode::FineScan
+                                     : Scanner::ScanMode::DeepHoleScan;
+            connect(btn, &QPushButton::clicked, this, [this, myIdx, title, mode]() {
                 if (!m_appCtx) return;
                 // —— 编辑成果物理化（P4b 2026-09-06）：就绪态续采/完成前，把悬浮
                 //    工具栏的显示级删除（alpha=0）路由到真账本——融合云移除＋obs
@@ -1172,18 +1183,15 @@ QWidget *MainWindow::createToolBar()
                         // 落下：停旧启新（模式切换）
                     }
                 }
-                const auto mode = title == QStringLiteral("面片扫描")
-                                      ? Scanner::ScanMode::MarkerPlusLaser
-                                      : Scanner::ScanMode::MarkerOnly;
-                auto r = m_appCtx->startScanSession(mode);
+                const auto r = m_appCtx->startScanSession(mode);   // 四值模式直传（⑨b：精细/深孔 07 链配对待裁决）
                 if (!r.success) {
                     QMessageBox::warning(this, title,
                         QString::fromStdString("扫描启动被拒:\n" + r.message));
                 } else {
                     setScanButtonVisual(myIdx, true);          // 只有本键变红
                     m_activeScanToolIdx = myIdx;
-                    // 工程树：首个扫描会话建「标记点 001」，后续会话（标点/面片）
-                    // 复用同一节点不新建（有对应类型即可——用户口径 2026-09-05）；
+                    // 工程树：首个扫描会话建「标记点 001」，后续会话（标点/面片/
+                    // 精细/深孔）复用同一节点不新建（有对应类型即可——用户口径 2026-09-05）；
                     // 计数实时刷新；激光点数据由「点云数据 001」承载（合账落库
                     // 后 cloudTimer 更新计数）
                     if (!m_markerCurrentItem && m_markerRootItem) {
@@ -1366,9 +1374,10 @@ QWidget *MainWindow::createToolBar()
             });
         }
 
-        // 标点扫描/面片扫描/点云扫描/双扫描/切片扫描：切换回默认界面
+        // 标点扫描/面片扫描/精细扫描/深孔扫描/正反扫描/切面扫描：切换回默认界面
+        //（键位随深孔新增右移：扫描四模式 2-5，正反=6；正反保留切回行为）
         // 注意：i==0 是"文件管理/导入"按钮，只开菜单，不能在这里 clearScene（否则导入后被清空）
-        if (i == 2 || i == 3 || i == 4 || i == 5) {
+        if (i == 2 || i == 3 || i == 4 || i == 5 || i == 6) {
             connect(btn, &QPushButton::clicked, this, [this]() {
                 // 仅从标定分屏切回时恢复（clearScene 会清扫描标志点——恢复
                 // lambda 与扫描启停 lambda 同键先后无条件执行，曾致"停止后点
@@ -1406,7 +1415,7 @@ QWidget *MainWindow::createToolBar()
             layout->addWidget(separator);
             layout->addSpacing(16);
         }
-        if (i == 4) {
+        if (i == 5) {
             QFrame *separator = new QFrame();
             separator->setFixedWidth(1);
             separator->setFixedHeight(36);

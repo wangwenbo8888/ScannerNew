@@ -236,8 +236,8 @@ void AppContext::initialize() {
     }
     cameraPreviewFps_ = std::max(1, camCfg.previewFps);
     Scanner::device::DeviceConfig devCfg;
-    devCfg.serialPort = "auto";   // 串口自动搜（MCUDriver 逐口发 N12Z1 探测应答认定）；固定口填 "COMx"
-    // protocol 默认 V3、baud 115200（DeviceConfig 缺省即产线口径）
+    devCfg.serialPort = "auto";   // 串口自动搜（MCUDriver 逐口发 N12 T100 等 G 帧凭据认定）；固定口填 "COMx"
+    // baud 115200 固定（260831 唯一口径：裸';' 分帧无版本号，DeviceConfig 缺省即产线口径）
     deviceManager_ = std::make_unique<Scanner::device::DeviceManager>(
         devCfg,
         [this](const std::string& op) -> Scanner::Result {
@@ -329,8 +329,9 @@ void AppContext::initialize() {
     });
 
     JMW_LOG_INFO("app-AppContext", "[AppContext] 全部组件装配完成");
-    // 灯态策略：启动/开门面不亮灯；startCapture（开始扫描）亮（N10 账本全参）、
-    // stopCapture（停扫描）熄（B0/L0）。UI 滑条空闲仅记账，采集中改值随全参重发。
+    // 灯态策略：启动/开门面不亮灯；startCapture（开始扫描）亮（N10 按模式四管
+    // 掩码组帧）、stopCapture（停扫描）熄（N11 H0）。UI 滑条空闲仅记账，采集中
+    // 改值随全参重发。
 
     // 启动 HardwareMonitor（始终运行，周期采集设备状态）
     hwMonitor_->start(1000);
@@ -350,7 +351,8 @@ void AppContext::startDevicesAsync() {
                          std::thread::hardware_concurrency(),
                          topo.pCores, topo.eCores, topo.hybrid, lanes);
         }
-        const auto devR = deviceManager_->open();   // 相机枚举→MCU 自动搜口→N12Z1→逻辑线程
+        const auto devR = deviceManager_->open();   // 相机枚举→MCU 自动搜口（N12 T100
+        // 探测）→上行接线→参数装载→N12 定版→逻辑线程；不预亮灯（启采=N10 才亮）
         JMW_LOG_INFO("app-AppContext", "[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
 
         notifySelfCheckItem("serialPort", devR.success);
@@ -425,25 +427,35 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
             if (debugFrameTap_) debugFrameTap_(frame);
         }
     });
-    // 灯型归采集组 N10（effectiveN10 带灯型覆写）——不预点亮：固件 H1"按上次
-    // 采集参数重启"会重置灯态（2026-08-22 实测），预点亮＝闪一下→灭→组内 N10
-    // 再亮（真机"先闪一下再持续"根因）；组序 H1→N10，灯以组内 N10 为准一次到位
-    // 灯型按模式（2026-09-01 定版）：A=纯补光（无激光——业务要求）；B=补光+激光。
-    // A 模式纯点图下真标志点亮斑须超分离阈值 80——DeviceManager 侧高补光代偿
-    const bool laserOn = (mode != Scanner::ScanMode::MarkerOnly);
-    dm->startCapture(laserOn);
-    if (laserOn) {
-        JMW_LOG_INFO("app-AppContext",
-            "[AppContext] 面片扫描激光组: 左斜=T{} 右斜=V{}（交替归固件 H1 帧序）",
-            static_cast<int>(dm->getParam("laserSelectA").value),
-            static_cast<int>(dm->getParam("laserSelectB").value));
+    // 灯型归采集组 N10（effectiveN10 按 ScanMode 组装四管掩码）——不预点亮：
+    // 固件收到 N10 即按新参数调灯，预点亮会闪变；启采=N10 本身一次到位。
+    // 四模式灯型（D7 产线方案）：标点 T0V0C0D0（B 抬升 40/L=0）；面片 T1V1C0D0；
+    // 精细 T0V0C1D0；深孔 T0V0C0D1。⑨b：精细/深孔单管周期下 07 激光链
+    // 「偶L奇R」配对假设未验证——本批仅 08/UI 映射就位
+    dm->startCapture(mode);
+    switch (mode) {
+    case Scanner::ScanMode::MarkerOnly:
+        JMW_LOG_INFO("app-AppContext", "[AppContext] 标点扫描(A) T0V0C0D0（B=40 抬升基线 L=0）");
+        break;
+    case Scanner::ScanMode::MarkerPlusLaser:
+        JMW_LOG_INFO("app-AppContext", "[AppContext] 面片扫描(B) T1V1C0D0（左右线交替归固件帧序）");
+        break;
+    case Scanner::ScanMode::FineScan:
+        JMW_LOG_INFO("app-AppContext", "[AppContext] 精细扫描(C) T0V0C1D0（单管——⑨b 周期模型待裁决）");
+        break;
+    case Scanner::ScanMode::DeepHoleScan:
+        JMW_LOG_INFO("app-AppContext", "[AppContext] 深孔扫描(D) T0V0C0D1（单管——⑨b 周期模型待裁决）");
+        break;
     }
 
     // 命令通道点火（门禁/前置/装配失败均带因返回；各"不走打印点"已落日志）
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
     scanWf_->setScanMode(mode);
     lastScanMode_ = mode;                       // 就绪态续采重启灯组依据（P3）
-    const auto modeName = mode == Scanner::ScanMode::MarkerOnly ? "标点扫描(A)" : "面片扫描(B)";
+    const char* modeName = mode == Scanner::ScanMode::MarkerOnly      ? "标点扫描(A)"
+                           : mode == Scanner::ScanMode::MarkerPlusLaser ? "面片扫描(B)"
+                           : mode == Scanner::ScanMode::FineScan        ? "精细扫描(C)"
+                                                                        : "深孔扫描(D)";
     auto gr = commandGate_->submit("start_scan", static_cast<int64_t>(mode));
     if (!gr.success) {
         JMW_LOG_WARN("app-AppContext", "[AppContext] {} 点火被拒: {}", modeName, gr.message);
@@ -511,14 +523,13 @@ Scanner::Result AppContext::resumeScanSession() {
     if (!isScanSessionPaused()) return Scanner::Result::fail("非就绪态（无暂停会话）");
     const auto r = scanWf_->resume();
     if (!r.success) return r;
-    // 续采：N10 重启灯组参数＋N11 H1 重启触发（2026-09-06 实测：首次启动
-    // N10 即够——MCU 从默认态进入触发；但 N11H0 停触发后仅 N10 不够，
-    // MCU 停在「已停」态——串口无声根因；须补 N11H1 才恢复触发）
+    // 续采：按当前模式重发 N10（启采=N10 本身——七参+四管掩码一次到位；
+    // 260831 无 N11 H1；N11H0 停触发后 MCU 停在「已停」态，须 N10 重启触发
+    //——2026-09-06 串口无声根因结论沿承，仅命令面随协议缩并）
     if (deviceManager_) {
-        const bool laserOn = (lastScanMode_ != Scanner::ScanMode::MarkerOnly);
-        deviceManager_->startCapture(laserOn);   // N10→N11H1→FLUSH（captureSeqSteps）
+        deviceManager_->startCapture(lastScanMode_);   // N10 按模式组帧（captureSeqSteps）
     }
-    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（N10 参数＋N11H1 重启触发）：ok");
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（N10 按模式四管掩码重启触发）：ok");
     return Scanner::Result::ok("续采中");
 }
 

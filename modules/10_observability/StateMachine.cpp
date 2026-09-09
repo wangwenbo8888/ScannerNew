@@ -8,7 +8,7 @@ namespace {
 // 转换表＝测试 FullMatrix 的 kLegal 期望表逐条对应（19 条合法边中 18 条入表，
 // S7 行的 SelfCheckPassed 特判不入表，见 resolveNext）。
 // 铁律：S6 无 Fault/Disconnect 边（免疫）；S7 无 Disconnect/DeviceConnected 边；
-// ScanStarted 的 param 0/1 区分在 resolveNext 里判。
+// ScanStarted 的 param（ScanMode 0-3：0→S4，1-3→S5）区分在 resolveNext 里判。
 struct Edge { SystemState from; EventType ev; SystemState to; };
 
 constexpr Edge kEdges[] = {
@@ -66,8 +66,13 @@ bool StateMachine::resolveNext(SystemState from, EventType event, int64_t param,
         }
         return true;
     }
-    // ScanStarted param 0/1 区分（base ScanMode 契约仅 0/1，其余值无边）
-    if (event == EventType::ScanStarted && param != 0 && param != 1) return false;
+    // ScanStarted param=ScanMode 四值判别（base ScanMode 契约 0-3，其余值无边）：
+    // 0=MarkerOnly→S4；1/2/3（面片/精细/深孔）均为含激光形态→并入 S5。
+    // ⑨b 待裁决：精细/深孔单管周期下 07 激光链配对未验证——S4/S5 二分暂按
+    // 「是否含激光」延伸，待 ⑨b 裁定后若需细分再扩态
+    if (event == EventType::ScanStarted &&
+        (param < 0 || param > static_cast<int64_t>(Scanner::ScanMode::DeepHoleScan)))
+        return false;
 
     for (const auto& e : kEdges) {
         if (e.from != from || e.ev != event) continue;

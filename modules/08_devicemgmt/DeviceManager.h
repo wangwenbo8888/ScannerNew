@@ -164,24 +164,27 @@ public:
     Result stopFrameStream();
 
     // —— 采集启停（不切模式；幂等：黑板同值直返；编队执行——调用后需一拍
-    //    logicTick 落地下行帧。260831：启采=N10 本身（七参自账本+灯型组装，
-    //    相机先启再发 N10——帧号错位修正口径保持）；停采=N11 H0。
-    //    laserOn=false（标点扫描 A 模式）：L=0 且四激光管全 0（只开补光）；
-    //    缺省 true=账本全参（面片扫描 B 模式）——
-    void startCapture(bool laserOn = true);
+    //    logicTick 落地下行帧。260831：启采=N10 本身（七参自账本+按 ScanMode
+    //    组装四管掩码，相机先启再发 N10——帧号错位修正口径保持）；停采=N11 H0。
+    //    四模式灯型见 effectiveN10（cpp 本地）：MarkerOnly 不开激光线（L=0 四管
+    //    全 0，B 抬升至 40）；其余模式 L=账本值、B=账本值；缺省=面片扫描 B。
+    //    ⑨b 周期模型待裁决：精细/深孔为单管周期（每帧仅 C 或 D），07 激光链
+    //    「偶L奇R」配对假设在单管下未验证——本层仅做掩码映射——
+    void startCapture(Scanner::ScanMode mode = Scanner::ScanMode::MarkerPlusLaser);
     void stopCapture();
     /// 实测相机帧率（配对交付差分 1s 窗口——帧回调链内计数，UI 只读）
     int measuredCameraFps() const { return m_measuredFps.load(std::memory_order_relaxed); }
 
     // —— 灯光直控（用户按钮直调；编队逻辑线程执行，不启停采集）——
-    /// N10 灯字段即时生效（盲发）：bgOn/laserOn=true 取账本值、false 置 0；
-    /// 激光管二值映射暂版——laserOn=true → T1V1C0D0，false → 四管全 0（批3 换 ScanMode 映射）
-    void setLights(bool bgOn, bool laserOn);
+    /// N10 灯字段即时生效（盲发）：bgOn=false 置 B=0；激光管按 ScanMode 四管
+    /// 掩码映射（同 effectiveN10——含 MarkerOnly 的 B=40 抬升，bgOn=false 可压 0）
+    void setLights(bool bgOn, Scanner::ScanMode mode);
 
     // —— 打光场景封装（灯型三态；N10 即时生效，组合语义见各自注释）——
-    /// 只打补光灯（标志点扫描 A 模式）：B=账本值，L=0，激光管全关
+    /// 只打补光灯（标点扫描 A 模式灯型）：MarkerOnly 掩码——B=40（2026-08 真机
+    /// 标点检测成功配置的补光抬升基线），L=0，激光管全关
     void lightsBgOnly();
-    /// 全灭（补光/激光全关；等价 close 前收口语义）
+    /// 全灭（补光/激光全关；等价 N11 H0 的熄灯语义——close 前收口用）
     void lightsAllOff();
 
     // —— 参数双口（Critical #1：账本归逻辑线程，引用出口已删）——
@@ -270,7 +273,7 @@ private:
     std::chrono::steady_clock::time_point m_lastFpsTick_{};  // 差分基点（相机线程）
     serial::TempFrame lastTemps_{};             // 逻辑线程账本（快照源）
     std::function<void(bool)> warmupDone_;      // 当前预热完成回调（onStable/onTimeout 消费）
-    bool captureLaserOn_ = true;                // 采集灯型（逻辑线程属主）：false=N10 强制 L=0+四管全 0
+    Scanner::ScanMode lastCaptureMode_ = Scanner::ScanMode::MarkerPlusLaser;   // 采集灯型（逻辑线程属主）：N10 四管掩码按此组装（缺省面片 B）
     std::vector<serial::GestureEvent> pendingGestures_;   // G01 手势暂存（pump 回调入队，
                                                            // logicTick ③ 派发后清空）
     // —— 故障边沿锚（逻辑线程属主；恢复清锚防复报）——

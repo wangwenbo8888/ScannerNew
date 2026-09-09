@@ -33,26 +33,37 @@ constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
     return {
         {"exposure", 10.0, 1.0, 100.0},        // 曝光 ms（相机直设）
-        {"freqHz", 60.0, 20.0, 120.0},         // N10 H 拍照频率（协议域 1-200——批3 放宽；
-                                                //   现 UI 滑条 20-120 域先留）
-        {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10——B 模式成功配置基线）
-        {"laserLevel", 40.0, 0.0, 100.0},      // N10 L 激光强度（默认 40；60 过亮→40 折中）
+        {"freqHz", 60.0, 1.0, 200.0},          // N10 H 拍照频率（协议域 1-200，批3 终态；
+                                                //   UI 滑条量程已同步 1-200）
+        {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10——B 模式成功配置基线；
+                                                //   MarkerOnly 灯型在 effectiveN10 抬升至 40）
+        {"laserLevel", 40.0, 0.0, 100.0},      // N10 L 激光强度（默认 40；60 过亮→40 折中；
+                                                //   旧档 >100 由 bootstrap 迁移钳 100）
+        {"tempReportPeriodMs", 100.0, 5.0, 1000.0},  // N12 T 温度上报周期 ms（批3 入 specs；
+                                                //   dispatch 走 N12，open 仍按 DeviceConfig 定版）
     };
 }
 
-// N10 生效参数（cpp 本地——不进头防 IMCU.h 类型泄漏）：账本三值 + 灯型二值版
-// 四激光管——laserOn=false（标点扫描 A 模式）L=0 且四管全 0（只开补光）；
-// laserOn=true 取账本 L、T1V1C0D0（二值映射暂版，批3 换 ScanMode 映射）。
+// N10 生效参数（cpp 本地——不进头防 IMCU.h 类型泄漏）：freqHz 账本值；四激光管
+// 按 ScanMode 掩码映射（D7 产线方案）——MarkerOnly T0V0C0D0 且 L=0、B 抬升 40
+// （保留旧 A 模式补光抬升基线——2026-08 真机标点检测成功配置）；面片 T1V1C0D0；
+// 精细（原点云扫描）T0V0C1D0；深孔 T0V0C0D1；其余模式 B/L 均账本值。
+// ⑨b 周期模型待裁决：精细/深孔为单管周期（每帧仅 C 或 D），07 激光链「偶L奇R」
+// 配对假设在单管下未验证——本函数仅做 08/UI 掩码映射就位。
 // 调用点均在逻辑线程（捕获 this 直读成员）
-hal::CaptureParams effectiveN10(const ParamStore& params, bool laserOn) {
+hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode) {
     hal::CaptureParams p;
     p.freqHz = static_cast<int>(params.get("freqHz").value);
-    p.bgLight = static_cast<int>(params.get("bgLight").value);
-    p.laserLevel = laserOn ? static_cast<int>(params.get("laserLevel").value) : 0;
-    p.laserT = laserOn ? 1 : 0;
-    p.laserV = laserOn ? 1 : 0;
-    p.laserC = 0;
-    p.laserD = 0;
+    p.bgLight = (mode == Scanner::ScanMode::MarkerOnly)
+                    ? 40                                        // A 模式补光抬升基线（真机成功配置）
+                    : static_cast<int>(params.get("bgLight").value);
+    p.laserLevel = (mode == Scanner::ScanMode::MarkerOnly)
+                       ? 0
+                       : static_cast<int>(params.get("laserLevel").value);
+    p.laserT = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;
+    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;
+    p.laserC = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;
+    p.laserD = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;
     return p;
 }
 
@@ -383,7 +394,7 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
 // 不再有 N11 H1/FLUSH）。相机先启后发（帧号错位修正口径，见 startCaptureOnLogic）
 std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
     return {{"N10", [this](McuDone cb) {
-                 mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
+                 mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_), std::move(cb));
              }}};
 }
 
@@ -411,20 +422,20 @@ void DeviceManager::toIdleOnLogic() {
 // 采集启停（启=N10（相机先启）/ 停=N11 H0；不切模式；幂等；编队执行）
 // ============================================================================
 
-void DeviceManager::startCapture(bool laserOn) {
-    post([this, laserOn] {
-        captureLaserOn_ = laserOn;               // 采集灯型（逻辑线程属主；N10 组帧生效）
+void DeviceManager::startCapture(Scanner::ScanMode mode) {
+    post([this, mode] {
+        lastCaptureMode_ = mode;                  // 采集灯型（逻辑线程属主；N10 四管掩码组帧生效）
         startCaptureOnLogic();
     });
 }
 
 // —— 灯光直控（用户按钮直调；不启停采集——N10 灯字段即时生效，实测口径同
-//    自检闪灯：固件收到 N10 即按新参数调灯）。二值映射暂版（批3 换 ScanMode）：
-//    laserOn=true → L=账本值 T1V1C0D0；false → L=0 四管全 0；bgOn 同理取账本或 0 ——
-void DeviceManager::setLights(bool bgOn, bool laserOn) {
-    post([this, bgOn, laserOn] {
+//    自检闪灯：固件收到 N10 即按新参数调灯）。激光管按 ScanMode 四管掩码
+//（effectiveN10 同映射）；bgOn=false 压 B=0（可压过 MarkerOnly 的 40 抬升）——
+void DeviceManager::setLights(bool bgOn, Scanner::ScanMode mode) {
+    post([this, bgOn, mode] {
         if (!mcu_->isOpen()) return;
-        hal::CaptureParams p = effectiveN10(*params_, laserOn);
+        hal::CaptureParams p = effectiveN10(*params_, mode);
         if (!bgOn) p.bgLight = 0;
         mcu_->setCaptureParams(p, nullptr);
     });
@@ -432,13 +443,13 @@ void DeviceManager::setLights(bool bgOn, bool laserOn) {
 
 // —— 打光场景封装（灯型三态；组合语义入口，按钮/工作流直调）——
 void DeviceManager::lightsBgOnly() {
-    setLights(/*bgOn=*/true, /*laserOn=*/false);
-    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 打光场景: 只打补光灯（L=0 四管全关）");
+    setLights(/*bgOn=*/true, Scanner::ScanMode::MarkerOnly);   // A 灯型：B=40 L=0 四管全关
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 打光场景: 只打补光灯（MarkerOnly 灯型 B=40 L=0 四管全关）");
 }
 
 void DeviceManager::lightsAllOff() {
-    setLights(/*bgOn=*/false, /*laserOn=*/false);
-    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 打光场景: 全灭");
+    setLights(/*bgOn=*/false, Scanner::ScanMode::MarkerOnly);  // 全零 N10：B0 L0 T0V0C0D0
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 打光场景: 全灭（N11 H0 同语义）");
 }
 
 void DeviceManager::stopCapture() {
@@ -642,10 +653,15 @@ void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore
         }
         return;
     }
+    if (key == "tempReportPeriodMs") {            // N12 T（批3 入 specs；值域 5-1000
+        mcu_->setTempReportPeriod(static_cast<int>(v),   // 入口已在 setValue 钳）
+                                  [done](bool ok, const std::string&) { done(ok); });
+        return;
+    }
     // N10 组参：采集中任一变更即全参重发（N10=启采——参数即时生效）；空闲仅
     // 记账 done(true)（startCapture 时自账本组帧下发）
     if (mode_->isCapturing()) {
-        mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_),
+        mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_),
                                [done](bool ok, const std::string&) { done(ok); });
     } else {
         done(true);

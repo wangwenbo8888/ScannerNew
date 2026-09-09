@@ -336,6 +336,41 @@ TEST(DeviceManager, T5b_StartCaptureN10FromParamAccount) {
     EXPECT_TRUE(dm.isCapturing());
 }
 
+// —— T5c（协议批3·D7）：四模式 N10 四管掩码映射——MarkerOnly 不开激光线
+//      （B=40 抬升基线/L=0/四管全 0）；面片 T1V1；精细 C 管；深孔 D 管
+//      （账本默认 freq 60/bg 10/laser 40；⑨b：单管周期配对归 07 侧待裁决）——
+TEST(DeviceManager, T5c_FourModeN10TubeMasks) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.startCapture(Scanner::ScanMode::FineScan);                // 精细：C 管
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C1 D0 L40"), 1);
+    EXPECT_TRUE(dm.isCapturing());
+    dm.stopCapture();
+    dm.logicTick();
+
+    dm.startCapture(Scanner::ScanMode::DeepHoleScan);            // 深孔：D 管
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C0 D1 L40"), 1);
+    dm.stopCapture();
+    dm.logicTick();
+
+    dm.startCapture(Scanner::ScanMode::MarkerOnly);              // 标点：B=40 抬升+全管灭
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H60 B40 T0 V0 C0 D0 L0"), 1);
+    dm.stopCapture();
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N11 H0"), 3);                          // 三轮启停各一帧收口
+}
+
 // —— T6：菜单全遍历（4 键×3 手势）—— layer2/游标环绕/调节上下文/模式光标可达性 ——
 TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     Scanner::infra::EventBus bus;

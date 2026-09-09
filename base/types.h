@@ -86,9 +86,14 @@ enum class FaultSeverity : uint8_t {
     Critical
 };
 
+// 扫描模式四值（协议 260831 批3·用户裁决 D7 产线激光方案）：
+// 激光管映射——标点 T0V0C0D0 / 面片 T1V1C0D0 / 精细 T0V0C1D0 / 深孔 T0V0C0D1
+//（组帧归 08 effectiveN10；⑨b：精细/深孔单管周期下 07 激光链配对未裁决）
 enum class ScanMode : uint8_t {
-    MarkerOnly = 0,
-    MarkerPlusLaser = 1
+    MarkerOnly = 0,        // 标点扫描：不开激光线（T0 V0 C0 D0）
+    MarkerPlusLaser = 1,   // 面片扫描：左右激光线（T1 V1 C0 D0）
+    FineScan = 2,          // 精细扫描（原「点云扫描」）：C 管（T0 V0 C1 D0）
+    DeepHoleScan = 3,      // 深孔扫描：D 管（T0 V0 C0 D1）
 };
 
 // 健康指标快照（08 侧采集 / 10 侧消费；字段对齐 08 文档差距清单）

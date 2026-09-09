@@ -302,3 +302,26 @@ TEST(ParamStore, SetEntryDirect) {
     ps.setEntryDirect("foo", 1.0, Source::Ui);
     EXPECT_FALSE(ps.has("foo"));                      // 未登记不动账
 }
+
+// —— 15. LegacyFileMigration（协议批3）：旧档 laserSelectA/B 键作废丢弃；
+//      laserLevel>100 旧量纲（0-255）读时钳 100——值口径断言（日志口径不强
+//      断言）；迁移单向：persist 只写 specs 内键，作废键不回写档 ——
+TEST(ParamStore, LegacyFileMigration) {
+    Recorder rec;
+    const std::vector<ParamSpec> specs = {
+        {"exposure", 10.0, 1.0, 100.0},
+        {"laserLevel", 40.0, 0.0, 100.0},
+    };
+    ParamStore ps(specs, rec.dispatch());
+    ps.bootstrap([] {
+        return std::string("laserSelectA=1;laserSelectB=2;laserLevel=150;exposure=12;");
+    });
+    EXPECT_FALSE(ps.has("laserSelectA"));             // 旧协议键作废：不入账
+    EXPECT_FALSE(ps.has("laserSelectB"));
+    EXPECT_EQ(ps.get("laserLevel").value, 100.0);     // 旧量纲迁移：>100 钳 100
+    EXPECT_EQ(ps.get("exposure").value, 12.0);        // 其余键不受影响
+    std::string out;
+    EXPECT_TRUE(ps.persist([&](const std::string& s) { out = s; return true; }));
+    EXPECT_EQ(out.find("laserSelect"), std::string::npos);   // 作废键不回写
+    EXPECT_NE(out.find("laserLevel=100"), std::string::npos); // 钳后值入档
+}

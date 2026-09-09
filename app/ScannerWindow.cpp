@@ -3,12 +3,9 @@
 #include "IWorkflow.h"
 #include "ScanWorkflow.h"
 #include "CalibrationWorkflow.h"
-// KeyManager.h 的 emit() 方法名与 Qt 的 emit 宏冲突（本 TU Qt 头先入）——
-// 包含 DeviceManager.h 链前临时摘宏、事后还原（下方 Qt emit 发信号不受影响）
-#pragma push_macro("emit")
-#undef emit
+//（原 KeyManager emit 宏守卫已删：KeyManager 随协议批1 退役，08 头链无 emit
+// 标识符冲突；本 TU 自身 emit 信号走 Qt 宏展开不受影响）
 #include "modules/08_devicemgmt/DeviceManager.h"
-#pragma pop_macro("emit")
 #include "modules/08_devicemgmt/HardwareMonitor.h"
 #include "StateMachine.h"
 #include "CommandGate.h"
@@ -84,12 +81,12 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
     connect(ui.horizontalSlider_Laser_Lighting, &QSlider::valueChanged, this, &ScannerWindow::onSliderLaserChanged);
     connect(ui.horizontalSlider_ExposeTime, &QSlider::valueChanged, this, &ScannerWindow::onSliderExposeChanged);
 
-    // A-T17 修复（运行时钳，.ui 不动）：滑条范围对齐 ParamStore spec
-    // （freq 20-120 默认 50 / bg 0-100 默认 60 / laser 0-100 默认 60——灯控量程实测
-    // 0-100），初值自账本快照同步——setValue 触发 valueChanged→setParam 同值记账
-    //（无副作用）
+    // A-T17 修复（运行时钳，.ui 设计量程同步）：滑条范围对齐 ParamStore spec
+    // （协议批3 终态：freq 1-200 默认 60 / bg 0-100 默认 10 / laser 0-100 默认
+    // 40——灯控量程实测 0-100），初值自账本快照同步——setValue 触发
+    // valueChanged→setParam 同值记账（无副作用）
     if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
-        ui.horizontalSlider_Freq->setRange(20, 120);
+        ui.horizontalSlider_Freq->setRange(1, 200);
         ui.horizontalSlider_Background_Lighting->setRange(0, 100);
         ui.horizontalSlider_Laser_Lighting->setRange(0, 100);
         ui.horizontalSlider_Freq->setValue(
@@ -221,7 +218,8 @@ void ScannerWindow::onOpenScannerCamera()
     if (!startDeviceOp()) return;
     ui.textEdit_Info->append("正在打开设备（相机+下位机）…");
     m_devThread = std::thread([this, dm] {
-        // open 一条龙：相机→MCU（自动搜口）→参数→N12Z1→逻辑线程（幂等：已开直返 ok）
+        // open 一条龙：相机→MCU（自动搜口 N12 T100 探测）→参数→N12 定版→逻辑
+        // 线程（幂等：已开直返 ok）
         const auto r = dm->open();
         QMetaObject::invokeMethod(this, [this, r] {
             endDeviceOp();
@@ -232,8 +230,8 @@ void ScannerWindow::onOpenScannerCamera()
                 m_appCtx->notifySelfCheckItem("serialPort", r.success);
             }
             if (r.success) {
-                // 灯态策略：开相机不亮灯——点"开始扫描仪"（N10 账本全参+N11H1）才亮，
-                // 停扫描/关相机即灭；启动自检的闪灯仅检测用
+                // 灯态策略：开相机不亮灯——点"开始扫描仪"（N10 按模式组帧=启采）
+                // 才亮，停扫描/关相机即灭（N11 H0）；启动自检的闪灯仅检测用
                 if (m_consumerTimer && !m_consumerTimer->isActive())
                     m_consumerTimer->start(100);   // 预览定时器复活（关闭时停过）
             }
@@ -279,12 +277,12 @@ void ScannerWindow::onStartScanner()
     }
 
     // A-T17 串口旁路收口：原 N10/N11 手拼串口命令删除——采集参数经 ParamStore
-    // 账本（startCapture 命令组 [N10 账本全参→N11H1] 下发+相机开流；滑条改值
+    // 账本（startCapture 单步 N10 自账本组帧下发+相机开流；滑条改值
     // 经 setParam 记账，采集中变更即全参重发）
     const int expose = ui.horizontalSlider_ExposeTime->value();
     dm->setParam("exposure", expose, Scanner::device::ParamEntry::Source::Ui);
 
-    // 帧出口接线 + 采集启动（门面 startCapture 内含 N11 H1 与相机开流；
+    // 帧出口接线 + 采集启动（门面 startCapture 内含 N10 启采与相机开流；
     // 帧回调双投递——预览 FrameBuffer ＋ 扫描会话环（02 pushSessionFrame：
     // enrich 出口查表→SlotRing，非扫描期该口自弃）。
     // 帧温＝MCU 末帧温度互斥快照（首路有效取之，否则 25℃ 缺省档）
@@ -298,13 +296,14 @@ void ScannerWindow::onStartScanner()
                                                        tempC, frame.frameId);
         }
     });
-    dm->startCapture();
+    dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 面片默认（四管掩码 T1V1C0D0）
 
-    // P5-T15 ①：经统一命令通道点火扫描（门禁 S2→S4/S5；payload=ScanMode 0/1
-    // 只喂状态机 S4/S5 判别——handler 无参拿不到，模式经 setScanMode 先设进
-    // 工作流）。面片扫描默认请求 B 模式（标记点+激光）——02 装配时查激光
-    // 温度表（mapData）：缺表自动降级 A 并日志告警（§8-1 生产者缺口）。
-    // 拒绝＝流程不走的打印点：UI 提示＋JMW_LOG 双出口（gate 内亦有一道）
+    // P5-T15 ①：经统一命令通道点火扫描（门禁 S2→S4/S5；payload=ScanMode 四值
+    // 喂状态机 S4/S5 判别——0=标点→S4，1-3=含激光形态→S5（⑨b 暂并入）；handler
+    // 无参拿不到，模式经 setScanMode 先设进工作流）。面片扫描默认请求 B 模式
+    // （标记点+激光）——02 装配时查激光温度表（mapData）：缺表自动降级 A 并日志
+    // 告警（§8-1 生产者缺口）。拒绝＝流程不走的打印点：UI 提示＋JMW_LOG 双出口
+    //（gate 内亦有一道）
     if (m_appCtx && m_appCtx->scanWorkflow()) {
         const auto mode = Scanner::ScanMode::MarkerPlusLaser;
         m_appCtx->scanWorkflow()->setScanMode(mode);
@@ -382,8 +381,8 @@ void ScannerWindow::onStopScanner()
 // ============================================================================
 void ScannerWindow::onCalibrateClicked()
 {
-    // 标定采集=采集链全编排（N10+N11+开流）——2026-08-21 实施裁定：标定需补光
-    // 与触发时序，与扫描同构（不走 enterCalibration 的 N16 路径）
+    // 标定采集=采集链全编排（N10 启采+开流）——2026-08-21 实施裁定：标定需补光
+    // 与触发时序，与扫描同构（不走 enterCalibration 的纯软件落板路径）
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!m_appCtx || !m_appCtx->calibWorkflow()) {
         ui.textEdit_Info->append("标定工作流不可用");
@@ -404,12 +403,12 @@ void ScannerWindow::onCalibrateClicked()
         });
     });
 
-    // 启动采集供标定使用（经门面：帧出口接线 + N11 H1 + 开流）
+    // 启动采集供标定使用（经门面：帧出口接线 + N10 启采 + 开流）
     if (!dm->isCapturing()) {
         dm->startFrameStream([this](const Scanner::hal::StereoFrame& frame) {
             pushFrameToBuffer(frame);
         });
-        dm->startCapture();
+        dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 缺省 B 灯型（与原缺省行为一致）
     }
 
     // P5-T14：经统一命令通道点火（门禁 S2→S3）——initialize+start 移入 gate
