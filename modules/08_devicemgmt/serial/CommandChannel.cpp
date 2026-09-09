@@ -1,5 +1,5 @@
 // ============================================================================
-// CommandChannel.cpp — 实现见头文件契约（设计方案 §2.3）
+// CommandChannel.cpp — 实现见头文件契约（协议 260831：盲发口径 D8）
 // ============================================================================
 #include "serial/CommandChannel.h"
 
@@ -7,8 +7,7 @@ namespace Scanner::device::serial {
 
 CommandChannel::CommandChannel(Deps d) : deps_(std::move(d)) {
     if (!deps_.write) deps_.write = [](const std::string&) { return false; };  // 空写=恒失败
-    if (!deps_.nowMs) deps_.nowMs = [] { return 0; };                          // 空钟=恒 0
-    if (deps_.ackTimeoutMs < 1) deps_.ackTimeoutMs = 1;                        // 防 tick 活锁
+    // codec 空保留：裸载荷直发（现口径延续）
 }
 
 bool CommandChannel::writeFrame(const std::string& payload) {
@@ -17,27 +16,8 @@ bool CommandChannel::writeFrame(const std::string& payload) {
 }
 
 void CommandChannel::send(const std::string& payload, DoneCb onDone) {
-    if (!deps_.reliable) {  // 盲发：写失败即败（D8）——批2 此分支成为唯一形态
-        const bool ok = writeFrame(payload);
-        if (onDone) onDone(ok, ok ? "未确认" : payload);
-        return;
-    }
-    bool evicted = false;
-    PendingCmd victim;
-    if (table_.size() >= kTableCap) {  // 满：最旧先判超时
-        victim = std::move(table_.front());
-        table_.erase(table_.begin());
-        evicted = true;
-    }
-    PendingCmd e;
-    e.seq = 0;   // 260831 无 seq（机制批2 整删——表项 seq 恒 0）
-    e.payload = payload;
-    e.onDone = std::move(onDone);
-    e.attempts = 1;
-    e.dueMs = deps_.nowMs() + deps_.ackTimeoutMs;
-    writeFrame(payload);
-    table_.push_back(std::move(e));
-    if (evicted) failEntry(std::move(victim));  // 先挂新再补发被逐回调（回调内可再 send）
+    const bool ok = writeFrame(payload);
+    if (onDone) onDone(ok, ok ? "未确认" : payload);   // 写成败同步回告（写队列即返）
 }
 
 void CommandChannel::sendFireAndForget(const std::string& payload) {
@@ -49,72 +29,15 @@ void CommandChannel::sendGroup(std::vector<std::string> payloads, DoneCb onGroup
         if (onGroupDone) onGroupDone(true, "");
         return;
     }
-    std::string first = std::move(payloads.front());
-    payloads.erase(payloads.begin());
-    send(first, [this, rest = std::move(payloads), onGroupDone = std::move(onGroupDone)](
-                    bool ok, const std::string& p) {
-        if (!ok) {  // 任一步 3 败 → 整组短路（后续不发）
-            if (onGroupDone) onGroupDone(false, p);
+    std::string last;
+    for (size_t i = 0; i < payloads.size(); ++i) {   // 索引循环：回调内可再 send（无迭代器失效）
+        if (!writeFrame(payloads[i])) {
+            if (onGroupDone) onGroupDone(false, payloads[i]);   // 写败短路：后续不发
             return;
         }
-        if (rest.empty()) {  // 组全 ACK → 组成功回调一次
-            if (onGroupDone) onGroupDone(true, p);
-            return;
-        }
-        sendGroup(rest, onGroupDone);  // 前条 ACK 完成回调里发下一条
-    });
-}
-
-void CommandChannel::onAck(uint16_t ackedSeq) {
-    for (size_t i = 0; i < table_.size(); ++i) {
-        if (table_[i].seq == ackedSeq) {
-            PendingCmd e = std::move(table_[i]);
-            table_.erase(table_.begin() + i);  // 先销项再回调（回调内可再 send）
-            if (e.onDone) e.onDone(true, e.payload);
-            return;
-        }
+        last = payloads[i];
     }
-}
-
-void CommandChannel::tick() {
-    if (!deps_.reliable) return;
-    for (;;) {  // 表序处理，同 tick 排空全部到期项
-        const int64_t now = deps_.nowMs();
-        size_t idx = table_.size();
-        for (size_t i = 0; i < table_.size(); ++i) {
-            if (now >= table_[i].dueMs) {
-                idx = i;
-                break;
-            }
-        }
-        if (idx == table_.size()) break;
-        if (table_[idx].attempts >= 1 + deps_.maxRetries) {  // 已用尽仍挂表（防御）→ 直判
-            PendingCmd dead = std::move(table_[idx]);
-            table_.erase(table_.begin() + idx);
-            failEntry(std::move(dead));
-            continue;
-        }
-        const uint16_t seq = table_[idx].seq;      // 拷贝字段——write 期间不持表内引用
-        const std::string payload = table_[idx].payload;  //（write 可重入 send/onAck 改表）
-        writeFrame(payload);                       // 重传（write 失败同计数——尝试已消耗）
-        for (size_t i = 0; i < table_.size(); ++i) {  // 按 seq 重取（重入已销项则跳过）
-            if (table_[i].seq != seq) continue;
-            PendingCmd& e = table_[i];             // 此引用不再跨 writeFrame 持有
-            ++e.attempts;
-            e.dueMs = now + deps_.ackTimeoutMs;
-            if (e.attempts >= 1 + deps_.maxRetries) {  // 最后一发与判败同 tick 收口（3 败）
-                PendingCmd dead = std::move(e);
-                table_.erase(table_.begin() + i);
-                failEntry(std::move(dead));
-            }
-            break;
-        }
-    }
-}
-
-void CommandChannel::failEntry(PendingCmd e) {
-    if (e.onDone) e.onDone(false, e.payload);
-    if (onFault) onFault(e.payload, e.attempts);
+    if (onGroupDone) onGroupDone(true, last);        // 组成功载荷=末步载荷
 }
 
 } // namespace Scanner::device::serial

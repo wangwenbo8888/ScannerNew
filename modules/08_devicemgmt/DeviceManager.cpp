@@ -85,8 +85,7 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
         for (size_t i = 0; i < paramKeys_.size(); ++i)
             if (paramKeys_[i] == key) idx = static_cast<int64_t>(i);
         publishEvent(EventType::UserDefined, idx, 0);   // base 暂无 ParamChanged——占位
-        JMW_LOG_DEBUG("08-DeviceManager", "[DeviceManager] 参数改账 {}={:.3f} confirmed={}", key, e.value,
-                      e.confirmed);
+        JMW_LOG_DEBUG("08-DeviceManager", "[DeviceManager] 参数改账 {}={:.3f}", key, e.value);
     };
     mode_->onChange = [this](DeviceMode oldM, DeviceMode newM) {
         publishEvent(EventType::StateChanged, static_cast<int64_t>(newM),
@@ -637,19 +636,19 @@ void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore
     if (key == "exposure") {
         if (camera_ && camera_->isOpen()) {
             const Result r = camera_->setExposure(v);
-            done(r.success, r.success);
+            done(r.success);
         } else {
-            done(true, true);                     // 无相机=纯记账（真机必接相机）
+            done(true);                            // 无相机=纯记账（真机必接相机）
         }
         return;
     }
     // N10 组参：采集中任一变更即全参重发（N10=启采——参数即时生效）；空闲仅
-    // 记账 done(true,false)（startCapture 时自账本组帧下发）
+    // 记账 done(true)（startCapture 时自账本组帧下发）
     if (mode_->isCapturing()) {
         mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_),
-                               [done](bool ok, const std::string&) { done(ok, ok); });
+                               [done](bool ok, const std::string&) { done(ok); });
     } else {
-        done(true, false);
+        done(true);
     }
 }
 

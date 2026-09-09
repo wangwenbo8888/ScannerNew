@@ -45,7 +45,7 @@ ParamStore::ParamStore(std::vector<ParamSpec> specs, Dispatch dispatch)
     : dispatch_(std::move(dispatch)) {
     for (auto& s : specs) {
         specs_[s.key] = s;
-        entries_[s.key] = ParamEntry{s.def, false, ParamEntry::Source::Boot};
+        entries_[s.key] = ParamEntry{s.def, ParamEntry::Source::Boot};
     }
 }
 
@@ -56,7 +56,7 @@ void ParamStore::bootstrap(Load load) {
     for (const auto& [key, spec] : specs_) {
         const auto it = file.find(key);                        // 未知 key 天然忽略
         const double v = (it != file.end()) ? clampToSpec(spec, it->second) : spec.def;
-        const ParamEntry e{v, false, ParamEntry::Source::Boot};
+        const ParamEntry e{v, ParamEntry::Source::Boot};
         entries_[key] = e;
         if (onParamChanged) onParamChanged(key, e);            // 逐参数广播（含默认值项）
     }
@@ -69,12 +69,12 @@ void ParamStore::setValue(const std::string& key, double v, ParamEntry::Source s
     const uint64_t gen = ++genSeq_;
     inflight_[key] = InFlight{clamped, gen};                   // 同 key 后值胜出（覆盖旧在途）
     if (!dispatch_) return;                                    // 无下发通道（测试/装配前）保在途记账
-    dispatch_(key, clamped, [this, key, clamped, src, gen](bool ok, bool confirmed) {
+    dispatch_(key, clamped, [this, key, clamped, src, gen](bool ok) {
         const auto fl = inflight_.find(key);
         if (fl == inflight_.end() || fl->second.gen != gen) return;   // 已被后值/bootstrap 取代
         inflight_.erase(fl);                                   // 出队（成败皆决）
         if (ok) {
-            const ParamEntry e{clamped, confirmed, src};       // v3: confirmed=ok；v2: 恒 false
+            const ParamEntry e{clamped, src};                   // 写成败直通（无 ACK 语义）
             entries_[key] = e;
             if (onParamChanged) onParamChanged(key, e);        // 改账后广播
         } else if (onReject) {
@@ -101,10 +101,10 @@ bool ParamStore::has(const std::string& key) const { return specs_.count(key) > 
 
 bool ParamStore::pending(const std::string& key) const { return inflight_.count(key) > 0; }
 
-void ParamStore::setEntryDirect(const std::string& key, double v, bool confirmed, ParamEntry::Source src) {
+void ParamStore::setEntryDirect(const std::string& key, double v, ParamEntry::Source src) {
     const auto it = entries_.find(key);
     if (it == entries_.end()) return;                          // 未登记不动账
-    it->second = ParamEntry{clampToSpec(specs_.at(key), v), confirmed, src};  // 静默写：不广播
+    it->second = ParamEntry{clampToSpec(specs_.at(key), v), src};  // 静默写：不广播
 }
 
 } // namespace Scanner::device

@@ -50,8 +50,8 @@
 //     登记序号，sourceId=8 标 08 来源）；
 //   - 按键门禁（KeySemantics gate）= !isCapturing（M1：采集态菜单/模式/调节键
 //     丢弃；启停键不问门禁）；
-//   - N10 组参 Dispatch：采集中全参重发；空闲仅记账 done(true,false)；exposure
-//     相机直设，无相机=纯记账 done(true,true)。
+//   - N10 组参 Dispatch：采集中全参重发；空闲仅记账 done(true)；exposure
+//     相机直设，无相机=纯记账 done(true)。
 // ============================================================================
 
 #include "IScannerCamera.h"

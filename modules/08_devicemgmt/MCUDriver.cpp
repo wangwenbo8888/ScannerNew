@@ -19,11 +19,6 @@ namespace Scanner::device {
 
 namespace {
 
-int64_t steadyNowMs() {   // 单调时钟：CommandChannel 对账用（机制批2 随 reliable 整删）
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
 Scanner::TimestampMs systemNowMs() {   // 墙钟：上行帧时间戳/心跳（对齐 base TimestampMs 口径）
     return static_cast<Scanner::TimestampMs>(std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch()).count());
@@ -48,8 +43,6 @@ serial::CommandChannel::Deps MCUDriver::makeDeps() {
     serial::CommandChannel::Deps d;
     d.codec = &codec_;
     d.write = [this](const std::string& f) { return writeFrame(f); };
-    d.nowMs = [] { return steadyNowMs(); };
-    d.reliable = false;   // 260831 无 ACK——盲发口径 D8（reliable/onAck/tick 机制批2 整删）
     return d;
 }
 
@@ -133,7 +126,7 @@ Scanner::Result MCUDriver::open(const std::string& port) {
 Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     if (open_.load()) return Scanner::Result::ok("MCU已打开");
     codec_ = serial::FrameCodec{};                  // 复位半帧挂起缓冲（重开语义）
-    channel_ = serial::CommandChannel(makeDeps());  // 重建依赖（清残留待确认表）
+    channel_ = serial::CommandChannel(makeDeps());  // 重建依赖（重开会话干净起点）
     // reopen 复位：排空残留上行环 + 清观测计数/心跳——上一会话数据不串染
     drainRing(gestureRing_);
     drainRing(tempRing_);

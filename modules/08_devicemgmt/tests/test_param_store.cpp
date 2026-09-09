@@ -1,21 +1,20 @@
 // ============================================================================
-// test_param_store.cpp — ParamStore 参数账本单测（D-T10）
+// test_param_store.cpp — ParamStore 参数账本单测（D-T10；批2 去 confirmed）
 //
-// 契约钉死（2026-08-18 设计 §2.5 + 2026-08-20 设计 §4-5 确认更新制）：
-//   - 开机装载：Load 有档→按档改账（confirmed=false, source=Boot；未知/坏档段
-//     忽略；越界钳回 spec 范围）；无档→默认值。均逐参数广播 onParamChanged；
-//     bootstrap 清在途（会话重启语义——迟到回调一律 gen 失配作废）；
+// 契约钉死（协议 260831：无 ACK——Done=写成败直通）：
+//   - 开机装载：Load 有档→按档改账（source=Boot；未知/坏档段忽略；越界钳回
+//     spec 范围）；无档→默认值。均逐参数广播 onParamChanged；bootstrap 清在途
+//     （会话重启语义——迟到回调一律 gen 失配作废）；
 //   - 设值：唯一入口（UI 滑条/按键步进同队列串行——单线程属主=逻辑线程）；
 //     入口即钳 spec 范围；未登记 key 不下发不广播；
-//   - Dispatch 完成回调口径 void(bool ok, bool confirmed)（D-T10 裁定）：
-//     v3=cb(ACK结果, ACK结果)；v2=cb(true, false)。ok→改账+广播 onParamChanged；
-//     !ok→保旧值+onReject(key, oldValue) 恰一次、无广播；
+//   - Dispatch 完成回调口径 void(bool ok)（批2 裁定）：ok=写成败（盲发直通）。
+//     ok→改账+广播 onParamChanged；!ok→保旧值+onReject(key, oldValue) 恰一次、
+//     无广播；
 //   - 在途后值胜出：同 key 再 setValue 覆盖在途（gen 判据）——旧回调到达
 //     （无论成败）不改账不弹回；
 //   - persist/bootstrap 手写极简格式 "key=value;..."（08 不引 json 库），
 //     存取全经注入回调（06 无直链）；人工触发才落盘；
 //   - setEntryDirect：直接改账不经下发、不广播（bootstrap 同源的静默写路径）。
-// 用例 = 实施计划 Task 10 十二条 + 钳档/直写两条补钉。
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -60,16 +59,14 @@ TEST(ParamStore, BootstrapNoFile) {
     };
     ps.bootstrap([] { return std::string(""); });
     EXPECT_EQ(ps.get("exposure").value, 10.0);       // 默认值
-    EXPECT_FALSE(ps.get("exposure").confirmed);
     EXPECT_EQ(ps.get("exposure").source, Source::Boot);
     EXPECT_EQ(ps.get("laser").value, 200.0);
-    EXPECT_FALSE(ps.get("laser").confirmed);
     ASSERT_EQ(changed.size(), 2u);                    // 每参数恰一次
     EXPECT_TRUE(ps.has("exposure") && ps.has("laser"));
     EXPECT_TRUE(rec.calls.empty());                   // 装载不下发
 }
 
-// —— 2. BootstrapFromFile：按档改账 confirmed=false；未知 key/坏数值段忽略 ——
+// —— 2. BootstrapFromFile：按档改账 source=Boot；未知 key/坏数值段忽略 ——
 TEST(ParamStore, BootstrapFromFile) {
     Recorder rec;
     ParamStore ps(demoSpecs(), rec.dispatch());
@@ -79,15 +76,15 @@ TEST(ParamStore, BootstrapFromFile) {
     };
     ps.bootstrap([] { return std::string("exposure=15;laser=abc;foo=1;"); });
     EXPECT_EQ(ps.get("exposure").value, 15.0);        // 按档
-    EXPECT_FALSE(ps.get("exposure").confirmed);       // 读档不等于 ACK 确认
     EXPECT_EQ(ps.get("exposure").source, Source::Boot);
     EXPECT_EQ(ps.get("laser").value, 200.0);          // laser=abc 坏段忽略 → 默认
     EXPECT_FALSE(ps.has("foo"));                      // 未知 key 忽略
     ASSERT_EQ(changed.size(), 2u);                    // 仍每参数广播一次
 }
 
-// —— 3. SetAckConfirm：setValue → dispatch(key,期望值) → cb(true,true) 改账+广播 ——
-TEST(ParamStore, SetAckConfirm) {
+// —— 3. SetWriteSuccess（原 SetAckConfirm 改写）：setValue → dispatch(key,期望值)
+//    → cb(true) 改账+广播（写成败直通——无 ACK 语义）——
+TEST(ParamStore, SetWriteSuccess) {
     Recorder rec;
     ParamStore ps(demoSpecs(), rec.dispatch());
     std::vector<std::pair<std::string, ParamEntry>> changed;
@@ -99,21 +96,21 @@ TEST(ParamStore, SetAckConfirm) {
     EXPECT_EQ(rec.calls[0].first, "exposure");
     EXPECT_EQ(rec.calls[0].second, 15.0);
     EXPECT_TRUE(ps.pending("exposure"));              // 在途未决
-    EXPECT_EQ(ps.get("exposure").value, 10.0);        // ACK 前不改账
-    rec.cbs[0](true, true);                           // v3：ACK 成功
+    EXPECT_EQ(ps.get("exposure").value, 10.0);        // 回调前不改账
+    rec.cbs[0](true);                                 // 写成功（直通）
     const ParamEntry e = ps.get("exposure");
     EXPECT_EQ(e.value, 15.0);                         // 改账
-    EXPECT_TRUE(e.confirmed);                         // confirmed=ok
     EXPECT_EQ(e.source, Source::Ui);
     EXPECT_FALSE(ps.pending("exposure"));             // 已决
     ASSERT_EQ(changed.size(), 1u);                    // 广播恰一次（改账后）
     EXPECT_EQ(changed[0].first, "exposure");
     EXPECT_EQ(changed[0].second.value, 15.0);
-    EXPECT_TRUE(changed[0].second.confirmed);
+    EXPECT_EQ(changed[0].second.source, Source::Ui);
 }
 
-// —— 4. SetThreeFailReject：cb(false,*) → 账保旧值 + onReject 恰一次 + 无广播 ——
-TEST(ParamStore, SetThreeFailReject) {
+// —— 4. SetWriteFailReject（原 SetThreeFailReject 改写）：cb(false) → 账保旧值 +
+//    onReject 恰一次 + 无广播（写失败即终报——重试机制已随批2 删）——
+TEST(ParamStore, SetWriteFailReject) {
     Recorder rec;
     ParamStore ps(demoSpecs(), rec.dispatch());
     std::vector<std::pair<std::string, ParamEntry>> changed;
@@ -124,10 +121,9 @@ TEST(ParamStore, SetThreeFailReject) {
     ps.onReject = [&](const std::string& k, double oldV) { rejects.emplace_back(k, oldV); };
     ps.setValue("exposure", 15.0, Source::Ui);
     ASSERT_EQ(rec.calls.size(), 1u);
-    rec.cbs[0](false, false);                         // 3 败终报（重试归 CommandChannel）
+    rec.cbs[0](false);                                // 写失败即终报
     const ParamEntry e = ps.get("exposure");
     EXPECT_EQ(e.value, 10.0);                         // 保旧值（默认账）
-    EXPECT_FALSE(e.confirmed);
     EXPECT_EQ(e.source, Source::Boot);
     ASSERT_EQ(rejects.size(), 1u);                    // 弹回恰一次
     EXPECT_EQ(rejects[0].first, "exposure");
@@ -136,28 +132,10 @@ TEST(ParamStore, SetThreeFailReject) {
     EXPECT_FALSE(ps.pending("exposure"));
 }
 
-// —— 5. V2ImmediateConfirmedFalse：cb(true,false) → 改账 confirmed=false（v2 期望值）——
-TEST(ParamStore, V2ImmediateConfirmedFalse) {
-    Recorder rec;
-    ParamStore ps(demoSpecs(), rec.dispatch());
-    std::vector<std::pair<std::string, ParamEntry>> changed;
-    ps.onParamChanged = [&](const std::string& k, const ParamEntry& e) {
-        changed.emplace_back(k, e);
-    };
-    std::vector<std::pair<std::string, double>> rejects;
-    ps.onReject = [&](const std::string& k, double oldV) { rejects.emplace_back(k, oldV); };
-    ps.setValue("exposure", 15.0, Source::Ui);
-    ASSERT_EQ(rec.calls.size(), 1u);
-    rec.cbs[0](true, false);                          // v2：无 ACK 立即成功但不确认
-    const ParamEntry e = ps.get("exposure");
-    EXPECT_EQ(e.value, 15.0);                         // 立即改账
-    EXPECT_FALSE(e.confirmed);                        // 期望值（未读回确认）
-    EXPECT_EQ(e.source, Source::Ui);
-    ASSERT_EQ(changed.size(), 1u);                    // 改账仍广播
-    EXPECT_TRUE(rejects.empty());                     // 不弹回
-}
+// —— 5.（原 V2ImmediateConfirmedFalse 删：v3/v2 双模式随 confirmed 亡——写成败
+//    直通单一语义，已并入用例 3）——
 
-// —— 6. InFlightLastWins：后值覆盖在途——旧回调（含 3 败）到达不改账不弹回 ——
+// —— 6. InFlightLastWins：后值覆盖在途——旧回调（含写败）到达不改账不弹回 ——
 TEST(ParamStore, InFlightLastWins) {
     Recorder rec;
     ParamStore ps(demoSpecs(), rec.dispatch());
@@ -171,15 +149,14 @@ TEST(ParamStore, InFlightLastWins) {
     ps.setValue("exposure", 7.0, Source::Ui);         // gen2 取代 gen1
     ASSERT_EQ(rec.calls.size(), 2u);
     EXPECT_TRUE(ps.pending("exposure"));
-    rec.cbs[0](false, false);                         // gen1 的 3 败迟到 → 已被取代
+    rec.cbs[0](false);                                // gen1 的写败迟到 → 已被取代
     EXPECT_EQ(ps.get("exposure").value, 10.0);        // 不改账
     EXPECT_TRUE(rejects.empty());                     // 不弹回
     EXPECT_TRUE(changed.empty());
     EXPECT_TRUE(ps.pending("exposure"));              // gen2 仍在途
-    rec.cbs[1](true, true);                           // gen2 ACK 成功
+    rec.cbs[1](true);                                 // gen2 写成功
     const ParamEntry e = ps.get("exposure");
     EXPECT_EQ(e.value, 7.0);
-    EXPECT_TRUE(e.confirmed);
     EXPECT_FALSE(ps.pending("exposure"));
     ASSERT_EQ(changed.size(), 1u);
 }
@@ -194,8 +171,8 @@ TEST(ParamStore, RangeClampAtEntry) {
     ps.setValue("laser", -5.0, Source::Key);          // min=0
     ASSERT_EQ(rec.calls.size(), 2u);
     EXPECT_EQ(rec.calls[1].second, 0.0);
-    rec.cbs[0](true, true);
-    rec.cbs[1](true, true);
+    rec.cbs[0](true);
+    rec.cbs[1](true);
     EXPECT_EQ(ps.get("exposure").value, 100.0);       // 落账也是钳后值
     EXPECT_EQ(ps.get("laser").value, 0.0);
 }
@@ -211,8 +188,8 @@ TEST(ParamStore, TwoSourcesSameQueue) {
     EXPECT_EQ(rec.calls[0].second, 5.0);
     EXPECT_EQ(rec.calls[1].first, "laser");
     EXPECT_EQ(rec.calls[1].second, 220.0);
-    rec.cbs[0](true, true);
-    rec.cbs[1](true, true);
+    rec.cbs[0](true);
+    rec.cbs[1](true);
     EXPECT_EQ(ps.get("exposure").source, Source::Ui);
     EXPECT_EQ(ps.get("laser").source, Source::Key);
     EXPECT_EQ(ps.get("exposure").value, 5.0);
@@ -225,10 +202,10 @@ TEST(ParamStore, PersistRoundTrip) {
     ParamStore ps(demoSpecs(), rec.dispatch());
     ps.setValue("exposure", 15.0, Source::Ui);
     ASSERT_EQ(rec.calls.size(), 1u);
-    rec.cbs[0](true, true);                           // 确认值 15
+    rec.cbs[0](true);                                 // 写成功入账 15
     ps.setValue("laser", 220.0, Source::Key);
     ASSERT_EQ(rec.calls.size(), 2u);
-    rec.cbs[1](true, false);                          // v2 期望值 220
+    rec.cbs[1](true);
     std::string json;
     const bool ok = ps.persist([&](const std::string& s) { json = s; return true; });
     EXPECT_TRUE(ok);
@@ -238,7 +215,6 @@ TEST(ParamStore, PersistRoundTrip) {
     ps2.bootstrap([&] { return json; });
     EXPECT_EQ(ps2.get("exposure").value, 15.0);       // 往返一致
     EXPECT_EQ(ps2.get("laser").value, 220.0);
-    EXPECT_FALSE(ps2.get("exposure").confirmed);      // 档不携带确认位
     EXPECT_EQ(ps2.get("exposure").source, Source::Boot);
     EXPECT_TRUE(rec2.calls.empty());
 }
@@ -256,7 +232,6 @@ TEST(ParamStore, UnknownKeyIgnored) {
     EXPECT_TRUE(changed.empty());                     // 不广播
     EXPECT_FALSE(ps.has("foo"));
     EXPECT_EQ(ps.get("foo").value, 0.0);              // 未登记 get → 零值
-    EXPECT_FALSE(ps.get("foo").confirmed);
     EXPECT_FALSE(ps.pending("foo"));
 }
 
@@ -269,11 +244,11 @@ TEST(ParamStore, PendingQuery) {
     ASSERT_EQ(rec.calls.size(), 1u);
     EXPECT_TRUE(ps.pending("exposure"));              // 在途
     EXPECT_FALSE(ps.pending("laser"));
-    rec.cbs[0](true, true);
+    rec.cbs[0](true);
     EXPECT_FALSE(ps.pending("exposure"));             // 已决
     ps.setValue("exposure", 20.0, Source::Ui);
     ASSERT_EQ(rec.calls.size(), 2u);
-    rec.cbs[1](false, false);                         // 败也出队
+    rec.cbs[1](false);                                // 败也出队
     EXPECT_FALSE(ps.pending("exposure"));
 }
 
@@ -284,7 +259,7 @@ TEST(ParamStore, BootstrapOverwritesRuntime) {
     ParamStore ps(demoSpecs(), rec.dispatch());
     ps.setValue("exposure", 15.0, Source::Ui);
     ASSERT_EQ(rec.calls.size(), 1u);
-    rec.cbs[0](true, true);                           // 15 已确认入账
+    rec.cbs[0](true);                                 // 15 已入账
     EXPECT_EQ(ps.get("exposure").value, 15.0);
     ps.setValue("exposure", 17.0, Source::Ui);        // gen2 在途不回调
     ASSERT_EQ(rec.calls.size(), 2u);
@@ -292,11 +267,10 @@ TEST(ParamStore, BootstrapOverwritesRuntime) {
     ps.bootstrap([] { return std::string("exposure=20;"); });
     const ParamEntry e = ps.get("exposure");
     EXPECT_EQ(e.value, 20.0);                         // 按档覆盖
-    EXPECT_FALSE(e.confirmed);
     EXPECT_EQ(e.source, Source::Boot);
     EXPECT_EQ(ps.get("laser").value, 200.0);          // 档缺 → 默认
     EXPECT_FALSE(ps.pending("exposure"));             // 在途清空
-    rec.cbs[1](true, true);                           // gen2 迟到 → 作废
+    rec.cbs[1](true);                                 // gen2 迟到 → 作废
     EXPECT_EQ(ps.get("exposure").value, 20.0);        // 账不动
 }
 
@@ -317,15 +291,14 @@ TEST(ParamStore, SetEntryDirect) {
     ps.onParamChanged = [&](const std::string& k, const ParamEntry& e) {
         changed.emplace_back(k, e);
     };
-    ps.setEntryDirect("exposure", 42.0, true, Source::Key);
+    ps.setEntryDirect("exposure", 42.0, Source::Key);
     const ParamEntry e = ps.get("exposure");
     EXPECT_EQ(e.value, 42.0);
-    EXPECT_TRUE(e.confirmed);
     EXPECT_EQ(e.source, Source::Key);
     EXPECT_TRUE(rec.calls.empty());                   // 不经下发
     EXPECT_TRUE(changed.empty());                     // 不广播
-    ps.setEntryDirect("exposure", 500.0, false, Source::Ui);
+    ps.setEntryDirect("exposure", 500.0, Source::Ui);
     EXPECT_EQ(ps.get("exposure").value, 100.0);       // 直写同样钳范围
-    ps.setEntryDirect("foo", 1.0, true, Source::Ui);
+    ps.setEntryDirect("foo", 1.0, Source::Ui);
     EXPECT_FALSE(ps.has("foo"));                      // 未登记不动账
 }
