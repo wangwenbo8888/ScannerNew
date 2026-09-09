@@ -69,9 +69,13 @@ TEST_F(MarkerMatchCPUParamTest, ZeroYToleranceThrows) {
     EXPECT_THROW(p.validate(), std::invalid_argument);
 }
 
-TEST_F(MarkerMatchCPUParamTest, YToleranceAboveOneThrows) {
-    auto p = defaultParams_; p.y_tolerance = 1.1f;
+// 上限随 2026-08-31 真机定版放宽至 (0,10]（像素口径）——1.1 现为合法值，
+// 仅 >10 抛（原 AboveOne 断言对旧 (0,1] 域过期）
+TEST_F(MarkerMatchCPUParamTest, YToleranceAboveTenThrows) {
+    auto p = defaultParams_; p.y_tolerance = 10.1f;
     EXPECT_THROW(p.validate(), std::invalid_argument);
+    p.y_tolerance = 1.1f;
+    EXPECT_NO_THROW(p.validate());
 }
 
 TEST_F(MarkerMatchCPUParamTest, NegativeNumThreadsThrows) {
