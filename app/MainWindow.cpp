@@ -28,6 +28,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <opencv2/imgproc.hpp>   // 相机监视预览降采样（cv::resize INTER_AREA）
 #include <osg/Vec3>
 #include <osg/Matrix>
 #include <osgGA/TrackballManipulator>
@@ -670,16 +671,27 @@ void MainWindow::showCameraMonitor() {
             1000000 / std::max(1, m_appCtx ? m_appCtx->cameraPreviewFps() : 10));
         if (now - lastPreview < minInterval) return;
         lastPreview = now;
-        const cv::Mat l = f.leftGray.clone();    // 深拷脱离 ring 复用
-        const cv::Mat r = f.rightGray.clone();
+        // —— 260911 预览减负（显示 10fps 不变）：原全分辨率 clone（6MB/帧）＋
+        //    UI 侧全尺寸 QImage 拷贝/QPixmap 缩放改为回调线程一次降采样 1/4
+        //    （INTER_AREA 质量更优）——送 UI 载荷 6MB→~200KB，UI 线程像素工作
+        //    量降两个量级，拖动主窗/对话框不再与预览互卡
+        cv::Mat lSmall, rSmall;
+        if (!f.leftGray.empty())
+            cv::resize(f.leftGray, lSmall, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+        if (!f.rightGray.empty())
+            cv::resize(f.rightGray, rSmall, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
         const auto fidL = f.frameIdLeft;
         const auto fidR = f.frameIdRight;
 
         // 激光线宽度测量（2026-09-06）：采样列，逐列垂直方向找亮像素连续段
         // ——水平激光线的「厚度」即列方向亮段长度；取中位数（排除背景/噪声）
-        int laserWidth = 0;
-        {
-            const cv::Mat& img = l;   // 左图
+        // 260911：降 1Hz 测量（10fps 预览下每 10 帧一次——全图列扫描省 9/10，
+        // 标签沿用最近值，显示不受影响）
+        static std::atomic<uint64_t> s_previewCnt{0};
+        static std::atomic<int> s_laserWidth{0};
+        if (s_previewCnt.fetch_add(1) % 10 == 0) {
+            int lw = 0;
+            const cv::Mat& img = f.leftGray;   // 左图（原图测量——缩放会改线宽）
             if (!img.empty()) {
                 std::vector<int> runs;
                 const int cols = img.cols;
@@ -699,17 +711,19 @@ void MainWindow::showCameraMonitor() {
                 }
                 if (!runs.empty()) {
                     std::sort(runs.begin(), runs.end());
-                    laserWidth = runs[runs.size() / 2];
+                    lw = runs[runs.size() / 2];
                 }
             }
+            s_laserWidth.store(lw);
         }
+        const int laserWidth = s_laserWidth.load();
 
-        QMetaObject::invokeMethod(this, [this, l, r, fidL, fidR, laserWidth]() {
+        QMetaObject::invokeMethod(this, [this, lSmall, rSmall, fidL, fidR, laserWidth]() {
             if (m_camDlg && m_camDlg->isVisible()) {
-                m_camLeft->setPixmap(QPixmap::fromImage(camMatToImage(l))
-                                          .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
-                m_camRight->setPixmap(QPixmap::fromImage(camMatToImage(r))
-                                           .scaled(m_camRight->size(), Qt::KeepAspectRatio));
+                m_camLeft->setPixmap(QPixmap::fromImage(camMatToImage(lSmall))
+                                           .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
+                m_camRight->setPixmap(QPixmap::fromImage(camMatToImage(rSmall))
+                                            .scaled(m_camRight->size(), Qt::KeepAspectRatio));
                 // 流水线消费帧率（1s 计算一次——帧计数差分）
                 static uint64_t lastPipelineCnt = 0;
                 static auto lastCalc = std::chrono::steady_clock::now();
@@ -1034,9 +1048,10 @@ QWidget *MainWindow::createToolBar()
     layout->setSpacing(32);
 
     struct ToolItem { QString icon; QString text; };
-    // 扫描四模式（协议批3·D7）：标点(2)=MarkerOnly / 面片(3)=MarkerPlusLaser /
-    // 精细(4)=FineScan（原「点云扫描」改名，C 管）/ 深孔(5)=DeepHoleScan（新增，
-    // D 管）；深孔 icon 复用 cloudscan（不新增美术资源，专属图标待设计）
+    // 扫描四模式（协议批3·D7；精细/深孔 2026-09-10 用户纠正对调）：标点(2)=
+    // MarkerOnly / 面片(3)=MarkerPlusLaser / 精细(4)=FineScan（原「点云扫描」改名，
+    // D 管）/ 深孔(5)=DeepHoleScan（新增，C 管）；深孔 icon 复用 cloudscan
+    // （不新增美术资源，专属图标待设计）
     QList<ToolItem> items = {
         {"filemanager-black-14", QStringLiteral("文件管理")},
         {"equipcalib-black-14", QStringLiteral("校准设备")},
@@ -1566,7 +1581,7 @@ QWidget *MainWindow::createParamSection()
 
     struct SliderItem { QString name; int val; int min; int max; };
     QList<SliderItem> sliders = {
-        {QStringLiteral("参数1：曝光/亮度"), 65, 0, 100},
+        {QStringLiteral("参数1：曝光/亮度"), 25, 0, 100},
         {QStringLiteral("参数2：点云分辨率"), 50, 0, 100},
         {QStringLiteral("参数3：滤波强度"), 30, 0, 100},
         {QStringLiteral("参数4：拼接平滑度"), 50, 0, 100},

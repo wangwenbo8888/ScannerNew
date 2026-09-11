@@ -36,7 +36,7 @@ constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 
 std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
     return {
-        {"exposure", 10.0, 1.0, 100.0},        // 曝光 ms（相机直设）
+        {"exposure", 25.0, 1.0, 100.0},        // 曝光 ms（相机直设；默认 25——260911 调亮基线）
         {"freqHz", 60.0, 1.0, 200.0},          // N10 H 拍照频率（协议域 1-200，批3 终态；
                                                 //   UI 滑条量程已同步 1-200）
         {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10——B 模式成功配置基线；
@@ -51,7 +51,8 @@ std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红
 // N10 生效参数（cpp 本地——不进头防 IMCU.h 类型泄漏）：freqHz 账本值；四激光管
 // 按 ScanMode 掩码映射（D7 产线方案）——MarkerOnly T0V0C0D0 且 L=0、B 抬升 40
 // （保留旧 A 模式补光抬升基线——2026-08 真机标点检测成功配置）；面片 T1V1C0D0；
-// 精细（原点云扫描）T0V0C1D0；深孔 T0V0C0D1；其余模式 B/L 均账本值。
+// 精细（原点云扫描）T0V0C0D1；深孔 T0V0C1D0（2026-09-10 用户纠正对调：精细 D
+// 管/深孔 C 管）；其余模式 B/L 均账本值。
 // ⑨b 周期模型待裁决：精细/深孔为单管周期（每帧仅 C 或 D），07 激光链「偶L奇R」
 // 配对假设在单管下未验证——本函数仅做 08/UI 掩码映射就位。
 // 调用点均在逻辑线程（捕获 this 直读成员）
@@ -66,8 +67,8 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
                        : static_cast<int>(params.get("laserLevel").value);
     p.laserT = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;
     p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;
-    p.laserC = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;
-    p.laserD = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;
+    p.laserC = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;
+    p.laserD = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;
     return p;
 }
 
@@ -487,7 +488,11 @@ void DeviceManager::lightsAllOff() {
 }
 
 void DeviceManager::stopCapture() {
-    post([this] { stopCaptureOnLogic(); });
+    post([this] { stopCaptureOnLogic(false); });
+}
+
+void DeviceManager::stopTrigger() {
+    post([this] { stopCaptureOnLogic(true); });
 }
 
 void DeviceManager::startCaptureOnLogic() {
@@ -496,16 +501,19 @@ void DeviceManager::startCaptureOnLogic() {
     //    N10** ——原序（N10→回调→startStream）在 N10 到达后 MCU 立即触发，而相机
     //    尚在配置中——左比右多吃 2~3 个触发脉冲，GetFrameID 偏移恒 2~3，严格配对
     //    全丢。改序后两台相机同时等触发，N10 到达时同步收第一个脉冲 → 偏移 ±1。
-    startStreamIfReady();                        // ① 相机先就绪等触发
-    sendSeq(captureSeqSteps(), [this](bool ok) { // ② N10=启采（盲发即回调）
+    // —— 260911 停启竞态收口：相机开流失败（停→快启 USB 忙）不得吞——发了 N10
+    //    且置采集中即僵尸态（相机停/账本采集中→下次 Start 被幂等闸吞）。此处
+    //    早退不置采集中，Start 可直接重试（Fault 0x0812 已报）
+    if (!startStreamIfReady().success) return;       // ① 相机先就绪等触发（失败收口）
+    sendSeq(captureSeqSteps(), [this](bool ok) {     // ② N10=启采（盲发即回调）
         if (!ok) return;
         mode_->setCapturing(true);
     });
 }
 
-void DeviceManager::stopCaptureOnLogic() {
+void DeviceManager::stopCaptureOnLogic(bool keepStreams) {
     if (!mode_->isCapturing()) return;
-    mcu_->stopScan([this](bool ok, const std::string& p) {
+    mcu_->stopScan([this, keepStreams](bool ok, const std::string& p) {
         if (!ok) {
             publishFault(code(DevFault::CmdNoAck), "N11 H0 " + p);   // 写失败语义（盲发口径）
             return;
@@ -514,12 +522,26 @@ void DeviceManager::stopCaptureOnLogic() {
         // 灯态收口：单帧 N11 H0 即停止熄灯（260831 同一命令）。停相机流前先冲
         // 队列——相机停流瞬间 USB 风暴会堵串口写（flush 有界 300ms）
         mcu_->flushWrites(300);
-        if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
+        // 就绪态（keepStreams）相机流保留：无触发即无帧——pause/resume 往返零
+        // 相机 USB 操作（260911：停启风暴是 -1010 楔死/重开后 L-R 帧号失配的
+        // 根因）；全停路径（会话结束/关相机）照旧收口相机流
+        if (!keepStreams && camera_ && camera_->isOpen()) {
+            const auto r = camera_->stopAsyncCapture();
+            // 停侧不净（AcquisitionStop 重试仍败——260911 楔死根因侧报 Fault；
+            // startCapture 的整设备复位重开路径自愈）
+            if (!r.success)
+                publishFault(code(DevFault::CameraStopFail), "stopStream " + r.message);
+        }
     });
 }
 
-void DeviceManager::startStreamIfReady() {
-    if (camera_ && camera_->isOpen() && frameCb_) camera_->startAsyncCapture(frameCb_);
+Result DeviceManager::startStreamIfReady() {
+    if (!camera_ || !camera_->isOpen() || !frameCb_)
+        return Result::ok("无相机/无帧出口——跳过开流");   // 未配相机=纯 MCU 合法形态
+    const auto r = camera_->startAsyncCapture(frameCb_);
+    if (!r.success)                              // 停→快启 USB 忙等（260911 收口）
+        publishFault(code(DevFault::CameraStartFail), "startStream " + r.message);
+    return r;
 }
 
 // ============================================================================
@@ -778,7 +800,8 @@ Result DeviceManager::startFrameStream(hal::FrameCallback cb) {
             }
             userCb(f);      // 转发上层回调
         };
-        if (camera_ && camera_->isOpen()) camera_->startAsyncCapture(frameCb_);
+        // 开流走统一收口口（失败报 Fault 0x0812——startCapture 路径还会再试）
+        startStreamIfReady();
     });
     return Result::ok("已编队");
 }

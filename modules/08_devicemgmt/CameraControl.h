@@ -94,8 +94,14 @@ private:
     StereoPairConfig m_config;
     std::atomic<bool> m_isOpen{false};
     std::atomic<bool> m_isCapturing{false};
-    std::atomic<double> m_currentExposureMs{10.0};
+    std::atomic<double> m_currentExposureMs{25.0};  // 与 DeviceManager specs 默认同源
     std::atomic<double> m_currentGain{0.0};      // 按 GainRaw 原生单位传，dB 语义由上层换算
+
+    // 帧号稳定偏移配对（260911）：N10 重发/启停后某侧多吃漏吃一触发沿→L-R 恒差
+    // ±1 永不收敛——连续 30 次同号失配即采纳，按时间对齐配对（严格等值期间=0）
+    int64_t m_pairOffset = 0;                    // 仅在 m_bufferMutex 内触碰
+    int64_t m_lastMismatchOff = 0;
+    int m_mismatchStreak = 0;
 
     // 标定缓存（注入式 B3：app 从 06 标定结果仓库喂入，08 不做第二真相源）
     mutable std::mutex m_calibMutex;
@@ -111,7 +117,7 @@ private:
     mutable std::mutex m_bufferMutex;  // 保护 tryDeliver 的缓冲区访问
 
     void startSideCapture(int sideIndex);
-    void stopSideCapture(int sideIndex);
+    bool stopSideCapture(int sideIndex);   // 返 true=干净停止（AcquisitionStop 成）
     void applySideParams(int sideIndex);
 };
 

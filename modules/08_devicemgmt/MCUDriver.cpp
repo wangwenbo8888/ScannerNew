@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
 #include <chrono>
+#include <thread>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -98,9 +99,19 @@ void MCUDriver::writeLoop() {
         }
         if (frame.empty()) continue;               // 保活已删（卡写队列致灭灯命令出不去）
         notifyTap(true, frame);                    // 调试监视：TX 实际出队帧
-        const auto r = serial_.write(frame);    // 阻塞只落在本线程（实测驱动可卡 2~2.5s）
-        if (!r.success)
-            JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 串口写失败: {}（帧 '{}'）", r.message, frame);
+        // 有界重试（260911 停启竞态收口）：启停瞬间 USB 风暴会致串口写瞬时失败
+        // ——关键控制帧（N10 启采/N11 H0 停采）丢失即「相机武装无触发」或「MCU
+        // 失控」，原口径丢帧仅 WARN。单写者线程内重试天然保序；最多 3 次尝试
+        // ×200ms 间隔，仍败才落最终 WARN（帧序不乱，最坏拖延 ~7s 于后台线程）
+        Scanner::Result r;
+        for (int attempt = 1; attempt <= 3; ++attempt) {
+            r = serial_.write(frame);              // 阻塞只落在本线程（实测驱动可卡 2~2.5s）
+            if (r.success) break;
+            JMW_LOG_WARN("08-MCUDriver",
+                "[MCUDriver] 串口写失败（第 {} 次）: {}（帧 '{}'）",
+                attempt, r.message, frame);
+            if (attempt < 3) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
         {
             std::lock_guard<std::mutex> lock(writeMtx_);
             if (writeQueue_.empty()) drainCv_.notify_all();     // 排空通知（收口等待用）

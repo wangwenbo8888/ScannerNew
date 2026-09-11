@@ -102,6 +102,10 @@ enum class DevFault : int64_t {
     // —— 表外既有路径（0x081x 开机段）——
     CameraOpenFail  = 0x0810,  // open 一条龙相机打开失败（同步倒序关）
     McuOpenFail     = 0x0811,  // open 一条龙 MCU 串口打开失败（同步倒序关）
+    CameraStartFail = 0x0812,  // 采集启动相机开流失败（停→快启 USB 忙致 OpenStream/
+                               //     StartGrab 异常；不置采集中——保 Start 可重试）
+    CameraStopFail  = 0x0813,  // 采集停止未干净收口（AcquisitionStop 重试仍败——设备
+                               //     滞留采集态；下次开流整设备复位重开自愈）
 };
 
 struct DeviceConfig {
@@ -178,6 +182,10 @@ public:
     //    「偶L奇R」配对假设在单管下未验证——本层仅做掩码映射——
     void startCapture(Scanner::ScanMode mode = Scanner::ScanMode::MarkerPlusLaser);
     void stopCapture();
+    // 就绪态停触发（260911 系统性收口）：只发 N11 H0（停触发+灭灯）——相机流
+    // 保留（无触发即无帧）。pause/resume 往返零相机 USB 操作，根除停启时
+    // AcquisitionStop/OpenStream 在 USB 饱和下超时楔死（真机 -1010 TL 0x16）
+    void stopTrigger();
     /// 实测相机帧率（配对交付差分 1s 窗口——帧回调链内计数，UI 只读）
     int measuredCameraFps() const { return m_measuredFps.load(std::memory_order_relaxed); }
 
@@ -233,7 +241,7 @@ private:
     void sendSeq(std::vector<SeqStep> steps, std::function<void(bool)> onDone);
     void onParamDispatch(const std::string& key, double v, ParamStore::Done done);
     void sendN12Clamped(int periodMs, McuDone cb);   // N12 单一下发出口（open/dispatch 共用）
-    void startStreamIfReady();
+    Result startStreamIfReady();                 // 相机开流（无相机/无出口=ok 跳过）
     void refreshParamSnapshot();                // 全参数拷入互斥快照
     // 切模式/启停的命令组主体（逻辑线程执行——门禁已在调用方线程过）
     std::vector<SeqStep> captureSeqSteps();      // 采集组步链（单步 N10——启采=N10 本身）
@@ -241,7 +249,7 @@ private:
     void enterCalibrationOnLogic();
     void toIdleOnLogic();
     void startCaptureOnLogic();
-    void stopCaptureOnLogic();
+    void stopCaptureOnLogic(bool keepStreams = false);   // true=就绪态（停触发不停流）
 
     // —— 配置与依赖（声明序即初始化序）——
     DeviceConfig cfg_;

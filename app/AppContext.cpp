@@ -113,9 +113,11 @@ void AppContext::initialize() {
             // ScanMode 不经 gate payload——UI 入口先 setScanMode 设进工作流
             spec.handler = [this]() {
                 if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
+                ++scanActGen_;                   // 会话代递增：作废更早装配线程的回滚资格
                 if (scanStartThread_.joinable())
                     return Scanner::Result::fail("扫描正在启动中（后台装配未完）");
-                scanStartThread_ = std::thread([this]() {
+                const uint64_t gen = scanActGen_.load();
+                scanStartThread_ = std::thread([this, gen]() {
                     Scanner::Result r = Scanner::Result::fail("未知");
                     auto* repo = wfCtx_ ? wfCtx_->calibRepo() : nullptr;
                     if (repo) {
@@ -142,12 +144,21 @@ void AppContext::initialize() {
                     if (!r.success) {
                         JMW_LOG_ERROR("app-AppContext",
                             "[AppContext] 扫描后台装配失败（已回滚待机）: {}", r.message);
-                        if (deviceManager_) {          // 设备收口（灯/采集已点，须收回）
-                            deviceManager_->lightsAllOff();
-                            deviceManager_->stopCapture();
+                        // 代守卫（260911 停启竞态）：装配耗时数百 ms，期间用户可能
+                        // 已停（finish_scan）再点新 start——无条件 stopCapture 会扑杀
+                        // 新会话（预览冻结观感）。仅当代未变（本次装配仍是最新动作）
+                        // 才收口硬件；过期=有更新动作接管，本线程不动手
+                        if (scanActGen_.load() == gen) {
+                            if (deviceManager_) {      // 设备收口（灯/采集已点，须收回）
+                                deviceManager_->lightsAllOff();
+                                deviceManager_->stopCapture();
+                            }
+                            commandGate_->notifyCompleted("start_scan", false);
+                            if (scanSessionEndedHandler_) scanSessionEndedHandler_(false);
+                        } else {
+                            JMW_LOG_INFO("app-AppContext",
+                                "[AppContext] 装配失败回滚跳过（会话代已前进——新会话已接管）");
                         }
-                        commandGate_->notifyCompleted("start_scan", false);
-                        if (scanSessionEndedHandler_) scanSessionEndedHandler_(false);
                     } else {
                         JMW_LOG_INFO("app-AppContext", "[AppContext] 扫描后台装配完成");
                     }
@@ -162,6 +173,7 @@ void AppContext::initialize() {
             // TODO 接入期——enableFinalBA=false 时收尾语义不变（设计 §3.2 注）
             spec.handler = [this]() {
                 if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
+                ++scanActGen_;                   // 用户停手=作废在途装配线程的回滚资格
                 return scanWf_->stop();
             };
         }
@@ -429,10 +441,11 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
     });
     // 灯型归采集组 N10（effectiveN10 按 ScanMode 组装四管掩码）——不预点亮：
     // 固件收到 N10 即按新参数调灯，预点亮会闪变；启采=N10 本身一次到位。
-    // 四模式灯型（D7 产线方案）：标点 T0V0C0D0（B 抬升 40/L=0——数值同源于 08
-    // DeviceManager.cpp 本地常量 kMarkerOnlyBg，日志文案不引跨层符号）；面片
-    // T1V1C0D0；精细 T0V0C1D0；深孔 T0V0C0D1。⑨b：精细/深孔单管周期下 07 激光链
-    // 「偶L奇R」配对假设未验证——本批仅 08/UI 映射就位
+    // 四模式灯型（D7 产线方案；精细/深孔 2026-09-10 用户纠正对调）：标点
+    // T0V0C0D0（B 抬升 40/L=0——数值同源于 08 DeviceManager.cpp 本地常量
+    // kMarkerOnlyBg，日志文案不引跨层符号）；面片 T1V1C0D0；精细 T0V0C0D1；
+    // 深孔 T0V0C1D0。⑨b：精细/深孔单管周期下 07 激光链「偶L奇R」配对假设未验证
+    // ——本批仅 08/UI 映射就位
     dm->startCapture(mode);
     switch (mode) {
     case Scanner::ScanMode::MarkerOnly:
@@ -442,10 +455,10 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
         JMW_LOG_INFO("app-AppContext", "[AppContext] 面片扫描(B) T1V1C0D0（左右线交替归固件帧序）");
         break;
     case Scanner::ScanMode::FineScan:
-        JMW_LOG_INFO("app-AppContext", "[AppContext] 精细扫描(C) T0V0C1D0（单管——⑨b 周期模型待裁决）");
+        JMW_LOG_INFO("app-AppContext", "[AppContext] 精细扫描(C) T0V0C0D1（D 管——⑨b 周期模型待裁决）");
         break;
     case Scanner::ScanMode::DeepHoleScan:
-        JMW_LOG_INFO("app-AppContext", "[AppContext] 深孔扫描(D) T0V0C0D1（单管——⑨b 周期模型待裁决）");
+        JMW_LOG_INFO("app-AppContext", "[AppContext] 深孔扫描(D) T0V0C1D0（C 管——⑨b 周期模型待裁决）");
         break;
     }
 
@@ -511,10 +524,12 @@ Scanner::Result AppContext::pauseScanSession() {
     if (!isScanSessionActive()) return Scanner::Result::fail("无活跃扫描会话");
     if (isScanSessionPaused()) return Scanner::Result::ok("已处于就绪态");
     // 停采集保活（用户口径 2026-09-06）：N11 H0 停触发＋灭灯（协议正确口径）
-    //——相机流保留（startAsyncCapture 不停），管线暂停自丢帧
-    if (deviceManager_) deviceManager_->stopCapture();
+    // ——260911 系统性收口：走 stopTrigger（相机流保留——无触发即无帧）。原
+    // stopCapture 全停流在 USB 饱和下 AcquisitionStop 频败（-1010 楔死），且
+    // 续采重开流后左右帧号失配丢帧——就绪态往返从此零相机 USB 操作
+    if (deviceManager_) deviceManager_->stopTrigger();
     const auto r = scanWf_->pause();
-    JMW_LOG_INFO("app-AppContext", "[AppContext] 就绪态（N11H0 停触发灭灯）：{}（融合云/obs 账本保留）",
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 就绪态（N11H0 停触发灭灯·相机流保留）：{}（融合云/obs 账本保留）",
                  r.success ? "ok" : r.message);
     return r;
 }

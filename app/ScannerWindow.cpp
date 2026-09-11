@@ -83,18 +83,21 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
 
     // A-T17 修复（运行时钳，.ui 设计量程同步）：滑条范围对齐 ParamStore spec
     // （协议批3 终态：freq 1-200 默认 60 / bg 0-100 默认 10 / laser 0-100 默认
-    // 40——灯控量程实测 0-100），初值自账本快照同步——setValue 触发
-    // valueChanged→setParam 同值记账（无副作用）
+    // 40——灯控量程实测 0-100；exposure 1-100 默认 25），初值自账本快照同步
+    // ——setValue 触发 valueChanged→setParam 同值记账（无副作用）
     if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
         ui.horizontalSlider_Freq->setRange(1, 200);
         ui.horizontalSlider_Background_Lighting->setRange(0, 100);
         ui.horizontalSlider_Laser_Lighting->setRange(0, 100);
+        ui.horizontalSlider_ExposeTime->setRange(1, 100);
         ui.horizontalSlider_Freq->setValue(
             static_cast<int>(dm->getParam("freqHz").value));
         ui.horizontalSlider_Background_Lighting->setValue(
             static_cast<int>(dm->getParam("bgLight").value));
         ui.horizontalSlider_Laser_Lighting->setValue(
             static_cast<int>(dm->getParam("laserLevel").value));
+        ui.horizontalSlider_ExposeTime->setValue(
+            static_cast<int>(dm->getParam("exposure").value));
     }
 
     // FPS 定时器

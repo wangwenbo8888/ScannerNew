@@ -171,6 +171,10 @@ private:
     std::atomic<bool> shutdownDone_{false};     // shutdown once 守卫（析构链防重复关）
     std::thread scanStartThread_;               // 扫描装配后台线程（§3.3 handler 毫秒级契约；
                                                 //   stop/shutdown 先 join——防与 stop() 竞态）
+    std::atomic<uint64_t> scanActGen_{0};       // 扫描会话代（260911）：每次 start_scan
+                                                //   尝试/finish_scan 递增——后台装配失败
+                                                //   回滚仅在代未变时执行，防过期回滚扑杀
+                                                //   用户停启间隙里新点的采集会话
     std::function<void(bool)> scanSessionEndedHandler_;   // 会话终止回调（后台线程调；可空）
     std::function<void(const Scanner::hal::StereoFrame&)> debugFrameTap_;   // 调试帧分路（可空）
     std::mutex debugTapMtx_;

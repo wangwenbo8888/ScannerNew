@@ -81,6 +81,9 @@ constexpr int64_t FC(DevFault f) { return static_cast<int64_t>(f); }
 struct FakeCamera : Scanner::hal::IScannerCamera {
     bool openOk = true;
     bool openState = false;
+    bool startAsyncFail = false;                 // T5d：开流失败注入（停启竞态收口）
+    bool stopAsyncFail = false;                  // T5e：停侧不净注入（0x0813 收口）
+    int stopAsyncCalls = 0;                      // T5f：停流调用计数（就绪态应 0）
     double exposureMs = 0.0;
     int exposureCalls = 0;
 
@@ -111,9 +114,15 @@ struct FakeCamera : Scanner::hal::IScannerCamera {
     bool isCapturing() const override { return false; }
     Result grabFrame(Scanner::hal::StereoFrame&, int) override { return Result::fail("未实现"); }
     Result startAsyncCapture(Scanner::hal::FrameCallback) override {
-        return openState ? Result::ok() : Result::fail("相机未开");
+        if (!openState) return Result::fail("相机未开");
+        if (startAsyncFail) return Result::fail("相机开流失败(测试)");
+        return Result::ok();
     }
-    Result stopAsyncCapture() override { return Result::ok(); }
+    Result stopAsyncCapture() override {
+        ++stopAsyncCalls;
+        if (stopAsyncFail) return Result::fail("AcquisitionStop 未干净收口(测试)");
+        return Result::ok();
+    }
     double getTemperature() const override { return 0.0; }
     std::string getPlatform() const override { return "Windows"; }
 };
@@ -338,9 +347,121 @@ TEST(DeviceManager, T5b_StartCaptureN10FromParamAccount) {
     EXPECT_TRUE(dm.isCapturing());
 }
 
-// —— T5c（协议批3·D7）：四模式 N10 四管掩码映射——MarkerOnly 不开激光线
-//      （B=40 抬升基线/L=0/四管全 0）；面片 T1V1；精细 C 管；深孔 D 管
-//      （账本默认 freq 60/bg 10/laser 40；⑨b：单管周期配对归 07 侧待裁决）——
+// —— T5d（260911 停启竞态收口）：相机开流失败 → 不发 N10/不置采集中＋Fault
+//      0x0812——修复前吞失败照发 N10 置采集中成僵尸态（相机停/账本采集中），
+//      下一次 Start 被幂等闸吞（真机观感=停→启预览不刷新）——
+TEST(DeviceManager, T5d_CameraStartFailNotZombieRetryable) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    FakeCamera* cam = nullptr;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus,
+                     [&] {
+                         auto c = std::make_unique<FakeCamera>();
+                         cam = c.get();
+                         return c;
+                     },
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.startFrameStream([](const Scanner::hal::StereoFrame&) {});
+    dm.logicTick();
+
+    cam->startAsyncFail = true;                  // 停→快启 USB 忙：开流失败注入
+    dm.startCapture();
+    dm.logicTick();
+    EXPECT_FALSE(dm.isCapturing());              // 不置采集中（僵尸态修复点）
+    EXPECT_EQ(mock.count("N10 "), 0);            // 相机没起来不发启采帧
+    EXPECT_EQ(rec.fault(FC(DevFault::CameraStartFail)), 1);
+
+    cam->startAsyncFail = false;                 // 恢复后 Start 直接可重试（不被幂等闸吞）
+    dm.startCapture();
+    dm.logicTick();
+    EXPECT_TRUE(dm.isCapturing());
+    EXPECT_EQ(mock.count("N10 "), 1);
+}
+
+// —— T5e（260911 停侧不净收口）：stopAsyncCapture 返败（AcquisitionStop 重试仍败
+//      ——设备滞留采集态）→ N11 H0 后 Fault 0x0813；黑板仍收口（幂等闸不卡后续
+//      Start——开流侧整设备复位重开自愈归真机链）——
+TEST(DeviceManager, T5e_CameraStopUncleanFaultReported) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    FakeCamera* cam = nullptr;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus,
+                     [&] {
+                         auto c = std::make_unique<FakeCamera>();
+                         cam = c.get();
+                         return c;
+                     },
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.startFrameStream([](const Scanner::hal::StereoFrame&) {});
+    dm.logicTick();
+    dm.startCapture();
+    dm.logicTick();
+    ASSERT_TRUE(dm.isCapturing());
+
+    cam->stopAsyncFail = true;                   // 停侧不净注入
+    dm.stopCapture();
+    dm.logicTick();
+    EXPECT_FALSE(dm.isCapturing());              // 黑板照常收口（不卡后续启停）
+    EXPECT_EQ(mock.count("N11 H0"), 1);
+    EXPECT_EQ(rec.fault(FC(DevFault::CameraStopFail)), 1);
+}
+
+// —— T5f（260911 就绪态停触发不停流）：stopTrigger 只发 N11 H0——相机流保留
+//      （stopAsyncCapture 零调用），Start 直接续采（N10 一帧即回）——就绪态
+//      往返零相机 USB 操作，根除停启楔死源 ——
+TEST(DeviceManager, T5f_StopTriggerKeepsCameraStreams) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    FakeCamera* cam = nullptr;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus,
+                     [&] {
+                         auto c = std::make_unique<FakeCamera>();
+                         cam = c.get();
+                         return c;
+                     },
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.startFrameStream([](const Scanner::hal::StereoFrame&) {});
+    dm.logicTick();
+    dm.startCapture();
+    dm.logicTick();
+    ASSERT_TRUE(dm.isCapturing());
+    const int stopsBefore = cam->stopAsyncCalls;
+
+    dm.stopTrigger();                            // 就绪态：停触发不停流
+    dm.logicTick();
+    EXPECT_FALSE(dm.isCapturing());
+    EXPECT_EQ(mock.count("N11 H0"), 1);
+    EXPECT_EQ(cam->stopAsyncCalls, stopsBefore); // 相机流未被触碰（零 USB 操作）
+
+    dm.startCapture();                           // 续采：相机已开流（幂等）+N10
+    dm.logicTick();
+    EXPECT_TRUE(dm.isCapturing());
+    EXPECT_EQ(mock.count("N10 "), 2);            // 首启+续采各一帧
+    EXPECT_EQ(cam->stopAsyncCalls, stopsBefore); // 全程未停流
+}
+
+// —— T5c（协议批3·D7；精细/深孔 2026-09-10 用户纠正对调）：四模式 N10 四管掩码
+//      映射——MarkerOnly 不开激光线（B=40 抬升基线/L=0/四管全 0）；面片 T1V1；
+//      精细 D 管；深孔 C 管（账本默认 freq 60/bg 10/laser 40；⑨b：单管周期配对
+//      归 07 侧待裁决）——
 TEST(DeviceManager, T5c_FourModeN10TubeMasks) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -352,16 +473,16 @@ TEST(DeviceManager, T5c_FourModeN10TubeMasks) {
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    dm.startCapture(Scanner::ScanMode::FineScan);                // 精细：C 管
+    dm.startCapture(Scanner::ScanMode::FineScan);                // 精细：D 管
     dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C1 D0 L40"), 1);
+    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C0 D1 L40"), 1);
     EXPECT_TRUE(dm.isCapturing());
     dm.stopCapture();
     dm.logicTick();
 
-    dm.startCapture(Scanner::ScanMode::DeepHoleScan);            // 深孔：D 管
+    dm.startCapture(Scanner::ScanMode::DeepHoleScan);            // 深孔：C 管
     dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C0 D1 L40"), 1);
+    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C1 D0 L40"), 1);
     dm.stopCapture();
     dm.logicTick();
 
@@ -594,7 +715,7 @@ TEST(DeviceManager, T9c_ReopenResyncN10WhenBoardNonIdle) {
 
     ASSERT_TRUE(dm.open().success);                            // reopen：成功尾段见黑板非 Idle
     EXPECT_EQ(mock.count("N10 "), n10Before + 1);              // 重开重同步：补发一帧 N10
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C1 D0 L40"), 3);   // 三帧同精细灯型（账本默认参）
+    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C0 D1 L40"), 3);   // 三帧同精细灯型（D 管，账本默认参）
     EXPECT_EQ(mock.count("N12 T100"), 2);                      // N12 亦重发
     EXPECT_TRUE(dm.isCapturing());                             // 黑板语义保持（MCU 已同步）
 }

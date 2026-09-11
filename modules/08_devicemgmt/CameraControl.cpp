@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <thread>
 
 namespace Scanner::device {
 
@@ -63,29 +64,57 @@ private:
             return;
         }
 
-        // —— 严格帧号配对（用户口径 2026-09-05）：左右 GetFrameID 相等才交付，
-        // 保奇偶分派（激光 T/V 左斜/右斜组别）与立体同刻性；不等则丢落后侧
-        // 图像（保留超前侧待追平）——防单侧丢帧后左右错刻配对（立体错配/
-        // 左右斜组别翻转）。两相机帧号若不同值起步/持续漂移会持续不配，
-        // 由下方计数日志暴露（实机观察口径）——
+        // —— 帧号配对（用户口径 2026-09-05 严格等值；260911 补稳定偏移采纳）——
+        // 严格等值保奇偶分派（激光 T/V 左斜/右斜组别）与立体同刻性；不等则丢
+        // 落后侧图像（保留超前侧待追平）。**实机实证（260911 日志）**：模式切换/
+        // 调参触发 N10 重发后，某侧多吃/漏吃一个触发沿→L-R 恒差 ±1 且永不收敛
+        // ——严格等值=每帧全丢（预览冻结/零数据，双相机实都在出流）。故补：
+        // 连续 30 次同号失配（60Hz 下 ~0.5s）即采纳该偏移，按时间对齐配对交付；
+        // 激光 T/V 奇偶归属可能有疑（无法从帧号判定哪侧失步）——采纳时 WARN
+        // 大声告警，frameIdLeft/Right 原始帧号照带上报供监视窗「偏移」显示。
+        int64_t off = 0;
         if (leftBuf.frameId != rightBuf.frameId) {
-            auto& behind = (leftBuf.frameId < rightBuf.frameId) ? leftBuf : rightBuf;
-            behind.image.release();
-            behind.ready.store(false, std::memory_order_release);
-            static std::atomic<uint64_t> s_mismatchDrops{0};
-            if (s_mismatchDrops.fetch_add(1) % 100 == 0) {
-                JMW_LOG_WARN("08-CameraControl",
-                             "[CameraControl] 帧号不配丢组（累计 {}）：L={} R={}",
-                             s_mismatchDrops.load(), leftBuf.frameId, rightBuf.frameId);
+            off = static_cast<int64_t>(leftBuf.frameId) -
+                  static_cast<int64_t>(rightBuf.frameId);
+            // 偏移估计器（恒跑：失配≠已采纳偏移时计数；漂移后同样可再收敛）
+            if (off != m_owner->m_pairOffset) {
+                if (off == m_owner->m_lastMismatchOff) {
+                    if (++m_owner->m_mismatchStreak >= 30) {
+                        const int64_t old = m_owner->m_pairOffset;
+                        m_owner->m_pairOffset = off;
+                        JMW_LOG_WARN("08-CameraControl",
+                            "[CameraControl] 帧号稳定偏移 {}→{} 采纳（L-R 恒差 {}："
+                            "按时间对齐配对——激光 T/V 奇偶归属可能有疑，扫描数据"
+                            "需复核；建议稍后重启采集复位偏移）",
+                            old, off, off);
+                        m_owner->m_mismatchStreak = 0;
+                    }
+                } else {
+                    m_owner->m_lastMismatchOff = off;
+                    m_owner->m_mismatchStreak = 1;
+                }
             }
-            return;
+            if (off != m_owner->m_pairOffset) {
+                auto& behind = (leftBuf.frameId < rightBuf.frameId) ? leftBuf : rightBuf;
+                behind.image.release();
+                behind.ready.store(false, std::memory_order_release);
+                static std::atomic<uint64_t> s_mismatchDrops{0};
+                if (s_mismatchDrops.fetch_add(1) % 100 == 0) {
+                    JMW_LOG_WARN("08-CameraControl",
+                                 "[CameraControl] 帧号不配丢组（累计 {}）：L={} R={}（采纳偏移={}）",
+                                 s_mismatchDrops.load(), leftBuf.frameId, rightBuf.frameId,
+                                 m_owner->m_pairOffset);
+                }
+                return;
+            }
+            // off == pairOffset：按稳定偏移配对（落入下方交付）
         }
 
         leftBuf.ready.store(false, std::memory_order_release);
         rightBuf.ready.store(false, std::memory_order_release);
 
         hal::StereoFrame frame;
-        frame.frameId = leftBuf.frameId;   // 严格配对下左右相等
+        frame.frameId = leftBuf.frameId;   // 严格配对下左右相等（偏移配对=左号为准）
         frame.frameIdLeft = leftBuf.frameId;    // 原始帧号（调试显示）
         frame.frameIdRight = rightBuf.frameId;
         frame.timestamp = 0;
@@ -370,24 +399,62 @@ void CameraControl::startSideCapture(int sideIndex) {
     JMW_LOG_INFO("08-CameraControl", "[CameraControl] 侧 {} 采集已启动", sideIndex);
 }
 
-void CameraControl::stopSideCapture(int sideIndex) {
+bool CameraControl::stopSideCapture(int sideIndex) {
     auto& side = m_sides[sideIndex];
-    if (!side.isCapturing) return;
+    if (!side.isCapturing) return true;
 
+    // —— 260911 停启楔死根因收口（真机日志实证）——
+    // 原序 AcquisitionStop→StopGrab→Unregister 单 try：AcquisitionStop 瞬时 USB
+    // 拥塞失败（-1010 TL 0x16）即整段跳过——设备滞留「采集中」态且 SDK 持已删
+    // 回调，此后 OpenStream 恒败（停→启预览冻结）。现拆分防护：
+    // ① StopGrab 先行——停帧投递降 USB 压力，后续控制命令更易成功
+    // ② AcquisitionStop 有界重试（3 次×200ms）——瞬时拥塞可自愈
+    // ③ UnregisterCaptureCallback 恒在 delete 前（异常路径不跳过）
     try {
-        side.featureControl->GetCommandFeature("AcquisitionStop")->Execute();
         side.stream->StopGrab();
+    } catch (CGalaxyException& e) {
+        JMW_LOG_WARN("08-CameraControl", "[CameraControl] StopGrab 异常(side={}): {}",
+                     sideIndex, e.what());
+    }
+    bool acqStopped = false;
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        try {
+            side.featureControl->GetCommandFeature("AcquisitionStop")->Execute();
+            acqStopped = true;
+            break;
+        } catch (CGalaxyException& e) {
+            JMW_LOG_WARN("08-CameraControl",
+                "[CameraControl] AcquisitionStop 失败（第 {} 次，side={}）: {}",
+                attempt, sideIndex, e.what());
+            if (attempt < 3) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+    if (!acqStopped) {
+        // 设备滞留采集态——上层 startCapture 的复位重开路径可救（此处仅记录；
+        // Fault 归 DeviceManager 收口）
+        JMW_LOG_ERROR("08-CameraControl",
+            "[CameraControl] AcquisitionStop 三次均败（side={}）——设备滞留采集态，"
+            "下次开流将触发整设备复位重开", sideIndex);
+    }
+    try {
         side.stream->UnregisterCaptureCallback();
     } catch (CGalaxyException& e) {
-        JMW_LOG_ERROR("08-CameraControl", "[CameraControl] 停止采集异常: {}", e.what());
+        JMW_LOG_WARN("08-CameraControl", "[CameraControl] 注销回调异常(side={}): {}",
+                     sideIndex, e.what());
     }
 
     delete side.eventHandler;
     side.eventHandler = nullptr;
 
-    side.stream->Close();
+    try {
+        side.stream->Close();
+    } catch (CGalaxyException& e) {
+        JMW_LOG_WARN("08-CameraControl", "[CameraControl] 关流异常(side={}): {}",
+                     sideIndex, e.what());
+    }
     side.stream = CGXStreamPointer();
     side.isCapturing = false;
+    return acqStopped;
 }
 
 // ============================================================================
@@ -397,13 +464,37 @@ Result CameraControl::startCapture() {
     if (!m_isOpen) return Result::fail("设备未打开");
     if (m_isCapturing) return Result::ok("已在采集");
 
+    // 偏移配对状态复位（新开流帧号重新起步——旧偏移不作数；此时无回调并发）
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        m_pairOffset = 0;
+        m_lastMismatchOff = 0;
+        m_mismatchStreak = 0;
+    }
+
     try {
         startSideCapture(0);
         startSideCapture(1);
     } catch (CGalaxyException& e) {
         stopSideCapture(0);
         stopSideCapture(1);
-        return Result::fail(-1, e.what());
+        // —— 260911 楔死自愈：开流 USB 失败（TL 0x16）多为设备滞留采集态（停侧
+        //    AcquisitionStop 曾失败）——原地重试无解；整设备 close→open（USB 重
+        //    枚举复位传输通道）后重试一次，等价人工"关相机再开"恢复路径
+        JMW_LOG_WARN("08-CameraControl",
+                     "[CameraControl] 开流失败（{}）——整设备复位重开后重试", e.what());
+        close();
+        const auto ro = open();
+        if (!ro.success)
+            return Result::fail(-1, std::string("相机复位重开失败: ") + ro.message);
+        try {
+            startSideCapture(0);
+            startSideCapture(1);
+        } catch (CGalaxyException& e2) {
+            stopSideCapture(0);
+            stopSideCapture(1);
+            return Result::fail(-1, std::string("复位后开流仍失败: ") + e2.what());
+        }
     }
 
     m_isCapturing = true;
@@ -414,11 +505,16 @@ Result CameraControl::startCapture() {
 Result CameraControl::stopCapture() {
     if (!m_isCapturing) return Result::ok();
 
-    stopSideCapture(1);
-    stopSideCapture(0);
+    const bool clean1 = stopSideCapture(1);
+    const bool clean0 = stopSideCapture(0);
 
     m_isCapturing = false;
     JMW_LOG_INFO("08-CameraControl", "[CameraControl] 双目采集已停止");
+    // 停侧不净（AcquisitionStop 重试仍败——设备滞留采集态）：报失败给上层出
+    // Fault；下次 startCapture 的复位重开路径自愈
+    if (!clean0 || !clean1)
+        return Result::fail(-1, "AcquisitionStop 未干净收口（设备滞留采集态——"
+                                "下次开流将整设备复位重开）");
     return Result::ok();
 }
 

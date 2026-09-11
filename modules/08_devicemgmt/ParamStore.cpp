@@ -80,6 +80,18 @@ void ParamStore::setValue(const std::string& key, double v, ParamEntry::Source s
     const auto specIt = specs_.find(key);
     if (specIt == specs_.end()) return;                        // 未登记：不下发不广播
     const double clamped = clampToSpec(specIt->second, v);     // 入口即钳
+    // 同值短路（260911 USB 减负）：账本已是该值且无「异值在途」即跳过——滑条
+    // 逐格 valueChanged/初值同步的同值 setParam 不再重复下发（曝光一次＝4 USB
+    // 写＋1 读回，饱和总线下即控制命令超时源）。在途为异值时不跳（后值须
+    // 取代在途——gen 语义保持）
+    {
+        const auto lit = inflight_.find(key);
+        const bool inflightSame = (lit != inflight_.end()) && (lit->second.expect == clamped);
+        const auto eit = entries_.find(key);
+        const bool ledgerSame = (eit != entries_.end()) && (eit->second.value == clamped);
+        if (ledgerSame && (inflight_.find(key) == inflight_.end() || inflightSame))
+            return;
+    }
     const uint64_t gen = ++genSeq_;
     inflight_[key] = InFlight{clamped, gen};                   // 同 key 后值胜出（覆盖旧在途）
     if (!dispatch_) return;                                    // 无下发通道（测试/装配前）保在途记账
