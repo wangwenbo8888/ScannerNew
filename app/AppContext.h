@@ -177,5 +177,7 @@ private:
                                                 //   用户停启间隙里新点的采集会话
     std::function<void(bool)> scanSessionEndedHandler_;   // 会话终止回调（后台线程调；可空）
     std::function<void(const Scanner::hal::StereoFrame&)> debugFrameTap_;   // 调试帧分路（可空）
+    std::atomic<uint64_t> debugTapFrames_{0};    // tap 心跳计数（终审证据——260912）
+    std::atomic<uint64_t> debugTapNullCnt_{0};   // tap 空计数（帧在流而监视窗未挂）
     std::mutex debugTapMtx_;
 };

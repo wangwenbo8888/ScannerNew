@@ -69,9 +69,12 @@ private:
         // 落后侧图像（保留超前侧待追平）。**实机实证（260911 日志）**：模式切换/
         // 调参触发 N10 重发后，某侧多吃/漏吃一个触发沿→L-R 恒差 ±1 且永不收敛
         // ——严格等值=每帧全丢（预览冻结/零数据，双相机实都在出流）。故补：
-        // 连续 30 次同号失配（60Hz 下 ~0.5s）即采纳该偏移，按时间对齐配对交付；
-        // 激光 T/V 奇偶归属可能有疑（无法从帧号判定哪侧失步）——采纳时 WARN
-        // 大声告警，frameIdLeft/Right 原始帧号照带上报供监视窗「偏移」显示。
+        // 连续同号失配即采纳该偏移，按时间对齐配对交付；激光 T/V 奇偶归属可能
+        // 有疑（无法从帧号判定哪侧失步）——采纳时 WARN 大声告警，frameIdLeft/
+        // Right 原始帧号照带上报供监视窗「偏移」显示。
+        // 260912c 阈值 30→8：每次触发重启（切模式/暂停续采/调参 N10 重发）后
+        // 偏移都要重学——30 帧≈0.5-1s 预览全停，快速操作观感即「点了没反应」；
+        // 8 帧≈0.13s。误采纳风险低：单侧真丢帧产生的偏移本就该采纳（新现实）
         int64_t off = 0;
         if (leftBuf.frameId != rightBuf.frameId) {
             off = static_cast<int64_t>(leftBuf.frameId) -
@@ -79,7 +82,7 @@ private:
             // 偏移估计器（恒跑：失配≠已采纳偏移时计数；漂移后同样可再收敛）
             if (off != m_owner->m_pairOffset) {
                 if (off == m_owner->m_lastMismatchOff) {
-                    if (++m_owner->m_mismatchStreak >= 30) {
+                    if (++m_owner->m_mismatchStreak >= 8) {
                         const int64_t old = m_owner->m_pairOffset;
                         m_owner->m_pairOffset = off;
                         JMW_LOG_WARN("08-CameraControl",

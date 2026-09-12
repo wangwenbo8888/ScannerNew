@@ -250,6 +250,7 @@ private:
     void toIdleOnLogic();
     void startCaptureOnLogic();
     void stopCaptureOnLogic(bool keepStreams = false);   // true=就绪态（停触发不停流）
+    void recoverSerialOnLogic();                // 0x0802 边沿自愈：同口 reopen＋N12T＋补 N10
 
     // —— 配置与依赖（声明序即初始化序）——
     DeviceConfig cfg_;
@@ -289,6 +290,11 @@ private:
     serial::TempFrame lastTemps_{};             // 逻辑线程账本（快照源）
     std::function<void(bool)> warmupDone_;      // 当前预热完成回调（onStable/onTimeout 消费）
     Scanner::ScanMode lastCaptureMode_ = Scanner::ScanMode::MarkerPlusLaser;   // 采集灯型（逻辑线程属主）：N10 四管掩码按此组装（缺省面片 B）
+    bool n10ResendDirty_ = false;                // 采集中改参合批标记（260912c 复用：滑条
+                                                 //   三路联动×逐格步进实测 100ms 连发 4 帧
+                                                 //   N10——每帧=MCU 触发重启→配对重学→
+                                                 //   预览停摆；合批＋限速根治拖动风暴）
+    int64_t lastN10ResendMs_ = 0;                // 末次改参 N10 时刻（250ms 限速窗）
     std::vector<serial::GestureEvent> pendingGestures_;   // G01 手势暂存（pump 回调入队，
                                                            // logicTick ③ 派发后清空）
     // —— 故障边沿锚（逻辑线程属主；恢复清锚防复报）——

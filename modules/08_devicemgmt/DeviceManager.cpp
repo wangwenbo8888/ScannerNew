@@ -313,6 +313,19 @@ void DeviceManager::logicLoop() {
 
 void DeviceManager::logicTick() {
     drainPosts();                               // ① 编队任务排空（首——本拍落地）
+    // ①b 改参 N10 合批消化（260912c）：本拍多键改参合成一帧末值 N10；250ms
+    //     限速窗防拖动风暴（每帧 N10=MCU 触发重启）。窗内保持脏标记，到期由
+    //     后续 tick 补发（末值不丢）
+    if (n10ResendDirty_) {
+        const int64_t nowRs = nowMs();
+        if (!mode_->isCapturing()) {
+            n10ResendDirty_ = false;            // 已停采：账本为准，下次启采组帧
+        } else if (nowRs - lastN10ResendMs_ >= 250) {
+            n10ResendDirty_ = false;
+            lastN10ResendMs_ = nowRs;
+            mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_), nullptr);
+        }
+    }
     mcu_->pump();                               // ② 上行 3 环排空（G01/G02/G03→uplink）
     for (const auto& ev : pendingGestures_) dispatchGesture(ev);   // ③ 手势派发（onGesture 入队）
     pendingGestures_.clear();
@@ -341,6 +354,10 @@ void DeviceManager::logicTick() {
                              std::string(lastRx > 0 ? "串口无声(心跳丢失) 距末帧 "
                                                     : "串口无声(全程无帧) 距武装 ")
                                  + std::to_string(now - ref) + "ms");
+                // 失联自愈（260912c 找回——快速暂停/续采循环后 MCU 失声的真机
+                // 复发实证 00:00:17）：同口定向 close→reopen＋N12 T 重同步＋
+                // 采集态补 N10。每边沿一次；G02 到达清锚即自证复活
+                recoverSerialOnLogic();
             }
         } else {
             serialSilentLatched_ = false;       // 心跳恢复清锚
@@ -535,6 +552,30 @@ void DeviceManager::stopCaptureOnLogic(bool keepStreams) {
     });
 }
 
+// 串口失联自愈（0x0802 边沿触发·每边沿一次；逻辑线程内同步执行——重开含线程
+// 收编/驱动复位可阻塞数秒，失联链路上无更优时机）：同口定向 close→reopen 免
+// 搜口；成功后 N12 T 重同步（G02 恢复→清锚自证），采集态补发 N10 续采
+void DeviceManager::recoverSerialOnLogic() {
+    const std::string port = mcu_->lastPort();
+    const int baud = mcu_->lastBaud();
+    if (port.empty()) return;
+    JMW_LOG_WARN("08-DeviceManager",
+                 "[DeviceManager] 串口失联自愈：close→reopen {}@{}（N12T 重同步）",
+                 port, baud);
+    mcu_->close();
+    const auto r = mcu_->open(port, baud);
+    if (!r.success) {
+        publishFault(code(DevFault::CmdNoAck), "串口自愈重开失败 " + r.message);
+        return;
+    }
+    sendN12Clamped(cfg_.tempReportPeriodMs, nullptr);
+    if (mode_->isCapturing())
+        sendSeq(captureSeqSteps(), [this](bool ok) {
+            if (!ok) return;
+            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 失联自愈：N10 已补发（续采）");
+        });
+}
+
 Result DeviceManager::startStreamIfReady() {
     if (!camera_ || !camera_->isOpen() || !frameCb_)
         return Result::ok("无相机/无帧出口——跳过开流");   // 未配相机=纯 MCU 合法形态
@@ -724,14 +765,14 @@ void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore
                         [done](bool ok, const std::string&) { done(ok); });
         return;
     }
-    // N10 组参：采集中任一变更即全参重发（N10=启采——参数即时生效）；空闲仅
-    // 记账 done(true)（startCapture 时自账本组帧下发）
+    // N10 组参（freqHz/bgLight/laserLevel）：采集中改参不再逐帧即发——合批＋
+    // 250ms 限速（logicTick 消化末值；260912c：滑条三路联动逐格步进实测 100ms
+    // 连发 4 帧 N10，每帧=MCU 触发重启→左右配对重学→预览停摆）。空闲仅记账
+    // done(true)（startCapture 时自账本组帧下发）
     if (mode_->isCapturing()) {
-        mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_),
-                               [done](bool ok, const std::string&) { done(ok); });
-    } else {
-        done(true);
+        n10ResendDirty_ = true;
     }
+    done(true);
 }
 
 void DeviceManager::refreshParamSnapshot() {

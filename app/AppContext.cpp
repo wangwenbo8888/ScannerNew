@@ -434,9 +434,20 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
             scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId);
         }
         // ③ 调试分路：相机预览监视弹窗（相机 SDK 线程直调；订阅方切线程+节流自理）
+        // 260912 终审证据：tap 空（监视窗未挂/已关）vs tap 心跳（活着）双路日志
+        // ——帧在流而画面停时，一查日志即知死在哪一环（每 300 帧≈5s 一条）
         {
             std::lock_guard<std::mutex> lock(debugTapMtx_);
-            if (debugFrameTap_) debugFrameTap_(frame);
+            if (debugFrameTap_) {
+                debugFrameTap_(frame);
+                if (++debugTapFrames_ % 300 == 0)
+                    JMW_LOG_INFO("app-AppContext", "[预览] tap 心跳：累计 {} 帧",
+                                 debugTapFrames_.load());
+            } else if (++debugTapNullCnt_ % 300 == 0) {
+                JMW_LOG_WARN("app-AppContext",
+                             "[预览] 帧在流但 tap 空（监视窗未挂/已关闭）——累计 {} 帧",
+                             debugTapNullCnt_.load());
+            }
         }
     });
     // 灯型归采集组 N10（effectiveN10 按 ScanMode 组装四管掩码）——不预点亮：

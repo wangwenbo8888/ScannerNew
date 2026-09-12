@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <opencv2/imgproc.hpp>   // 相机监视预览降采样（cv::resize INTER_AREA）
@@ -642,23 +643,34 @@ void MainWindow::showCameraMonitor() {
         imgLay->addWidget(m_camRight);
         vLay->addLayout(imgLay);
         vLay->addWidget(m_camFrameLabel);
-        // 关闭即摘分路（帧回调不再进 UI）
+        // 关闭即摘分路（帧回调不再进 UI）——260912：记日志（tap 空＝监视窗死因
+        // 定位锚点：关闭时刻 vs 后续画面停时刻的相对关系直接读日志）
         connect(m_camDlg, &QDialog::finished, this, [this]() {
             if (m_appCtx) m_appCtx->setDebugFrameTap(nullptr);
+            JMW_LOG_INFO("app-MainWindow", "[预览] 监视窗关闭——tap 摘除");
         });
     }
     m_appCtx->setDebugFrameTap([this](const Scanner::hal::StereoFrame& f) {
-        // 接收帧率计数（节流前每帧计数——给帧号行用）
+        // —— 260912 崩溃隔离（提交内卡死根因手术）：本 tap 可能从左右两个相机
+        //    SDK 线程交替进入，体内任一异常会被 CameraControl 回调最外层
+        //    catch(...) 整体吞掉——此后每帧同点重抛＝tap「永久死」而扫描链（同
+        //    回调的②）照跑（真机日志实证：心跳停在第 1201 帧，管线跑到会话尾）
+        //    。整体兜异常＋限频记日志，单帧故障不再杀死预览链 ——
+        try {
+        // 接收帧率计数（节流前每帧计数——给帧号行用；双 SDK 线程交替进入——
+        // s_lastRxTick 非原子 static 须互斥护，撕裂值可触发异常路径）
+        static std::mutex s_fpsMtx;
         static std::atomic<uint64_t> s_rxCnt{0};
-        static auto s_lastRxTick = std::chrono::steady_clock::now();
         static std::atomic<uint64_t> s_rxFps{0};
         ++s_rxCnt;
         {
+            std::lock_guard<std::mutex> lock(s_fpsMtx);
+            static auto s_lastRxTick = std::chrono::steady_clock::now();
             const auto now = std::chrono::steady_clock::now();
             if (now - s_lastRxTick >= std::chrono::seconds(1)) {
-                s_rxFps.store(s_rxCnt.exchange(0) * 1000 /
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - s_lastRxTick).count());
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    now - s_lastRxTick).count();
+                s_rxFps.store(ms > 0 ? s_rxCnt.exchange(0) * 1000 / ms : 0);
                 s_lastRxTick = now;
             }
         }
@@ -683,43 +695,62 @@ void MainWindow::showCameraMonitor() {
         const auto fidL = f.frameIdLeft;
         const auto fidR = f.frameIdRight;
 
-        // 激光线宽度测量（2026-09-06）：采样列，逐列垂直方向找亮像素连续段
-        // ——水平激光线的「厚度」即列方向亮段长度；取中位数（排除背景/噪声）
-        // 260911：降 1Hz 测量（10fps 预览下每 10 帧一次——全图列扫描省 9/10，
-        // 标签沿用最近值，显示不受影响）
-        static std::atomic<uint64_t> s_previewCnt{0};
+        // —— 激光线宽度测量（2026-09-06）：260912 诊断隔离（用户指令）——整块
+        //    暂停调用：验证预览卡死是否与其相关（tap 内异常被相机回调外层
+        //    catch(...) 吞掉＝预览链猝死的嫌疑源之一）。定位后按结论恢复或
+        //    重写。标签显示沿用 0 ——
+        // 【原实现见 post_0336317_回退备份.patch／git 历史：采样列×全高扫描
+        //  img.at 逐像素找亮段取中位数，1Hz 节流，f.leftGray 原图测量】
         static std::atomic<int> s_laserWidth{0};
-        if (s_previewCnt.fetch_add(1) % 10 == 0) {
-            int lw = 0;
-            const cv::Mat& img = f.leftGray;   // 左图（原图测量——缩放会改线宽）
-            if (!img.empty()) {
-                std::vector<int> runs;
-                const int cols = img.cols;
-                const int step = std::max(1, cols / 100);
-                for (int x = 0; x < cols; x += step) {
-                    int maxRun = 0, curRun = 0;
-                    for (int y = 0; y < img.rows; ++y) {
-                        if (img.at<uint8_t>(y, x) > 150) {
-                            ++curRun;
-                            if (curRun > maxRun) maxRun = curRun;
-                        } else {
-                            curRun = 0;
-                        }
-                    }
-                    if (maxRun > 2 && maxRun < img.rows / 10)
-                        runs.push_back(maxRun);
-                }
-                if (!runs.empty()) {
-                    std::sort(runs.begin(), runs.end());
-                    lw = runs[runs.size() / 2];
-                }
-            }
-            s_laserWidth.store(lw);
-        }
+        // static std::atomic<uint64_t> s_previewCnt{0};
+        // if (s_previewCnt.fetch_add(1) % 10 == 0) {
+        //     int lw = 0;
+        //     const cv::Mat& img = f.leftGray;   // 左图（原图测量——缩放会改线宽）
+        //     if (!img.empty()) {
+        //         std::vector<int> runs;
+        //         const int cols = img.cols;
+        //         const int step = std::max(1, cols / 100);
+        //         for (int x = 0; x < cols; x += step) {
+        //             int maxRun = 0, curRun = 0;
+        //             for (int y = 0; y < img.rows; ++y) {
+        //                 if (img.at<uint8_t>(y, x) > 150) {
+        //                     ++curRun;
+        //                     if (curRun > maxRun) maxRun = curRun;
+        //                 } else {
+        //                     curRun = 0;
+        //                 }
+        //             }
+        //             if (maxRun > 2 && maxRun < img.rows / 10)
+        //                 runs.push_back(maxRun);
+        //         }
+        //         if (!runs.empty()) {
+        //             std::sort(runs.begin(), runs.end());
+        //             lw = runs[runs.size() / 2];
+        //         }
+        //     }
+        //     s_laserWidth.store(lw);
+        // }
         const int laserWidth = s_laserWidth.load();
 
         QMetaObject::invokeMethod(this, [this, lSmall, rSmall, fidL, fidR, laserWidth]() {
-            if (m_camDlg && m_camDlg->isVisible()) {
+            // 260912：isVisible 闸移除——帧流/窗开/定时器活三者俱证时预览仍停，
+            // 该闸为残余嫌疑（隐藏窗 setPixmap 无害且 10fps 开销可忽略）；空判保留
+            if (m_camDlg) {
+                // UI 侧终审计数（每 30 次≈3s 一条）：lambda 是否真在 UI 线程跑——
+                // 有此日志而画面停＝窗口绘制层（ghost/合成器）；无＝投递层。
+                // 260912b：带帧号——卡死期间帧号仍在走＝数据新鲜而画面停（渲染层）；
+                // 帧号也停＝上游给了重复/旧帧（数据层）
+                static std::atomic<uint64_t> s_uiRefresh{0};
+                if (s_uiRefresh.fetch_add(1) % 30 == 0)
+                    JMW_LOG_INFO("app-MainWindow", "[预览] UI 刷新：累计 {} 次（帧 L{} R{}）",
+                                 s_uiRefresh.load(), fidL, fidR);
+                // 标题栏活体指示：帧号跳动＝链路活；整窗冻结（含标题）＝渲染层/ghost
+                if (m_camDlg)
+                    m_camDlg->setWindowTitle(
+                        QStringLiteral("相机预览监视（左 / 右）——帧 L%1 R%2  刷新%3")
+                            .arg(static_cast<qulonglong>(fidL))
+                            .arg(static_cast<qulonglong>(fidR))
+                            .arg(s_uiRefresh.load()));
                 m_camLeft->setPixmap(QPixmap::fromImage(camMatToImage(lSmall))
                                            .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
                 m_camRight->setPixmap(QPixmap::fromImage(camMatToImage(rSmall))
@@ -751,6 +782,16 @@ void MainWindow::showCameraMonitor() {
                             .arg(static_cast<qulonglong>(fidL) - static_cast<qulonglong>(fidR)));
             }
         }, Qt::QueuedConnection);
+        } catch (const std::exception& e) {
+            // 限频记错（首错即记；累计计数）——凶手自报名字，预览链不死
+            static std::atomic<uint64_t> s_tapErrLogged{0};
+            if (s_tapErrLogged.fetch_add(1) % 100 == 0)
+                JMW_LOG_ERROR("app-MainWindow",
+                    "[相机监视] tap 帧处理异常（已兜住——预览链不死；累计 {}）: {}",
+                    s_tapErrLogged.load(), e.what());
+        } catch (...) {
+            JMW_LOG_ERROR("app-MainWindow", "[相机监视] tap 帧处理未知异常（已兜住）");
+        }
     });
     m_camDlg->show();
     m_camDlg->raise();
@@ -1164,6 +1205,9 @@ QWidget *MainWindow::createToolBar()
                             auto rr = m_appCtx->resumeScanSession();
                             if (rr.success) {
                                 setScanButtonVisual(myIdx, true);
+                                // 260912：续采重挂监视窗（注册 tap＋重显）——resume
+                                // 原不重注册，关闭过的对话框＝tap 空＝预览死
+                                showCameraMonitor();
                                 statusBar()->showMessage(QString::fromStdString(rr.message) +
                                                          QStringLiteral("——再点停止采集"));
                             } else {

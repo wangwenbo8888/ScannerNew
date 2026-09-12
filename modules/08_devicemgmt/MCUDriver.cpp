@@ -136,6 +136,8 @@ Scanner::Result MCUDriver::open(const std::string& port) {
 
 Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     if (open_.load()) return Scanner::Result::ok("MCU已打开");
+    lastPort_ = port;                               // 失联自愈定向重开凭据（auto 命中
+    lastBaud_ = baud;                               //   口由下方覆写；测试 override 记 cfg 口）
     codec_ = serial::FrameCodec{};                  // 复位半帧挂起缓冲（重开语义）
     channel_ = serial::CommandChannel(makeDeps());  // 重建依赖（重开会话干净起点）
     // reopen 复位：排空残留上行环 + 清观测计数/心跳——上一会话数据不串染
@@ -152,6 +154,10 @@ Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     std::string target = port;
     // 写线程先起（探测帧也走队列——WriteFile 实测可被 USB 驱动卡 2~2.5s，直写会
     // 把 open/逻辑线程一起堵死；写线程=唯一写者，R2-A1 属主天然落此）
+    // 260912：写线程每 open 重起（tid 新）——属主必须随代际重置：失联自愈
+    // close→reopen 后旧 tid 残留会拒新线程全部写（真机实证"串口并发写拒绝"×3
+    // ——N12T 都发不出，自愈变全灭）
+    serial_.resetWriteOwner();
     writeRunning_.store(true);
     writeThread_ = std::thread(&MCUDriver::writeLoop, this);
     if (target.empty() || target == "auto" || target == "AUTO") {
@@ -172,6 +178,7 @@ Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     }
     // 打开后不发任何额外命令（原 N12Z1 自检握手已废——N12 温度周期归 DeviceManager
     // 批1-C 调 setTempReportPeriod）
+    lastPort_ = target;                             // auto 搜口命中口覆写（自愈定向重开）
     JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 串口已打开: {} @ {} baud", target, baud);
     return Scanner::Result::ok();
 }

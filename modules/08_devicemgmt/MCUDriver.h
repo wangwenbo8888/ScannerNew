@@ -43,6 +43,8 @@ public:
     Scanner::Result open(const std::string& port, int baud);        // D-T12b：baud 接通
     Scanner::Result close() override;
     bool isOpen() const override;
+    std::string lastPort() const { return lastPort_; }   // 实际口名（失联自愈定向重开）
+    int lastBaud() const { return lastBaud_; }
 
     // —— IMCU：typed 下行 4 条（payload 拼装 → CommandChannel）——
     void setCaptureParams(const hal::CaptureParams& p, DoneCb cb) override;   // N10 七参（即启采）
@@ -120,6 +122,8 @@ private:
 
     std::atomic<Scanner::TimestampMs> lastRx_{0};   // 通讯心跳（任何完整上行帧刷新）
     std::atomic<uint64_t> parseFailCount_{0};       // 上行载荷解析失败计数
+    std::string lastPort_;                          // 实际打开的口（含 auto 命中——0x0802
+    int lastBaud_ = kDefaultBaud;                   //   失联自愈定向重开用）
     std::function<void(bool, const std::string&)> wireTap_;  // 串口收发监听（调试）
     std::mutex tapMtx_;                             // wireTap_ 装卸互斥（回调热路径无锁快查）
     void notifyTap(bool tx, const std::string& data);
