@@ -2,6 +2,8 @@
 
 #include "file_io.h"
 
+#include <algorithm>   // replacePointCloud: min
+
 namespace Scanner::data {
 
 PointCloudBuffer::PointCloudBuffer() {}
@@ -32,6 +34,20 @@ Result PointCloudBuffer::getSnapshot(uint64_t& version,
         colors = allColors_;
         version = version_.load(std::memory_order_acquire);
     }
+    return Result::ok();
+}
+
+Result PointCloudBuffer::replacePointCloud(const PointCloudFrame& cloud) {
+    const size_t n = std::min(cloud.points.size(), static_cast<size_t>(cloud.pointCount));
+    {
+        std::unique_lock lock(rwlock_);
+        allPoints_.assign(cloud.points.begin(), cloud.points.begin() + n);
+        allColors_.clear();
+        if (cloud.colors.size() >= n)
+            allColors_.assign(cloud.colors.begin(), cloud.colors.begin() + n);
+    }
+    version_.fetch_add(1, std::memory_order_release);
+    totalPoints_.store(static_cast<int>(n), std::memory_order_release);
     return Result::ok();
 }
 

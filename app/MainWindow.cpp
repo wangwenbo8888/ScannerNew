@@ -29,6 +29,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <QSignalBlocker>   // 面片预设：旋钮同步阻断耦合反灌（260912）
 #include <opencv2/imgproc.hpp>   // 相机监视预览降采样（cv::resize INTER_AREA）
 #include <osg/Vec3>
 #include <osg/Matrix>
@@ -228,6 +229,22 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                               .arg(pts.size()));
                         }
                         if (!m_3dView || pts.empty()) return;
+                        // —— 260912 导出补链：标志点快照入 PointCloudBuffer——
+                        //    setMarkers 原零调用者（导出标志点恒空，同激光病）。
+                        //    快照语义（整表替换）与融合云瞬时快照口径一致
+                        if (auto* pcbMk = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr) {
+                            std::vector<Scanner::data::MarkerRecord> recs;
+                            recs.reserve(pts.size());
+                            for (size_t i = 0; i < pts.size(); ++i) {
+                                Scanner::data::MarkerRecord r;
+                                r.globalId = static_cast<uint32_t>(i);
+                                r.pos = pts[i];
+                                if (normals.size() == pts.size())
+                                    r.normal = normals[i];
+                                recs.push_back(r);
+                            }
+                            pcbMk->setMarkers(recs);
+                        }
                         std::vector<osg::Vec3> markers;
                         markers.reserve(pts.size());
                         for (const auto& p : pts) markers.emplace_back(p.x, p.y, p.z);
@@ -264,16 +281,31 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             }
                         }
                         if (!m_3dView) return;
-                        // 激光计数合账（可见数口径：软删 alpha=0 不计——
-                        // 「点云数据 001」显示 标记/激光——激光不进 PointCloudBuffer）
+                        // —— 260912c 导出补链（基线+当期替换）：激光信号=本会话
+                        //    融合云全量快照（体素去重累计）——新会话从零重来，直
+                        //    接替换会清掉跨会话累计。新会话首推锁存基线（此前全
+                        //    部），此后替换=基线+当期——仓库跨会话只增不减
+                        if (auto* pcbExp = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;
+                            pcbExp && !pts.empty()) {
+                            if (!m_laserSessionLatched) {
+                                m_laserSessionLatched = true;   // 首推锁存（启动口复位）
+                                std::vector<cv::Vec3b> cols;
+                                uint64_t v = 0;
+                                pcbExp->getSnapshot(v, m_laserBasePts, cols);
+                            }
+                            Scanner::data::PointCloudFrame fr;
+                            fr.points = m_laserBasePts;
+                            fr.points.insert(fr.points.end(), pts.begin(), pts.end());
+                            fr.pointCount = static_cast<int>(fr.points.size());
+                            pcbExp->replacePointCloud(fr);
+                        }
+                        // 3D 激光显示（累积渲染）。260912 计数收口：本处不再写
+                        // 「点云数据 001」——计数唯一真相源=PointCloudBuffer（由
+                        // cloudTimer 500ms 刷新，与导出一致）
                         std::vector<osg::Vec3> laser;
                         laser.reserve(pts.size());
                         for (const auto& p : pts) laser.emplace_back(p.x, p.y, p.z);
                         m_3dView->loadLaserPoints(laser);
-                        m_laserPtsShown = static_cast<int>(m_3dView->visibleLaserCount());
-                        if (m_cloudItem001)
-                            m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
-                                                        .arg(m_laserPtsShown));
                     });
             connect(feed, &SceneFeedAdapter::freezeChanged, this,
                     [this](bool frozen) {
@@ -591,6 +623,8 @@ void MainWindow::onScanClicked()
                                            : QString::fromStdString("停止被拒: " + r.message));
         return;
     }
+    applyMeshPreset();       // 导航"扫描"＝面片：推荐预设＋旋钮同步（260912）
+    m_laserSessionLatched = false;   // 新会话：激光仓库基线待重锁（260912c）
     auto r = m_appCtx->startScanSession(Scanner::ScanMode::MarkerPlusLaser);
     if (!r.success) {
         QMessageBox::warning(this, QStringLiteral("扫描"),
@@ -613,6 +647,17 @@ QImage camMatToImage(const cv::Mat& m) {
     if (m.empty()) return {};
     return QImage(m.data, m.cols, m.rows, static_cast<qsizetype>(m.step),
                   QImage::Format_Grayscale8).copy();
+}
+
+// —— 参数1 三参比例映射（260912 用户口径 B''）：旋钮 1→各参最小、100→各参最大，
+//    线性比例。曝光域 1-5ms（用户口径 260912——60Hz 触发周期 16.7ms，>5ms 拖影）；
+//    补光/激光域 0-100（协议文档 N10 表 B/L——与 ParamStore specs 同源）——
+void pushParam1Scaled(Scanner::device::DeviceManager* dm, int val) {
+    const double t = static_cast<double>(std::clamp(val, 1, 100) - 1) / 99.0;
+    auto src = Scanner::device::ParamEntry::Source::Ui;
+    dm->setParam("exposure",   1.0 + t * 4.0, src);             // 1-5ms
+    dm->setParam("laserLevel", 0.0 + t * 100.0, src);           // 0-100
+    dm->setParam("bgLight",    0.0 + t * 100.0, src);           // 0-100
 }
 } // namespace
 
@@ -1244,6 +1289,13 @@ QWidget *MainWindow::createToolBar()
                         // 落下：停旧启新（模式切换）
                     }
                 }
+                if (mode == Scanner::ScanMode::MarkerOnly)
+                    applyMarkerPreset();       // 标点：推荐预设＋旋钮同步（260912）
+                else if (mode == Scanner::ScanMode::MarkerPlusLaser)
+                    applyMeshPreset();         // 面片：推荐预设＋旋钮同步（260912）
+                else
+                    applyParam1ToLedger();     // 精细/深孔：三参压旋钮值（待真机标定预设）
+                m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
                 const auto r = m_appCtx->startScanSession(mode);   // 四值模式直传（⑨b：精细/深孔 07 链配对待裁决）
                 if (!r.success) {
                     QMessageBox::warning(this, title,
@@ -1410,24 +1462,31 @@ QWidget *MainWindow::createToolBar()
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
                     auto* pcb = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;   // 仓库内存直导（02-D5 唯一出口）
-                    if (pcb && pcb->exportCloud(spath))
-                        statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\x82\xb9\xe4\xba\x91\xe6\x88\x90\xe5\x8a\x9f"));
+                    // 260912 数量回显：导出成败带点数——0 点=喂入侧问题（看扫描中
+                    // 「点云数据 001」是否增长）；N>0 而文件空/找不到=路径编码问题
+                    const int nPts = pcb ? pcb->getTotalPointCount() : 0;
+                    const bool ok = pcb && pcb->exportCloud(spath);
+                    JMW_LOG_INFO("app-MainWindow", "[导出] 点云：{} 点 ok={} → {}",
+                                 nPts, ok ? 1 : 0, spath);
+                    if (ok)
+                        statusBar()->showMessage(
+                            QStringLiteral("导出点云成功（%1 点）").arg(nPts), 5000);
                     else
-                        statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xa4\xb1\xe8\xb4\xa5"));
+                        statusBar()->showMessage(
+                            QStringLiteral("导出点云失败（仓库 %1 点）").arg(nPts), 5000);
                 });
                 menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc"), [this]() {
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc"), "mesh.stl", "Mesh (*.stl *.obj)");
                     if (path.isEmpty()) return;
-                    std::string spath = path.toStdString();
-                    Scanner::data::fileio::MeshData mesh;  // TODO: 从后处理结果获取
-                    if (Scanner::data::fileio::exportMesh(spath, mesh))
-                        statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc\xe6\x88\x90\xe5\x8a\x9f"));
-                    else
-                        statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xa4\xb1\xe8\xb4\xa5"));
+                    // 260912 诚实化：后处理网格产物未接入（原桩写空 STL——假文件）；
+                    // 接入点=04 后处理完成后（TODO 登记），当前提示后不造文件
+                    QMessageBox::information(this, QStringLiteral("导出网格"),
+                        QStringLiteral("网格导出需先完成后处理流程（当前无网格产物）。"));
                 });
                 menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xb7\xa5\xe7\xa8\x8b\xe6\x96\x87\xe4\xbb\xb6"), [this]() {
-                    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xb7\xa5\xe7\xa8\x8b\xe6\x96\x87\xe4\xbb\xb6"), "project.leadscan", "Project (*.leadscan)");
-                    if (!path.isEmpty()) statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba: ") + path);
+                    // 260912 诚实化：原仅状态栏假提示；工程序列化格式规划中
+                    QMessageBox::information(this, QStringLiteral("导出工程文件"),
+                        QStringLiteral("工程文件导出未实现（序列化格式规划中）。"));
                 });
 
                 QPoint pos = btn->mapToGlobal(QPoint(btn->width() + 4, 0));
@@ -1670,18 +1729,16 @@ QWidget *MainWindow::createParamSection()
         });
         controlLayout->addWidget(valueLbl);
 
-        // 参数1（曝光/亮度）→ 三路联动（用户口径 2026-09-06）：
-        //   补光灯 B / 激光线 L＝滑条值直接映射（0~100）
-        //   相机曝光＝滑条值×100 µs（100µs~10000µs，即 0.1ms~10ms）
+        // 参数1（曝光/亮度）→ 三路比例联动（260912 用户口径 B'）：旋钮 1→各参
+        //   最小、100→各参最大，线性比例（各参域=ParamStore specs：曝光 1-100ms/
+        //   补光 0-100/激光 0-100——域值同源 08 makeParamSpecs，不引跨层符号）；
+        //   启动扫描前 applyParam1ToLedger 同映射压账本——初始与中途恒同效
         if (si == 0) {
+            m_param1Slider = slider;
             QObject::connect(slider, &QSlider::valueChanged, this, [this](int val) {
                 auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
                 if (!dm) return;
-                auto src = Scanner::device::ParamEntry::Source::Ui;
-                const double exposureUs = std::max(100.0, static_cast<double>(val) * 100.0);
-                dm->setParam("exposure",  exposureUs / 1000.0, src);   // µs→ms
-                dm->setParam("laserLevel", static_cast<double>(val), src);
-                dm->setParam("bgLight",  static_cast<double>(val), src);
+                pushParam1Scaled(dm, val);
             });
         }
 
@@ -1691,6 +1748,53 @@ QWidget *MainWindow::createParamSection()
 
     layout->addWidget(slidersWidget, 1);
     return section;
+}
+
+// 面片扫描推荐预设（260912 用户口径）：B=10（「B 模式成功配置基线」——spec
+// 注释同源）＋L=40（「60 过亮→40 折中」——spec 注释同源）＋H=60＋曝光 3ms。
+// B≠L 不在旋钮比例曲线上——直写账本；旋钮同步至激光位 41（本模式主灯），
+// QSignalBlocker 防旋钮耦合反灌覆盖预设；仅新启会话套用，续采保留现值
+void MainWindow::applyMeshPreset() {
+    auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+    if (!dm) return;
+    if (m_param1Slider) {
+        const QSignalBlocker blocker(m_param1Slider);   // 阻断耦合——预设精确落账
+        m_param1Slider->setValue(41);                   // 激光位 L=40
+    }
+    auto src = Scanner::device::ParamEntry::Source::Ui;
+    dm->setParam("exposure",   3.0, src);
+    dm->setParam("bgLight",   10.0, src);
+    dm->setParam("laserLevel", 40.0, src);
+    dm->setParam("freqHz",    60.0, src);
+    statusBar()->showMessage(
+        QStringLiteral("面片扫描推荐参数已套用（B=10/L=40/H=60/曝光3ms）"), 3000);
+}
+
+// 标点扫描推荐预设（260912 用户口径）：补光 B=40（2026-08 真机标点检测成功
+// 配置——08 kMarkerOnlyBg 同源数值；实发另有模式强制 B=40/L=0/T0V0C0D0 兜底）
+// ＋频率 H=60（账本默认）。旋钮同步至比例曲线上 B=40 对应位置（t=0.4 → 旋钮
+// 41，曝光随之 ~2.6ms/激光 40——L 在标点模式实发恒 0，账本值仅占位）；仅新启
+// 会话套用，续采（resume）保留用户当前值
+void MainWindow::applyMarkerPreset() {
+    auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+    if (!dm) return;
+    constexpr int kKnobBg40 = 41;              // 1 + round(0.4×99)（pushParam1Scaled 反算）
+    if (m_param1Slider)
+        m_param1Slider->setValue(kKnobBg40);   // 触发 valueChanged→pushParam1Scaled 记账
+    else
+        pushParam1Scaled(dm, kKnobBg40);
+    dm->setParam("freqHz", 60.0, Scanner::device::ParamEntry::Source::Ui);
+    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（B=40/H=60）"), 3000);
+}
+
+// 参数1 三参比例压账本（260912 用户口径 B'）：启动扫描前调用——按旋钮 1-100
+// 比例映射三参（1=各参最小/100=各参最大），与中途拖动完全同效；随后
+// startCapture 自账本组帧下发
+void MainWindow::applyParam1ToLedger()
+{
+    auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+    if (!dm || !m_param1Slider) return;
+    pushParam1Scaled(dm, m_param1Slider->value());
 }
 
 QWidget *MainWindow::createInfoSection()
@@ -1725,7 +1829,7 @@ QWidget *MainWindow::createInfoSection()
         {"WIFIstate-black-11",   QStringLiteral("连接状态")},
         {"cloudnumber-black-11", QStringLiteral("点云数量")},
         {"infopanel-black-11",   QStringLiteral("帧率 (FPS)")},
-        {"temprature-black-11",  QStringLiteral("设备温度")},
+        {"temprature-black-11",  QStringLiteral("MCU温度")},
         {"cloudlist-black-11",   QStringLiteral("CPU占用率")},
         {"memory-black-11",      QStringLiteral("内存状态")}
     };
@@ -1988,11 +2092,12 @@ QWidget *MainWindow::createBottomToolBar()
                                   .arg(m_markerScanSeq, 3, 10, QChar('0'))
                                   .arg(vis));
                 }
-                // 点云计数同步可见激光数（05 P4b 激光侧——软删立即反映）
-                if (m_cloudItem001 && m_3dView) {
-                    m_laserPtsShown = static_cast<int>(m_3dView->visibleLaserCount());
+                // 点云计数（260912 收口）：仓库计数为准（软删不改仓库——导出
+                // 口径与计数一致；渲染侧软删仅影响画面）
+                if (auto* pcbCnt = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;
+                    m_cloudItem001 && pcbCnt) {
                     m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
-                                                .arg(m_laserPtsShown));
+                                                .arg(pcbCnt->getTotalPointCount()));
                 }
                 JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 三栏复位完成（0-6 全清）");
             });
@@ -2181,20 +2286,26 @@ void MainWindow::startInfoTimer()
     connect(cloudTimer, &QTimer::timeout, this, [this]() {
         if (!m_appCtx || !m_3dView) return;
         auto* pcb = m_appCtx->pointCloudBuffer();
-        if (!pcb || pcb->getTotalPointCount() == 0) return;
+        if (!pcb) return;
         static int lastCount = 0;
         int curCount = pcb->getTotalPointCount();
-        if (curCount != lastCount) {
-            uint64_t version = 0;
-            std::vector<cv::Point3f> points;
-            std::vector<cv::Vec3b> colors;
-            pcb->getSnapshot(version, points, colors);
-            m_3dView->loadCloudSnapshot(version, points, colors);
-            lastCount = curCount;
-            if (m_cloudItem001)
-                m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
-                                            .arg(std::max(curCount, m_laserPtsShown)));
+        // 260912b 标签独立于 3D 重载：计数始终刷新（真值=仓库快照）
+        if (m_cloudItem001 && curCount != lastCount)
+            m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
+                                        .arg(curCount));
+        // 3D 快照重载仅非扫描期（扫描期激光由 laserCloudUpdated 直渲——
+        // 此处再拉同份点＝双份顶点/内存；会话结束后（含导入云）才走此路）
+        if (curCount == 0 || curCount == lastCount) return;
+        if (m_appCtx->isScanSessionActive()) {
+            lastCount = curCount;                  // 会话期只跟计数不重载
+            return;
         }
+        uint64_t version = 0;
+        std::vector<cv::Point3f> points;
+        std::vector<cv::Vec3b> colors;
+        pcb->getSnapshot(version, points, colors);
+        m_3dView->loadCloudSnapshot(version, points, colors);
+        lastCount = curCount;
     });
     cloudTimer->start(500);
 }
@@ -2343,16 +2454,19 @@ void MainWindow::updateInfoSection()
         }
     }
 
-    // 4. 设备温度 — 从 DeviceStateCache 读（HardwareMonitor 写入）
+    // 4. 下位机温度——G02 四路取最高一路显示（260912 用户口径；ts=0=未收帧）
     if (m_infoTempLabel) {
-        double camTemp = dsc ? dsc->getTemperature("Camera") : 0.0;
-        double mcuTemp = dsc ? dsc->getTemperature("MCU") : 0.0;
-        double temp = std::max(camTemp, mcuTemp);
-        if (temp > 0.0) {
-            m_infoTempLabel->setText(QString::number(temp, 'f', 1) + " ℃");
-            m_infoTempLabel->setStyleSheet(temp > 50.0 ? "color: #DDAA00;" : "");
+        const auto t = (m_appCtx && m_appCtx->deviceManager())
+                           ? m_appCtx->deviceManager()->getLastTemperatures()
+                           : Scanner::device::serial::TempFrame{};
+        if (t.ts > 0) {
+            const double mx = std::max({t.celsius[0], t.celsius[1],
+                                        t.celsius[2], t.celsius[3]});
+            m_infoTempLabel->setText(QString::number(mx, 'f', 1) + QStringLiteral(" ℃"));
+            m_infoTempLabel->setStyleSheet(mx > 50.0 ? "color: #DDAA00;" : "");
         } else {
-            m_infoTempLabel->setText("-- ℃");
+            m_infoTempLabel->setText(QStringLiteral("-- ℃"));
+            m_infoTempLabel->setStyleSheet("");
         }
     }
 

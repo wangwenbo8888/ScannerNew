@@ -36,6 +36,11 @@ public:
     void setMarkers(const std::vector<MarkerRecord>& markers);
     void snapshotMarkers(uint64_t& version, std::vector<MarkerRecord>& out) const;
 
+    // 整包替换（260912 激光导出口径）：一次锁内清+写——渲染节流推送的融合云是
+    // 全量快照（体素去重累计），追加语义会致点重复数十次（真机 52 万点导出
+    // 不可用实证）；替换语义=仓库恒等当前融合云，导出/计数皆真
+    Result replacePointCloud(const PointCloudFrame& cloud);
+
     // 人工按需导出（02-D5 唯一出口）：锁内拷贝后走 fileio，扩展名分派 ply/pcd/xyz
     // markers 导出 globalId 不落盘（标志点格式只有坐标），续扫基准走内存通道
     bool exportCloud(const std::string& path);

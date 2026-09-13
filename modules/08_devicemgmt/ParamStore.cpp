@@ -3,9 +3,6 @@
 // ============================================================================
 #include "ParamStore.h"
 
-#include <spdlog/spdlog.h>
-#include "jmw_logging.h"
-
 #include <cmath>
 
 namespace Scanner::device {
@@ -48,7 +45,7 @@ ParamStore::ParamStore(std::vector<ParamSpec> specs, Dispatch dispatch)
     : dispatch_(std::move(dispatch)) {
     for (auto& s : specs) {
         specs_[s.key] = s;
-        entries_[s.key] = ParamEntry{s.def, ParamEntry::Source::Boot};
+        entries_[s.key] = ParamEntry{s.def, false, ParamEntry::Source::Boot};
     }
 }
 
@@ -56,21 +53,10 @@ void ParamStore::bootstrap(Load load) {
     inflight_.clear();   // 会话重启语义：在途全废（gen 单调递增，迟到回调必失配作废）
     std::map<std::string, double> file;
     if (load) parseLedger(load(), file);
-    // —— 旧档迁移（批3：读时单向，不改档格式版本号）——
-    // laserSelectA/B：旧协议激光管选择键已作废（N10 四管掩码按 ScanMode 组装，
-    // 批1 已删参数）→ 丢弃＋info；laserLevel>100：旧档 0-255 量纲 → 钳 100＋warn
-    //（值域结果与 clampToSpec 同效，迁移只为日志留痕）
-    if (file.erase("laserSelectA") > 0 || file.erase("laserSelectB") > 0) {
-        JMW_LOG_INFO("08-ParamStore", "[ParamStore] 旧协议档键作废: laserSelectA/laserSelectB 已丢弃（四管掩码改按 ScanMode 组装）");
-    }
-    if (const auto ll = file.find("laserLevel"); ll != file.end() && ll->second > 100.0) {
-        ll->second = 100.0;
-        JMW_LOG_WARN("08-ParamStore", "[ParamStore] 旧档量纲迁移（0-255→0-100）: laserLevel 钳 100");
-    }
     for (const auto& [key, spec] : specs_) {
         const auto it = file.find(key);                        // 未知 key 天然忽略
         const double v = (it != file.end()) ? clampToSpec(spec, it->second) : spec.def;
-        const ParamEntry e{v, ParamEntry::Source::Boot};
+        const ParamEntry e{v, false, ParamEntry::Source::Boot};
         entries_[key] = e;
         if (onParamChanged) onParamChanged(key, e);            // 逐参数广播（含默认值项）
     }
@@ -80,27 +66,15 @@ void ParamStore::setValue(const std::string& key, double v, ParamEntry::Source s
     const auto specIt = specs_.find(key);
     if (specIt == specs_.end()) return;                        // 未登记：不下发不广播
     const double clamped = clampToSpec(specIt->second, v);     // 入口即钳
-    // 同值短路（260911 USB 减负）：账本已是该值且无「异值在途」即跳过——滑条
-    // 逐格 valueChanged/初值同步的同值 setParam 不再重复下发（曝光一次＝4 USB
-    // 写＋1 读回，饱和总线下即控制命令超时源）。在途为异值时不跳（后值须
-    // 取代在途——gen 语义保持）
-    {
-        const auto lit = inflight_.find(key);
-        const bool inflightSame = (lit != inflight_.end()) && (lit->second.expect == clamped);
-        const auto eit = entries_.find(key);
-        const bool ledgerSame = (eit != entries_.end()) && (eit->second.value == clamped);
-        if (ledgerSame && (inflight_.find(key) == inflight_.end() || inflightSame))
-            return;
-    }
     const uint64_t gen = ++genSeq_;
     inflight_[key] = InFlight{clamped, gen};                   // 同 key 后值胜出（覆盖旧在途）
     if (!dispatch_) return;                                    // 无下发通道（测试/装配前）保在途记账
-    dispatch_(key, clamped, [this, key, clamped, src, gen](bool ok) {
+    dispatch_(key, clamped, [this, key, clamped, src, gen](bool ok, bool confirmed) {
         const auto fl = inflight_.find(key);
         if (fl == inflight_.end() || fl->second.gen != gen) return;   // 已被后值/bootstrap 取代
         inflight_.erase(fl);                                   // 出队（成败皆决）
         if (ok) {
-            const ParamEntry e{clamped, src};                   // 写成败直通（无 ACK 语义）
+            const ParamEntry e{clamped, confirmed, src};       // v3: confirmed=ok；v2: 恒 false
             entries_[key] = e;
             if (onParamChanged) onParamChanged(key, e);        // 改账后广播
         } else if (onReject) {
@@ -127,10 +101,10 @@ bool ParamStore::has(const std::string& key) const { return specs_.count(key) > 
 
 bool ParamStore::pending(const std::string& key) const { return inflight_.count(key) > 0; }
 
-void ParamStore::setEntryDirect(const std::string& key, double v, ParamEntry::Source src) {
+void ParamStore::setEntryDirect(const std::string& key, double v, bool confirmed, ParamEntry::Source src) {
     const auto it = entries_.find(key);
     if (it == entries_.end()) return;                          // 未登记不动账
-    it->second = ParamEntry{clampToSpec(specs_.at(key), v), src};  // 静默写：不广播
+    it->second = ParamEntry{clampToSpec(specs_.at(key), v), confirmed, src};  // 静默写：不广播
 }
 
 } // namespace Scanner::device

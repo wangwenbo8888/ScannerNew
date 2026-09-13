@@ -450,27 +450,18 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
             }
         }
     });
-    // 灯型归采集组 N10（effectiveN10 按 ScanMode 组装四管掩码）——不预点亮：
-    // 固件收到 N10 即按新参数调灯，预点亮会闪变；启采=N10 本身一次到位。
-    // 四模式灯型（D7 产线方案；精细/深孔 2026-09-10 用户纠正对调）：标点
-    // T0V0C0D0（B 抬升 40/L=0——数值同源于 08 DeviceManager.cpp 本地常量
-    // kMarkerOnlyBg，日志文案不引跨层符号）；面片 T1V1C0D0；精细 T0V0C0D1；
-    // 深孔 T0V0C1D0。⑨b：精细/深孔单管周期下 07 激光链「偶L奇R」配对假设未验证
-    // ——本批仅 08/UI 映射就位
-    dm->startCapture(mode);
-    switch (mode) {
-    case Scanner::ScanMode::MarkerOnly:
-        JMW_LOG_INFO("app-AppContext", "[AppContext] 标点扫描(A) T0V0C0D0（B=40 抬升基线 L=0）");
-        break;
-    case Scanner::ScanMode::MarkerPlusLaser:
-        JMW_LOG_INFO("app-AppContext", "[AppContext] 面片扫描(B) T1V1C0D0（左右线交替归固件帧序）");
-        break;
-    case Scanner::ScanMode::FineScan:
-        JMW_LOG_INFO("app-AppContext", "[AppContext] 精细扫描(C) T0V0C0D1（D 管——⑨b 周期模型待裁决）");
-        break;
-    case Scanner::ScanMode::DeepHoleScan:
-        JMW_LOG_INFO("app-AppContext", "[AppContext] 深孔扫描(D) T0V0C1D0（C 管——⑨b 周期模型待裁决）");
-        break;
+    // 灯型归采集组 N10（effectiveN10 带灯型覆写）——不预点亮：固件 H1"按上次
+    // 采集参数重启"会重置灯态（2026-08-22 实测），组序内 N10 灯型一次到位。
+    // 灯型按模式（2026-09-01 定版）：A=纯补光（无激光——业务要求）；B=补光+激光。
+    // 协议回退旧版（2026-09-12）：N10 五参（H/B/T/V/L），激光管归账本
+    // laserSelectA/B；精细/深孔两模式旧协议无对应管位，暂与 B 同灯型（laserOn）
+    const bool laserOn = (mode != Scanner::ScanMode::MarkerOnly);
+    dm->startCapture(laserOn);
+    if (laserOn) {
+        JMW_LOG_INFO("app-AppContext",
+            "[AppContext] 激光组: 左斜=T{} 右斜=V{}（交替归固件 H1 帧序）",
+            static_cast<int>(dm->getParam("laserSelectA").value),
+            static_cast<int>(dm->getParam("laserSelectB").value));
     }
 
     // 命令通道点火（门禁/前置/装配失败均带因返回；各"不走打印点"已落日志）
@@ -535,10 +526,8 @@ Scanner::Result AppContext::pauseScanSession() {
     if (!isScanSessionActive()) return Scanner::Result::fail("无活跃扫描会话");
     if (isScanSessionPaused()) return Scanner::Result::ok("已处于就绪态");
     // 停采集保活（用户口径 2026-09-06）：N11 H0 停触发＋灭灯（协议正确口径）
-    // ——260911 系统性收口：走 stopTrigger（相机流保留——无触发即无帧）。原
-    // stopCapture 全停流在 USB 饱和下 AcquisitionStop 频败（-1010 楔死），且
-    // 续采重开流后左右帧号失配丢帧——就绪态往返从此零相机 USB 操作
-    if (deviceManager_) deviceManager_->stopTrigger();
+    //——相机流保留（旧协议 stopCapture 不停流），管线暂停自丢帧
+    if (deviceManager_) deviceManager_->stopCapture();
     const auto r = scanWf_->pause();
     JMW_LOG_INFO("app-AppContext", "[AppContext] 就绪态（N11H0 停触发灭灯·相机流保留）：{}（融合云/obs 账本保留）",
                  r.success ? "ok" : r.message);
@@ -550,13 +539,14 @@ Scanner::Result AppContext::resumeScanSession() {
     if (!isScanSessionPaused()) return Scanner::Result::fail("非就绪态（无暂停会话）");
     const auto r = scanWf_->resume();
     if (!r.success) return r;
-    // 续采：按当前模式重发 N10（启采=N10 本身——七参+四管掩码一次到位；
-    // 260831 无 N11 H1；N11H0 停触发后 MCU 停在「已停」态，须 N10 重启触发
-    //——2026-09-06 串口无声根因结论沿承，仅命令面随协议缩并）
+    // 续采：N10 重启灯组参数＋N11 H1 重启触发（2026-09-06 实测：首次启动
+    // N10 即够——MCU 从默认态进入触发；但 N11H0 停触发后仅 N10 不够，
+    // MCU 停在「已停」态——串口无声根因；须补 N11H1 才恢复触发）
     if (deviceManager_) {
-        deviceManager_->startCapture(lastScanMode_);   // N10 按模式组帧（captureSeqSteps）
+        const bool laserOn = (lastScanMode_ != Scanner::ScanMode::MarkerOnly);
+        deviceManager_->startCapture(laserOn);   // N10→N11H1→FLUSH（captureSeqSteps）
     }
-    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（N10 按模式四管掩码重启触发）：ok");
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（N10 参数＋N11H1 重启触发）：ok");
     return Scanner::Result::ok("续采中");
 }
 

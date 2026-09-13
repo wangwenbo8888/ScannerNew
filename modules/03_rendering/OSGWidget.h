@@ -3,6 +3,7 @@
 #include <QOpenGLWidget>
 #include <QTimer>
 #include <QLabel>
+#include <QContextMenuEvent>
 
 #include <opencv2/core.hpp>   // cv::Point3f/Vec3b（loadCloudSnapshot 值签名）
 
@@ -134,6 +135,13 @@ public:
     bool lassoFirstLayer() const { return m_lassoFirstLayer; }
     void setLassoFirstLayerTolerance(double mm) { m_lassoFirstLayerTolMm = mm > 0 ? mm : 5.0; }
 
+    // 显示/隐藏开关（右键菜单口）：作用于 m_markerRoot/m_laserRoot 的 NodeMask；
+    // clearScene 后重建承袭开关状态；隐藏子树不参与圈选
+    void setMarkerPointsVisible(bool visible);
+    void setLaserPointsVisible(bool visible);
+    bool markerPointsVisible() const { return m_markersVisible; }
+    bool laserPointsVisible() const { return m_laserVisible; }
+
     /// 集合最优取景（2026-09-05）：PCA 主平面法向面视＋上向＝面内主轴，
     /// 按有效半视场（含宽高比）填充 ~92%，near/far 紧致（深度精度）——
     /// 点云/标志点集合通用（导入路径调用）
@@ -195,6 +203,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
 
 signals:
     void streamProgress(int loaded, int total);
@@ -384,6 +393,10 @@ private:
     osg::ref_ptr<osg::Geometry> m_laserGeom;
     osg::ref_ptr<osg::Vec3Array> m_laserCoords;
     bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角）
+    bool m_markersVisible = true;                   // 标志点显示开关（右键菜单；NodeMask 0=隐藏）
+    bool m_laserVisible = true;                     // 激光点显示开关（右键菜单；NodeMask 0=隐藏）
+    QPoint m_rightPressGlobalPos;                   // 右键按下位置（拖拽阈值判定）
+    bool m_suppressContextMenu = false;             // 右键拖拽平移/圈选闭合后松开不弹菜单
     double m_lastFitRadius = -1.0;                  // 上次取景时场景半径（-1=未取过）
     std::chrono::steady_clock::time_point m_lastFitTime{};   // 上次取景时刻（1s 节流）
 };

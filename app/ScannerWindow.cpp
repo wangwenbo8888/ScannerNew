@@ -83,13 +83,14 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
 
     // A-T17 修复（运行时钳，.ui 设计量程同步）：滑条范围对齐 ParamStore spec
     // （协议批3 终态：freq 1-200 默认 60 / bg 0-100 默认 10 / laser 0-100 默认
-    // 40——灯控量程实测 0-100；exposure 1-100 默认 25），初值自账本快照同步
-    // ——setValue 触发 valueChanged→setParam 同值记账（无副作用）
+    // 40——灯控量程实测 0-100；exposure 1-5ms 默认 3——260912 用户口径，60Hz
+    // 触发周期 16.7ms，>5ms 过曝拖影），初值自账本快照同步——setValue 触发
+    // valueChanged→setParam 同值记账（无副作用）
     if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
         ui.horizontalSlider_Freq->setRange(1, 200);
         ui.horizontalSlider_Background_Lighting->setRange(0, 100);
         ui.horizontalSlider_Laser_Lighting->setRange(0, 100);
-        ui.horizontalSlider_ExposeTime->setRange(1, 100);
+        ui.horizontalSlider_ExposeTime->setRange(1, 5);
         ui.horizontalSlider_Freq->setValue(
             static_cast<int>(dm->getParam("freqHz").value));
         ui.horizontalSlider_Background_Lighting->setValue(
@@ -299,7 +300,7 @@ void ScannerWindow::onStartScanner()
                                                        tempC, frame.frameId);
         }
     });
-    dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 面片默认（四管掩码 T1V1C0D0）
+    dm->startCapture(true);   // 面片默认（账本 T/V 激光，N10→N11H1 组）
 
     // P5-T15 ①：经统一命令通道点火扫描（门禁 S2→S4/S5；payload=ScanMode 四值
     // 喂状态机 S4/S5 判别——0=标点→S4，1-3=含激光形态→S5（⑨b 暂并入）；handler
@@ -411,7 +412,7 @@ void ScannerWindow::onCalibrateClicked()
         dm->startFrameStream([this](const Scanner::hal::StereoFrame& frame) {
             pushFrameToBuffer(frame);
         });
-        dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 缺省 B 灯型（与原缺省行为一致）
+        dm->startCapture(true);   // 缺省 B 灯型（与原缺省行为一致）
     }
 
     // P5-T14：经统一命令通道点火（门禁 S2→S3）——initialize+start 移入 gate

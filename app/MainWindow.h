@@ -100,13 +100,26 @@ protected:
     QList<QPushButton*> m_navRightButtons;
     QList<QPushButton*> m_toolButtons;
     QList<QPushButton*> m_selectionButtons;
+    class QSlider *m_param1Slider = nullptr;  // 参数1（曝光/亮度三路联动旋钮——B 口径：
+                                              //   启动扫描前把三参压成旋钮值，恒一致）
+    // 激光点仓库跨会话累计（260912c）：融合云是会话私有的（新会话从零）——仓库
+    // 直接整包替换会在新会话首推把累计清掉（真机「点云数据 001 清零」实证）。
+    // 新会话首推锁存基线（=此前全部累积），此后每次替换=基线+当期融合云——
+    // 计数/导出跨会话只增不减（正反扫描两趟合导出的数据基础）
+    std::vector<cv::Point3f> m_laserBasePts;
+    bool m_laserSessionLatched = false;
+    void applyParam1ToLedger();               // 三参（exposure/bgLight/laserLevel）压账本
+    void applyMarkerPreset();                 // 标点扫描推荐预设（260912：B=40 成功基线
+                                              //   ＋H=60＋旋钮同步；续采不套用——保留现值）
+    void applyMeshPreset();                   // 面片扫描推荐预设（260912：B=10 成功基线
+                                              //   ＋L=40＋H=60＋曝光3ms；B≠L 非比例曲线，
+                                              //   直写账本＋旋钮同步激光位）
 
     OSGWidget *m_3dView;
     QWidget *m_3dViewArea;
     QLabel *m_projectName;
     QTreeWidget *m_projectTree;
     QTreeWidgetItem *m_cloudItem001;
-int m_laserPtsShown = 0;
     QTreeWidgetItem *m_markerRootItem = nullptr;     // 标记点列表根（动态挂扫描会话节点）
     QTreeWidgetItem *m_markerCurrentItem = nullptr;  // 当前扫描会话节点（实时计数落点）
     int m_markerScanSeq = 0;                         // 会话序号（标记点 001、002…）

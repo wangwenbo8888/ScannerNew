@@ -250,8 +250,14 @@ bool CameraControl::isOpen() const { return m_isOpen; }
 Result CameraControl::setExposure(double ms) {
     if (!m_isOpen) return Result::fail("设备未打开");
     m_currentExposureMs = ms;
-    applySideParams(0);
-    applySideParams(1);
+    // applySideParams 重试后仍败会上抛（开流路径语义）——参数路径就地收口为
+    // Result fail（逻辑线程不扩散异常）
+    try {
+        applySideParams(0);
+        applySideParams(1);
+    } catch (CGalaxyException& e) {
+        return Result::fail(e.what());
+    }
     // 读回验证
     try {
         double actual = m_sides[0].featureControl->GetFloatFeature("ExposureTime")->GetValue();
@@ -266,11 +272,27 @@ void CameraControl::applySideParams(int sideIndex) {
         JMW_LOG_WARN("08-CameraControl", "[CameraControl] applySideParams: featureControl 为空 (side={})", sideIndex);
         return;
     }
-    try {
-        fc->GetEnumFeature("ExposureAuto")->SetValue("Off");
-        fc->GetFloatFeature("ExposureTime")->SetValue(m_currentExposureMs * 1000.0);
-    } catch (CGalaxyException& e) {
-        JMW_LOG_ERROR("08-CameraControl", "[CameraControl] 曝光设置异常(side={}): {}", sideIndex, e.what());
+    // —— 260912 假活根因收口：停→快启窗口 USB 控制通道瞬时拥塞（-1010 TL 0x16）
+    //    原实现吞异常＝带病启动（状态已启动/0 帧/无报错——预览死真机实证）。
+    //    有界重试 3×200ms（同 AcquisitionStop 口径）；仍败上抛——startCapture
+    //    的整设备复位重开路径接管自愈
+    for (int attempt = 1; ; ++attempt) {
+        try {
+            fc->GetEnumFeature("ExposureAuto")->SetValue("Off");
+            fc->GetFloatFeature("ExposureTime")->SetValue(m_currentExposureMs * 1000.0);
+            return;
+        } catch (CGalaxyException& e) {
+            if (attempt >= 3) {
+                JMW_LOG_ERROR("08-CameraControl",
+                    "[CameraControl] 曝光设置 3 次均败(side={}): {}——上抛触发复位重开",
+                    sideIndex, e.what());
+                throw;
+            }
+            JMW_LOG_WARN("08-CameraControl",
+                "[CameraControl] 曝光设置失败（第 {} 次，side={}）: {}——200ms 后重试",
+                attempt, sideIndex, e.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
     }
 }
 

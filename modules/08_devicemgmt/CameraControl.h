@@ -94,7 +94,7 @@ private:
     StereoPairConfig m_config;
     std::atomic<bool> m_isOpen{false};
     std::atomic<bool> m_isCapturing{false};
-    std::atomic<double> m_currentExposureMs{25.0};  // 与 DeviceManager specs 默认同源
+    std::atomic<double> m_currentExposureMs{3.0};  // 与 DeviceManager specs 默认同源（域 1-5ms）
     std::atomic<double> m_currentGain{0.0};      // 按 GainRaw 原生单位传，dB 语义由上层换算
 
     // 帧号稳定偏移配对（260911）：N10 重发/启停后某侧多吃漏吃一触发沿→L-R 恒差

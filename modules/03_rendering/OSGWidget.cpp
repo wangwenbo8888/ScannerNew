@@ -24,6 +24,7 @@
 #include <QWheelEvent>
 #include <QApplication>
 #include <QMessageBox>
+#include <QMenu>
 #include <QImage>
 #include <QPainter>
 #include <QFont>
@@ -1055,6 +1056,9 @@ void OSGWidget::mouseMoveEvent(QMouseEvent *event)
 {
     if (m_lassoMode)
         return;
+    if ((event->buttons() & Qt::RightButton) &&
+        (event->globalPos() - m_rightPressGlobalPos).manhattanLength() > 6)
+        m_suppressContextMenu = true;       // 右键拖拽＝平移视角，松开不弹菜单
     if (!m_gw.valid()) return;
     float x = event->pos().x();
     float y = event->pos().y();
@@ -1079,9 +1083,15 @@ void OSGWidget::mousePressEvent(QMouseEvent *event)
     {
         if (event->button() == Qt::LeftButton)
             addLassoPoint(event->pos().x(), event->pos().y());
-        else if (event->button() == Qt::RightButton)
+        else if (event->button() == Qt::RightButton) {
+            m_suppressContextMenu = true;   // 圈选右键＝闭合多段线，松开不弹菜单
             closeLasso();
+        }
         return;
+    }
+    if (event->button() == Qt::RightButton) {
+        m_rightPressGlobalPos = event->globalPos();
+        m_suppressContextMenu = false;      // 右键按下记账（Move 拖拽阈值判定）
     }
     if (!m_gw.valid()) return;
     m_firstMouse = true;
@@ -1127,6 +1137,47 @@ void OSGWidget::wheelEvent(QWheelEvent *event)
     int delta = event->angleDelta().y();
     m_gw->getEventQueue()->mouseScroll(
         delta > 0 ? osgGA::GUIEventAdapter::SCROLL_UP : osgGA::GUIEventAdapter::SCROLL_DOWN);
+}
+
+// ============================================================================
+// 右键菜单：显示/隐藏标志点、激光点（NodeMask 开关；右键拖拽平移/圈选闭合不弹）
+// ============================================================================
+void OSGWidget::contextMenuEvent(QContextMenuEvent *event)
+{
+    if (m_lassoMode || m_suppressContextMenu) {
+        m_suppressContextMenu = false;
+        return;
+    }
+
+    QMenu menu(this);
+    QAction* actMarkers = menu.addAction(QStringLiteral("显示标志点"));
+    actMarkers->setCheckable(true);
+    actMarkers->setChecked(m_markersVisible);
+    QAction* actLaser = menu.addAction(QStringLiteral("显示激光点"));
+    actLaser->setCheckable(true);
+    actLaser->setChecked(m_laserVisible);
+
+    QAction* chosen = menu.exec(event->globalPos());
+    if (chosen == actMarkers)
+        setMarkerPointsVisible(actMarkers->isChecked());
+    else if (chosen == actLaser)
+        setLaserPointsVisible(actLaser->isChecked());
+}
+
+void OSGWidget::setMarkerPointsVisible(bool visible)
+{
+    m_markersVisible = visible;
+    if (m_markerRoot.valid())
+        m_markerRoot->setNodeMask(visible ? ~0u : 0u);
+    update();
+}
+
+void OSGWidget::setLaserPointsVisible(bool visible)
+{
+    m_laserVisible = visible;
+    if (m_laserRoot.valid())
+        m_laserRoot->setNodeMask(visible ? ~0u : 0u);
+    update();
 }
 
 // ---- Lasso / Polyline selection ----
@@ -1486,6 +1537,7 @@ void OSGWidget::collectLassoHits(const osg::Vec2Array* poly, std::vector<LassoHi
     std::vector<std::pair<osg::Geode*, int>> geodes;
     std::function<void(osg::Node*, int)> collect = [&](osg::Node* n, int cat) {
         if (!n) return;
+        if (n->getNodeMask() == 0) return;   // 隐藏子树（显示开关关）不可圈选/删除
         if (osg::Geode* g = n->asGeode()) { geodes.emplace_back(g, cat); return; }
         if (osg::Group* grp = n->asGroup())
             for (unsigned int k = 0; k < grp->getNumChildren(); ++k)
@@ -2105,6 +2157,7 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
         m_leftCamViewApplied = false;    // 新会话首点——左相机视角重新设置
     }
 
+    m_markerRoot->setNodeMask(m_markersVisible ? ~0u : 0u);   // 重建后承袭开关
     m_markerCoords->assign(markers.begin(), markers.end());
     m_markerColors = new osg::Vec4ubArray;
     m_markerColors->resize(markers.size(), osg::Vec4ub(255, 255, 255, 255));  // 白（贴图调制；Vec4ub——套索命中/删除链颜色路径统一）
@@ -2177,6 +2230,8 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
         m_markerColors = new osg::Vec4ubArray;
         m_leftCamViewApplied = false;
     }
+
+    m_markerRoot->setNodeMask(m_markersVisible ? ~0u : 0u);   // 重建后承袭开关
 
     // 圆盘几何：中心＋重建法线 → 切平面基（t,b）→ 四角 quad
     const float r = m_markerDiscRadiusMm;
@@ -2267,6 +2322,7 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
         m_laserRoot->getOrCreateStateSet()->setAttribute(lbf);
         m_laserCoords = new osg::Vec3Array;
     }
+    m_laserRoot->setNodeMask(m_laserVisible ? ~0u : 0u);      // 重建后承袭开关
     m_laserCoords->assign(laser.begin(), laser.end());
     m_laserGeom->setVertexArray(m_laserCoords);
     // 逐顶点色：默认=导入点云色（LeadScan 浅蓝——用户口径同源）；待物理化
