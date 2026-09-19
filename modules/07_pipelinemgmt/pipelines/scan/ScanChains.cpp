@@ -12,6 +12,8 @@
 // ============================================================================
 #include "pipelines/scan/ScanChains.h"
 
+#include "pipelines/scan/SimScanSource.h"   // 中段模拟提取源（deps.simSource）
+
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
 #include <utility>
@@ -323,6 +325,11 @@ ScanChains::Hooks ScanChains::assemble() {
                                                 // 尺寸先验，还账 2026-09-01）
         front.roisR = cclR.toRectList();
 
+        // 中段模拟提取（调试件）：本帧设备系观测在此生成（frontReady 前——
+        // pChain 标志点替换与激光段覆写经 front.simObs 只读；false=maxFrames
+        // 尽→空观测续跑，真链结果照常）
+        if (deps_.simSource) deps_.simSource->next(front.simObs);
+
         // 3) ccl 就绪点：提交 P 链（此后激光段与 P 链帧内并行）
         frontReady();
 
@@ -505,7 +512,41 @@ ScanChains::Hooks ScanChains::assemble() {
                 return -1;
             }
         }();
-        if (laserStatus < 0) return false;
+        // 模拟提取容错（调试语义）：真链激光段失败不毁帧——模拟观测照常供块
+        if (laserStatus < 0 && !deps_.simSource) return false;
+
+        // 中段模拟提取：模拟观测为**权威覆写**——真链激光块一律弃用。原守卫
+        // !laser.empty() 下，模拟激光出视场的空窗帧真机激光透传入云（260919
+        // 真机实证：融合云打满 2M 上限全为真机点，模拟数据被淹不可辨）
+        if (deps_.simSource) {
+            if (front.simObs.laser.empty()) {
+                front.laserBlock.reset();       // 空观测=本帧无激光（真链块弃用）
+            } else {
+                if (!front.laserBlock && deps_.laserPool) {
+                    auto blk = deps_.laserPool->acquire(deps_.poolAcquireTimeout);
+                    if (blk) front.laserBlock = std::move(*blk);
+                }
+                if (front.laserBlock) {
+                    cv::Mat host(1, static_cast<int>(front.simObs.laser.size()), CV_32FC3,
+                                 front.simObs.laser.data());
+                    const int n = std::min<int>(host.cols, front.laserBlock->points.cols);
+                    if (n < host.cols) {
+                        JMW_LOG_WARN("07-ScanChains",
+                                     "[ScanChains] 模拟激光 {} 点超池块容量 {}，截断至 {}（降级）",
+                                     host.cols, front.laserBlock->points.cols, n);
+                        front.laserTruncated = true;
+                    }
+                    if (n > 0) {
+                        cv::cuda::GpuMat dst = front.laserBlock->points.colRange(0, n);
+                        dst.upload(host.colRange(0, n), stream);
+                        front.laserBlock->count = n;
+                        front.laserBlock->frameId = frame->frameId;
+                    } else {
+                        front.laserBlock.reset();   // 0 点=无激光（eFinalize 判降级）
+                    }
+                }
+            }
+        }
 
         stream.waitForCompletion();             // 块数据落定后方可交 eFinalize/FuseConsumer
         return true;
@@ -531,7 +572,16 @@ ScanChains::Hooks ScanChains::assemble() {
         try {
             std::vector<cv::Point3d> positions;
             std::vector<cv::Vec3d> normals;
-            if (!runMarkerChain(*frame, *ops, front, positions, normals))
+            bool hasMarkers = runMarkerChain(*frame, *ops, front, positions, normals);
+            // 中段模拟提取（调试件）：真实提取结果弃用，以模拟观测替换——
+            // 其后 runRegistration/融合/渲染与真机完全同路径（R/T vs prevState
+            // 全局锚、GBA 观测、体素融合）
+            if (deps_.simSource) {
+                positions = front.simObs.markerPositions;
+                normals = front.simObs.markerNormals;
+                hasMarkers = !positions.empty();
+            }
+            if (!hasMarkers)
                 result.quality = Scanner::QualityFlag::Degraded;   // 空帧=正常降级
             runRegistration(*frame, *ops, positions, normals, result);
         } catch (const std::exception& e) {
@@ -753,6 +803,11 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
     return positions.size() >= 3;
 }
 
+// globalId 全局原子序列（260919：并发 lane 各按「本帧最大 id」发新 id→撞号；
+// 首帧/晋升**共用此唯一计数器**——两处独立 static 曾都从 0 起=必然互撞→锚被
+// 两标志点拖行、路径全入格=300+ 伪点。单一序列跨 lane 跨帧唯一）
+static std::atomic<int> s_markerGidSeq{0};
+
 // ============================================================================
 // P 核链：配准（prevState 原子快照模型——最新快照，不严格等帧号 N-1）
 // ============================================================================
@@ -782,8 +837,10 @@ void ScanChains::runRegistration(const data::EnhancedFrame& frame, ScanLaneOps& 
             result.quality = Scanner::QualityFlag::Degraded;
             return;
         }
+        // globalId＝全局原子序列（首帧/晋升共用 s_markerGidSeq——见其注释）
         std::vector<int> ids(n);
-        for (size_t i = 0; i < n; ++i) ids[i] = static_cast<int>(i);
+        for (size_t i = 0; i < n; ++i)
+            ids[i] = s_markerGidSeq.fetch_add(1, std::memory_order_relaxed);
         auto st = std::make_shared<calib::AtomicFrameState>();
         st->rawPoints = toPoints(ids);
         st->normals.reserve(n * 3);
@@ -829,10 +886,18 @@ void ScanChains::runRegistration(const data::EnhancedFrame& frame, ScanLaneOps& 
         ids.reserve(fr.markers.size());
         result.markers.reserve(fr.markers.size());
         for (const auto& m : fr.markers) {
-            ids.push_back(m.globalId);
+            // 未匹配新点发新 globalId（260919 根因：算子对 unmatched 恒 -1 且
+            // 下帧 gid<0 的位置匹配对被丢弃（op:416）→ matched 恒 3 → R/T 仅 3 点
+            // SVD 欠定→位姿漂移→标志点云分布与真值大相径庭；新 id 后下帧即入
+            // 匹配集，R/T 全重合子集稳定可解。发号＝s_markerGidSeq（首帧/晋升
+            // 共用唯一序列——两处独立计数器曾都从 0 起=必然互撞）
+            const int gid = m.globalId >= 0
+                                ? m.globalId
+                                : s_markerGidSeq.fetch_add(1, std::memory_order_relaxed);
+            ids.push_back(gid);
             calib::MarkerPoint3D mp{m.rawPosition.x, m.rawPosition.y, m.rawPosition.z,
                                     m.rawNormal(0), m.rawNormal(1), m.rawNormal(2),
-                                    m.globalId};
+                                    gid};
             result.markers.push_back(mp);
         }
         auto st = std::make_shared<calib::AtomicFrameState>();

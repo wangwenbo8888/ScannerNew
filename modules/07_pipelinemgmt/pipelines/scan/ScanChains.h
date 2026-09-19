@@ -44,6 +44,8 @@
 
 namespace Scanner::pipeline {
 
+class SimScanSource;                           // 中段模拟提取源（调试件；deps 指针）
+
 /// 全局配准快照锚（atomic_load/store 自由函数操作，见 prev_frame_state.h；
 /// 初始 nullptr=首帧未初始化）
 using AtomicFrameStatePtr = std::shared_ptr<calib::AtomicFrameState>;
@@ -65,6 +67,11 @@ struct ScanFront {
 #endif
     // —— lane 锚（gpuChain 首帧惰性创建，先于 frontReady()；此后两链只读）——
     std::shared_ptr<ScanLaneOps> ops;
+
+    // —— 模拟分区（simSource 非空时 gpuChain frontReady() 前写；此后
+    //    pChain/激光段只读——中段模拟提取的单帧观测，走与真机相同的
+    //    配准/融合/渲染主干）——
+    SimFrameObs simObs;
 };
 
 // ============================================================================
@@ -87,6 +94,10 @@ struct ScanChainDeps {
     int imageHeight = 0;
     sched::FrameResultQueue<FrameResult>* sink = nullptr;  // eFinalize push（空=不 push）
     std::chrono::milliseconds poolAcquireTimeout{50};      // 激光块池取块超时
+    /// 中段模拟提取源（调试件；空=真机链。非空时 gpuChain 每帧产 SimFrameObs：
+    /// pChain 标志点观测替换真实提取结果→生产 runRegistration 配准；激光段
+    /// 以模拟点覆写激光块——R/T/融合/体素/渲染全走生产代码）
+    SimScanSource* simSource = nullptr;
 };
 
 // ============================================================================

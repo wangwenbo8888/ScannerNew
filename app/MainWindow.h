@@ -91,6 +91,8 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
 
     int m_activeScanToolIdx = -1;     // 当前活跃扫描键（2-5 四模式键；-1=无——停止复原用）
+    bool m_sessionSimExtract = false; // 会话启动时「模拟数据」开关基线（260917：
+                                      //   就绪态续采检测开关翻转——变则完整重启装配）
     QDialog *m_camDlg = nullptr;      // 相机预览监视弹窗（调试，懒建）
     QLabel *m_camLeft = nullptr;      // 左相机图
     QLabel *m_camRight = nullptr;

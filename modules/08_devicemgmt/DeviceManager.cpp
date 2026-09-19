@@ -38,37 +38,31 @@ constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
     return {
         {"exposure", 10.0, 1.0, 100.0},        // 曝光 ms（相机直设）
-        {"freqHz", 60.0, 20.0, 120.0},         // N10 H 拍照频率（默认 60——USB 传输上限 60fps，用户口径 2026-09-01）
+        {"freqHz", 60.0, 1.0, 200.0},          // N10 H 拍照频率（默认 60——USB 传输上限 60fps，用户口径 2026-09-01；协议 260831 域 1-200）
         {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10——B 模式成功配置基线；B30 过曝毁检测 ROI 跌至 4）
         {"laserLevel", 40.0, 0.0, 100.0},      // N10 L 激光强度（默认 40；60 过亮→40 折中）
-        {"laserSelectA", 1.0, 1.0, 6.0},       // N10 T 交叉激光选择 A＝左斜组（1-6）
-        {"laserSelectB", 2.0, 1.0, 6.0},       // N10 V 交叉激光选择 B＝右斜组（1-6；
-                                               //   与 A 异组——同组则固件帧序交替失效，
-                                               //   只打一族线；组号↔左/右映射随固件实测定）
     };
 }
 
-// N10 全参自 ParamStore 账本组帧（cpp 本地——不进头防 IMCU.h 类型泄漏）
-hal::CaptureParams captureParamsFromAccount(const ParamStore& params) {
+// N10 生效参数（cpp 本地——不进头防 IMCU.h 类型泄漏）：账本值 ＋ ScanMode 四管
+// 掩码映射（协议 260831 七参定版，260919 恢复——五参帧固件不解析=面片扫描无激光线
+// 根因）：标志点 A（MarkerOnly）T0V0C0D0＋L=0＋B 抬 40（真标志点亮斑须超分离阈值
+// 80，高补光代偿激光缺失）；面片 B（MarkerPlusLaser）T1V1；精细 C（FineScan）D 管；
+// 深孔 D（DeepHoleScan）C 管（260910 用户口径对调定版）。调用点均在逻辑线程
+constexpr int kMarkerOnlyBg = 40;              // A 模式补光抬升基线（成功配置基线）
+hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode) {
     hal::CaptureParams p;
     p.freqHz = static_cast<int>(params.get("freqHz").value);
-    p.bgLight = static_cast<int>(params.get("bgLight").value);
-    p.laserSelectA = static_cast<int>(params.get("laserSelectA").value);
-    p.laserSelectB = static_cast<int>(params.get("laserSelectB").value);
-    p.laserLevel = static_cast<int>(params.get("laserLevel").value);
-    return p;
-}
-
-// N10 生效参数（cpp 本地）：账本全参 ＋ 采集灯型覆写——laserOn=false（标点扫描
-// A 模式）激光量强制 L=0（只开补光）。调用点均在逻辑线程（捕获 this 直读成员）
-hal::CaptureParams effectiveN10(const ParamStore& params, bool laserOn) {
-    hal::CaptureParams p = captureParamsFromAccount(params);
-    if (!laserOn) {
-        // A 模式（纯补光）：L=0（无激光——业务要求）+ B 提到 40——真标志点
-        // 亮斑须超分离阈值 80（B10 纯点图实测 ROI=0；高补光代偿激光缺失）
-        p.laserLevel = 0;
-        p.bgLight = 40;
-    }
+    p.bgLight = (mode == Scanner::ScanMode::MarkerOnly)
+                    ? kMarkerOnlyBg
+                    : static_cast<int>(params.get("bgLight").value);
+    p.laserLevel = (mode == Scanner::ScanMode::MarkerOnly)
+                       ? 0
+                       : static_cast<int>(params.get("laserLevel").value);
+    p.laserT = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;
+    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;
+    p.laserC = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;
+    p.laserD = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;
     return p;
 }
 
@@ -415,7 +409,7 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
 // （单帧 N11 H0，不发 N10）
 std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
     return {{"N10", [this](McuDone cb) {
-                 mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_), std::move(cb));
+                 mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_), std::move(cb));
              }},
             {"FLUSH", [this](McuDone cb) {
                  mcu_->flushWrites(300);        // 有界：残余慢写最多 300ms
@@ -476,22 +470,26 @@ void DeviceManager::toIdleOnLogic() {
 // 采集启停（N10(账本)→N11H1→开流 / N11H0；不切模式；幂等；编队执行）
 // ============================================================================
 
-void DeviceManager::startCapture(bool laserOn) {
-    post([this, laserOn] {
-        captureLaserOn_ = laserOn;               // 采集灯型（逻辑线程属主；N10 组帧生效）
+void DeviceManager::startCapture(Scanner::ScanMode mode) {
+    post([this, mode] {
+        lastCaptureMode_ = mode;                   // 采集灯型（逻辑线程属主；N10 组帧生效）
         startCaptureOnLogic();
     });
 }
 
 // —— 灯光直控（用户按钮直调；不启停采集——N10 灯字段即时生效，实测口径同
 //    自检闪灯：固件收到 N10 即按新参数调灯，无需 H1）——
-// bgOn/laserOn：true=取账本值，false=0。标点扫描 A 模式＝(true,false) 只开补光
+// 基线=面片灯型（T1V1C0D0＋账本 B/L）；bgOn/laserOn：false 压 0。标点扫描 A
+// 模式＝(true,false) 只开补光
 void DeviceManager::setLights(bool bgOn, bool laserOn) {
     post([this, bgOn, laserOn] {
         if (!mcu_->isOpen()) return;
-        hal::CaptureParams p = captureParamsFromAccount(*params_);
-        p.bgLight = bgOn ? p.bgLight : 0;
-        p.laserLevel = laserOn ? p.laserLevel : 0;
+        hal::CaptureParams p = effectiveN10(*params_, Scanner::ScanMode::MarkerPlusLaser);
+        if (!bgOn) p.bgLight = 0;
+        if (!laserOn) {
+            p.laserT = p.laserV = p.laserC = p.laserD = 0;
+            p.laserLevel = 0;
+        }
         mcu_->setCaptureParams(p, nullptr);
     });
 }
@@ -499,21 +497,13 @@ void DeviceManager::setLights(bool bgOn, bool laserOn) {
 // —— 打光场景封装（灯型三态；组合语义入口，按钮/工作流直调）——
 void DeviceManager::lightsBgOnly() {
     setLights(/*bgOn=*/true, /*laserOn=*/false);
-    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 打光场景: 只打补光灯（L=0）");
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 打光场景: 只打补光灯（激光管全关）");
 }
 
 void DeviceManager::lightsBgAndCrossLaser() {
-    const int tSel = static_cast<int>(params_->get("laserSelectA").value);
-    const int vSel = static_cast<int>(params_->get("laserSelectB").value);
-    if (tSel == vSel) {
-        JMW_LOG_WARN("08-DeviceManager",
-            "[DeviceManager] 打光场景: 左斜组 T{} 与右斜组 V{} 同组——固件帧序交替"
-            "将只打一族激光线（调 laserSelectA/B 参数异组）", tSel, vSel);
-    }
-    setLights(/*bgOn=*/true, /*laserOn=*/true);
+    setLights(/*bgOn=*/true, /*laserOn=*/true);    // T1V1（面片交叉激光，交替归固件帧序）
     JMW_LOG_INFO("08-DeviceManager",
-        "[DeviceManager] 打光场景: 补光＋左右斜激光（左斜=T{} 右斜=V{}，交替归固件帧序）",
-        tSel, vSel);
+        "[DeviceManager] 打光场景: 补光＋左右斜激光（T1V1，交替归固件帧序）");
 }
 
 void DeviceManager::lightsAllOff() {
@@ -577,12 +567,15 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
         selfCheck_.stageStartMs = nowMs();
         selfCheck_.report("mcuLink", mcu_->isOpen());
 
-        // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V2 L50（auto 搜口已探测合一
-        // 发过且回显命中——通常此处直接判过；manual 口/回显未达时补发兜底），
-        // 停留 1 秒（2026-09-06 用户口径，原 5 秒）→ N11 H0 收口（停扫描，固件关灯）
+        // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V1 C0 D0 L50（七参·协议 260831；
+        // auto 搜口已探测合一发过且回显命中——通常此处直接判过；manual 口/回显未达
+        // 时补发兜底），停留 1 秒（2026-09-06 用户口径，原 5 秒）→ N11 H0 收口
+        //（停扫描，固件关灯）
         hal::CaptureParams on{};
-        on.freqHz = 50; on.bgLight = 50; on.laserSelectA = 1; on.laserSelectB = 2; on.laserLevel = 50;
-        selfCheck_.expectEcho = "N10 H50 B50 T1 V2 L50";
+        on.freqHz = 50; on.bgLight = 50;
+        on.laserT = 1; on.laserV = 1; on.laserC = 0; on.laserD = 0;
+        on.laserLevel = 50;
+        selfCheck_.expectEcho = "N10 H50 B50 T1 V1 C0 D0 L50";
         if (mcu_->lastEchoPayload() != selfCheck_.expectEcho) {
             mcu_->setCaptureParams(on, nullptr);   // 兜底补发（manual 口路径）
         }
@@ -601,8 +594,18 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
             selfCheck_.stage = 1;
             selfCheck_.stageStartMs = nowMs_;      // 闪亮窗口起
         } else if (nowMs_ - selfCheck_.stageStartMs > 8000) {
-            selfCheck_.report("bgLight", false);
-            selfCheck_.report("laser", false);
+            // 回显超时（260919 现固件不回显命令——只周期上行 G02 温度 ~300ms）：
+            // 降级凭据=上行活证（3s 内收到过任一上行帧=链路+固件活，N10 已落线；
+            // 回环线不产上行帧不误判）。若仍判败 → system_ready 永不触发 →
+            // 状态机卡 Init → start_scan 恒被拒（260919 真机实证）
+            const bool linkAlive =
+                mcu_->lastRxTime() > 0 &&
+                nowMs_ - static_cast<int64_t>(mcu_->lastRxTime()) < 3000;
+            selfCheck_.report("bgLight", linkAlive);
+            selfCheck_.report("laser", linkAlive);
+            JMW_LOG_WARN("08-DeviceManager",
+                "[DeviceManager] 自检回显超时（固件无回显）——{}",
+                linkAlive ? "凭上行活证判过（降级凭据）" : "上行亦静默，判败");
             selfCheck_.stage = 1;                  // 仍走 stage1（闪亮窗缩短+相机启动不跳过
             selfCheck_.stageStartMs = nowMs_;      // ——灯败与相机验证独立，原直跳 stage2
         }                                          //   会漏 startAsyncCapture→相机恒 0 帧）
@@ -719,7 +722,7 @@ void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore
     // 空闲仅记账 done(true,false)（enterScan 时自账本组帧下发）。v2 通道发不等
     // → done(true,false)
     if (mode_->isCapturing()) {
-        mcu_->setCaptureParams(effectiveN10(*params_, captureLaserOn_),
+        mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_),
                                [done](bool ok, const std::string&) { done(ok, ok); });
     } else {
         done(true, false);

@@ -174,6 +174,10 @@ Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     lastTSeq_ = 0;
     lastRx_.store(0, std::memory_order_release);
     probeN12Sent_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(echoMtx_);
+        lastEcho_.clear();                 // 陈旧回显不串染新会话（stage0 免假命中）
+    }
     if (writeOverride_) {                 // 测试模式：不开真串口、不起 rx 线程
         open_.store(true);
         return Scanner::Result::ok();
@@ -187,7 +191,7 @@ Scanner::Result MCUDriver::open(const std::string& port, int baud) {
         target = probeAutoPort(baud);     // 自动搜口：逐口探测命中（含开串口+起 rx 线程）
         if (target.empty()) {
             stopWriteThread();
-            return Scanner::Result::fail(-1, "MCU 自动搜口失败（无口应答 N12Z1 探测）");
+            return Scanner::Result::fail(-1, "MCU 自动搜口失败（无上行帧应答）");
         }
     } else {
         auto r = serial_.open(target, baud);
@@ -217,11 +221,13 @@ void MCUDriver::stopWriteThread() {
     }
 }
 
-// 自动搜口（open 前置，调用线程执行）：逐口 开→发 N12Z1 探测→300ms 内收到
-// 数值行（温度上报）即认定 MCU（v2 固件口径：回显是「载荷;」帧不算凭据——纯
-// 回环线只会回显，不误命中）。半途收 rx 线程+关串口再试下一口。探测写在调用
-// 线程——测毕 resetWriteOwner 归还写权给逻辑线程（R2-A1 单写者纪律）。
-// 注：探测的 N12Z1 与 open 后 DeviceManager 的 enterSelfCheck 重复——Z1 幂等，无害。
+// 自动搜口（open 前置，调用线程执行）：逐口 开→发 N10 点灯探测帧→3s 内收到
+// 任一有效上行（G0x 帧/数值行，rx 侧置 probeHit_）即认定 MCU。半途收 rx 线程+
+// 关串口再试下一口。凭据=上行活证而非命令回显——260919 真机实证：现固件不回显
+// 下行命令（只周期上行 G02 温度 ~300ms），回显判据恒 miss → 搜口失败 → open 失败
+// → startupSelfCheck 整链不跑（自检收口 N11 H0 缺失根因）；回环线只会回显不产
+// 上行帧，仍不误命中。N10 探测帧照发：兼作点灯（自检闪灯）+回显记档（若固件
+// 回显，startupSelfCheck stage0 直接过）。
 std::string MCUDriver::probeAutoPort(int baud) {
     const auto ports = serial::SerialPort::listPorts();
     if (ports.empty()) JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 自动搜口：本机未枚举到任何 COM 口");
@@ -232,15 +238,23 @@ std::string MCUDriver::probeAutoPort(int baud) {
         rxThread_ = std::thread(&MCUDriver::rxLoop, this);
         lastRx_.store(0, std::memory_order_release);
         probeHit_.store(false, std::memory_order_release);
-        probeN12Sent_.store(false, std::memory_order_release);  // 不再发 N12Z1（自检模式已废弃）
-        // 探测凭据=点灯参数帧（2026-08-30 合一定版）：探测与自检点灯共用一帧
-        // N10 H50 B50 T1 V2 L50——回显即命中（v2 固件整帧回显），灯随之点亮；
-        // 免去"探测(B0/L0)+点灯"两帧连发。回显=固件在线
-        if (sendEchoProbe("N10 H50 B50 T1 V2 L50", 3000)) {
-            JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 自动搜口命中: {}（{} 口中，N10 探测+点灯合一）", port, ports.size());
+        probeN12Sent_.store(false, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(echoMtx_);
+            lastEcho_.clear();             // 每口探测前清档（回显只作记档不作凭据）
+        }
+        channel_.sendFireAndForget("N10 H50 B50 T1 V1 C0 D0 L50");
+        bool hit = false;
+        for (int waited = 0; waited < 3000; waited += 10) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (probeHit_.load(std::memory_order_acquire)) { hit = true; break; }
+        }
+        if (hit) {
+            JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 自动搜口命中: {}（{} 口中，上行帧凭据；N10 点灯帧已发）",
+                         port, ports.size());
             return port;
         }
-        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 自动搜口: {} 无回显，试下一口", port);
+        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 自动搜口: {} 无上行帧，试下一口", port);
         close();                           // 停 rx 线程+关串口+open_ 复位（幂等）
     }
     return {};
@@ -352,14 +366,18 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
     case 'E':
         onParseFail(f.payload);   // v2 旧 E1; 急停牌已删——忽略+warn（§2.2 列净）
         break;
-    default:
-        // v2 固件对下行命令整帧回显（实测）——'N' 打头载荷即回显，记档供 sendEchoProbe
-        if (!f.payload.empty() && f.payload[0] == 'N') {
+    default: {
+        // v2 固件对下行命令整帧回显（实测）；新固件回显带 "CMD: " 前缀（260917
+        // 真机日志实证）——剥离前缀归一化，'N' 打头载荷即回显，记档供 sendEchoProbe
+        std::string p = f.payload;
+        if (p.rfind("CMD: ", 0) == 0) p.erase(0, 5);
+        if (!p.empty() && p[0] == 'N') {
             std::lock_guard<std::mutex> lock(echoMtx_);
-            lastEcho_ = f.payload;
+            lastEcho_ = p;
         }
-        onParseFail(f.payload);
+        onParseFail(p);
         break;
+    }
     }
 }
 
@@ -374,14 +392,58 @@ void MCUDriver::onParseFail(const std::string& payload) {
     JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 上行载荷丢弃(计{}): '{}'", n, payload);
 }
 
-// v2 固件裸文本行（rx 线程）：数值行=温度上报（实测 ~133，单位待定——非合理 ℃，
-// 暂不入 TempFrame：防 tempMaxC=60 的 0x0803 量纲误判 + Warmup 吃脏数据；单位
-// 与固件方确认后再接）；其余为状态文本（如 "Self check begins"）。任何行=链路
-// 活：刷 lastRx_（0x0802 心跳口径）。数值行兼作自动搜口命中凭据（回显/纯回环
-// 线不产数值行，不会误命中）。
+// v2 固件裸文本行（rx 线程）：G0x 帧（260831 风格——G02 四路温度入 TempFrame，
+// G01/G03 仅在线凭据）与旧数值行（实测 ~133，单位待定——不入 TempFrame：防
+// tempMaxC=60 的 0x0803 量纲误判；单位与固件方确认后再接）；其余为状态文本
+// （如 "Self check begins"）。任何行=链路活：刷 lastRx_（0x0802 心跳口径）。
+// 数值行/G0x 帧兼作自动搜口命中凭据（回显/纯回环线不产上行帧，不会误命中）。
 void MCUDriver::feedTextLine(const std::string& line) {
     notifyTap(false, line);                       // 调试监视：RX 裸文本行
     lastRx_.store(systemNowMs(), std::memory_order_release);
+    // G0x 上行帧（260831 协议风格固件）：G01 手势/G02 四路温度/G03 计数——任一
+    // 即固件在线凭据（自动搜口 probeHit_）。G02 A/B/C/D ℃ → TempFrame 入 T 环
+    // （pump → onTemp → DeviceManager 温度账本/快照——主界面「MCU温度」/预热喂数/
+    // 温度双警的统一数据源；260919 用户口径：采集温度须上界面）
+    if (line.size() >= 3 && line[0] == 'G' && line[1] == '0') {
+        probeHit_.store(true, std::memory_order_release);
+        if (line[2] == '2') {                     // G02 四路温度：逐标签 A/B/C/D 解析
+            double v[4] = {0, 0, 0, 0};
+            bool got[4] = {false, false, false, false};
+            size_t i = 3;
+            while (i < line.size()) {
+                while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+                if (i >= line.size()) break;
+                const char ch = line[i];
+                int idx = -1;
+                if (ch == 'A') idx = 0;
+                else if (ch == 'B') idx = 1;
+                else if (ch == 'C') idx = 2;
+                else if (ch == 'D') idx = 3;
+                if (idx < 0) break;               // 非标签 token——整帧格式不符
+                char* endp = nullptr;
+                const double d = std::strtod(line.c_str() + i + 1, &endp);
+                if (endp == line.c_str() + i + 1) break;   // 标签后无数
+                v[idx] = d;
+                got[idx] = true;
+                i = static_cast<size_t>(endp - line.c_str());
+            }
+            if (got[0] && got[1] && got[2] && got[3]) {
+                serial::TempFrame t{};
+                t.celsius[0] = v[0]; t.celsius[1] = v[1];
+                t.celsius[2] = v[2]; t.celsius[3] = v[3];
+                t.channels = 4;
+                t.seq = 0;                        // 裸文本行无 seq（V3 才对账）
+                t.ts = systemNowMs();
+                if (!tempRing_.push(t))
+                    JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 遥测环满丢新(计{})", tempRing_.dropped());
+            } else {
+                JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] G02 格式不符（温度不入账）: '{}'", line);
+            }
+            return;
+        }
+        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] G 上行帧: '{}'", line);
+        return;
+    }
     char* endp = nullptr;
     const double v = std::strtod(line.c_str(), &endp);
     if (endp != line.c_str() && *endp == '\0') {
@@ -427,8 +489,10 @@ void MCUDriver::accountTempSeq(uint16_t seq) {
 void MCUDriver::setCaptureParams(const hal::CaptureParams& p, DoneCb cb) {
     channel_.send("N10 H" + std::to_string(p.freqHz) +
                   " B" + std::to_string(p.bgLight) +
-                  " T" + std::to_string(p.laserSelectA) +
-                  " V" + std::to_string(p.laserSelectB) +
+                  " T" + std::to_string(p.laserT) +
+                  " V" + std::to_string(p.laserV) +
+                  " C" + std::to_string(p.laserC) +
+                  " D" + std::to_string(p.laserD) +
                   " L" + std::to_string(p.laserLevel), std::move(cb));
 }
 void MCUDriver::startScan(DoneCb cb)        { channel_.send("N11 H1", std::move(cb)); }

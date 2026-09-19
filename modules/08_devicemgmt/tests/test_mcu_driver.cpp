@@ -53,14 +53,14 @@ TEST(MCUDriver, TypedPayloadV3) {
     d.setProtocolVersion(FCodec::Version::V3);
     FCodec enc(FCodec::Version::V3);
 
-    d.setCaptureParams(CaptureParams{60, 80, 1, 1, 120}, {});
+    d.setCaptureParams(CaptureParams{60, 80, 1, 1, 0, 0, 120}, {});
     d.startScan({});
     d.enterStandby({});
     d.setHeatTarget(60, {});
     d.queryTemperature(2);
 
     ASSERT_EQ(io.frames.size(), 5u);
-    EXPECT_EQ(io.frames[0], enc.encode("N10 H60 B80 T1 V1 L120", 0));
+    EXPECT_EQ(io.frames[0], enc.encode("N10 H60 B80 T1 V1 C0 D0 L120", 0));
     EXPECT_EQ(io.frames[1], enc.encode("N11 H1", 1));
     EXPECT_EQ(io.frames[2], enc.encode("N13 E1", 2));
     EXPECT_EQ(io.frames[3], enc.encode("N14 T60", 3));

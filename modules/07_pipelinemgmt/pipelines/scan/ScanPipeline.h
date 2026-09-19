@@ -58,6 +58,8 @@
 
 namespace Scanner::pipeline {
 
+class SimScanSource;                           // 中段模拟提取源（调试件；attachSimSource）
+
 /// 可 seed 的标记点融合窄接口（真适配器透传 09 MarkerCloudFuseCPU::seed；
 /// 测试假实现记录 seed/fuse 时序）。生产/测试统一经此注入 FuseConsumer。
 struct ISeedableMarkerFuse : IMarkerFuse {
@@ -83,6 +85,10 @@ public:
     void attachCalib(const cv::Mat& K1, const cv::Mat& D1, const cv::Mat& K2,
                      const cv::Mat& D2, int imageWidth, int imageHeight,
                      std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable);
+    /// 中段模拟提取源（调试件；configure 前调用。空指针/不调=真机链；非空时
+    /// gpu/p 链照常运行，每帧标志点/激光提取结果由模拟观测替换，配准/融合/
+    /// 渲染走生产代码。生命周期归调用方——须存活至 stop()）
+    void attachSimSource(SimScanSource* src) { simSource_ = src; }
     /// 输出队列（FuseConsumer 消费源，同对象内；02/D 诊断读）
     sched::FrameResultQueue<FrameResult>& outputQueue();
     /// 逐帧观测累加器（D GBA 读）
@@ -153,6 +159,7 @@ private:
     cv::Mat K1_, D1_, K2_, D2_;
     int imageWidth_ = 0, imageHeight_ = 0;
     std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable_;
+    SimScanSource* simSource_ = nullptr;                      // 中段模拟提取源（可空）
 
     // —— 测试模式 ——
     bool testHooksSet_ = false;

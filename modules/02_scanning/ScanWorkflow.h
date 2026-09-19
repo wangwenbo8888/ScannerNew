@@ -42,7 +42,12 @@ class FrameObsAccumulator;
 // 前向声明（07 流水线对象；定义见 modules/07_pipelinemgmt/pipelines/scan/）
 namespace Scanner::pipeline {
 class ScanPipeline;
+class SimScanSource;                                       // 中段模拟提取源（调试件）
 class FrameObsAccumulator;
+struct FrameResult;                                     // ScanTypes.h（outputQueue 透传口）
+namespace sched {
+template <typename T> class FrameResultQueue;           // sched/FrameResultQueue.h
+}
 }
 namespace calib { struct LaserPlaneMapTempTable; }   // 09 激光温度表（档→映射表）
 
@@ -69,6 +74,9 @@ public:
 
     void setScanMode(ScanMode mode) { scanMode_ = mode; }
     void setCalibration(const ScanCalibration& calib);
+    /// 中段模拟提取源（调试件；start 前设置。空=真机链；非空=每帧标志点/激光
+    /// 提取结果由模拟观测替换，配准/融合/渲染走生产代码。生命周期归调用方）
+    void setSimSource(Scanner::pipeline::SimScanSource* src) { simSource_ = src; }
 
     // —— 完成回报钩子（P5-T15 门禁接线，同 01 T14 模式）——
     /// 会话终态回报（stop() 活跃会话终止处调用，bool=ok）。
@@ -103,6 +111,10 @@ public:
     /// 调方保证仅在会话 stop 后、对象存活期内访问）
     Scanner::pipeline::FrameObsAccumulator& obs();
 
+    /// 输出队列透传（调试注入口：SimScanSource→真融合链，2026-09-13 模拟调通；
+    /// pipeline_ 未装配/已停＝nullptr——调方保证会话期访问，停止链先停注入线程）
+    Scanner::pipeline::sched::FrameResultQueue<Scanner::pipeline::FrameResult>* outputQueue();
+
     // IWorkflow
     std::string getName() const override { return "ScanWorkflow"; }
     Result initialize() override;
@@ -122,6 +134,7 @@ private:
     WorkflowContext* ctx_;
     ScanMode scanMode_ = ScanMode::MarkerOnly;
     ScanCalibration calib_;
+    Scanner::pipeline::SimScanSource* simSource_ = nullptr;   // 中段模拟提取源（可空）
     std::atomic<WorkflowState> state_{WorkflowState::Idle};
     WorkflowCallback callback_;
     std::function<void(bool)> onFinished_;         // 完成回报（app 注入；可空）

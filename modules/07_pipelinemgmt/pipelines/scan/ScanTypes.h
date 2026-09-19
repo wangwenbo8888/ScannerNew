@@ -9,6 +9,8 @@
 #include <memory>
 #include <vector>
 
+#include <opencv2/core.hpp>
+
 #include "base/types.h"                                              // Scanner::QualityFlag
 #include "core/marker/marker_cloud_fuse_cpu/marker_cloud_fuse_cpu.h" // calib::MarkerCloudPoint
 #include "core/scheduler/prev_frame_state.h"                         // calib::MarkerPoint3D
@@ -60,6 +62,19 @@ struct FrameResult {
     int laser = 0;                                       // CUDA 关闭占位
 #endif
     Scanner::QualityFlag quality = Scanner::QualityFlag::Normal;
+};
+
+// ============================================================================
+// SimFrameObs — 中段模拟提取的单帧原始观测（设备系；260917 架构对齐）
+// SimScanSource 产出 → ScanChains gpuChain frontReady 前写 ScanFront 分区
+// → pChain 以此替换真实提取结果走生产配准（vs prevState 全局锚）→ 激光块
+// 覆写 → 生产融合/体素/渲染。纯数据，配准/融合语义全部归生产链。
+// ============================================================================
+struct SimFrameObs {
+    uint64_t frameId = 0;
+    std::vector<cv::Point3d> markerPositions;   // 设备系标志点观测（含检测噪声）
+    std::vector<cv::Vec3d> markerNormals;       // 法线（场景真值旋转）
+    std::vector<cv::Point3f> laser;             // 设备系激光观测（含抖动；可空）
 };
 
 // ============================================================================

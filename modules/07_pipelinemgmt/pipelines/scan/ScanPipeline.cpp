@@ -71,18 +71,58 @@ public:
     void fuse(const std::vector<calib::MarkerPoint3D>& markers,
               const double R[9], const double T[3]) override {
         if (markers.empty()) return;
-        std::vector<calib::MarkerFuseInput> in(markers.size());
+        const cv::Matx33d Rm = matxFromArr9(R);
+        const cv::Vec3d Tv = vec3FromArr3(T);
+        std::vector<calib::MarkerFuseInput> in;        // 无 id 帧（兜底）——原路径
+        std::vector<calib::MarkerFuseInput> anchored;  // id 锚定帧——恒等位姿直喂
+        in.reserve(markers.size());
+        anchored.reserve(markers.size());
         for (size_t i = 0; i < markers.size(); ++i) {
-            in[i].x  = static_cast<float>(markers[i].x);
-            in[i].y  = static_cast<float>(markers[i].y);
-            in[i].z  = static_cast<float>(markers[i].z);
-            in[i].nx = static_cast<float>(markers[i].nx);
-            in[i].ny = static_cast<float>(markers[i].ny);
-            in[i].nz = static_cast<float>(markers[i].nz);
+            calib::MarkerFuseInput f;
+            f.x  = static_cast<float>(markers[i].x);
+            f.y  = static_cast<float>(markers[i].y);
+            f.z  = static_cast<float>(markers[i].z);
+            f.nx = static_cast<float>(markers[i].nx);
+            f.ny = static_cast<float>(markers[i].ny);
+            f.nz = static_cast<float>(markers[i].nz);
             // whiteRadius：MarkerPoint3D 无半径字段，置 0（饱和判定降级，不影响位置融合）
+            if (markers[i].globalId < 0) {
+                in.push_back(f);
+                continue;
+            }
+            // 全局位锚定（260919：纯体素哈希下真值贴 5mm 边界的标志点随噪声/
+            // 位姿微抖在邻格翻转→一个标志点两格=30 显 35 伪点。同 id 观测恒以
+            // 锚定全局位（EMA 轻精化）入格——一格一点；id<0 无恒等性仍走体素）
+            const cv::Vec3d g = Rm * cv::Vec3d(f.x, f.y, f.z) + Tv;
+            auto it = idAnchors_.find(markers[i].globalId);
+            if (it == idAnchors_.end()) {
+                // 邻近归并（260919 并发 lane 偶发重发 id/短暂丢配准→同物理标志点
+                // 多 id 多格=伪点。标志点间距 ≥50mm，10mm 邻域必同一点——新 id
+                // 继承既有锚位（同格入云不增点）
+                const cv::Vec3d* nearAnchor = nullptr;
+                for (const auto& kv : idAnchors_) {
+                    if (cv::norm(kv.second - g) < 10.0) { nearAnchor = &kv.second; break; }
+                }
+                it = idAnchors_.emplace(markers[i].globalId,
+                                        nearAnchor ? *nearAnchor : g).first;
+            }
+            // 锚位冻结于首观测（260919：EMA 慢精化跨 5mm 体素边界时旧格残留
+            //=+1 伪点（融合只增不删）；首观测位偏差 <1mm，冻结保 N 格恒定）
+            f.x = static_cast<float>(it->second[0]);
+            f.y = static_cast<float>(it->second[1]);
+            f.z = static_cast<float>(it->second[2]);
+            anchored.push_back(f);
         }
-        auto r = op_.Execute(in, matxFromArr9(R), vec3FromArr3(T));
-        if (!r.success) JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] marker 融合失败: {}", r.message);
+        if (!in.empty()) {
+            auto r = op_.Execute(in, Rm, Tv);
+            if (!r.success)
+                JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] marker 融合失败: {}", r.message);
+        }
+        if (!anchored.empty()) {
+            auto r = op_.Execute(anchored, cv::Matx33d::eye(), cv::Vec3d(0, 0, 0));
+            if (!r.success)
+                JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] marker 锚定融合失败: {}", r.message);
+        }
     }
 
     /// 稳定存储：算子内部 vector 对象（地址跨调用稳定，渲染句柄安全）
@@ -104,6 +144,8 @@ private:
         p.voxelSize = 5.0f;
         return p;
     }()};
+    // id→锚定全局位（fuse 内 EMA 精化；会话生命周期——适配器随 pipeline 每会话新建）
+    std::unordered_map<int, cv::Vec3d> idAnchors_;
 };
 
 #ifdef JMW_BUILD_CUDA
@@ -157,7 +199,15 @@ public:
     }
 
 private:
-    calib::LaserCloudFuseCuda fuse_;
+    // 体素 0.5→0.25mm（260919 用户口径——唯一格 ×4：窄带数据 87 万→~350 万）；
+    // 槽 2M→8M（0.25mm 下 8.4M 槽覆盖 30M 点云主量级，显存数百 MB）
+    calib::LaserCloudFuseCUDAParams fuseParams() {
+        calib::LaserCloudFuseCUDAParams p;
+        p.voxelSize = 0.25f;
+        p.reserveVoxelCount = static_cast<size_t>(1) << 23;
+        return p;
+    }
+    calib::LaserCloudFuseCuda fuse_{fuseParams()};
     calib::LaserCloudNormalCuda normal_;
 };
 #endif // JMW_BUILD_CUDA
@@ -346,6 +396,7 @@ Scanner::Result ScanPipeline::configure(const PipelineDeps& deps) {
         sd.imageHeight = imageHeight_;
         sd.sink = &queue_;
         sd.poolAcquireTimeout = kPoolAcquireTimeout;
+        sd.simSource = simSource_;                 // 中段模拟提取源（可空=真机链）
 #ifdef JMW_BUILD_CUDA
         sd.laserPool = laserPool_.get();         // enableLaser=false 时可空
 #endif

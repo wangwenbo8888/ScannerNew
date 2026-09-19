@@ -261,25 +261,33 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
             // 激光点云（host 块直推——FuseConsumer 下载的当帧激光块）
             connect(feed, &SceneFeedAdapter::laserCloudUpdated, this,
                     [this](const std::vector<cv::Point3f>& pts) {
-                        // 节流导出（exe 目录 laser_snapshot.ply——人工导入核对用）
-                        static std::atomic<uint64_t> s_lRecv{0};
-                        if (const auto k = s_lRecv.fetch_add(1); k % 30 == 0 && !pts.empty()) {
-                            if (QFile f(QStringLiteral("laser_snapshot.ply"));
-                                f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                                QByteArray out;
-                                out += "ply\nformat ascii 1.0\n";
-                                out += QString("element vertex %1\n").arg(pts.size()).toUtf8();
-                                out += "property float x\nproperty float y\nproperty float z\nend_header\n";
-                                for (const auto& p : pts) {
-                                    out += QString("%1 %2 %3\n")
-                                              .arg(p.x, 0, 'f', 3)
-                                              .arg(p.y, 0, 'f', 3)
-                                              .arg(p.z, 0, 'f', 3)
-                                              .toUtf8();
-                                }
-                                f.write(out);
-                            }
+                // 显示/导出减负（260919：全域扫描后融合云至数百万点——全量 VBO
+                // 重传＋数千万字节文本 PLY 每 30 拍写盘拖死 UI；>150 万点按步长
+                // 抽样至 ~150 万（仓库/日志计数仍为全量真值）
+                const size_t kDispMax = 1500000;
+                const size_t stride = pts.size() > kDispMax ? (pts.size() + kDispMax - 1) / kDispMax : 1;
+                // 节流导出（exe 目录 laser_snapshot.ply——人工导入核对用）
+                static std::atomic<uint64_t> s_lRecv{0};
+                if (const auto k = s_lRecv.fetch_add(1); k % 30 == 0 && !pts.empty()) {
+                    if (QFile f(QStringLiteral("laser_snapshot.ply"));
+                        f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                        QByteArray out;
+                        out += "ply\nformat ascii 1.0\n";
+                        out += QString("element vertex %1\n")
+                                   .arg((pts.size() + stride - 1) / stride)
+                                   .toUtf8();
+                        out += "property float x\nproperty float y\nproperty float z\nend_header\n";
+                        for (size_t i = 0; i < pts.size(); i += stride) {
+                            const auto& p = pts[i];
+                            out += QString("%1 %2 %3\n")
+                                       .arg(p.x, 0, 'f', 3)
+                                       .arg(p.y, 0, 'f', 3)
+                                       .arg(p.z, 0, 'f', 3)
+                                       .toUtf8();
                         }
+                        f.write(out);
+                    }
+                }
                         if (!m_3dView) return;
                         // —— 260912c 导出补链（基线+当期替换）：激光信号=本会话
                         //    融合云全量快照（体素去重累计）——新会话从零重来，直
@@ -299,14 +307,13 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             fr.pointCount = static_cast<int>(fr.points.size());
                             pcbExp->replacePointCloud(fr);
                         }
-                        // 3D 激光显示（累积渲染）。260912 计数收口：本处不再写
-                        // 「点云数据 001」——计数唯一真相源=PointCloudBuffer（由
-                        // cloudTimer 500ms 刷新，与导出一致）
-                        std::vector<osg::Vec3> laser;
-                        laser.reserve(pts.size());
-                        for (const auto& p : pts) laser.emplace_back(p.x, p.y, p.z);
-                        m_3dView->loadLaserPoints(laser);
-                    });
+                         // 3D 激光显示（累积渲染；>150 万点抽样——见头部减负注）
+                         std::vector<osg::Vec3> laser;
+                         laser.reserve((pts.size() + stride - 1) / stride);
+                         for (size_t i = 0; i < pts.size(); i += stride)
+                             laser.emplace_back(pts[i].x, pts[i].y, pts[i].z);
+                         m_3dView->loadLaserPoints(laser);
+                     });
             connect(feed, &SceneFeedAdapter::freezeChanged, this,
                     [this](bool frozen) {
                         // D 批处理期冻结：画面保持末帧（ingest 已由 adapter 丢弃）——状态条提示可后续挂
@@ -1246,29 +1253,44 @@ QWidget *MainWindow::createToolBar()
                         //    （合账落库，出口③雏形）＋启动新模式 ——
                         // （续采/完成前先物理化编辑成果）
                         if (wasSelf) {
-                            materializeEdits();
-                            auto rr = m_appCtx->resumeScanSession();
-                            if (rr.success) {
-                                setScanButtonVisual(myIdx, true);
-                                // 260912：续采重挂监视窗（注册 tap＋重显）——resume
-                                // 原不重注册，关闭过的对话框＝tap 空＝预览死
-                                showCameraMonitor();
-                                statusBar()->showMessage(QString::fromStdString(rr.message) +
-                                                         QStringLiteral("——再点停止采集"));
-                            } else {
-                                statusBar()->showMessage(
-                                    QString::fromStdString("续采被拒: " + rr.message));
+                            // —— 开关变体检测（260917）：「模拟数据」开关在会话期间翻转
+                            //    时，续采改为完整重启——新会话装配读新开关值（中段
+                            //    模拟提取源随之注入/移除）；未变=原语义就绪态续采 ——
+                            if (m_appCtx->simExtract() == m_sessionSimExtract) {
+                                materializeEdits();
+                                auto rr = m_appCtx->resumeScanSession();
+                                if (rr.success) {
+                                    setScanButtonVisual(myIdx, true);
+                                    // 260912：续采重挂监视窗（注册 tap＋重显）——resume
+                                    // 原不重注册，关闭过的对话框＝tap 空＝预览死
+                                    showCameraMonitor();
+                                    statusBar()->showMessage(QString::fromStdString(rr.message) +
+                                                             QStringLiteral("——再点停止采集"));
+                                } else {
+                                    statusBar()->showMessage(
+                                        QString::fromStdString("续采被拒: " + rr.message));
+                                }
+                                return;
                             }
-                            return;
+                            // 开关已变：完成旧会话（完整停）→落下走下方公共启动路径
+                            materializeEdits();
+                            auto sr = m_appCtx->stopScanSession();
+                            if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                            m_activeScanToolIdx = -1;
+                            if (!sr.success)
+                                statusBar()->showMessage(
+                                    QString::fromStdString("完成被拒: " + sr.message));
+                            // 落下：按新开关状态重启（继续启动）
+                        } else {
+                            materializeEdits();
+                            auto sr = m_appCtx->stopScanSession();
+                            if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                            m_activeScanToolIdx = -1;
+                            if (!sr.success)
+                                statusBar()->showMessage(
+                                    QString::fromStdString("完成被拒: " + sr.message));
+                            // 落下：继续启动新模式
                         }
-                        materializeEdits();
-                        auto sr = m_appCtx->stopScanSession();
-                        if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
-                        m_activeScanToolIdx = -1;
-                        if (!sr.success)
-                            statusBar()->showMessage(
-                                QString::fromStdString("完成被拒: " + sr.message));
-                        // 落下：继续启动新模式
                     } else {
                         // —— 运行态：本键＝停止采集→就绪（保活，05 D2 编辑时机）；
                         //    他键＝完整停旧（模式切换）—— ——
@@ -1303,6 +1325,7 @@ QWidget *MainWindow::createToolBar()
                 } else {
                     setScanButtonVisual(myIdx, true);          // 只有本键变红
                     m_activeScanToolIdx = myIdx;
+                    m_sessionSimExtract = m_appCtx->simExtract();   // 会话开关基线（续采变体检测）
                     // 工程树：首个扫描会话建「标记点 001」，后续会话（标点/面片/
                     // 精细/深孔）复用同一节点不新建（有对应类型即可——用户口径 2026-09-05）；
                     // 计数实时刷新；激光点数据由「点云数据 001」承载（合账落库
@@ -1372,6 +1395,10 @@ QWidget *MainWindow::createToolBar()
 
                     std::vector<cv::Point3f> rawPts;
                     bool ok = Scanner::data::fileio::importPointCloud(spath, rawPts);
+                    // 模拟提取 stash（「模拟数据」开关的激光数据源——2026-09-13
+                    // 模拟调通；普通导入路径无副作用，仅值拷贝一份）
+                    if (m_appCtx && ok && !rawPts.empty())
+                        m_appCtx->setLastImportedCloud(rawPts);
                     std::vector<osg::Vec3> points;   // UI 容器仍用 osg::Vec3，就地转换
                     points.reserve(rawPts.size());
                     for (const auto& p : rawPts) points.emplace_back(p.x, p.y, p.z);
@@ -1543,6 +1570,45 @@ QWidget *MainWindow::createToolBar()
             layout->addWidget(separator);
         }
     }
+
+    // —— 「模拟数据」开关（调试件）：置位后下个扫描会话启用中段模拟提取——
+    //    真机前端照常采集，每帧标志点/激光提取结果由模拟观测替换，配准（标志点
+    //    vs 全局锚 R/T）→点云变换→体素融合→3D 显示全走生产代码（260917）
+    QPushButton *simToggle = new QPushButton();
+    simToggle->setObjectName("toolButton");
+    simToggle->setFixedSize(64, 56);
+    simToggle->setCheckable(true);
+    simToggle->setToolTip(QStringLiteral("模拟数据：开启后扫描会话的中段提取（标志点/激光 3D）"
+                                         "由模拟数据替换——配准/融合/显示走真实流水线"));
+    QVBoxLayout *simLay = new QVBoxLayout(simToggle);
+    simLay->setContentsMargins(0, 4, 0, 4);
+    simLay->setSpacing(2);
+    simLay->setAlignment(Qt::AlignCenter);
+    QLabel *simIcon = new QLabel();
+    simIcon->setPixmap(renderSvg(
+        QStringLiteral(":/icons/resources/icons/icon/third/both-black-14.svg"), 20));
+    simIcon->setFixedSize(20, 20);
+    simLay->addWidget(simIcon, 0, Qt::AlignHCenter);
+    QLabel *simText = new QLabel(QStringLiteral("模拟数据"));
+    simText->setObjectName("toolButtonText");
+    simText->setAlignment(Qt::AlignCenter);
+    simText->setMinimumWidth(simToggle->width());
+    simLay->addWidget(simText);
+    simToggle->setStyleSheet(
+        "QPushButton { background-color: transparent; border: none; }"
+        "QPushButton:hover { background-color: rgba(0,0,0,0.05); }"
+        "QPushButton:checked { background-color: rgba(230,145,18,0.18);"
+        " border: 1px solid #E69112; border-radius: 4px; }");
+    connect(simToggle, &QPushButton::toggled, this, [this](bool on) {
+        if (!m_appCtx) return;
+        m_appCtx->setSimExtract(on);
+        JMW_LOG_INFO("app-MainWindow", "[模拟数据] 开关: {}（下个扫描会话生效）",
+                     on ? "开" : "关");
+        statusBar()->showMessage(on
+            ? QStringLiteral("模拟数据：开——下个扫描会话启用中段模拟提取")
+            : QStringLiteral("模拟数据：关——纯真机链"));
+    });
+    layout->addWidget(simToggle);
 
     layout->addStretch();
     return bar;

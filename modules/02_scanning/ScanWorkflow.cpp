@@ -73,6 +73,7 @@ Result ScanWorkflow::assemblePipeline() {
         JMW_LOG_WARN("02-ScanWorkflow", "[ScanWorkflow] 无续扫基准（新扫描或上次未留存）");
     }
     pipeline_ = std::make_unique<sp::ScanPipeline>(cfg);
+    if (simSource_) pipeline_->attachSimSource(simSource_);   // 中段模拟提取（调试件）
 
     // 帧响应接线（08 采集回调→session 环）：app 双投递经 pushSessionFrame 注入
     pipeline_->attachRing(session_.ring(), /*dropThreshold=*/0);   // 0=自动（2*lanes）
@@ -251,6 +252,11 @@ ScanWorkflow::buildLaserTableFromRepo() const {
 Scanner::pipeline::FrameObsAccumulator& ScanWorkflow::obs() {
     // pipeline_ 会话私有件——调方保证仅会话装配后访问（stop 后仍存活至析构）
     return pipeline_->obs();
+}
+
+Scanner::pipeline::sched::FrameResultQueue<Scanner::pipeline::FrameResult>*
+ScanWorkflow::outputQueue() {
+    return pipeline_ ? &pipeline_->outputQueue() : nullptr;
 }
 
 Result ScanWorkflow::stop() {

@@ -12,7 +12,8 @@ set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
     pipelines/scan/FrameObsAccumulator.cpp
     pipelines/scan/FuseConsumer.cpp
     pipelines/scan/ScanChains.cpp
-    pipelines/scan/ScanPipeline.cpp)
+    pipelines/scan/ScanPipeline.cpp
+    pipelines/scan/SimScanSource.cpp)   # 调试件：FrameResult 出口级模拟源（JMW_SIM_SCAN 链路调试）
 if(BUILD_CUDA)
     list(APPEND JMW_PM_PIPELINE_SRCS pipelines/scan/GpuPointCloudPool.cpp)  # GPU 点云块池（cv::cuda 类型）
 endif()

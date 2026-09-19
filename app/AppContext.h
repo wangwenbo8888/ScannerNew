@@ -17,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+#include <opencv2/core.hpp>   // cv::Point3f（导入点云 stash）
+
 class SceneFeedAdapter;   // P2 渲染加固：ISceneFeed 实现（app 装配持有）
 
 namespace Scanner::hal    { struct StereoFrame; }   // 调试帧分路签名（IScannerCamera.h 定义）
@@ -26,6 +28,7 @@ namespace Scanner::service { class StateMachine; class ParameterManager; class F
 namespace Scanner::infra   { class EventBus; }
 namespace Scanner::device  { class DeviceManager; class HardwareMonitor; class SelfCheckCollector; }
 namespace Scanner::workflow{ class WorkflowContext; class ScanWorkflow; class CalibrationWorkflow; class PostProcessWorkflow; }
+namespace Scanner::pipeline{ class SimScanSource; }  // 中段模拟提取源（UI 开关组装）
 
 class AppContext {
 public:
@@ -111,6 +114,16 @@ public:
         debugFrameTap_ = std::move(tap);
     }
 
+    // —— 中段模拟提取（调试件；主界面「模拟数据」开关控制）——
+    /// 开关置位（扫描启动时读取）：true=下个扫描会话每帧标志点/激光提取结果
+    /// 由 SimScanSource 模拟观测替换（真机前端照常采集），配准/融合/体素/渲染
+    /// 全走生产代码；false=纯真机链
+    void setSimExtract(bool on) { simExtract_.store(on, std::memory_order_relaxed); }
+    bool simExtract() const { return simExtract_.load(std::memory_order_relaxed); }
+    /// 「导入点云」stash：模拟扫描的激光数据源（导入点云菜单写入；sim 启动读取）
+    void setLastImportedCloud(std::vector<cv::Point3f> pts) { lastImportedCloud_ = std::move(pts); }
+    const std::vector<cv::Point3f>& lastImportedCloud() const { return lastImportedCloud_; }
+
     // Workflow
     Scanner::workflow::WorkflowContext*     workflowCtx()    { return wfCtx_.get(); }
     Scanner::workflow::ScanWorkflow*        scanWorkflow()   { return scanWf_.get(); }
@@ -180,4 +193,10 @@ private:
     std::atomic<uint64_t> debugTapFrames_{0};    // tap 心跳计数（终审证据——260912）
     std::atomic<uint64_t> debugTapNullCnt_{0};   // tap 空计数（帧在流而监视窗未挂）
     std::mutex debugTapMtx_;
+
+    // —— 中段模拟提取（调试件；UI 开关，默认零影响）——
+    void assembleSimSource();                     // 开关置位时会话起步组装模拟源（场景+轨迹）
+    std::unique_ptr<Scanner::pipeline::SimScanSource> simSource_;  // 会话期持有（start 建/stop 弃）
+    std::atomic<bool> simExtract_{false};         // UI「模拟数据」开关（start_scan 时读取）
+    std::vector<cv::Point3f> lastImportedCloud_;  // 「导入点云」stash（导入线程写/sim 启动读）
 };

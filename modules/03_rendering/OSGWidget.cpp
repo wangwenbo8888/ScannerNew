@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <atomic>
 
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
@@ -2311,7 +2312,7 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
         m_root->addChild(m_laserRoot);
 
         osg::ref_ptr<osg::Point> pointSize = new osg::Point;
-        pointSize->setSize(2.0f);
+        pointSize->setSize(4.0f);   // 260915：2px 浅蓝点远距不可辨（用户只见标志点）——对齐导入云可视尺寸再加大
         m_laserRoot->getOrCreateStateSet()->setAttribute(pointSize);
         m_laserRoot->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
         // 混合开：软删 alpha=0 隐藏（05 P4b 激光删除链——旧版 BIND_OVERALL
@@ -2324,6 +2325,13 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
     }
     m_laserRoot->setNodeMask(m_laserVisible ? ~0u : 0u);      // 重建后承袭开关
     m_laserCoords->assign(laser.begin(), laser.end());
+    m_laserCoords->dirty();   // 260915：同指针 setVertexArray 早退不重传 VBO——原地改必须显式 dirty
+    static std::atomic<uint64_t> s_laserLoadCnt{0};
+    if (const auto k = s_laserLoadCnt.fetch_add(1); k % 30 == 0) {
+        JMW_LOG_INFO("03-OSGWidget",
+            "[OSGWidget] 激光点渲染: {} 点（第 {} 次）nodeMask={} parents={}",
+            laser.size(), k + 1, m_laserRoot->getNodeMask(), m_laserRoot->getNumParents());
+    }
     m_laserGeom->setVertexArray(m_laserCoords);
     // 逐顶点色：默认=导入点云色（LeadScan 浅蓝——用户口径同源）；待物理化
     // 删除的下标 alpha=0 隐藏（周期重推不复活——物理化在就绪态续采/完成前）

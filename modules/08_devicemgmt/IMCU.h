@@ -14,8 +14,11 @@
 
 namespace Scanner::hal {
 
-struct CaptureParams {              // N10 五参（协议表：H20-120/B0-255/T1-6/V1-6/L0-255）
-    int freqHz = 60; int bgLight = 80; int laserSelectA = 1; int laserSelectB = 1; int laserLevel = 120;
+struct CaptureParams {              // N10 七参（协议 260831 §下行表；H 1-200 / B 0-100 / T V C D 0|1 / L 0-100）
+    int freqHz = 60;
+    int bgLight = 10;
+    int laserT = 1, laserV = 1, laserC = 0, laserD = 0;   // 四激光管开关（ScanMode 映射，见 DeviceManager::effectiveN10）
+    int laserLevel = 40;
 };
 
 struct McuUplink {                  // 上行分流出口（DeviceManager 注册；均在逻辑线程回调）

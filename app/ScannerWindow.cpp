@@ -300,7 +300,7 @@ void ScannerWindow::onStartScanner()
                                                        tempC, frame.frameId);
         }
     });
-    dm->startCapture(true);   // 面片默认（账本 T/V 激光，N10→N11H1 组）
+    dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 面片默认（T1V1 激光，N10 七参组）
 
     // P5-T15 ①：经统一命令通道点火扫描（门禁 S2→S4/S5；payload=ScanMode 四值
     // 喂状态机 S4/S5 判别——0=标点→S4，1-3=含激光形态→S5（⑨b 暂并入）；handler
@@ -412,7 +412,7 @@ void ScannerWindow::onCalibrateClicked()
         dm->startFrameStream([this](const Scanner::hal::StereoFrame& frame) {
             pushFrameToBuffer(frame);
         });
-        dm->startCapture(true);   // 缺省 B 灯型（与原缺省行为一致）
+        dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 缺省 B 灯型（与原缺省行为一致）
     }
 
     // P5-T14：经统一命令通道点火（门禁 S2→S3）——initialize+start 移入 gate

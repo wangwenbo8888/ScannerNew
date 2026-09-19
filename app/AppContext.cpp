@@ -9,9 +9,12 @@
 #include "DeviceStateCache.h"
 
 #include <algorithm>
+#include <cstdlib>              // std::getenv（JMW_SIM_MARKERS_PLY 场景覆写）
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include "sched/CpuTopology.h"   // 自检起点 CPU 拓扑记录（2026-09-01）
+#include "pipelines/scan/SimScanSource.h"   // 中段模拟提取源（UI 开关组装）
+#include "file_io.h"             // fileio::importPLY（激光数据集文件装载）
 #include "CalibrationRepository.h"
 #include "StateMachine.h"
 #include "ParameterManager.h"
@@ -129,9 +132,19 @@ void AppContext::initialize() {
                             c.distCoeffsL   = st.distCoeffsL;
                             c.distCoeffsR   = st.distCoeffsR;
                             c.R1 = st.R1;  c.R2 = st.R2;
-                            c.P1 = st.P1;  c.P2 = st.P2;  c.Q = st.Q;
+                            c.P1 = st.P1;  c.P2 = st.P2;
+                            c.Q = st.Q;
                             c.imageSize = st.imageSize;
                             c.valid = true;
+                            // 中段模拟提取（调试件）：UI「模拟数据」开关——置位则
+                            // 本会话装配模拟源（真机前端照常，提取结果替换；配准/
+                            // 融合/体素/渲染走生产代码）
+                            if (simExtract_.load(std::memory_order_relaxed)) {
+                                assembleSimSource();
+                            } else {
+                                simSource_.reset();
+                            }
+                            scanWf_->setSimSource(simSource_.get());
                             scanWf_->setCalibration(c);
                             r = scanWf_->initialize();
                             if (r.success) r = scanWf_->start();
@@ -160,7 +173,8 @@ void AppContext::initialize() {
                                 "[AppContext] 装配失败回滚跳过（会话代已前进——新会话已接管）");
                         }
                     } else {
-                        JMW_LOG_INFO("app-AppContext", "[AppContext] 扫描后台装配完成");
+                        JMW_LOG_INFO("app-AppContext", "[AppContext] 扫描后台装配完成{}",
+                                     simSource_ ? "（中段模拟提取=开）" : "");
                     }
                 });
                 return Scanner::Result::ok("扫描启动中（后台装配）");
@@ -411,6 +425,7 @@ void AppContext::startDevicesAsync() {
 // ============================================================================
 Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
     const auto t0 = std::chrono::steady_clock::now();   // 启停耗时打点（分段排查）
+    {
     auto* dm = deviceManager_.get();
     if (!dm || !dm->isDeviceReady()) {
         JMW_LOG_WARN("app-AppContext", "[AppContext] 扫描点火被拦: 设备未就绪（门面空/相机或 MCU 未开）");
@@ -450,19 +465,14 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
             }
         }
     });
-    // 灯型归采集组 N10（effectiveN10 带灯型覆写）——不预点亮：固件 H1"按上次
-    // 采集参数重启"会重置灯态（2026-08-22 实测），组序内 N10 灯型一次到位。
-    // 灯型按模式（2026-09-01 定版）：A=纯补光（无激光——业务要求）；B=补光+激光。
-    // 协议回退旧版（2026-09-12）：N10 五参（H/B/T/V/L），激光管归账本
-    // laserSelectA/B；精细/深孔两模式旧协议无对应管位，暂与 B 同灯型（laserOn）
-    const bool laserOn = (mode != Scanner::ScanMode::MarkerOnly);
-    dm->startCapture(laserOn);
-    if (laserOn) {
-        JMW_LOG_INFO("app-AppContext",
-            "[AppContext] 激光组: 左斜=T{} 右斜=V{}（交替归固件 H1 帧序）",
-            static_cast<int>(dm->getParam("laserSelectA").value),
-            static_cast<int>(dm->getParam("laserSelectB").value));
-    }
+    // 灯型归采集组 N10（effectiveN10 按模式组装四管掩码）——不预点亮：固件 H1
+    // "按上次采集参数重启"会重置灯态（2026-08-22 实测），组序内 N10 灯型一次到位。
+    // 协议 260831 七参恢复（260919）：T/V/C/D=四管开关按 ScanMode 映射（A=纯补光；
+    // B=T1V1 交叉；精细=D 管；深孔=C 管）——五参帧固件不解析=面片无激光线根因
+    dm->startCapture(mode);
+    JMW_LOG_INFO("app-AppContext",
+        "[AppContext] 采集启动（N10 七参·四管掩码，mode={}）", static_cast<int>(mode));
+    }   // ← 设备段结束（真机前端——中段模拟提取时设备照常采集，提取结果在 07 链内替换）
 
     // 命令通道点火（门禁/前置/装配失败均带因返回；各"不走打印点"已落日志）
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
@@ -498,6 +508,10 @@ Scanner::Result AppContext::stopScanSession() {
     }
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
     auto r = commandGate_->submit("finish_scan");          // 工作流合账（handler=stop）
+    if (simSource_) {           // 中段模拟提取源随会话终了弃（下会话按开关重组）
+        simSource_.reset();
+        scanWf_->setSimSource(nullptr);
+    }
     {
         const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - t0).count();
@@ -543,8 +557,7 @@ Scanner::Result AppContext::resumeScanSession() {
     // N10 即够——MCU 从默认态进入触发；但 N11H0 停触发后仅 N10 不够，
     // MCU 停在「已停」态——串口无声根因；须补 N11H1 才恢复触发）
     if (deviceManager_) {
-        const bool laserOn = (lastScanMode_ != Scanner::ScanMode::MarkerOnly);
-        deviceManager_->startCapture(laserOn);   // N10→N11H1→FLUSH（captureSeqSteps）
+        deviceManager_->startCapture(lastScanMode_);   // N10→FLUSH（captureSeqSteps·模式掩码）
     }
     JMW_LOG_INFO("app-AppContext", "[AppContext] 续采（N10 参数＋N11H1 重启触发）：ok");
     return Scanner::Result::ok("续采中");
@@ -572,6 +585,7 @@ void AppContext::shutdown() {
     if (devStartThread_.joinable()) devStartThread_.join();   // 设备启动收尾再关（防竞态）
     if (hwMonitor_) hwMonitor_->stop();
     if (scanWf_)    scanWf_->stop();
+    simSource_.reset();                                          // 模拟源随后者弃（lane 已 join）
     if (calibWf_)   calibWf_->stop();
     if (postWf_)    postWf_->stop();
     if (faultHandler_) faultHandler_->stop();
@@ -622,4 +636,338 @@ std::vector<std::pair<std::string, bool>> AppContext::selfCheckSnapshot() const 
 bool AppContext::selfCheckDone() const {
     std::lock_guard<std::mutex> lock(selfCheckMtx_);
     return selfCheck_.done;
+}
+
+// ============================================================================
+// 中段模拟提取（调试件；主界面「模拟数据」开关——start_scan 时读取组装）
+// ============================================================================
+
+// ASCII PLY 限量读取（前 maxPts 点——pointcloud.ply 3100 万点大文件专用；
+// 06 importPLY 对该量级文件实测失败回退，故装配层自持读取器）
+namespace {
+bool loadAsciiPlyLimited(const std::string& path, size_t maxPts,
+                         std::vector<cv::Point3f>& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    std::string line;
+    long long vertexCount = 0;
+    bool headerEnd = false;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line == "end_header") { headerEnd = true; break; }
+        if (line.compare(0, 14, "element vertex") == 0)
+            vertexCount = std::stoll(line.substr(15));
+    }
+    if (!headerEnd || vertexCount <= 0) return false;
+    const size_t n = std::min<size_t>(maxPts, static_cast<size_t>(vertexCount));
+    out.clear();
+    out.reserve(n);
+    char buf[1 << 16];
+    for (size_t i = 0; i < n && f.good(); ) {
+        f.read(buf, sizeof buf);
+        const std::streamsize got = f.gcount();
+        if (got <= 0) break;
+        std::streamsize pos = 0;
+        while (pos < got && i < n) {
+            const char* nl = static_cast<const char*>(
+                memchr(buf + pos, '\n', static_cast<size_t>(got - pos)));
+            if (!nl) break;                          // 半行留待下块（简化：丢弃头部残行）
+            float x = 0, y = 0, z = 0;
+            if (sscanf(buf + pos, "%f %f %f", &x, &y, &z) == 3) {
+                if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z))
+                    out.emplace_back(x, y, z);
+                ++i;
+            }
+            pos = static_cast<std::streamsize>(nl - buf) + 1;
+        }
+    }
+    return !out.empty();
+}
+} // namespace
+
+// 模拟数据集·激光档主源读取（260919 用户口径）：「加载点云」按钮同源数据
+// D:/pointcloud_100M.ply 的**前 3000 万点**——binary LE、15B/点（3×f32 xyz＋
+// 3×u8 rgb，同 OSGWidget::loadTestDataFromPLY 的流式口径与截断上限）
+namespace {
+bool loadPointCloud100MLimited(const std::string& path, size_t maxPts,
+                               std::vector<cv::Point3f>& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    std::vector<char> sbuf(1 << 20, '\0');
+    f.rdbuf()->pubsetbuf(sbuf.data(), static_cast<std::streamsize>(sbuf.size()));
+    std::string line;
+    long long vertexCount = 0;
+    bool binaryLE = false, headerEnd = false;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line == "end_header") { headerEnd = true; break; }
+        if (line.compare(0, 14, "element vertex") == 0)
+            vertexCount = std::stoll(line.substr(15));
+        if (line.find("binary_little_endian") != std::string::npos) binaryLE = true;
+    }
+    if (!headerEnd || vertexCount <= 0 || !binaryLE) return false;
+    const size_t n = std::min<size_t>(maxPts, static_cast<size_t>(vertexCount));
+    constexpr size_t kBytesPerPoint = 15;        // 3×f32 + 3×u8
+    out.clear();
+    out.reserve(n);
+    std::vector<char> buf(1 << 20, '\0');
+    size_t got = 0;
+    while (got < n) {
+        const size_t batch = std::min<size_t>(n - got, buf.size() / kBytesPerPoint);
+        f.read(buf.data(), static_cast<std::streamsize>(batch * kBytesPerPoint));
+        const size_t rd = static_cast<size_t>(f.gcount()) / kBytesPerPoint;
+        if (rd == 0) break;
+        for (size_t i = 0; i < rd; ++i) {
+            float x, y, z;
+            std::memcpy(&x, buf.data() + i * kBytesPerPoint, 4);
+            std::memcpy(&y, buf.data() + i * kBytesPerPoint + 4, 4);
+            std::memcpy(&z, buf.data() + i * kBytesPerPoint + 8, 4);
+            if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z))
+                out.emplace_back(x, y, z);
+        }
+        got += rd;
+    }
+    return !out.empty();
+}
+} // namespace
+void AppContext::assembleSimSource() {
+    // 场景组装：标志点←PLY（JMW_SIM_MARKERS_PLY 覆写，缺省 D:/markers_30.ply）；
+    // 激光←「导入点云」stash；两者缺一 builtin fallback（保链路可用，warn 留痕）
+    Scanner::pipeline::SimScene scene;
+    const char* plyEnv = std::getenv("JMW_SIM_MARKERS_PLY");
+    const std::string plyPath = plyEnv && *plyEnv ? std::string(plyEnv)
+                                                  : std::string("D:/markers_30.ply");
+    auto mr = Scanner::pipeline::SimScene::loadMarkersFromPly(plyPath, scene);
+    if (!mr.success)
+        JMW_LOG_WARN("app-AppContext", "[SimScan] 标志点 PLY 不可用（{}）——builtin 兜底: {}",
+                     mr.message, plyPath);
+    scene.laser = lastImportedCloud_;
+    if (scene.laser.empty()) {
+        // 模拟数据集·激光档（260919 用户口径）：主源＝「加载点云」按钮同源
+        // D:/pointcloud_100M.ply 前 3000 万点；JMW_SIM_LASER_PLY 覆写走文本
+        // PLY；均无才退 builtin
+        std::vector<cv::Point3f> laserPts;
+        std::string srcDesc;
+        const char* laserEnv = std::getenv("JMW_SIM_LASER_PLY");
+        if (laserEnv && *laserEnv) {
+            if (Scanner::data::fileio::importPLY(laserEnv, laserPts) && !laserPts.empty())
+                srcDesc = laserEnv;
+        } else {
+            // 主源＝pointcloud_100M.ply 前 3000 万点（260919 回退定版：该版本
+            // 标志点/激光显示正常——终值 ~87 万为该窄带数据的 0.5mm 唯一格全量，
+            // 属扫完非卡死。pointcloud.ply 米级场景版显示异常未解，仅经
+            // JMW_SIM_LASER_PLY 覆写可用）
+            if (loadPointCloud100MLimited("D:/pointcloud_100M.ply", 30000000,
+                                          laserPts)) {
+                srcDesc = "D:/pointcloud_100M.ply 前 3000 万点";
+            }
+        }
+        if (!laserPts.empty()) {
+            scene.laser = std::move(laserPts);
+            JMW_LOG_INFO("app-AppContext", "[SimScan] 激光数据集文件装载: {} 点 ← {}",
+                         scene.laser.size(), srcDesc);
+        }
+    }
+    if (scene.laser.empty())
+        JMW_LOG_WARN("app-AppContext",
+            "[SimScan] 导入 stash 与数据集文件均空（先「文件管理→导入点云」或置 "
+            "JMW_SIM_LASER_PLY）——builtin 兜底");
+    if (scene.markers.empty()) {
+        const auto fb = Scanner::pipeline::SimScene::builtin();
+        scene.markers = fb.markers;
+    }
+
+    // 标志点包围盒（激光源组装/对齐基准）
+    float mnx = scene.markers[0].x, mxx = mnx;
+    float mny = scene.markers[0].y, mxy = mny;
+    float mnz = scene.markers[0].z, mxz = mnz;
+    for (const auto& m : scene.markers) {
+        mnx = std::min(mnx, m.x); mxx = std::max(mxx, m.x);
+        mny = std::min(mny, m.y); mxy = std::max(mxy, m.y);
+        mnz = std::min(mnz, m.z); mxz = std::max(mxz, m.z);
+    }
+
+    if (scene.laser.empty()) {
+        // builtin 兜底=覆盖标志点包围盒**全程**的大平面（生成于标志点区，无需
+        // rebase）。验收口径「扫到哪看到哪」：激光源必须大于视场窗（400mm 深度
+        // 处约 373×291mm）——旧 200×200 内置平面一帧全入窗=整片一次性出现
+        //（260919 用户口径不符）。2.5mm 网格＋0.25 偏移钉 0.5mm 体素中心、微抖
+        // ±0.02（对齐 SimScene::builtin 口径）；z 贴板前 2.25mm
+        const float xc = (mnx + mxx) / 2.0f;
+        const float halfW = (mxx - mnx) / 2.0f + 60.0f;
+        const float yLo = mny - 60.0f, yHi = mxy + 60.0f;
+        const float zc = (mnz + mxz) / 2.0f + 2.25f;
+        std::mt19937 rng(2609);
+        std::uniform_real_distribution<float> jit(-0.02f, 0.02f);
+        for (float y = yLo + 1.25f; y < yHi; y += 2.5f)
+            for (float x = xc - halfW + 1.25f; x < xc + halfW; x += 2.5f)
+                scene.laser.emplace_back(x + jit(rng), y + jit(rng), zc + jit(rng));
+        JMW_LOG_INFO("app-AppContext",
+            "[SimScan] builtin 激光大平面: {} 点（{:.0f}×{:.0f}mm @({:.0f},{:.0f},{:.0f})）",
+            scene.laser.size(), halfW * 2, yHi - yLo, xc, (mny + mxy) / 2.0f, zc);
+    } else {
+        // 导入点云 rebase：**中位数对齐**（260919 用户口径「同帧点云区域与标志点
+        // 区域一致」：bbox 中心受远场离群点牵引——真扫描云含杂点，中心偏到空区
+        // →标志点带内云点稀疏、激光线落在远处。中位数＝云主体中心，稳健；形状
+        // 不变仅平移，z 贴板前 2.25mm）。单轴缓冲复用控内存
+        std::vector<float> axis(scene.laser.size());
+        auto medianAxis = [&](int c) {
+            for (size_t i = 0; i < scene.laser.size(); ++i) {
+                const auto& p = scene.laser[i];
+                axis[i] = c == 0 ? p.x : (c == 1 ? p.y : p.z);
+            }
+            const size_t mid = axis.size() / 2;
+            std::nth_element(axis.begin(), axis.begin() + static_cast<long>(mid), axis.end());
+            return axis[mid];
+        };
+        const float lcx = medianAxis(0), lcy = medianAxis(1), lcz = medianAxis(2);
+        const float dx = (mnx + mxx) / 2.0f - lcx;
+        const float dy = (mny + mxy) / 2.0f - lcy;
+        const float dz = (mnz + mxz) / 2.0f + 2.25f - lcz;
+        for (auto& p : scene.laser) {
+            p.x += dx;
+            p.y += dy;
+            p.z += dz;
+        }
+        JMW_LOG_INFO("app-AppContext",
+            "[SimScan] 导入激光源中位数 rebase 至标志点区（{:+.1f},{:+.1f},{:+.1f}；{} 点）",
+            dx, dy, dz, scene.laser.size());
+    }
+
+    // —— 标志点铺云（260919 终版口径：真实场景＝反光贴纸散布**整个工件表面**、
+    //    扫描逐片覆盖工件——PLY 标志板布局与扫描云是两个独立场景，无论贴板/贴
+    //    柱，区域都被标志板跨度框死（实测 ±120mm 带内仅 ~85 万点，采完即停滞，
+    //    30M 云的其余部分永远扫不到）。改为从云上 **FPS 最远点采样 30 个铺展点**
+    //    作标志点位置（数量保持 30、散布整个工件表面）：观测窗口沿 y 扫过哪些
+    //    标志点、哪片表面逐帧长出来——与真实手持扫描一致。采样域=10 万随机
+    //    子集（FPS 30×10 万=300 万次距离评估，后台秒级）
+    if (!scene.laser.empty() && scene.laser.size() > 1000) {
+        const size_t markerCount = scene.markers.empty() ? 30 : scene.markers.size();
+        std::mt19937 rng(2609);
+        // 深度护栏：只在工作距带（设备看向 -z，200~800mm）内采样——大跨度云
+        // 的远端/背向点不当标志点位置
+        std::vector<size_t> pick;
+        pick.reserve(scene.laser.size());
+        for (size_t i = 0; i < scene.laser.size(); ++i)
+            if (scene.laser[i].z < -200.0f && scene.laser[i].z > -800.0f)
+                pick.push_back(i);
+        if (pick.size() < 1000) {                 // 带内过稀＝不铺（保留 PLY 布局）
+            JMW_LOG_WARN("app-AppContext",
+                "[SimScan] 工作距带内云点仅 {}——FPS 铺展跳过（保留原标志点布局）",
+                pick.size());
+        } else {
+        // 鲁棒围栏（260919 破案：FPS 最远点采样偏爱离群点——采到 x=+81m 杂点，
+        // 标志点包围球 86m→相机取景拉全远→真实场景缩成 1% 像素=「没有显示」。
+        // 候选限各轴中位数 ±2500mm 内，主体场景内的远点才参与铺展）
+        float pickMed[3] = {0, 0, 0};
+        {
+            const size_t PS = std::min<size_t>(50000, pick.size());
+            std::vector<float> ax(PS);
+            for (int c = 0; c < 3; ++c) {
+                for (size_t i = 0; i < PS; ++i) {
+                    const auto& p = scene.laser[pick[i]];
+                    ax[i] = c == 0 ? p.x : (c == 1 ? p.y : p.z);
+                }
+                const size_t mid = PS / 2;
+                std::nth_element(ax.begin(), ax.begin() + static_cast<long>(mid), ax.end());
+                pickMed[c] = ax[mid];
+            }
+        }
+        constexpr float kFenceXY = 2500.0f;       // mm（主体场景半径）
+        constexpr float kFenceZ = 1500.0f;
+        std::vector<size_t> fenced;
+        fenced.reserve(pick.size());
+        for (size_t idx : pick) {
+            const auto& p = scene.laser[idx];
+            if (std::abs(p.x - pickMed[0]) > kFenceXY ||
+                std::abs(p.y - pickMed[1]) > kFenceXY ||
+                std::abs(p.z - pickMed[2]) > kFenceZ)
+                continue;
+            fenced.push_back(idx);
+        }
+        if (fenced.size() >= 1000) pick.swap(fenced);
+        const size_t S = std::min<size_t>(100000, pick.size());
+        for (size_t i = 0; i < S; ++i) {          // 前 S 个洗牌＝随机子集（可复现）
+            std::uniform_int_distribution<size_t> take(i, pick.size() - 1);
+            std::swap(pick[i], pick[take(rng)]);
+        }
+        std::vector<float> bestD2(S, std::numeric_limits<float>::max());
+        size_t cur = pick[0];                     // 起点＝随机子集首点
+        std::vector<cv::Point3f> chosen;
+        chosen.reserve(markerCount);
+        for (size_t n = 0; n < markerCount; ++n) {
+            const cv::Point3f& cp = scene.laser[cur];
+            chosen.push_back(cp);
+            size_t farIdx = 0;
+            float farD2 = -1.0f;
+            for (size_t i = 0; i < S; ++i) {
+                const cv::Point3f& p = scene.laser[pick[i]];
+                const float ddx = p.x - cp.x, ddy = p.y - cp.y, ddz = p.z - cp.z;
+                const float d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+                if (d2 < bestD2[i]) bestD2[i] = d2;
+                if (bestD2[i] > farD2) { farD2 = bestD2[i]; farIdx = i; }
+            }
+            cur = pick[farIdx];                   // 下一锚＝离已选集最远点
+        }
+        scene.markers.assign(markerCount, calib::MarkerCloudPoint{});
+        for (size_t i = 0; i < markerCount; ++i) {
+            auto& m = scene.markers[i];
+            m.x = chosen[i].x; m.y = chosen[i].y; m.z = chosen[i].z;
+            m.nx = 0.0f; m.ny = 0.0f; m.nz = 1.0f;
+            m.whiteRadius = 1.5f;
+        }
+        // 铺展后包围盒供日志（激光区域随观测窗口走，无需再 rebase——标志点
+        // 已在云上）
+        float snx = chosen[0].x, sxx = snx, sny = chosen[0].y, sxy = sny,
+              snz = chosen[0].z, sxz = snz;
+        for (const auto& c : chosen) {
+            snx = std::min(snx, c.x); sxx = std::max(sxx, c.x);
+            sny = std::min(sny, c.y); sxy = std::max(sxy, c.y);
+            snz = std::min(snz, c.z); sxz = std::max(sxz, c.z);
+        }
+        JMW_LOG_INFO("app-AppContext",
+            "[SimScan] 标志点铺云（FPS {} 点散布工件表面）: bbox X[{:.0f},{:.0f}] "
+            "Y[{:.0f},{:.0f}] Z[{:.0f},{:.0f}]mm",
+            markerCount, snx, sxx, sny, sxy, snz, sxz);
+        }
+    }
+
+    // 模拟参数（260915 v3 部分观测）：视场窗 H50°/V40°＋深度窗＋纵向扫描行程
+    //（视场窗沿 y 从场景底部扫到顶部）——标志点/激光逐帧进入视场，融合云渐进
+    // 增长（复刻真实手持扫描「扫到哪看到哪」）；旋转/横移取小值保 sweep 主导
+    Scanner::pipeline::SimTrajParams sp;
+    // 递增观测调度（260919 用户定版「模拟真实扫描过程」）：帧0 观测 8 个标志点，
+    // 每 15 帧一步：窗口前移 1（与上一步重合 ~W-1 个）＋每 2 步扩 1 → 8→9→10…
+    // 逐帧增加；重合标志点驱动生产链光流配准逐帧链入全局锚。设备微动
+    //（帧间 ~0.2mm << 匹配阈 2mm——旧 sweep 3.4mm/帧致配准逐帧全败，弃用）
+    // 设备运动=0（260919 破案：7 路并行 lane 下 prevState 锚可落后当前帧 ~7 帧，
+    // 0.25mm/帧 × 7 ≈ 1.75mm 卡在光流匹配阈 2mm 边缘→部分/全败→frame_fuse 兜底
+    // 以 matched=0+RMSE130mm 垃圾"成功"→-1 标志点逐帧灌入融合云=乱序元凶。
+    // 扫描推进由窗口调度承担，设备静态＋σ=0.05 噪声足够）
+    sp.rotDegPerFrame = 0.0;
+    sp.transMmPerFrame = 0.0;
+    sp.markerNoiseSigmaMm = 0.05;
+    sp.jitterSigmaMm = 0.05;
+    sp.markerStepFrames = 5;           // 每 5 帧一步（260919：15 帧/步太慢——
+                                       // 区域行程 ~4mm/帧，新点仅数百/帧。5 帧/步
+                                       // ≈12~18mm/帧表面行程×行密度≈3~4 万新点/帧）
+    sp.markerWindowStart = 8;          // 帧0 观测 8 个
+    sp.markerGrowEvery = 1;            // 每步 +1（8→9→10…；到 30 后覆盖全云）
+    sp.markerAdvancePerStep = 1;       // 与上一步重合 W-1 个
+    sp.laserPerFrame = scene.laser.size() > 200000
+                           ? 35000           // 导入大点云＝3~4 万点/帧（260919 用户
+                                             // 口径；真机 25 线单帧量级同档）
+                           : 4000;            // builtin：25 线/帧×~120 点/线（条带观测全量）
+    sp.maxFrames = 2700;               // ~4.5min@10fps（260919：600 帧耗尽=点云
+                                       // 冻结在 69.7 万点——延长扫描时长）
+    sp.fovHalfHDeg = 25.0;             //（递增调度下 FOV 锥不再门控）
+    sp.fovHalfVDeg = 20.0;
+    sp.depthMinMm = 0.0;               // 深度窗放开（260919：250~800 真机工作距
+    sp.depthMaxMm = 0.0;               // 把 30M 云的 ~97% 挡在域外=冻结 872,854
+                                       // 的根因；模拟演示口径全域可达）
+    sp.sweepY = false;                 // 递增调度取代几何扫掠
+    simSource_ = std::make_unique<Scanner::pipeline::SimScanSource>(std::move(scene),
+                                                                    std::move(sp));
+    JMW_LOG_INFO("app-AppContext",
+                 "[SimScan] 中段模拟提取源就绪（每帧观测替换提取结果，配准/融合走生产链）");
 }
