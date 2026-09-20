@@ -98,8 +98,15 @@ private:
     SimScene scene_;
     SimTrajParams params_;
     uint64_t frame_ = 0;              // 已产帧数（G_k 的 k）
-    std::vector<uint32_t> laserIdx_;  // 激光洗牌池（游标环扫取视场内子集）
+    std::vector<uint32_t> laserIdx_;  // 激光洗牌池（legacy FOV 模式游标环扫用）
     size_t laserCursor_ = 0;          // 池游标（每帧前进 scanBudget，跨帧覆盖全池）
+    // 行分桶索引（260919 提速：subset 模式取行——30M 池随机游标探测 ~150ms/帧
+    // ×4 lane 互斥串行=600ms/帧=7fps 根因；按全局 y 2.5mm 行分桶后取行只读
+    // 选中桶（~3.5 万顺序读）<1ms。桶内下标→scene_.laser；构造期建（场景不变）
+    std::vector<std::vector<uint32_t>> rowBuckets_;
+    long rowBucketBase_ = 0;          // 桶 0 对应的全局行号（floor(y/2.5)）
+    size_t bucketCursor_ = 0;         // 桶内取数起点（帧间轮转——配额摊到全部
+                                      // 选中行，防首桶填满=覆盖塌缩）
     std::vector<size_t> markerOrder_; // 标志点按 y 升序下标（递增调度滑动窗用）
     std::mt19937 rng_;
     mutable std::mutex mtx_;          // next() 多 lane 并发互斥（gpuChain 调用方）

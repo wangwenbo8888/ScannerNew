@@ -1693,6 +1693,7 @@ void OSGWidget::highlightSelectedPoints() {
 }
 
 void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
+    ++m_deleteActionSeq;                        // 本次圈选删除＝一个动作组（跨几何）
     std::map<osg::Geometry*, std::vector<unsigned int>> byGeom;
     for (const auto& h : hits) byGeom[h.geom].push_back(h.vi);
     for (auto& kv : byGeom) {
@@ -1817,6 +1818,7 @@ void OSGWidget::pushDeleteUndo(osg::Geometry* geom,
     entry.geom = geom;
     entry.indices = indices;
     entry.originalColors = origColors;
+    entry.actionId = m_deleteActionSeq;
     m_deleteHistory.push_back(std::move(entry));
 }
 
@@ -1825,21 +1827,56 @@ void OSGWidget::undoDelete()
     if (m_deleteHistory.empty())
         return;
 
-    const DeleteEntry& entry = m_deleteHistory.back();
-    osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(
-        entry.geom->getColorArray());
-    if (colors)
-    {
-        for (size_t i = 0; i < entry.indices.size(); ++i)
-        {
-            unsigned int vi = entry.indices[i];
-            if (vi < colors->size())
-                (*colors)[vi] = entry.originalColors[i];
+    // 按删除动作分组整批恢复（260919 修复：一次圈选跨几何＝点云+标志点各记
+    // 一条，逐条 pop 曾致「恢复后标志点未恢复」——一条已弹一条还压栈）。同
+    // 时撤销该动作在 pending 物理化账本的登记（防续采时把已恢复的点真删）
+    const uint64_t actionId = m_deleteHistory.back().actionId;
+    std::vector<uint32_t> undoMarkerIdx, undoCloudIdx;
+    auto markerDivisor = [this]() {          // 圆盘 4 顶点/盘；点精灵 1:1
+        if (m_markerGeom && m_markerGeom->getNumPrimitiveSets() > 0) {
+            const auto* ps = m_markerGeom->getPrimitiveSet(0);
+            if (ps && ps->getMode() == osg::PrimitiveSet::QUADS) return 4u;
         }
-        colors->dirty();
-        entry.geom->setColorArray(colors);
+        return 1u;
+    };
+    while (!m_deleteHistory.empty() && m_deleteHistory.back().actionId == actionId) {
+        const DeleteEntry entry = std::move(m_deleteHistory.back());
+        m_deleteHistory.pop_back();
+        osg::Vec4ubArray* colors = dynamic_cast<osg::Vec4ubArray*>(
+            entry.geom->getColorArray());
+        if (colors)
+        {
+            for (size_t i = 0; i < entry.indices.size(); ++i)
+            {
+                unsigned int vi = entry.indices[i];
+                if (vi < colors->size())
+                    (*colors)[vi] = entry.originalColors[i];
+            }
+            colors->dirty();
+            entry.geom->setColorArray(colors);
+        }
+        // pending 物理化账本撤销登记
+        if (entry.geom == m_markerGeom.get()) {
+            const uint32_t div = markerDivisor();
+            for (unsigned int vi : entry.indices) undoMarkerIdx.push_back(vi / div);
+        } else if (entry.geom == m_laserGeom.get()) {
+            for (unsigned int vi : entry.indices) undoCloudIdx.push_back(vi);
+        }
     }
-    m_deleteHistory.pop_back();
+    // pending 物理化账本撤销登记（单趟集合差——逐元素 remove 扫全表在圈选
+    // 数万点时 O(N×M) 卡死秒级；账本序无语义（消费方只遍历）可排序处理）
+    auto purge = [](std::vector<uint32_t>& ledger, std::vector<uint32_t>& victims) {
+        if (victims.empty() || ledger.empty()) return;
+        std::sort(victims.begin(), victims.end());
+        victims.erase(std::unique(victims.begin(), victims.end()), victims.end());
+        std::sort(ledger.begin(), ledger.end());
+        const auto it = std::set_difference(ledger.begin(), ledger.end(),
+                                            victims.begin(), victims.end(),
+                                            ledger.begin());
+        ledger.erase(it, ledger.end());
+    };
+    purge(m_pendingMarkerDel, undoMarkerIdx);
+    purge(m_pendingCloudDel, undoCloudIdx);
 }
 // ---- 圈选命中收集（高亮/删除共用；含栏3 对象类型过滤与视图向深度）----
 void OSGWidget::createCenterOverlay()
@@ -2322,6 +2359,7 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
         lbf->setFunction(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         m_laserRoot->getOrCreateStateSet()->setAttribute(lbf);
         m_laserCoords = new osg::Vec3Array;
+        m_laserColors = new osg::Vec4ubArray;   // 成员复用（见头文件注）
     }
     m_laserRoot->setNodeMask(m_laserVisible ? ~0u : 0u);      // 重建后承袭开关
     m_laserCoords->assign(laser.begin(), laser.end());
@@ -2333,15 +2371,16 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
             laser.size(), k + 1, m_laserRoot->getNodeMask(), m_laserRoot->getNumParents());
     }
     m_laserGeom->setVertexArray(m_laserCoords);
-    // 逐顶点色：默认=导入点云色（LeadScan 浅蓝——用户口径同源）；待物理化
-    // 删除的下标 alpha=0 隐藏（周期重推不复活——物理化在就绪态续采/完成前）
-    auto* lc = new osg::Vec4ubArray(laser.size());
+    // 逐顶点色（成员复用——260919 卡顿修复：每次 push new 数组=MB 级分配＋
+    // VBO 全量重传抖动）：默认=导入点云色（LeadScan 浅蓝）；待物理化删除的
+    // 下标 alpha=0 隐藏（周期重推不复活——物理化在就绪态续采/完成前）
+    if (!m_laserColors) m_laserColors = new osg::Vec4ubArray;
     const osg::Vec4ub kLaserColor(134, 206, 250, 255);
-    lc->assign(laser.size(), kLaserColor);
+    m_laserColors->assign(laser.size(), kLaserColor);
     for (uint32_t vi : m_pendingCloudDel)
-        if (vi < lc->size()) (*lc)[vi] = osg::Vec4ub(0, 0, 0, 0);
-    lc->dirty();
-    m_laserGeom->setColorArray(lc, osg::Array::BIND_PER_VERTEX);
+        if (vi < m_laserColors->size()) (*m_laserColors)[vi] = osg::Vec4ub(0, 0, 0, 0);
+    m_laserColors->dirty();
+    m_laserGeom->setColorArray(m_laserColors.get(), osg::Array::BIND_PER_VERTEX);
     if (m_laserGeom->getNumPrimitiveSets() == 0)
         m_laserGeom->addPrimitiveSet(new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)laser.size()));
     else

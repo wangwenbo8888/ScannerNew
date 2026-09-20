@@ -181,6 +181,31 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
             JMW_LOG_WARN("07-ScanChains", "[ScanChains] 未注入温度表，激光匹配将失败");
         }                                        // A 模式无表属正常配置，不告警
         ops->recon = std::make_unique<calib::LaserReconstructCuda>();
+
+        // Warmup 预热（260919 性能破案：CCL/去畸变等 CUDA 算子逐帧 cudaMalloc＋
+        // 设备同步（每帧多条 "GPU buffer (re)allocation"/"auto-allocating" 告警）
+        // →GPU 链 ~140ms/帧→流水线实测仅 6.8fps。算子契约 Warmup()＝装配期
+        // 预分配（算子规范 §4），此处按标定档图像尺寸/典型点量补课）。
+        // ⚠ 全局互斥串行化＋失败非致命：多 lane 并发首建 CUDA 上下文竞态曾抛
+        // cudaErrorInvalidDevice → lane 算子集构建失败=整会话 0 帧；预热属优
+        // 化，失败仅回退惰性分配（旧行为），不毁 lane
+        const int wuRows = static_cast<int>(deps_.imageHeight);
+        const int wuCols = static_cast<int>(deps_.imageWidth);
+        static std::mutex s_warmupMtx;
+        std::lock_guard<std::mutex> wuLock(s_warmupMtx);
+        auto safeWarmup = [](const char* name, auto&& fn) {
+            try {
+                fn();
+            } catch (const std::exception& e) {
+                JMW_LOG_WARN("07-ScanChains",
+                             "[ScanChains] Warmup({}) 失败（忽略，回退惰性分配）: {}",
+                             name, e.what());
+            }
+        };
+        safeWarmup("sep", [&] { ops->sep->Warmup(wuRows, wuCols); });
+        safeWarmup("ccl", [&] { ops->ccl->Warmup(wuRows, wuCols); });
+        safeWarmup("steger", [&] { ops->steger->Warmup(wuRows, wuCols); });
+        safeWarmup("undistG", [&] { ops->undistG->Warmup(200000); });
 #endif
         calib::ImageSplitCPUParams sp;
         sp.enableBoundaryCheck = true;          // ROI 越界安全裁剪
@@ -234,6 +259,24 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
     return ops;
 }
 
+// —— 三钩子段耗时秒表（260919 吞吐排障：流水线 7.5fps=133ms/帧固定成本定位；
+//    RAII 计时，早退路径覆盖，节流 1/30 打点）——
+namespace {
+std::atomic<uint64_t> g_hwGpu{0}, g_hwP{0}, g_hwE{0};
+struct HookWatch {
+    const char* name;
+    std::atomic<uint64_t>& cnt;
+    std::chrono::steady_clock::time_point t0{std::chrono::steady_clock::now()};
+    ~HookWatch() {
+        const uint64_t k = cnt.fetch_add(1, std::memory_order_relaxed);
+        if (k % 30 == 0)
+            JMW_LOG_INFO("07-ScanChains", "[ScanChains] 段耗时 {}={:.1f}ms（#{}）", name,
+                         std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - t0).count(), k);
+    }
+};
+} // namespace
+
 ScanChains::Hooks ScanChains::assemble() {
     Hooks hooks;
 
@@ -244,6 +287,7 @@ ScanChains::Hooks ScanChains::assemble() {
                             const std::shared_ptr<const data::EnhancedFrame>& frame,
                             ScanFront& front,
                             std::function<void()> frontReady) -> bool {
+        HookWatch hwGpu{"gpuChain", g_hwGpu};
         if (!initError_.empty()) {
             JMW_LOG_ERROR("07-ScanChains", "[ScanChains] gpuChain: 装配错误 {}", initError_);
             return false;
@@ -261,6 +305,43 @@ ScanChains::Hooks ScanChains::assemble() {
         auto stream = cv::cuda::StreamAccessor::wrapStream(guard.stream);
         front.laserBlock.reset();               // 防上帧残留（失败/池耗尽路径）
         front.laserTruncated = false;           // 同上（截断标志逐帧重置）
+        // 分段秒表（260919 吞吐定位：gpuChain 整段 400-500ms 的内部分解）
+        using CLK = std::chrono::steady_clock;
+        const auto tA0 = CLK::now();
+        double tSep = 0, tCcl = 0, tLaser = 0, tSim = 0, tSync = 0;
+
+        // —— 模拟模式快路（260919 破案：真机前段（sep/ccl/激光链 ~600ms/帧）
+        //    的结果在模拟模式下被权威覆写整体丢弃＝纯浪费——60fps 输入被
+        //    600ms/帧掐成 6.7fps。模拟模式只测下游（配准/融合/显示），前段
+        //    全跳：rois 置空（pChain 真标志点链随之空转快速返回）＋激光链不跑，
+        //    末尾仅模拟覆写供块）——
+        if (deps_.simSource) {
+            front.roisL.clear();
+            front.roisR.clear();
+            deps_.simSource->next(front.simObs);
+            frontReady();                       // 提交 P 链（模拟替换在其内生效）
+            if (!front.simObs.laser.empty()) {
+                if (deps_.laserPool) {
+                    auto blk = deps_.laserPool->acquire(deps_.poolAcquireTimeout);
+                    if (blk) front.laserBlock = std::move(*blk);
+                }
+                if (front.laserBlock) {
+                    cv::Mat host(1, static_cast<int>(front.simObs.laser.size()), CV_32FC3,
+                                 front.simObs.laser.data());
+                    const int n = std::min<int>(host.cols, front.laserBlock->points.cols);
+                    if (n > 0) {
+                        cv::cuda::GpuMat dst = front.laserBlock->points.colRange(0, n);
+                        dst.upload(host.colRange(0, n), stream);
+                        front.laserBlock->count = n;
+                        front.laserBlock->frameId = frame->frameId;
+                    } else {
+                        front.laserBlock.reset();
+                    }
+                }
+            }
+            stream.waitForCompletion();
+            return true;
+        }
 
         // 1) 掩膜分离（统一走 sep 算子——A 模式算子内 spot 模式直通阈值化，
         // B 模式线点形态学；还账后 07 不再持图像处理原语 2026-09-01）
@@ -288,6 +369,7 @@ ScanChains::Hooks ScanChains::assemble() {
             JMW_LOG_ERROR("07-ScanChains", "[ScanChains] mask_separation 异常: {}", e.what());
             return false;
         }
+        tSep = std::chrono::duration<double, std::milli>(CLK::now() - tA0).count();
 
         // 2) ccl（吃标记点掩膜）L/R → 包围盒入 front 前段分区
         // 激光掩膜观测（节流 1/30 帧，仅 B 模式）：分离出的激光掩膜非零像素
@@ -320,6 +402,7 @@ ScanChains::Hooks ScanChains::assemble() {
             JMW_LOG_ERROR("07-ScanChains", "[ScanChains] ccl 异常: {}", e.what());
             return false;
         }
+        tCcl = std::chrono::duration<double, std::milli>(CLK::now() - tA0).count() - tSep;
         front.roisL = cclL.toRectList();        // host 数据（ccl 内部已同步下载；
                                                 // 面积过滤归 ccl 算子参数——07 不持
                                                 // 尺寸先验，还账 2026-09-01）
@@ -512,6 +595,7 @@ ScanChains::Hooks ScanChains::assemble() {
                 return -1;
             }
         }();
+        tLaser = std::chrono::duration<double, std::milli>(CLK::now() - tA0).count() - tSep - tCcl;
         // 模拟提取容错（调试语义）：真链激光段失败不毁帧——模拟观测照常供块
         if (laserStatus < 0 && !deps_.simSource) return false;
 
@@ -549,6 +633,19 @@ ScanChains::Hooks ScanChains::assemble() {
         }
 
         stream.waitForCompletion();             // 块数据落定后方可交 eFinalize/FuseConsumer
+        tSim = std::chrono::duration<double, std::milli>(CLK::now() - tA0).count() - tSep - tCcl -
+               tLaser;
+        tSync = std::chrono::duration<double, std::milli>(CLK::now() - tA0).count() - tSep - tCcl -
+                tLaser - tSim;
+        // 分段打点（节流 1/30——260919 吞吐定位：gpuChain 整段 400-500ms 分解）
+        {
+            static std::atomic<uint64_t> s_gpuSeg{0};
+            if (s_gpuSeg.fetch_add(1) % 30 == 0)
+                JMW_LOG_INFO("07-ScanChains",
+                             "[ScanChains] gpuChain 分段: sep={:.1f} ccl={:.1f} laser={:.1f} "
+                             "sim={:.1f} sync={:.1f} ms",
+                             tSep, tCcl, tLaser, tSim, tSync);
+        }
         return true;
 #endif
     };
@@ -558,6 +655,7 @@ ScanChains::Hooks ScanChains::assemble() {
     // ------------------------------------------------------------------
     hooks.pChain = [this](const std::shared_ptr<const data::EnhancedFrame>& frame,
                           ScanFront& front, FrameResult& result) -> Result {
+        HookWatch hwP{"pChain", g_hwP};
         // 调度观测：pChain 被调即打（节流 1/30+前 3）——区分"调度层没调"与
         // "链内没到 runMarkerChain"
         static std::atomic<uint64_t> s_pcall{0};
@@ -597,6 +695,7 @@ ScanChains::Hooks ScanChains::assemble() {
     hooks.eFinalize = [this](const std::shared_ptr<const data::EnhancedFrame>& frame,
                              ScanFront& front, FrameResult& result,
                              std::future<Scanner::Result>& fut) -> Result {
+        HookWatch hwE{"eFinalize", g_hwE};
         Result pr;
         try {
             pr = fut.get();                     // pChain Result/异常均在此消费

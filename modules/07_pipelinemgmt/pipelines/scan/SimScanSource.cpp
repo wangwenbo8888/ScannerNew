@@ -102,11 +102,37 @@ Scanner::Result SimScene::loadMarkersFromPly(const std::string& path, SimScene& 
 SimScanSource::SimScanSource(SimScene scene, SimTrajParams params)
     : scene_(std::move(scene)), params_(params), rng_(20260913) {
     if (params_.laserPerFrame == 0) params_.laserPerFrame = 1;
-    laserIdx_.resize(scene_.laser.size());
-    for (uint32_t i = 0; i < laserIdx_.size(); ++i) laserIdx_[i] = i;
-    for (size_t i = laserIdx_.size(); i > 1; --i) {  // 全池洗牌（Fisher–Yates）：
-        std::uniform_int_distribution<size_t> pick(0, i - 1);   // 游标环扫的池序
-        std::swap(laserIdx_[i - 1], laserIdx_[pick(rng_)]);     // 均匀无周期
+    // 洗牌池：legacy FOV 模式与**非静止轨迹**的 subset 回退路径都需要（subset+
+    // 静止走行分桶才可免——省 120MB＋洗牌秒级；漏建曾致回退路径空池越界 SEH）
+    const bool needShufflePool =
+        params_.markerStepFrames == 0 || params_.rotDegPerFrame != 0.0 ||
+        params_.transMmPerFrame != 0.0;
+    if (needShufflePool && !scene_.laser.empty()) {
+        laserIdx_.resize(scene_.laser.size());
+        for (uint32_t i = 0; i < laserIdx_.size(); ++i) laserIdx_[i] = i;
+        for (size_t i = laserIdx_.size(); i > 1; --i) {  // 全池洗牌（Fisher–Yates）：
+            std::uniform_int_distribution<size_t> pick(0, i - 1);   // 游标环扫的池序
+            std::swap(laserIdx_[i - 1], laserIdx_[pick(rng_)]);     // 均匀无周期
+        }
+    }
+    // 行分桶索引（subset 模式）：全局 y 按 2.5mm 行分桶（与 next() 取行同一行厚）
+    if (params_.markerStepFrames > 0 && !scene_.laser.empty()) {
+        constexpr double kBucketRow = 2.5;   // mm（与 next() kRowThickness 一致）
+        double yMin = scene_.laser[0].y, yMax = yMin;
+        for (const auto& p : scene_.laser) {
+            yMin = std::min(yMin, static_cast<double>(p.y));
+            yMax = std::max(yMax, static_cast<double>(p.y));
+        }
+        rowBucketBase_ = static_cast<long>(std::floor(yMin / kBucketRow));
+        const long rowTop = static_cast<long>(std::floor(yMax / kBucketRow));
+        rowBuckets_.assign(static_cast<size_t>(rowTop - rowBucketBase_ + 1), {});
+        for (uint32_t i = 0; i < scene_.laser.size(); ++i) {
+            const long r = static_cast<long>(std::floor(scene_.laser[i].y / kBucketRow)) -
+                           rowBucketBase_;
+            rowBuckets_[static_cast<size_t>(r)].push_back(i);
+        }
+        JMW_LOG_INFO("07-SimScan", "[SimScan] 行分桶索引: {} 桶 / {} 点（构造一次）",
+                     rowBuckets_.size(), scene_.laser.size());
     }
     // 场景 y 包围盒＋平均深度（sweepY 行程与 FOV 窗宽估算）
     {
@@ -286,6 +312,54 @@ bool SimScanSource::next(SimFrameObs& out) {
             std::min(M, std::max(n * 15, static_cast<size_t>(65536)));
         out.laser.reserve(n);
         size_t got = 0;
+        // 静止轨迹判定：行桶按全局 y 分桶，设备系≈全局系仅当 G≈I；非零轨迹
+        // 回退游标随机探测保正确性
+        const bool staticTraj =
+            params_.rotDegPerFrame == 0.0 && params_.transMmPerFrame == 0.0;
+        if (subsetMode && staticTraj && !rowBuckets_.empty()) {
+            // 行桶取行（260919 提速主径）：只遍历选中行桶（顺序访存 <1ms；原
+            // 随机游标探测 52.5 万次×360MB 随机访存 ~150ms/帧×4 lane 互斥串行
+            // =600ms=流水线 7fps 根因）。
+            // ⚠ 配额轮转（v2）：首版「首桶填满即停」每帧取同一桶=覆盖塌缩到
+            // ~10 万点（3 帧后无新点）。改为：配额=目标÷选中行数，摊到全部选
+            // 中行；桶内起点随 bucketCursor_ 帧间轮转（质数步进防周期共振）——
+            // 逐行推进＋桶内轮转=全池可持续覆盖
+            const long rowMin = static_cast<long>(std::floor(bmin[1] / kRowThickness));
+            const long rowMax = static_cast<long>(std::floor(bmax[1] / kRowThickness));
+            long selCount = 0;                    // 选中行数（先数后取）
+            for (long r = rowMin; r <= rowMax; ++r)
+                if (((r + stripePhase) % stride) == 0 && r >= rowBucketBase_ &&
+                    static_cast<size_t>(r - rowBucketBase_) < rowBuckets_.size())
+                    ++selCount;
+            const size_t quota =
+                selCount > 0 ? std::max<size_t>(1, n / static_cast<size_t>(selCount)) : n;
+            for (long r = rowMin; r <= rowMax && got < n; ++r) {
+                if (((r + stripePhase) % stride) != 0) continue;   // 当帧线行
+                if (r < rowBucketBase_) continue;
+                const size_t bi = static_cast<size_t>(r - rowBucketBase_);
+                if (bi >= rowBuckets_.size()) continue;
+                const auto& bucket = rowBuckets_[bi];
+                if (bucket.empty()) continue;
+                const size_t take = std::min(quota, bucket.size());
+                const size_t start = bucketCursor_ % bucket.size();
+                for (size_t t = 0; t < take && got < n; ++t) {
+                    const auto& p = scene_.laser[bucket[(start + t) % bucket.size()]];
+                    if (p.x < bmin[0] || p.x > bmax[0] ||          // G=I：d==p
+                        p.y < bmin[1] || p.y > bmax[1] ||
+                        p.z < bmin[2] || p.z > bmax[2])
+                        continue;                                  // 覆盖区域外
+                    const double depth = -p.z;
+                    if (params_.depthMinMm > 0.0 && depth < params_.depthMinMm) continue;
+                    if (params_.depthMaxMm > 0.0 && depth > params_.depthMaxMm) continue;
+                    out.laser.emplace_back(
+                        static_cast<float>(p.x + gauss(rng_)),
+                        static_cast<float>(p.y + gauss(rng_)),
+                        static_cast<float>(p.z + gauss(rng_)));
+                    ++got;
+                }
+            }
+            bucketCursor_ += 7919;                 // 帧间轮转（质数步进）
+        } else {
         for (size_t t = 0; t < scanBudget && got < n; ++t) {
             const auto& p = scene_.laser[laserIdx_[(laserCursor_ + t) % M]];
             const cv::Vec3d d = RgT * (cv::Vec3d(p.x, p.y, p.z) - Tg);
@@ -312,6 +386,7 @@ bool SimScanSource::next(SimFrameObs& out) {
             ++got;
         }
         laserCursor_ = (laserCursor_ + scanBudget) % M;
+        }
     }
 
     out.frameId = k;

@@ -113,9 +113,19 @@ void FuseConsumer::processOne(FrameResult& fr) {
 #endif
 
         // 3) 渲染节流（先于 obs.push，序见文件头）：第 1、N+1…帧推送一次
-        //    （激光句柄由 ILaserFuse 适配器持有 → nullptr）
-        if (deps_.sceneFeed &&
+        //    （激光句柄由 ILaserFuse 适配器持有 → nullptr）。
+        //    ＋时间门控 ≥300ms（260919 卡顿修复：帧计数节流按 7fps 设计，
+        //    60fps 时=12 次/秒全量推送（百万点 VBO 重传+色数组 new+仓库整包
+        //    拷贝全在 UI 线程）=显示卡顿。时间门控保 2~3Hz 刷新）
+        static thread_local std::chrono::steady_clock::time_point s_lastPush{};
+        const auto nowTp = std::chrono::steady_clock::now();
+        const bool timeOk =
+            s_lastPush.time_since_epoch().count() == 0 ||
+            std::chrono::duration_cast<std::chrono::milliseconds>(nowTp - s_lastPush).count() >=
+                300;
+        if (deps_.sceneFeed && timeOk &&
             n % static_cast<uint64_t>(deps_.renderThrottleFrames) == 0) {
+            s_lastPush = nowTp;
             CloudViewHandle h;
             h.hostMarker = &deps_.markerFuse->fusedPoints();
             h.deviceLaser = nullptr;

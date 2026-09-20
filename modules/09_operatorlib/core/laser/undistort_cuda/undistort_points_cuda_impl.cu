@@ -304,8 +304,15 @@ void UndistortPointsCuda::Impl::SetParams(const UndistortPointsParams& params) {
         cudaSetDevice(params_.deviceId);
     }
 
-    warmed_up_ = false;
-    warmup_pointCount_ = 0;
+    // 热身分配仅依赖 deviceId（点数缓冲与 K/D/R/P 矩阵值无关）——设备不变不
+    // 作废（260919 性能修复：ScanChains 每帧 SetParams（温补快照矩阵）曾致
+    // warmup 逐帧重置=每帧 auto-alloc cudaMalloc（千条告警/分钟），GPU 链被
+    // 拖至 ~7fps）
+    if (deviceChanged) {
+        warmed_up_ = false;
+        warmup_pointCount_ = 0;
+    }
 
-    CALIB_LOG_INFO("SetParams(): params updated, warmup reset");
+    CALIB_LOG_INFO("SetParams(): params updated{}",
+                   deviceChanged ? " (device changed, warmup reset)" : "");
 }

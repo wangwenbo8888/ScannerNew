@@ -341,8 +341,12 @@ private:
         osg::Geometry* geom;
         std::vector<unsigned int> indices;
         std::vector<osg::Vec4ub> originalColors;
+        uint64_t actionId = 0;   // 同一次圈选删除（跨几何：点云+标志点）同组——
+                                 // undo 按组整批恢复（260919：逐条恢复曾致
+                                 // 「恢复后标志点未恢复」=一条已弹一条还压栈）
     };
     std::vector<DeleteEntry> m_deleteHistory;
+    uint64_t m_deleteActionSeq = 0;   // 删除动作序号（applyLassoDelete 每次 ++）
 
     // Center overlay (two circles + text)
     osg::ref_ptr<osg::Camera> m_centerOverlayCamera;
@@ -392,6 +396,8 @@ private:
     osg::ref_ptr<osg::Geode> m_laserGeode;
     osg::ref_ptr<osg::Geometry> m_laserGeom;
     osg::ref_ptr<osg::Vec3Array> m_laserCoords;
+    osg::ref_ptr<osg::Vec4ubArray> m_laserColors;   // 逐顶点色（成员复用——每次
+                                                    // push new 数组=MB 级分配抖动）
     bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角）
     bool m_markersVisible = true;                   // 标志点显示开关（右键菜单；NodeMask 0=隐藏）
     bool m_laserVisible = true;                     // 激光点显示开关（右键菜单；NodeMask 0=隐藏）
