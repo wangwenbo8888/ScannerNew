@@ -5,6 +5,7 @@
 #include <string>
 
 #include "base/EventBus.h"
+#include "ICloudWarehouse.h"   // 06 点云仓库流式写口（260919 正式接线）
 
 namespace Scanner::pipeline {
 
@@ -35,6 +36,8 @@ struct PipelineDeps {
     IAcquisitionControl* acquisition{nullptr};
     ICalibRepoWriter* calibRepo{nullptr};
     ICloudRepoWriter* cloudRepo{nullptr};
+    Scanner::data::ICloudWarehouse* cloudWarehouse{nullptr};   // 07 融合线程直写
+                                                              // 仓库正式口（可空）
 };
 
 } // namespace Scanner::pipeline

@@ -160,6 +160,7 @@ private:
     int imageWidth_ = 0, imageHeight_ = 0;
     std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable_;
     SimScanSource* simSource_ = nullptr;                      // 中段模拟提取源（可空）
+    Scanner::data::ICloudWarehouse* cloudWarehouse_ = nullptr;  // warehouse direct-write port (260919, nullable)
 
     // —— 测试模式 ——
     bool testHooksSet_ = false;

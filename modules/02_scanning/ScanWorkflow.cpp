@@ -106,6 +106,9 @@ Result ScanWorkflow::assemblePipeline() {
     sp::PipelineDeps deps;
     deps.eventBus = ctx_ ? ctx_->eventBus() : nullptr;
     deps.sceneFeed = ctx_ ? ctx_->sceneFeed() : nullptr;   // P2 渲染加固：app SceneFeedAdapter（可空）
+    // 260919 正式写口：融合线程直写 06 点云仓库（ICloudWarehouse 会话两层——
+    // 基线折叠+会话层替换；app「基线锁存+整包替换」UI 补丁链退役）
+    deps.cloudWarehouse = ctx_ ? ctx_->pointCloudBuffer() : nullptr;
     auto cr = pipeline_->configure(deps);
     if (!cr.success) {
         pipeline_.reset();

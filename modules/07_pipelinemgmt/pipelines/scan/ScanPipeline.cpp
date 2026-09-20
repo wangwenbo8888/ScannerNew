@@ -411,7 +411,9 @@ Scanner::Result ScanPipeline::configure(const PipelineDeps& deps) {
     cd.laserFuse = laserFuse_;
 #endif
     cd.sceneFeed = deps.sceneFeed;
+    cd.cloudWarehouse = deps.cloudWarehouse;   // 260919 正式口：融合线程直写仓库
     cd.obs = &obs_;
+    cloudWarehouse_ = deps.cloudWarehouse;       // start() 会话边界用
     cd.sink = sink_.get();
     cd.renderThrottleFrames = kRenderThrottleFrames;
     cd.highPrecisionGlobalIds = hpGlobalIds_.empty() ? nullptr : &hpGlobalIds_;
@@ -434,6 +436,10 @@ Scanner::Result ScanPipeline::start() {
         case State::Configured: break;
     }
     if (!ring_) return Result::fail("ScanPipeline::start: 未 attachRing（输入源必备）");
+
+    // 0) 点云仓库会话边界（260919 正式口）：既有内容折入基线前缀——本会话
+    //    pushSessionCloud 覆写会话层，跨会话只增不减（原 app 基线锁存语义入仓）
+    if (cloudWarehouse_) cloudWarehouse_->beginCloudSession();
 
     // 1) seed：时序保证——先于 runtime/consumer 起线程，即先于任何扫描帧 fuse；
     //    失败整批零写入（09 契约），start 可重试（seeded_ 守卫不重复 seed）

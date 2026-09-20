@@ -137,6 +137,10 @@ void FuseConsumer::processOne(FrameResult& fr) {
 #endif
             h.hostLaser = fusedXyz.empty() ? nullptr : fusedXyz.data();  // 激光 host 块
             h.laserCount = fusedXyz.size() / 3;
+            // 点云仓库直写（260919 正式口）：融合云累计快照直入 06 PointCloudBuffer
+            //（会话层替换语义——app UI「基线锁存+整包替换」补丁链由此退役）
+            if (deps_.cloudWarehouse && !fusedXyz.empty())
+                deps_.cloudWarehouse->pushSessionCloud(fusedXyz);
             // 显示链观测（节流同频）：融合云点数——0=融合无产出；>0=断在
             // 下游（SceneFeed/UI）
             JMW_LOG_INFO("07-ScanChains", "[FuseConsumer] 推送渲染: 融合云={} 点 激光融合云={} 点（帧 {}）",

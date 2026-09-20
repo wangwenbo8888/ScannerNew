@@ -289,24 +289,10 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                     }
                 }
                         if (!m_3dView) return;
-                        // —— 260912c 导出补链（基线+当期替换）：激光信号=本会话
-                        //    融合云全量快照（体素去重累计）——新会话从零重来，直
-                        //    接替换会清掉跨会话累计。新会话首推锁存基线（此前全
-                        //    部），此后替换=基线+当期——仓库跨会话只增不减
-                        if (auto* pcbExp = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;
-                            pcbExp && !pts.empty()) {
-                            if (!m_laserSessionLatched) {
-                                m_laserSessionLatched = true;   // 首推锁存（启动口复位）
-                                std::vector<cv::Vec3b> cols;
-                                uint64_t v = 0;
-                                pcbExp->getSnapshot(v, m_laserBasePts, cols);
-                            }
-                            Scanner::data::PointCloudFrame fr;
-                            fr.points = m_laserBasePts;
-                            fr.points.insert(fr.points.end(), pts.begin(), pts.end());
-                            fr.pointCount = static_cast<int>(fr.points.size());
-                            pcbExp->replacePointCloud(fr);
-                        }
+                        // —— 仓库写入已退役（260919 正式写口上线）：07 FuseConsumer
+                        //    融合线程经 ICloudWarehouse 直写 06 PointCloudBuffer
+                        //    （会话两层：start 折叠基线＋节流推会话层替换）——
+                        //    本 UI 处理器只余显示/导出，不再承担数据通道
                          // 3D 激光显示（累积渲染；>150 万点抽样——见头部减负注）
                          std::vector<osg::Vec3> laser;
                          laser.reserve((pts.size() + stride - 1) / stride);

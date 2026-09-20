@@ -29,6 +29,7 @@
 #include "base/types.h"
 #include "pipelines/ISceneFeed.h"
 #include "pipelines/PipelineEventSink.h"
+#include "pipelines/PipelineDeps.h"        // ICloudWarehouse（260919 直写口）
 #include "pipelines/scan/FrameObsAccumulator.h"
 #include "pipelines/scan/ScanTypes.h"
 #include "sched/FrameResultQueue.h"
@@ -80,7 +81,8 @@ public:
         ILaserFuse* laserFuse = nullptr;                  // 可空=A 模式（跳过激光路径）
         LaserDownloadFn laserDownload;                    // 空=默认真下载（GpuMat::download）
 #endif
-        ISceneFeed* sceneFeed = nullptr;                  // 可空=不推渲染
+        ISceneFeed* sceneFeed = nullptr;
+        Scanner::data::ICloudWarehouse* cloudWarehouse = nullptr;  // 260919 07 direct-write warehouse (nullable)                  // 可空=不推渲染
         FrameObsAccumulator* obs = nullptr;               // 必填（start 校验）
         PipelineEventSink* sink = nullptr;                // 可空=不上报
         int renderThrottleFrames = 5;                     // 首帧起每 N 帧 push 一次（第 1、N+1…；<=0 按 1）

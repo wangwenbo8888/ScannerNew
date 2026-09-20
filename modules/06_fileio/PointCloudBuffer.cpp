@@ -60,10 +60,39 @@ Result PointCloudBuffer::clear() {
         std::unique_lock lock(rwlock_);
         allPoints_.clear();
         allColors_.clear();
+        cloudBaseCount_ = 0;
     }
     version_.fetch_add(1, std::memory_order_release);
     totalPoints_.store(0, std::memory_order_release);
     return Result::ok();
+}
+
+// ============================================================================
+// ICloudWarehouse —— 07 融合线程直写正式口（260919；语义见 ICloudWarehouse.h）
+// ============================================================================
+
+void PointCloudBuffer::beginCloudSession() {
+    std::unique_lock lock(rwlock_);
+    cloudBaseCount_ = allPoints_.size();   // 既有内容（含上一会话成果）折入基线
+    version_.fetch_add(1, std::memory_order_release);
+}
+
+void PointCloudBuffer::pushSessionCloud(const std::vector<float>& xyzInterleaved) {
+    const size_t n = xyzInterleaved.size() / 3;
+    {
+        std::unique_lock lock(rwlock_);
+        // 会话层替换（累计快照语义）：截回基线前缀再重建会话段——跨会话只增
+        // 不减、会话内恒等当前融合云（导出/计数皆真）
+        allPoints_.resize(cloudBaseCount_);
+        allPoints_.reserve(cloudBaseCount_ + n);
+        for (size_t i = 0; i < n; ++i)
+            allPoints_.emplace_back(xyzInterleaved[i * 3],
+                                    xyzInterleaved[i * 3 + 1],
+                                    xyzInterleaved[i * 3 + 2]);
+        if (!allColors_.empty()) allColors_.clear();   // 会话层无色（显示侧自配色）
+    }
+    version_.fetch_add(1, std::memory_order_release);
+    totalPoints_.store(static_cast<int>(cloudBaseCount_ + n), std::memory_order_release);
 }
 
 void PointCloudBuffer::setMarkers(const std::vector<MarkerRecord>& markers) {
