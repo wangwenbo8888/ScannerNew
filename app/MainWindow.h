@@ -35,6 +35,7 @@ class LEADSCANSeries;
 class AppContext;
 namespace calib_display { class CalibBoard2D; }
 
+class QProgressDialog;
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -151,4 +152,6 @@ protected:
 
     void startInfoTimer();
     void updateInfoSection();
+    QProgressDialog* m_finalBADlg = nullptr;   // final-BA progress dialog (260920 finish background GBA)
+
 };

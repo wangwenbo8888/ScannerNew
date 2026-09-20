@@ -186,6 +186,32 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                     m_activeScanToolIdx = -1;
                     statusBar()->showMessage(QStringLiteral("扫描启动失败（后台装配）——详见日志"), 5000);
                 }
+                // 终局遍弹窗兜底关闭（正常完成路径由 100% 关；此为安全网）
+                if (m_finalBADlg) { m_finalBADlg->close(); m_finalBADlg = nullptr; }
+            }, Qt::QueuedConnection);
+        });
+        // 终局遍进度弹窗（260920：finish 后台 GBA 分钟级——用户须见"优化中"；
+        // 回调在后台线程 → queued 切 UI 更新/关闭）
+        m_appCtx->setFinalBAProgress([this](int percent, const std::string& stage) {
+            QMetaObject::invokeMethod(this, [this, percent, stage]() {
+                if (!m_finalBADlg) {
+                    m_finalBADlg = new QProgressDialog(
+                        QStringLiteral("全局优化中，请稍候……"), QString(), 0, 100, this);
+                    m_finalBADlg->setWindowTitle(QStringLiteral("全局优化"));
+                    m_finalBADlg->setWindowModality(Qt::ApplicationModal);
+                    m_finalBADlg->setMinimumDuration(0);
+                    m_finalBADlg->setAutoClose(false);
+                    m_finalBADlg->show();
+                }
+                m_finalBADlg->setValue(std::clamp(percent, 0, 100));
+                m_finalBADlg->setLabelText(QString(QStringLiteral("全局优化中（%1%）——%2"))
+                                               .arg(percent)
+                                               .arg(QString::fromStdString(stage)));
+                if (percent >= 100) {               // 完成（点云入库后）——延迟一拍关
+                    QMetaObject::invokeMethod(this, [this]() {
+                        if (m_finalBADlg) { m_finalBADlg->close(); m_finalBADlg = nullptr; }
+                    }, Qt::QueuedConnection);
+                }
             }, Qt::QueuedConnection);
         });
     }

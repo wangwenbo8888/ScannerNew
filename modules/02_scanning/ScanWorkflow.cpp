@@ -11,6 +11,7 @@
 #include "CalibrationRepository.h"
 #include "PointCloudBuffer.h"
 #include "pipelines/PipelineDeps.h"
+#include "pipelines/globaloptim/GlobalOptimObject.h"   // Q5 终局遍（GBA＋重融合）
 #include "pipelines/scan/ScanPipeline.h"
 
 #include <nlohmann/json.hpp>
@@ -68,10 +69,27 @@ Result ScanWorkflow::assemblePipeline() {
             cfg.existingMarkers.push_back(
                 calib::MarkerCloudPoint{r.pos.x, r.pos.y, r.pos.z,
                                         r.normal[0], r.normal[1], r.normal[2]});
+        // 终局遍软先验留档（Q5：GlobalOptimObject.setExistingPrior 消费；
+        // id=下标 0..n-1——与 07 seed/hpGlobalIds 下标语义对接）
+        priorIds_.clear();
+        priorXyz_.clear();
+        priorIds_.reserve(markerRecs.size());
+        priorXyz_.reserve(markerRecs.size() * 3);
+        for (size_t i = 0; i < markerRecs.size(); ++i) {
+            priorIds_.push_back(static_cast<int>(i));
+            priorXyz_.push_back(markerRecs[i].pos.x);
+            priorXyz_.push_back(markerRecs[i].pos.y);
+            priorXyz_.push_back(markerRecs[i].pos.z);
+        }
         JMW_LOG_INFO("02-ScanWorkflow", "[ScanWorkflow] 续扫基准 {} 点", markerRecs.size());
     } else {
+        priorIds_.clear();
+        priorXyz_.clear();
         JMW_LOG_WARN("02-ScanWorkflow", "[ScanWorkflow] 无续扫基准（新扫描或上次未留存）");
     }
+    // 逐帧激光缓存预算 2048→6144MB（260919：流水线 60fps 后 35k 点/帧×12B×60
+    // ≈25MB/s，2048MB 仅 ~81s 会话——终局遍重融合需逐帧数据，超限丢最旧=GBA 缺观测）
+    cfg.laserCacheBudgetMB = 6144;
     pipeline_ = std::make_unique<sp::ScanPipeline>(cfg);
     if (simSource_) pipeline_->attachSimSource(simSource_);   // 中段模拟提取（调试件）
 
@@ -270,8 +288,11 @@ Result ScanWorkflow::stop() {
         (state_ == WorkflowState::Running || state_ == WorkflowState::Paused);
     state_ = WorkflowState::Stopping;
     if (pipeline_) {
-        pipeline_->stop();          // 停止顺序见 07：lane 停→在飞排空→consumer 排空
-        pipeline_.reset();          // 会话私有件：stop 后不重启，续扫建新对象
+        pipeline_->stop();          // 停止顺序归 07：lane 停止在释放槽、consumer 排空
+        // —— 02-⑦ 尾批算（Q5 接线 260919）：终局遍＝GBA 全局优化＋重融合。
+        //    必须在 pipeline_.reset() 前（obs 逐帧观测随 pipeline 存活）
+        if (finalBAEnabled_) runFinalBA();
+        pipeline_.reset();          // 会话私有件（stop 后销毁，续扫=全新建）
     }
     state_ = WorkflowState::Completed;
     sessionEndTime_ = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -300,6 +321,60 @@ Result ScanWorkflow::setProgressCallback(WorkflowCallback cb) {
     // TODO(接入期): 帧级处理进度/故障经 EventBus（07 PipelineEventSink →
     // FaultOccurred 族）消费侧接线后透传 UI（现无逐帧进度源）
     return Result::ok();
+}
+
+// ============================================================================
+// 02-⑦ 尾批算（Q5 接线 260919/完善 260920）：终局遍＝GBA 全局优化＋逐帧重融合
+// ============================================================================
+void ScanWorkflow::runFinalBA() {
+    namespace sp = Scanner::pipeline;
+    if (!pipeline_) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    try {
+        sp::GlobalOptimObject go;
+        sp::PipelineDeps deps;
+        deps.sceneFeed = ctx_ ? ctx_->sceneFeed() : nullptr;
+        if (!go.configure(deps).success) {
+            JMW_LOG_WARN("02-ScanWorkflow", "[终局遍] GlobalOptimObject 装配失败——跳过");
+            return;
+        }
+        if (!priorIds_.empty()) go.setExistingPrior(priorIds_, priorXyz_, {});
+        sp::CancelToken cancel;
+        const auto r = go.run(pipeline_->obs(), finalBAProgress_, cancel);
+        const auto& out = go.output();
+        const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        // GBA 终版标志点入 06 仓库（globalId 保真）
+        if (ctx_ && ctx_->pointCloudBuffer() && !out.gbaMarkers.empty()) {
+            std::vector<Scanner::data::MarkerRecord> recs;
+            recs.reserve(out.gbaMarkers.size());
+            for (const auto& m : out.gbaMarkers) {
+                Scanner::data::MarkerRecord rec;
+                rec.globalId = static_cast<uint32_t>(std::max(0, m.globalId));
+                rec.pos = cv::Point3f(static_cast<float>(m.X.x),
+                                      static_cast<float>(m.X.y),
+                                      static_cast<float>(m.X.z));
+                rec.normal = cv::Vec3f(0.f, 0.f, 1.f);
+                recs.push_back(rec);
+            }
+            ctx_->pointCloudBuffer()->setMarkers(recs);
+        }
+        // 终版激光融合云入 06 仓库（260920：优化后顶掉优化前 C 线版）
+        if (ctx_ && ctx_->pointCloudBuffer() && !out.laserXyzFinal.empty()) {
+            ctx_->pointCloudBuffer()->pushSessionCloud(out.laserXyzFinal);
+            JMW_LOG_INFO("02-ScanWorkflow",
+                "[终局遍] 激光终版入仓: {} 点（替换 C 线中间版）", out.laserXyzFinal.size() / 3);
+        }
+        JMW_LOG_INFO("02-ScanWorkflow",
+            "[终局遍] 完成 {}ms: GBA={} 帧={} 初RMSE={:.4f} 末RMSE={:.4f} 标志点={} "
+            "激光重放={} 降级={} 质量={}（{}）",
+            el, out.gbaSuccess ? "ok" : "fail(初值兜底)", out.frameCount,
+            out.gbaStats.initialRMSE, out.gbaStats.finalRMSE,
+            out.markerCloud.size(), out.laserReplayed, out.laserDegraded,
+            static_cast<int>(out.quality), r.message);
+    } catch (const std::exception& e) {
+        JMW_LOG_ERROR("02-ScanWorkflow", "[终局遍] 异常（不影响会话收尾）: {}", e.what());
+    }
 }
 
 } // namespace Scanner::workflow

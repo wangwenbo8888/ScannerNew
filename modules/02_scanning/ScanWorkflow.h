@@ -111,6 +111,12 @@ public:
     /// 调方保证仅在会话 stop 后、对象存活期内访问）
     Scanner::pipeline::FrameObsAccumulator& obs();
 
+    /// 终局遍进度出口（260920 Q5：app 弹窗消费——percent 0-100＋阶段文案；
+    /// 回调在 finish 后台线程执行，订阅方自行切 UI 线程）
+    void setFinalBAProgress(std::function<void(int, const std::string&)> cb) {
+        finalBAProgress_ = std::move(cb);
+    }
+
     /// 输出队列透传（调试注入口：SimScanSource→真融合链，2026-09-13 模拟调通；
     /// pipeline_ 未装配/已停＝nullptr——调方保证会话期访问，停止链先停注入线程）
     Scanner::pipeline::sched::FrameResultQueue<Scanner::pipeline::FrameResult>* outputQueue();
@@ -130,6 +136,11 @@ private:
     /// 与 laser_match_scan::LoadTempTable 同源）。全档无 mapData → nullptr（降级 A）
     std::shared_ptr<calib::LaserPlaneMapTempTable> buildLaserTableFromRepo() const;
 
+    /// 02-⑦ 尾批算（Q5 接线 260919）：终局遍＝GlobalOptimObject（冻结→GBA→
+    /// 重融合→cloudRepo→解冻推修正云）。stop() 内、pipeline_.reset() 前调用
+    /// （obs 随 pipeline 存活）；GBA 终版标志点经 setMarkers 入 06 仓库
+    void runFinalBA();
+
 private:
     WorkflowContext* ctx_;
     ScanMode scanMode_ = ScanMode::MarkerOnly;
@@ -138,6 +149,12 @@ private:
     std::atomic<WorkflowState> state_{WorkflowState::Idle};
     WorkflowCallback callback_;
     std::function<void(bool)> onFinished_;         // 完成回报（app 注入；可空）
+
+    // —— 终局遍（Q5）——
+    bool finalBAEnabled_ = true;                   // 尾批 GBA＋重融合开关
+    std::vector<int>    priorIds_;                 // 续扫基准软先验（装配期自仓库快照）
+    std::vector<double> priorXyz_;                 // 3n 展开x,y,z
+    std::function<void(int, const std::string&)> finalBAProgress_;  // 进度出口（可空）
 
     // —— 会话记账（D6：归工作流自身；起止时间戳/帧计数，接入期由 07 流水线回调回填）——
     TimestampMs sessionStartTime_   = 0;

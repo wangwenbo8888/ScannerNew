@@ -7,6 +7,7 @@
 //   激光缓存降级=不重放（Degraded 近似）；取消=检查点安全退出。
 // ============================================================================
 #include "pipelines/globaloptim/GlobalOptimObject.h"
+#include <cuda_runtime.h>   // cudaMemcpy（终版激光 host 下载）
 
 #include <algorithm>
 #include <exception>
@@ -81,6 +82,21 @@ public:
 
     calib::LaserCloudFuseDeviceContext deviceContext() const override {
         return fuse_.GetDeviceContext();
+    }
+
+    // 终版融合云 host 下载（260920 完善流程：优化后激光入仓/显示——透传 09
+    // 融合云 d_fusedXyz 设备下载，同 ScanPipeline::downloadFusedXyz 口径）
+    std::vector<float> downloadFusedXyz() const override {
+        const auto ctx = fuse_.GetDeviceContext();
+        if (!ctx.d_fusedXyz || ctx.fusedPointCount == 0) return {};
+        std::vector<float> host(ctx.fusedPointCount * 3);
+        if (cudaMemcpy(host.data(), ctx.d_fusedXyz,
+                       host.size() * sizeof(float),
+                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+            JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] laser 终版融合云下载失败");
+            return {};
+        }
+        return host;
     }
 
 private:
@@ -336,6 +352,10 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
             if (!cancel.cancelled()) {
                 out_.laserReplayed = true;
                 out_.laserCtx = replayLaser_->deviceContext();
+                // 终版激光融合云 host 下载（260920 完善流程：入仓/显示——
+                // run 返回后 replayLaser_ 可能随下次 run 重建，host 拷贝长存）
+                if (cb) cb(85, "终版激光下载");
+                out_.laserXyzFinal = replayLaser_->downloadFusedXyz();
             }
             if (laserFuseFails > 0) {
                 // 部分帧融合失败：修正后激光点云可能不全 → Degraded（每 run 上报一次，

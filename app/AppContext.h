@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // ============================================================================
 // AppContext.h — 应用层装配点
 //
@@ -118,7 +118,12 @@ public:
     /// 开关置位（扫描启动时读取）：true=下个扫描会话每帧标志点/激光提取结果
     /// 由 SimScanSource 模拟观测替换（真机前端照常采集），配准/融合/体素/渲染
     /// 全走生产代码；false=纯真机链
-    void setSimExtract(bool on) { simExtract_.store(on, std::memory_order_relaxed); }
+        /// 终局遍进度出口（260920：finish 后台 GBA——percent/阶段文案；回调在后台
+    /// 线程，订阅方自行切 UI 线程；空=无通知）
+    void setFinalBAProgress(std::function<void(int, const std::string&)> cb) {
+        finalBAProgress_ = std::move(cb);
+    }
+void setSimExtract(bool on) { simExtract_.store(on, std::memory_order_relaxed); }
     bool simExtract() const { return simExtract_.load(std::memory_order_relaxed); }
     /// 「导入点云」stash：模拟扫描的激光数据源（导入点云菜单写入；sim 启动读取）
     void setLastImportedCloud(std::vector<cv::Point3f> pts) { lastImportedCloud_ = std::move(pts); }
@@ -183,6 +188,8 @@ private:
     std::thread devStartThread_;                // 设备启动后台线程（shutdown 先 join）
     std::atomic<bool> shutdownDone_{false};     // shutdown once 守卫（析构链防重复关）
     std::thread scanStartThread_;               // 扫描装配后台线程（§3.3 handler 毫秒级契约；
+    std::thread finishThread_;                  // finish background (260920: stop()+GBA final pass, minutes — was blocking UI)
+    std::function<void(int, const std::string&)> finalBAProgress_;   // 终局遍进度出口（可空）
                                                 //   stop/shutdown 先 join——防与 stop() 竞态）
     std::atomic<uint64_t> scanActGen_{0};       // 扫描会话代（260911）：每次 start_scan
                                                 //   尝试/finish_scan 递增——后台装配失败

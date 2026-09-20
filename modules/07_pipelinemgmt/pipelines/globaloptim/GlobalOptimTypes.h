@@ -32,9 +32,12 @@ struct GlobalOptimOutput {
     Scanner::QualityFlag quality = Scanner::QualityFlag::Normal;
 
 #ifdef JMW_BUILD_CUDA
-    // 激光重放累积器设备上下文（laserReplayed 时有效）。裸设备指针——生命周期随
-    // GlobalOptimObject 持有的重放实例，至下一次 run 重建前有效。
+    // 激光重放累积器设备上下文（模数：laserReplayed 时有效）——外部渲染器指针：
+    // 调用方注意 GlobalOptimObject 析构（下一次 run 重建前）内有效。
     calib::LaserCloudFuseDeviceContext laserCtx{};
+    // 终版激光融合云 host 拷贝（n×3 交错 float；260920 完善流程：入仓/显示——
+    // 值拷贝长生命周期，消费方无悬垂顾虑）
+    std::vector<float> laserXyzFinal;
 #endif
 };
 

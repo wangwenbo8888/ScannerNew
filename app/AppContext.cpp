@@ -181,14 +181,28 @@ void AppContext::initialize() {
             };
         }
         if (spec.name == "finish_scan") {
-            // 触发型（§3.2 ⑦）：用户点「完成扫描/停止」仅点火收尾——S4/S5→S2 切态
-            // 不在此（⑩ 合账后由 notifyCompleted 执行，02-D3/D4）。现状收尾=stop()
-            // 回收合账；02-⑦ GBA 批算（GlobalOptimObject 消费 pipeline_->obs()）
-            // TODO 接入期——enableFinalBA=false 时收尾语义不变（设计 §3.2 注）
+            // 完成语义§3.2 高：用户点「扫描/停止」扫尾批S4/S5，S2 静态
+            // 不在此。收尾链=stop()收尾链（02-D3/D4）：首次尾批=stop()
+            // 收尾链（02-⑦ GBA 终局批（GlobalOptimObject 消费 pipeline_->obs()）。
+            // 260920 后台化：GBA 千帧级 Ceres 分钟耗时——UI 线程同步执行曾
+            // 鼠标转圈死等；改后台线程执行 stop()（含终局遍），完成后
+            // notifyCompleted 合账（模式同 start_scan 装配后台化§3.3）
             spec.handler = [this]() {
                 if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
-                ++scanActGen_;                   // 用户停手=作废在途装配线程的回滚资格
-                return scanWf_->stop();
+                ++scanActGen_;                   // 会话代递增：作废更早线程的收口资格
+                const uint64_t gen = scanActGen_.load();
+                if (finishThread_.joinable()) finishThread_.join();   // 旧收尾应已完成（防御）
+                scanWf_->setFinalBAProgress(finalBAProgress_);
+                finishThread_ = std::thread([this, gen]() {
+                    const bool ok = scanWf_->stop().success;
+                    if (scanActGen_.load() != gen) {
+                        JMW_LOG_INFO("app-AppContext",
+                            "[AppContext] 完成收口跳过（会话代已前进——新动作已接管）");
+                        return;
+                    }
+                    commandGate_->notifyCompleted("finish_scan", ok);
+                });
+                return Scanner::Result::ok("完成中（终局优化后台执行）");
             };
         }
         if (spec.name == "start_postprocess") {
@@ -581,7 +595,8 @@ void AppContext::shutdown() {
     // DeviceManager::close 挂死致进程不退（cmd 窗口残留）——相机 SDK 的二次
     // 关闭路径不可依赖。首轮在 main 线程、时序确定，一轮即止
     if (shutdownDone_.exchange(true, std::memory_order_acq_rel)) return;
-    if (scanStartThread_.joinable()) scanStartThread_.join();   // 装配线程先收（防与 stop 竞态）
+    if (scanStartThread_.joinable()) scanStartThread_.join();   // 装配线程收尾再关（防竞态 stop 误态）
+    if (finishThread_.joinable()) finishThread_.join();         // 完成收尾线程（GBA 终局遍）先收
     if (devStartThread_.joinable()) devStartThread_.join();   // 设备启动收尾再关（防竞态）
     if (hwMonitor_) hwMonitor_->stop();
     if (scanWf_)    scanWf_->stop();
