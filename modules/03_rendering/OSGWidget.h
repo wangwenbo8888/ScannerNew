@@ -255,6 +255,8 @@ private:
     bool m_lassoDeleteMode = false;
     LassoTool m_lassoToolType = LassoTool::Polyline;   // D3 栏1 工具类型（260920 套索实现）
     bool m_lassoDragging = false;                      // 套索手绘拖拽中（Press 置/Release 清）
+    QPointF m_lastLassoWidgetPos;                      // 手绘去抖：最近落点屏幕坐标（260920）
+    bool m_hasLassoWidgetPos = false;
     int m_lassoTargets = LassoMarkers | LassoClouds;   // 对象类型过滤（setLassoTargets）
     bool m_lassoFirstLayer = false;                    // 深度模式（栏2：只取表面）
     double m_lassoFirstLayerTolMm = 1.0;               // 表面层厚度（mm——2026-09-05 裁定：统一 1mm；SelectionService 同款默认）

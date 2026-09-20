@@ -1057,9 +1057,19 @@ void OSGWidget::mouseMoveEvent(QMouseEvent *event)
 {
     if (m_lassoMode)
     {
-        // 套索手绘：按住左键拖拽连续加点（Polyline 模式不走此路径——逐点 Press）
+        // 套索手绘：按住左键拖拽连续加点（≥2.5px 去抖——鼠标事件高频抖动/过密，
+        // 降噪＋限制点密度：命中测试与几何刷新的代价受控；平滑在闭合时另行割角处理）
         if (m_lassoDragging && m_lassoToolType == LassoTool::Lasso)
-            addLassoPoint(event->pos().x(), event->pos().y());
+        {
+            const QPointF p = event->pos();
+            if (!m_hasLassoWidgetPos ||
+                (p - m_lastLassoWidgetPos).manhattanLength() >= 2.5)
+            {
+                m_lastLassoWidgetPos = p;
+                m_hasLassoWidgetPos = true;
+                addLassoPoint(p.x(), p.y());
+            }
+        }
         return;
     }
     if ((event->buttons() & Qt::RightButton) &&
@@ -1093,6 +1103,8 @@ void OSGWidget::mousePressEvent(QMouseEvent *event)
             {
                 // 套索：按下开始手绘，拖拽连续加点，Release 自动闭合
                 m_lassoDragging = true;
+                m_lastLassoWidgetPos = event->pos();
+                m_hasLassoWidgetPos = true;
                 addLassoPoint(event->pos().x(), event->pos().y());
             }
             else
@@ -1221,6 +1233,7 @@ void OSGWidget::enterLassoMode(LassoTool tool)
     m_lassoMode = true;
     m_lassoToolType = tool;                   // Polyline=逐点落子 / Lasso=按住拖拽
     m_lassoDragging = false;
+    m_hasLassoWidgetPos = false;
     m_lassoPoints = new osg::Vec2Array();
     m_selectedPolylines.clear();
 
@@ -1439,6 +1452,63 @@ void OSGWidget::debugValidateProjection()
     QMessageBox::information(this, "Projection Debug", msg);
 }
 
+namespace {
+/// Catmull-Rom 样条采样（曲线经过每个控制点，平滑无过冲抖动）。
+/// 闭式（closed=true）用环绕索引成环；开式两端做 clamp 幻影点。
+osg::ref_ptr<osg::Vec2Array> sampleCatmullRom(const osg::Vec2Array* pts,
+                                              bool closed, int samplesPerSeg)
+{
+    if (!pts || pts->size() < 3) return nullptr;
+    const int n = static_cast<int>(pts->size());
+    const int segs = closed ? n : (n - 1);
+    const int sps = samplesPerSeg > 0 ? samplesPerSeg : 10;
+
+    auto get = [&](int idx) -> osg::Vec2 {
+        if (closed)
+        {
+            idx = idx % n;
+            if (idx < 0) idx += n;
+            return (*pts)[static_cast<unsigned int>(idx)];
+        }
+        // 开式 clamp 幻影端点
+        if (idx < 0) idx = 0;
+        if (idx > n - 1) idx = n - 1;
+        return (*pts)[static_cast<unsigned int>(idx)];
+    };
+
+    osg::ref_ptr<osg::Vec2Array> out = new osg::Vec2Array();
+    out->reserve(static_cast<size_t>(segs) * sps + 1);
+    for (int i = 0; i < segs; ++i)
+    {
+        const osg::Vec2 p0 = get(i - 1);
+        const osg::Vec2 p1 = get(i);
+        const osg::Vec2 p2 = get(i + 1);
+        const osg::Vec2 p3 = get(i + 2);
+        for (int s = 0; s < sps; ++s)
+        {
+            const float t = static_cast<float>(s) / static_cast<float>(sps);
+            const float t2 = t * t;
+            const float t3 = t2 * t;
+            const osg::Vec2 q =
+                ((p1 + p1) + (p2 - p0) * t +
+                 (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2 +
+                 (p3 + p1 * 3.0f - p2 * 3.0f - p0) * t3) * 0.5f;
+            out->push_back(q);
+        }
+    }
+    if (closed)
+    {
+        // 收尾点＝起点，保证闭合环无缝
+        out->push_back((*pts)[0]);
+    }
+    else
+    {
+        out->push_back((*pts)[n - 1]);
+    }
+    return out;
+}
+} // namespace
+
 void OSGWidget::closeLasso()
 {
     JMW_LOG_INFO("03-OSGWidget", "[closeLasso] 进入（点数={} delete模式={}）",
@@ -1450,13 +1520,23 @@ void OSGWidget::closeLasso()
         return;
     }
 
-    m_selectedPolylines.push_back(new osg::Vec2Array(*m_lassoPoints));
+    // 套索手绘平滑：Catmull-Rom 样条采样（曲线经控制点、无锯齿）。显示与命中
+    // 测试共用同一平滑点集（m_selectedPolylines 拷贝）——所见即所选（260920）
+    osg::ref_ptr<osg::Vec2Array> finalPts = m_lassoPoints;
+    if (m_lassoToolType == LassoTool::Lasso)
+    {
+        osg::ref_ptr<osg::Vec2Array> smooth = sampleCatmullRom(m_lassoPoints.get(), true, 10);
+        if (smooth.valid() && smooth->size() >= 10)
+            finalPts = smooth;
+    }
+
+    m_selectedPolylines.push_back(new osg::Vec2Array(*finalPts));
 
     // Show the fully closed polygon FIRST
     m_lassoVerts->clear();
-    for (unsigned int i = 0; i < m_lassoPoints->size(); ++i)
+    for (unsigned int i = 0; i < finalPts->size(); ++i)
     {
-        const osg::Vec2& pt = (*m_lassoPoints)[i];
+        const osg::Vec2& pt = (*finalPts)[i];
         m_lassoVerts->push_back(osg::Vec3(pt.x(), pt.y(), 0.0f));
     }
     m_lassoVerts->dirty();
@@ -1509,10 +1589,21 @@ void OSGWidget::updateLassoGeometry()
     if (!m_lassoVerts.valid() || !m_lassoGeom.valid())
         return;
 
-    m_lassoVerts->clear();
-    for (unsigned int i = 0; i < m_lassoPoints->size(); ++i)
+    // 拖拽实时预览：套索走开式 Catmull-Rom 平滑（>=3 点时）——手感平滑；
+    // 点不足时退回原始折线
+    osg::ref_ptr<osg::Vec2Array> drawPts = m_lassoPoints;
+    if (m_lassoToolType == LassoTool::Lasso)
     {
-        const osg::Vec2& pt = (*m_lassoPoints)[i];
+        osg::ref_ptr<osg::Vec2Array> smooth =
+            sampleCatmullRom(m_lassoPoints.get(), false, 6);
+        if (smooth.valid() && smooth->size() >= 3)
+            drawPts = smooth;
+    }
+
+    m_lassoVerts->clear();
+    for (unsigned int i = 0; i < drawPts->size(); ++i)
+    {
+        const osg::Vec2& pt = (*drawPts)[i];
         m_lassoVerts->push_back(osg::Vec3(pt.x(), pt.y(), 0.0f));
     }
     m_lassoVerts->dirty();
