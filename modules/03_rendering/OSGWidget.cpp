@@ -1056,7 +1056,12 @@ bool OSGWidget::tryResumeRender()
 void OSGWidget::mouseMoveEvent(QMouseEvent *event)
 {
     if (m_lassoMode)
+    {
+        // 套索手绘：按住左键拖拽连续加点（Polyline 模式不走此路径——逐点 Press）
+        if (m_lassoDragging && m_lassoToolType == LassoTool::Lasso)
+            addLassoPoint(event->pos().x(), event->pos().y());
         return;
+    }
     if ((event->buttons() & Qt::RightButton) &&
         (event->globalPos() - m_rightPressGlobalPos).manhattanLength() > 6)
         m_suppressContextMenu = true;       // 右键拖拽＝平移视角，松开不弹菜单
@@ -1083,7 +1088,19 @@ void OSGWidget::mousePressEvent(QMouseEvent *event)
     if (m_lassoMode)
     {
         if (event->button() == Qt::LeftButton)
-            addLassoPoint(event->pos().x(), event->pos().y());
+        {
+            if (m_lassoToolType == LassoTool::Lasso)
+            {
+                // 套索：按下开始手绘，拖拽连续加点，Release 自动闭合
+                m_lassoDragging = true;
+                addLassoPoint(event->pos().x(), event->pos().y());
+            }
+            else
+            {
+                // 多段线：逐点落子
+                addLassoPoint(event->pos().x(), event->pos().y());
+            }
+        }
         else if (event->button() == Qt::RightButton) {
             m_suppressContextMenu = true;   // 圈选右键＝闭合多段线，松开不弹菜单
             closeLasso();
@@ -1108,7 +1125,16 @@ void OSGWidget::mouseReleaseEvent(QMouseEvent *event)
 {
     m_userInteracting = false;             // 视角跟随恢复（Press 置位处）
     if (m_lassoMode)
+    {
+        // 套索：松开左键＝自动闭合圈选（拖拽手绘结束）
+        if (event->button() == Qt::LeftButton && m_lassoDragging &&
+            m_lassoToolType == LassoTool::Lasso)
+        {
+            m_lassoDragging = false;
+            closeLasso();
+        }
         return;
+    }
     if (!m_gw.valid()) return;
     unsigned int button = Qt::LeftButton;
     if (event->button() == Qt::MidButton)     button = osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON;
@@ -1183,16 +1209,18 @@ void OSGWidget::setLaserPointsVisible(bool visible)
 
 // ---- Lasso / Polyline selection ----
 
-void OSGWidget::enterLassoDeleteMode()
+void OSGWidget::enterLassoDeleteMode(LassoTool tool)
 {
     m_lassoDeleteMode = true;
-    enterLassoMode();
+    enterLassoMode(tool);                  // 260920 套索：工具栏区分 套索(Lasso)/多段线(Polyline)
 }
 
-void OSGWidget::enterLassoMode()
+void OSGWidget::enterLassoMode(LassoTool tool)
 {
     clearHighlight();
     m_lassoMode = true;
+    m_lassoToolType = tool;                   // Polyline=逐点落子 / Lasso=按住拖拽
+    m_lassoDragging = false;
     m_lassoPoints = new osg::Vec2Array();
     m_selectedPolylines.clear();
 
@@ -1267,6 +1295,7 @@ void OSGWidget::deleteSelectedPoints()
 void OSGWidget::exitLassoMode()
 {
     m_lassoMode = false;
+    m_lassoDragging = false;
     if (m_lassoPoints.valid())
         m_lassoPoints->clear();
 
@@ -1294,7 +1323,7 @@ void OSGWidget::addLassoPoint(float mx, float my)
     m_lassoPoints->push_back(osg::Vec2(sx, sy));
     updateLassoGeometry();
 
-    if (m_lassoPoints->size() > 2)
+    if (m_lassoPoints->size() > 2 && m_lassoToolType == LassoTool::Polyline)
     {
         const osg::Vec2& first = m_lassoPoints->front();
         float dx = sx - first.x();
@@ -1451,8 +1480,11 @@ void OSGWidget::closeLasso()
     {
         QMessageBox::StandardButton reply = QMessageBox::question(
             this,
-            QStringLiteral("确认删除"),
-            QStringLiteral("确定要删除多段线圈定的区域内的点吗？"),
+QStringLiteral("确认删除"),
+                    QStringLiteral("确定要删除%s圈定的区域内的点吗？")
+                        .arg(m_lassoToolType == LassoTool::Lasso
+                                 ? QStringLiteral("套索")
+                                 : QStringLiteral("多段线")),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
 

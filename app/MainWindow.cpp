@@ -2132,16 +2132,23 @@ QWidget *MainWindow::createBottomToolBar()
         });
     }
 
-    // 套索（索引 5）/多段线（索引 6）→ 圈选＋删除确认流（左键落点/右键或双击
-    // 闭合→弹「确认删除」；删除钮在操作组隐藏期间由此承载删除入口）
-    for (const int idx : {5, 6}) {
-        if (m_selectionButtons.size() > idx)
+    // 套索（索引 5）：按住左键拖拽自由手绘，松开自动闭合
+    // 多段线（索引 6）：逐点落子，右键/双击/回车闭合（260920 工具类型分发）
+    if (m_selectionButtons.size() > 5)
+    {
+        connect(m_selectionButtons[5], &QPushButton::clicked, this, [this]()
         {
-            connect(m_selectionButtons[idx], &QPushButton::clicked, this, [this]()
-            {
-                if (m_3dView) m_3dView->enterLassoDeleteMode();
-            });
-        }
+            if (m_3dView)
+                m_3dView->enterLassoDeleteMode(OSGWidget::LassoTool::Lasso);
+        });
+    }
+    if (m_selectionButtons.size() > 6)
+    {
+        connect(m_selectionButtons[6], &QPushButton::clicked, this, [this]()
+        {
+            if (m_3dView)
+                m_3dView->enterLassoDeleteMode(OSGWidget::LassoTool::Polyline);
+        });
     }
 
     // 圈选流程结束（确认删除/取消均发 lassoCompleted）→ 工具组回无选中初始态

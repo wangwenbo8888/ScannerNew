@@ -101,9 +101,13 @@ public:
     void home();
 
     // Lasso / polyline selection
-    void enterLassoMode();
+    /// 圈选工具类型（D3 栏1：三栏正交开关之一）
+    enum class LassoTool { Polyline, Lasso };
+    void enterLassoMode(LassoTool tool = LassoTool::Polyline);
+    void enterLassoDeleteMode(LassoTool tool = LassoTool::Polyline);
     void exitLassoMode();
     bool isLassoMode() const { return m_lassoMode; }
+    LassoTool lassoTool() const { return m_lassoToolType; }
 
     /// 可见标志点数（软删后 alpha>0 顶点折算——左侧统计栏刷新用）
     size_t visibleMarkerCount() const;
@@ -122,7 +126,6 @@ public:
     void clearPendingCloudDeletes() { m_pendingCloudDel.clear(); }
     void deleteSelectedPoints();
     void undoDelete();
-    void enterLassoDeleteMode();
 
     // 圈选目标类型（05 D3 栏3·对象类型过滤——显示级删除链用；缺省全开）
     enum LassoTarget { LassoNone = 0, LassoMarkers = 1, LassoClouds = 2 };
@@ -250,6 +253,8 @@ private:
     // 2D screen lasso (selection mode)
     bool m_lassoMode = false;
     bool m_lassoDeleteMode = false;
+    LassoTool m_lassoToolType = LassoTool::Polyline;   // D3 栏1 工具类型（260920 套索实现）
+    bool m_lassoDragging = false;                      // 套索手绘拖拽中（Press 置/Release 清）
     int m_lassoTargets = LassoMarkers | LassoClouds;   // 对象类型过滤（setLassoTargets）
     bool m_lassoFirstLayer = false;                    // 深度模式（栏2：只取表面）
     double m_lassoFirstLayerTolMm = 1.0;               // 表面层厚度（mm——2026-09-05 裁定：统一 1mm；SelectionService 同款默认）
