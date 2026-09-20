@@ -13,6 +13,7 @@
 #include "pipelines/PipelineDeps.h"
 #include "pipelines/globaloptim/GlobalOptimObject.h"   // Q5 终局遍（GBA＋重融合）
 #include "WorkflowArtifactStore.h"                     // L4 产物仓库（终版持久化）
+#include "file_io.h"                                   // exportPLY（终版激光大载荷落盘）
 #include <filesystem>
 #include "pipelines/scan/ScanPipeline.h"
 
@@ -58,6 +59,36 @@ Result ScanWorkflow::assemblePipeline() {
 
     sp::ScanConfig cfg;
     cfg.enableLaser = (scanMode_ == ScanMode::MarkerPlusLaser);
+
+    // —— #1 L4 读侧（260920 完善流程：装配时探查上次会话产物——GBA 标志点
+    //    注入软先验＋existingMarkers seed，仓库快照为空时的兜底/增强）——
+    if (priorIds_.empty()) {
+        const auto artDir = (std::filesystem::current_path() / "artifacts").string();
+        Scanner::data::FileArtifactStore probe(artDir);
+        std::vector<unsigned char> probeBlob;
+        if (probe.get("scan/markers_gba", probeBlob)) {
+            std::vector<Scanner::data::ArtifactMarker> l4Markers;
+            if (deserializeMarkers(probeBlob, l4Markers) && !l4Markers.empty()) {
+                priorIds_.reserve(l4Markers.size());
+                priorXyz_.reserve(l4Markers.size() * 3);
+                cfg.existingMarkers.reserve(l4Markers.size());
+                for (size_t i = 0; i < l4Markers.size(); ++i) {
+                    priorIds_.push_back(static_cast<int>(i));
+                    priorXyz_.push_back(l4Markers[i].x);
+                    priorXyz_.push_back(l4Markers[i].y);
+                    priorXyz_.push_back(l4Markers[i].z);
+                    cfg.existingMarkers.push_back(
+                        calib::MarkerCloudPoint{static_cast<float>(l4Markers[i].x),
+                                                static_cast<float>(l4Markers[i].y),
+                                                static_cast<float>(l4Markers[i].z),
+                                                0.0f, 0.0f, 1.0f});
+                }
+                JMW_LOG_INFO("02-ScanWorkflow",
+                    "[L4 读侧] 上次会话 GBA 标志点 {} 个装载（软先验＋seed）← artifacts/scan/markers_gba",
+                    l4Markers.size());
+            }
+        }
+    }
 
     // 续扫基准注入：点云仓库快照 → 09 MarkerCloudPoint（globalId 语义在 obs 层，
     // 07 按下标 0..n-1 对接 hpGlobalIds——见 ScanPipeline.h seed 时序）
@@ -406,6 +437,28 @@ void ScanWorkflow::runFinalBA() {
             meta.elapsedMs = static_cast<uint64_t>(el);
             if (serializeSessionMeta(meta, blob) && store.put("scan/session_meta", blob))
                 JMW_LOG_INFO("02-ScanWorkflow", "[L4] 会话元信息落盘 ← artifacts/scan/session_meta");
+            // —— #7 大载荷落盘（终版激光点云 PLY——关程序后 L4 目录可重载）——
+            if (!out.laserXyzFinal.empty()) {
+                const auto plyPath = (std::filesystem::path(artDir) / "scan_laser_final.ply").string();
+                std::vector<cv::Point3f> pts;
+                pts.reserve(out.laserXyzFinal.size() / 3);
+                for (size_t i = 0; i < out.laserXyzFinal.size(); i += 3)
+                    pts.emplace_back(out.laserXyzFinal[i], out.laserXyzFinal[i + 1],
+                                     out.laserXyzFinal[i + 2]);
+                if (Scanner::data::fileio::exportPLY(plyPath, pts))
+                    JMW_LOG_INFO("02-ScanWorkflow",
+                        "[L4] 终版激光 {} 点落盘 ← {}", pts.size(), plyPath);
+                else
+                    JMW_LOG_WARN("02-ScanWorkflow", "[L4] 终版激光 PLY 落盘失败: {}", plyPath);
+            }
+            // —— #2 FrameObs checkpoint 自动化（崩溃恢复链——下次会话可 load）——
+            {
+                const auto ckptPath = (std::filesystem::path(artDir) / "scan_obs_checkpoint.dat").string();
+                if (pipeline_->obs().saveCheckpoint(ckptPath).success)
+                    JMW_LOG_INFO("02-ScanWorkflow",
+                        "[L4] FrameObs checkpoint 落盘 ← {}（{} 帧）", ckptPath,
+                        pipeline_->obs().frameCount());
+            }
         }
         JMW_LOG_INFO("02-ScanWorkflow",
             "[终局遍] 完成 {}ms: GBA={} 帧={} 初RMSE={:.4f} 末RMSE={:.4f} 标志点={} "
