@@ -12,6 +12,8 @@
 #include "PointCloudBuffer.h"
 #include "pipelines/PipelineDeps.h"
 #include "pipelines/globaloptim/GlobalOptimObject.h"   // Q5 终局遍（GBA＋重融合）
+#include "WorkflowArtifactStore.h"                     // L4 产物仓库（终版持久化）
+#include <filesystem>
 #include "pipelines/scan/ScanPipeline.h"
 
 #include <nlohmann/json.hpp>
@@ -364,6 +366,46 @@ void ScanWorkflow::runFinalBA() {
             ctx_->pointCloudBuffer()->pushSessionCloud(out.laserXyzFinal);
             JMW_LOG_INFO("02-ScanWorkflow",
                 "[终局遍] 激光终版入仓: {} 点（替换 C 线中间版）", out.laserXyzFinal.size() / 3);
+        }
+        // —— L4 产物仓库持久化（260920：优化后位姿＋GBA 标志点＋会话元信息
+        //    落盘——隔天离线重优化/后处理重跑可用；仓目录=exe 旁 artifacts/）
+        if (ctx_) {
+            const std::string artDir = (std::filesystem::current_path() / "artifacts").string();
+            Scanner::data::FileArtifactStore store(artDir);
+            std::vector<unsigned char> blob;
+            // 位姿数组
+            std::vector<Scanner::data::ArtifactPose> artPoses;
+            artPoses.reserve(out.poses.size());
+            for (const auto& ps : out.poses) {
+                Scanner::data::ArtifactPose ap;
+                ap.frameId = ps.frameId;
+                for (int j = 0; j < 9; ++j) ap.R[j] = ps.R[j];
+                ap.T[0] = ps.t[0]; ap.T[1] = ps.t[1]; ap.T[2] = ps.t[2];
+                artPoses.push_back(ap);
+            }
+            if (serializePoses(artPoses, blob) && store.put("scan/poses_optimized", blob))
+                JMW_LOG_INFO("02-ScanWorkflow", "[L4] 位姿 {} 帧落盘 ← artifacts/scan/poses_optimized", artPoses.size());
+            // GBA 标志点
+            blob.clear();
+            std::vector<Scanner::data::ArtifactMarker> artMarkers;
+            artMarkers.reserve(out.gbaMarkers.size());
+            for (const auto& m : out.gbaMarkers) {
+                artMarkers.push_back({ m.X.x, m.X.y, m.X.z, m.globalId, m.covisCount });
+            }
+            if (serializeMarkers(artMarkers, blob) && store.put("scan/markers_gba", blob))
+                JMW_LOG_INFO("02-ScanWorkflow", "[L4] GBA 标志点 {} 个落盘 ← artifacts/scan/markers_gba", artMarkers.size());
+            // 会话元信息
+            blob.clear();
+            Scanner::data::ArtifactSessionMeta meta{};
+            meta.frameCount = out.frameCount;
+            meta.initialRMSE = out.gbaStats.initialRMSE;
+            meta.finalRMSE = out.gbaStats.finalRMSE;
+            meta.quality = static_cast<int32_t>(out.quality);
+            meta.gbaSuccess = out.gbaSuccess ? 1 : 0;
+            meta.laserReplayed = out.laserReplayed ? 1 : 0;
+            meta.elapsedMs = static_cast<uint64_t>(el);
+            if (serializeSessionMeta(meta, blob) && store.put("scan/session_meta", blob))
+                JMW_LOG_INFO("02-ScanWorkflow", "[L4] 会话元信息落盘 ← artifacts/scan/session_meta");
         }
         JMW_LOG_INFO("02-ScanWorkflow",
             "[终局遍] 完成 {}ms: GBA={} 帧={} 初RMSE={:.4f} 末RMSE={:.4f} 标志点={} "
