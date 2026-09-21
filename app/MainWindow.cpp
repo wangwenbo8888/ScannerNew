@@ -9,9 +9,8 @@
 #include "ScannerWindow.h"
 #include "stubs/LEADSCANSeries.h"
 #include "stubs/CameraControl.h"
-#include "stubs/camera_calib_workflow.h"
-#include "stubs/laser_calib_workflow.h"
-#include "stubs/scan_workflow.h"
+#include "stubs/camera_calib_workflow.h"  // calibration::CameraCalibWorkflow（相机标定联调口）
+#include "stubs/laser_calib_workflow.h"   // calibration::LaserCalibInput（激光标定联调口）
 #include "ScanWorkflow.h"       // 02（编辑物理化访问链 markerFuse/obsAccumulator——P4b）
 #include "PostProcessWorkflow.h" // 04（后处理进度回调——P1-1 UI 入口）
 #include "pipelines/scan/FuseConsumer.h"       // 07 IMarkerFuse（removePoints 契约）
