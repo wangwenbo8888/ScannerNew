@@ -72,6 +72,7 @@ private:
     void setButtonGroupExclusive(QList<QPushButton*> buttons);
     void setActiveButton(QPushButton *btn, QList<QPushButton*> group);
     void createFloatingToolbar();
+    bool ensureEditAllowed();                 // P0-3 编辑门禁唯一事实源（canEnterEditSession）：不满足则拒并提示
 
 private slots:
     void onIntegrateTestClicked();

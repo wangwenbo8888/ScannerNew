@@ -119,9 +119,12 @@ Result StateMachine::transition(EventType event, int64_t param) {
 }
 
 bool StateMachine::canOperate(const std::string& operation) const {
-    const auto s = state_.load(std::memory_order_acquire);
+const auto s = state_.load(std::memory_order_acquire);
     if (operation == "calibrate" || operation == "scan" ||
         operation == "postprocess" || operation == "edit") {
+        // edit：SM 静态键仅 S2 放行（SM 无「暂停」态）；扫描就绪态（暂停）分支由
+        //   app 层 AppContext::canEnterEditSession 并集裁定（P0-3 定案 2026-09-21，
+        //   05/03 编辑入口统一走该单一事实源，不再依赖本键）
         return s == SystemState::Standby;
     }
     if (operation == "scanning") {

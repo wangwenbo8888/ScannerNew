@@ -600,6 +600,15 @@ void MainWindow::onCalibDeviceClicked()
     }
 }
 
+// P0-3 编辑门禁唯一事实源：经 AppContext::canEnterEditSession()（SM==S2 或暂停
+// 就绪态）且有点云。不满足→拒并状态栏提示（工具栏编辑工具统一走此口）
+bool MainWindow::ensureEditAllowed() {
+    if (m_appCtx && m_appCtx->canEnterEditSession()) return true;
+    statusBar()->showMessage(
+        QStringLiteral("编辑不可用：需处于待机/扫描就绪态且有标志点或激光点云"), 3000);
+    return false;
+}
+
 void MainWindow::onScanClicked()
 {
     // 切换回默认界面：隐藏标定板和彩条，恢复相机
@@ -2139,16 +2148,16 @@ QWidget *MainWindow::createBottomToolBar()
     {
         connect(m_selectionButtons[5], &QPushButton::clicked, this, [this]()
         {
-            if (m_3dView)
-                m_3dView->enterLassoDeleteMode(OSGWidget::LassoTool::Lasso);
+            if (!ensureEditAllowed() || !m_3dView) return;
+            m_3dView->enterLassoDeleteMode(OSGWidget::LassoTool::Lasso);
         });
     }
     if (m_selectionButtons.size() > 6)
     {
         connect(m_selectionButtons[6], &QPushButton::clicked, this, [this]()
         {
-            if (m_3dView)
-                m_3dView->enterLassoDeleteMode(OSGWidget::LassoTool::Polyline);
+            if (!ensureEditAllowed() || !m_3dView) return;
+            m_3dView->enterLassoDeleteMode(OSGWidget::LassoTool::Polyline);
         });
     }
 
@@ -2195,6 +2204,7 @@ QWidget *MainWindow::createBottomToolBar()
     {
         connect(m_selectionButtons[11], &QPushButton::clicked, this, [this]()
         {
+            if (!ensureEditAllowed() || !m_3dView) return;
             m_3dView->enterLassoDeleteMode();
         });
     }

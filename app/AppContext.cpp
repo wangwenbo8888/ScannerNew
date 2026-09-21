@@ -615,10 +615,17 @@ bool AppContext::isScanSessionPaused() const {
 }
 
 bool AppContext::canEnterEditSession() const {
-    // app 级门禁（10 状态机就绪态扩展另行）：就绪态＋标志点融合云非空
-    if (!isScanSessionPaused()) return false;
-    if (!sceneFeed_) return false;
-    return !sceneFeed_->latestMarkers().empty();
+    // P0-3 编辑门禁定案（用户口径 2026-09-21）：编辑门 = （SM==S2 待机 或
+    // 扫描就绪态[暂停]）&& 有编辑数据（标志点或激光点云）。本函数为唯一事实源
+    // ——SM canOperate("edit") 保持 S2 静态键（SM 无暂停态语义），暂停分支由
+    // 本层并集；05/03 编辑入口（MainWindow 套索/多段线/删除）统一经此判定
+    const auto s = stateMachine_
+        ? stateMachine_->getCurrentState() : Scanner::service::SystemState::Init;
+    const bool idle = (s == Scanner::service::SystemState::Standby) || isScanSessionPaused();
+    if (!idle) return false;
+    if (sceneFeed_ && !sceneFeed_->latestMarkers().empty()) return true;   // 有标志点
+    if (pointCloudBuffer_ && pointCloudBuffer_->getTotalPointCount() > 0) return true;  // 有激光点云
+    return false;
 }
 
 void AppContext::shutdown() {
