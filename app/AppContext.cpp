@@ -394,8 +394,7 @@ void AppContext::initialize() {
     postWf_  = std::make_unique<Scanner::workflow::PostProcessWorkflow>(wfCtx_.get());
     // P5-T16 完成回报注入（§9 04 行）：工作流 postThread_ 批算线程尾回调 →
     // 合账切 S2；app 是组合根，可同时触达 04 工作流与 10 门禁（04 不依赖 10）。
-    // 现无 UI 入口触发后处理（04 为离线批，入口待 04 工作流产品化时接）——
-    // handler 已备好，05/04 UI 落地后 submit("start_postprocess") 即通
+    // P1-1 入口已接：文件菜单「后处理导出 STL」→ startPostProcessSession 点火
     postWf_->setOnFinished([this](bool ok) {
         commandGate_->notifyCompleted("start_postprocess", ok);
     });
@@ -539,6 +538,24 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
         JMW_LOG_INFO("app-AppContext", "[AppContext] ▶启动同步段完成 t+{}ms（灯命令已编队/装配转后台）", el);
     }
     return Scanner::Result::ok(modeName);
+}
+
+// P1-1：后处理点火（04/07-E）——输出路径/跳段位注入工作流后经命令通道
+// start_postprocess（pre 拦空点云/S2 门禁；handler initialize+start 毫秒级返，
+// STL 批算在 04 postThread_，完成经后装 onFinished 合账）
+Scanner::Result AppContext::startPostProcessSession(const std::string& outputPath,
+                                                    uint32_t skipStages) {
+    if (!postWf_) return Scanner::Result::fail("后处理工作流未装配");
+    if (!commandGate_) return Scanner::Result::fail("命令通道未装配");
+    postWf_->setOutputPath(outputPath);
+    postWf_->setSkipStages(skipStages);
+    auto gr = commandGate_->submit("start_postprocess");
+    if (!gr.success) {
+        JMW_LOG_WARN("app-AppContext", "[AppContext] 后处理点火被拒: {}", gr.message);
+        return gr;
+    }
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 后处理已点火（S6），STL 输出={}", outputPath);
+    return gr;
 }
 
 Scanner::Result AppContext::stopScanSession() {

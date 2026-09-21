@@ -16,7 +16,7 @@
 //   - 输入改 06 点云仓库（app 存活件）内存句柄（现 PointCloudBuffer 快照，
 //     02 GBA 修正点云写入后此处即为修正结果）。
 //   - 网格四族算子（封装/补洞/光顺/边界）09 落地后经 setStageOp 注入
-//     （现内置桩恒 degraded "operator pending"，法线阶段已实接）。
+//     （P1-1 已实注阶段 0 法线 NormalStage；1-4 仍内置桩恒 degraded "operator pending"）。
 // ============================================================================
 
 #include "IWorkflow.h"

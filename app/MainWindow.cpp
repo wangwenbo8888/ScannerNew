@@ -13,6 +13,7 @@
 #include "stubs/laser_calib_workflow.h"
 #include "stubs/scan_workflow.h"
 #include "ScanWorkflow.h"       // 02（编辑物理化访问链 markerFuse/obsAccumulator——P4b）
+#include "PostProcessWorkflow.h" // 04（后处理进度回调——P1-1 UI 入口）
 #include "pipelines/scan/FuseConsumer.h"       // 07 IMarkerFuse（removePoints 契约）
 #include "pipelines/scan/FrameObsAccumulator.h" // 07 obs（excludeMarkerObs 契约）
 #include "file_io.h"
@@ -1524,13 +1525,32 @@ QWidget *MainWindow::createToolBar()
                         statusBar()->showMessage(
                             QStringLiteral("导出点云失败（仓库 %1 点）").arg(nPts), 5000);
                 });
-                menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc"), [this]() {
-                    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc"), "mesh.stl", "Mesh (*.stl *.obj)");
+                menu.addAction(QStringLiteral("\xe5\x90\x8e\xe5\xa4\x84\xe7\x90\x86\xe5\xaf\xbc\xe5\x87\xba STL"), [this]() {
+                    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\x90\x8e\xe5\xa4\x84\xe7\x90\x86\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc"), "mesh.stl", "Mesh (*.stl *.obj)");
                     if (path.isEmpty()) return;
-                    // 260912 诚实化：后处理网格产物未接入（原桩写空 STL——假文件）；
-                    // 接入点=04 后处理完成后（TODO 登记），当前提示后不造文件
-                    QMessageBox::information(this, QStringLiteral("导出网格"),
-                        QStringLiteral("网格导出需先完成后处理流程（当前无网格产物）。"));
+                    // P1-1（260912 诚实化的兑现）：04/07-E 后处理真正点火——S2→S6
+                    // 批算（法线重算→封装→补洞→光顺→边界）→ STL 写出 → 合账回 S2。
+                    // 阶段 0 法线真算；网格四族 09 待建→当前产物为法线化点云（有棱无面）
+                    if (!m_appCtx) return;
+                    auto r = m_appCtx->startPostProcessSession(path.toStdString());
+                    if (!r.success) {
+                        QMessageBox::warning(this, QStringLiteral("后处理"),
+                            QStringLiteral("后处理无法启动：%1").arg(QString::fromStdString(r.message)));
+                        return;
+                    }
+                    statusBar()->showMessage(
+                        QStringLiteral("后处理已启动：法线重算→封装→补洞→光顺→边界→STL 写出……"), 6000);
+                    // 进度透传（阶段名+百分位；04 postThread_ 回调→队列内直更状态栏）
+                    auto* pw = m_appCtx->postWorkflow();
+                    if (pw) pw->setProgressCallback([this](const auto& p) {
+                        const int pct = static_cast<int>(p.progress * 100.0f);
+                        if (pct >= 100)
+                            statusBar()->showMessage(QStringLiteral("后处理完成，STL 已导出。"), 6000);
+                        else if (pct > 0)
+                            statusBar()->showMessage(
+                                QStringLiteral("后处理中[%1]：%2%……")
+                                    .arg(QString::fromStdString(p.stageName)).arg(pct), 1500);
+                    });
                 });
                 menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xb7\xa5\xe7\xa8\x8b\xe6\x96\x87\xe4\xbb\xb6"), [this]() {
                     // 260912 诚实化：原仅状态栏假提示；工程序列化格式规划中

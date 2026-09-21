@@ -92,6 +92,13 @@ public:
     /// 扫描会话是否活跃（Running/Paused——按钮启停切换判据）
     bool isScanSessionActive() const;
 
+    // —— 后处理会话点火（P1-1：04/07-E；文件菜单「后处理导出 STL」入口）——
+    /// 设输出路径/跳段位（默认 0＝五阶段全跑）后经命令通道 start_postprocess
+    /// 点火（S2→S6，07 阻塞批算在线程池）。同步失败返回 Result；异步成败经
+    /// onFinished 合账切回 S2。阶段 0 法线真算，网格四族 09 待建→当前出法线化点云。
+    Scanner::Result startPostProcessSession(const std::string& outputPath,
+                                            uint32_t skipStages = 0);
+
     // —— 就绪态（05 D2/D8，实施计划 P3）——
     /// 停止采集但**保活会话**：设备侧灭灯停采（stopCapture），管线 pause——
     /// 融合累积器/obs 账本/渲染推送链全保留（编辑会话数据源）。三出口：

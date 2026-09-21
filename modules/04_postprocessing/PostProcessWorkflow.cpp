@@ -12,6 +12,7 @@
 #include "file_io.h"            // 06 STL 导出
 
 #include "pipelines/PipelineDeps.h"
+#include "pipelines/postprocess/NormalStage.h"
 
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
@@ -94,8 +95,11 @@ Result PostProcessWorkflow::start() {
     cfg.skipStages = skipStages_;
     cfg.outputPath = outputPath_;
     pipeline_ = std::make_unique<Scanner::pipeline::PostProcessPipeline>(std::move(cfg));
-    pipeline_->setStlExporter(&exportStlViaFileIo);   // app 侧适配 06 file_io exportSTL
-    // TODO(接入期): 网格四族算子 09 落地后经 pipeline_->setStageOp 注入
+pipeline_->setStlExporter(&exportStlViaFileIo);   // app 侧适配 06 file_io exportSTL
+    // P1-1（兑现 h:18 约定）：阶段 0 法线实注——07 NormalStage 适配 09
+    // laser_cloud_normal_cpu；网格四族（封装/补洞/光顺/边界）09 落地后同样
+    // 经 setStageOp 注入（当前内置桩 degraded "operator pending"）
+    pipeline_->setStageOp(0, std::make_unique<Scanner::pipeline::NormalStage>());
 
     Scanner::pipeline::PipelineDeps deps;
     deps.eventBus = ctx_ ? ctx_->eventBus() : nullptr;
