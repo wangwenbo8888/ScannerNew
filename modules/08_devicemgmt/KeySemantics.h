@@ -7,7 +7,7 @@
 // 门禁由注入 gate() 判——不让按→丢弃记日志（无计数可错位）。
 // 依赖方向：裁判→账本/黑板（单向只读）。
 // ============================================================================
-#include "KeyManager.h"
+#include "serial/McuFrame.h"
 #include "MenuLogic.h"
 
 #include <functional>
@@ -40,11 +40,12 @@ public:
     // capturing：采集子态（ModeController 黑板真相源）——裁判不看，启停同信号。
     KeySemantics(std::function<bool()> gate, KeySemActions actions);
 
-    // 处理一个手势：查门禁→查状态源→转移表→触发动作（动作内做不做账本变更由
+    // 处理一个手势（KeyManager 退役——直收 MCU 已判的 G01 手势，1短/2双/3长直映射）：
+    // 查门禁→查状态源→转移表→触发动作（动作内做不做账本变更由
     // DeviceManager 在动作回调里调 MenuLogic.apply——本类不直接碰账本）。
     // 左右键短按口径：菜单优先于调节——layer=2 一律游标（即使 ctx≠None；
     // 进菜单时 ctx 被 Exit 清，理论不并存，转移表定死优先级）。
-    void onGesture(const KeyGesture& g, const MenuState& menu);
+    void onGesture(const serial::GestureEvent& g, const MenuState& menu);
 
 private:
     std::function<bool()> gate_;   // 菜单类键门禁（每手势现问——DeviceManager 按当前态给）

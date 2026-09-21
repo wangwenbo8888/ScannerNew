@@ -23,7 +23,7 @@ struct CaptureParams {              // N10 七参（协议 260831 §下行表；
 
 struct McuUplink {                  // 上行分流出口（DeviceManager 注册；均在逻辑线程回调）
     std::function<void(const Scanner::device::serial::TempFrame&)> onTemp;
-    std::function<void(const Scanner::device::serial::RawKeyEvent&)> onKey;
+    std::function<void(const Scanner::device::serial::GestureEvent&)> onGesture;
     std::function<void(const Scanner::device::serial::StatusFrame&)> onStatus;
 };
 

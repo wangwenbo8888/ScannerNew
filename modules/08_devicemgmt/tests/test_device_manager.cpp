@@ -1,15 +1,16 @@
 // ============================================================================
 // test_device_manager.cpp — DeviceManager 门面集成测（D-T12b T1–T14 + D-T13 F1–F7）
 //
-// 全链真件（MCUDriver/KeyManager/KeySemantics/MenuLogic/ParamStore/Warmup/
+// 全链真件（MCUDriver/KeySemantics/MenuLogic/ParamStore/Warmup/
 // ModeController 全真配），假件仅两处边界：
 //   - MockMcu：writeOverride 记下行帧 + 可配置自动 ACK 回执（收到 "$Nxx..seq..;"
 //     解析 seq 回 "$A<seq>" 帧，经 DeviceManager::testInjectRaw 回灌）；
 //   - FakeCamera：IScannerCamera 全接口空壳，isOpen 可拨（掉线模拟）。
-// manualTick=true：不起逻辑线程，logicTick() 手动驱动；KeyManager/Warmup 时基
-// 用真实系统钟（手势静默窗/预热窗以小阈值+毫秒级 sleep 换确定论）。
+// manualTick=true：不起逻辑线程，logicTick() 手动驱动；Warmup 时基用真实系统钟
+// （预热窗以小阈值+毫秒级 sleep 换确定论）。手势=MCU 已判 G01 文本行注入
+// （KeyManager 退役：无 PC 侧消抖/时序合成），单发即单一手势。
 // 用例语义 = 08 设计方案 §7 集成行（T1–T12）+ T13/T14（并发冒烟/标定组链）+
-// F1–F7（§6.2 故障 8 码：掉线边沿/心跳/温度双警/预热超时/K 环溢/seq 跳变）。
+// F1–F7（§6.2 故障 8 码：掉线边沿/心跳/温度双警/预热超时/G01 手势环溢/seq 跳变）。
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -149,52 +150,28 @@ DeviceConfig makeCfg(FCodec::Version v = FCodec::Version::V3) {
     c.baud = 115200;
     c.protocol = v;
     c.ackTimeoutMs = 100;
-    c.keys = GestureThresholds{10, 60, 60, 150};              // 消抖/短按/双击窗/长按
     c.warmup = WarmupConfig{100, 0.1, 2.0, 3000};             // 稳定窗 100ms
     c.manualTick = true;
     return c;
 }
 
-// —— 按键/温度注入工具（v3 帧经 testInjectRaw；手势经 MCU 时刻域合成）——
+// —— 按键/温度注入工具（温度帧 v3 经 testInjectRaw；手势=MCU 已判 G01 文本行直收，
+//     经 testInjectTextLine——KeyManager 退役后无 PC 侧组合）——
 struct Kit {
     FCodec enc{FCodec::Version::V3};
     DeviceManager* dm = nullptr;
     uint16_t seq = 16;
-    uint32_t mcu = 100;
 
     void raw(const std::string& payload) { dm->testInjectRaw(enc.encode(payload, seq++)); }
-    void ev(char k, bool pressed, uint32_t t) {
-        raw(std::string{'K', k, static_cast<char>(pressed ? '1' : '0'), ','} + std::to_string(t));
-    }
-    // 短按：按下→30ms 松开→静默窗到期（tick 判 S）
-    void shortPress(char k) {
-        ev(k, true, mcu);
-        ev(k, false, mcu + 30);
-        mcu += 1000;
-        dm->logicTick();
-        sleepMs(90);
-        dm->logicTick();
-        dm->logicTick();                                      // 追一拍消化命令 ACK
-    }
-    // 双击：两对按压松开（事件驱动判 D）
-    void doublePress(char k) {
-        ev(k, true, mcu);
-        ev(k, false, mcu + 30);
-        ev(k, true, mcu + 60);
-        ev(k, false, mcu + 90);
-        mcu += 1000;
-        dm->logicTick();
+    // G01 手势：键 U/L/M/R + 手势位 1短/2双/3长（MCU 已判）→ 文本行注入 + 本拍 pump 派发
+    void gest(char k, int g) {
+        dm->testInjectTextLine(std::string("G01 ") + k + std::to_string(g));
         dm->logicTick();
     }
-    // 长按：仅按下，holdMs 到期（tick 判 H）
-    void holdPress(char k) {
-        ev(k, true, mcu);
-        mcu += 1000;
-        dm->logicTick();
-        sleepMs(190);
-        dm->logicTick();
-        dm->logicTick();
-    }
+    // 短按/双击/长按 = 单发 G01（手势类型 MCU 判定，无 PC 侧时序组合）
+    void shortPress(char k) { gest(k, 1); dm->logicTick(); }   // 追加一拍消化命令 ACK
+    void doublePress(char k) { gest(k, 2); dm->logicTick(); }
+    void holdPress(char k) { gest(k, 3); dm->logicTick(); }
     void temp(double c) {
         raw("T" + std::to_string(c));
         dm->logicTick();
@@ -455,20 +432,13 @@ TEST(DeviceManager, T7_KeyFlood100NoCrash) {
     mock.noAck = {"N11"};                                      // 关 ACK：每次启采集都发 H1（计消化数）
     ASSERT_TRUE(dm.open().success);
 
-    uint32_t t = 100;
-    for (int i = 0; i < 50; ++i) {                             // 50 对按下/松开 = 100 个 K 帧
-        kit.ev('M', true, t);
-        kit.ev('M', false, t + 30);
-        t += 1000;
+    for (int i = 0; i < 50; ++i) {                             // 50 次 M 短按 = 50 个 G01 手势
+        kit.shortPress('M');
     }
-    dm.logicTick();                                            // 环容量 64：仅前 64 事件入环
-    sleepMs(90);                                               // 末对静默窗到期
-    dm.logicTick();                                            // 手势 drain → 各组手势派发拍同步发 N10
-    dm.logicTick();                                            // ACK 泵消化 → 组收尾
-    // 每消化一对手势产生启停交替（启=单帧 N10，停=N11 H0——a9bfe53 口径）：
+    // 环容量 64：50 < 64 不溢；每手势即一个启/停（启=N10/停=N11 H0——a9bfe53 口径）：
     // 洪峰下 CommandChannel 挂表容量有限，组可被逐出判超时——本测只证洪峰不崩
     EXPECT_GE(mock.count("N10") + mock.count("N11 H0"), 1);      // 洪峰下仍有命令落地（启=N10/停=N11 H0）
-    EXPECT_EQ(dm.menuState().layer, 1);                        // 洪峰后菜单层仍可读（不崩/不死；启停奇偶不assert——环溢数依容量时序）
+    EXPECT_EQ(dm.menuState().layer, 1);                        // 洪峰后菜单层仍可读（不崩/不死；启停奇偶不assert）
 }
 
 // —— T8：采集中相机掉线 → Fault 且无自主停采（只报不动手：无 N11 H0）——
@@ -501,7 +471,7 @@ TEST(DeviceManager, T8_CameraDisconnectDuringCaptureFaultNoAutoStop) {
     EXPECT_FALSE(dm.isDeviceReady());
 }
 
-// —— T9：v2→close→v3 开关切换重连（v2 匿名按键丢、v3 手势链活）——
+// —— T9：v2→close→v3 开关切换重连（v2 匿名 K 帧停用丢弃、v3 G01 手势链活）——
 TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -515,7 +485,7 @@ TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
         DeviceManager dm(v2, gateOk, &bus, nullptr, write);
         mock.dm = &dm;
         ASSERT_TRUE(dm.open().success);
-        dm.testInjectRaw("K1;");                               // v2 匿名按键：构不出 RawKeyEvent → 丢
+        dm.testInjectRaw("K1;");                               // v2 匿名按键：K 原始链停用 → 落 onParseFail 丢
         dm.logicTick();
         EXPECT_EQ(dm.menuState().layer, 1);                    // 无任何手势副作用
         EXPECT_EQ(mock.count("N11"), 0);
@@ -851,7 +821,7 @@ TEST(DeviceManager, F5_WarmupTimeoutFault) {
     EXPECT_EQ(mock.count("N14 T0"), 0);                         // 只报不停加热
 }
 
-// —— F6（#6）：按键洪峰挤爆 K 环 → keyDrop 增长 → 0x0806 一次；无增量不重复 ——
+// —— F6（#6）：G01 手势洪峰挤爆手势环 → keyDrop 增长 → 0x0806 一次；无增量不重复 ——
 TEST(DeviceManager, F6_KeyRingOverflowFault) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -865,11 +835,8 @@ TEST(DeviceManager, F6_KeyRingOverflowFault) {
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    uint32_t t = 100;
-    for (int i = 0; i < 50; ++i) {                             // 100 K 帧 > 环容 63 → 丢新
-        kit.ev('M', true, t);
-        kit.ev('M', false, t + 30);
-        t += 1000;
+    for (int i = 0; i < 100; ++i) {                            // 100 个 G01 L1（主层左键短=无效，
+        dm.testInjectTextLine("G01 L1");                       // 无副作用）> 环容 63 → 丢新 ~37
     }
     dm.logicTick();                                            // 泵消化 + 巡检报溢
     EXPECT_GE(rec.fault(FC(DevFault::KeyRingOverflow)), 1);

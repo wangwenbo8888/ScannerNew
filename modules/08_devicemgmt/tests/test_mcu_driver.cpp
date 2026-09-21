@@ -30,16 +30,16 @@ struct FrameLog {
 
 // 上行回调记账
 struct UplinkLog {
-    int temp = 0, key = 0, status = 0;
+    int temp = 0, gesture = 0, status = 0;
     TempFrame lastT{};
-    RawKeyEvent lastK{};
+    GestureEvent lastG{};
     StatusFrame lastS{};
 
     McuUplink uplink() {
         McuUplink h;
-        h.onTemp   = [this](const TempFrame& t)   { ++temp;   lastT = t; };
-        h.onKey    = [this](const RawKeyEvent& k) { ++key;    lastK = k; };
-        h.onStatus = [this](const StatusFrame& s) { ++status; lastS = s; };
+        h.onTemp    = [this](const TempFrame& t)     { ++temp;    lastT = t; };
+        h.onGesture = [this](const GestureEvent& g)  { ++gesture; lastG = g; };
+        h.onStatus  = [this](const StatusFrame& s)   { ++status;  lastS = s; };
         return h;
     }
 };
@@ -67,7 +67,8 @@ TEST(MCUDriver, TypedPayloadV3) {
     EXPECT_EQ(io.frames[4], enc.encode("N15 V2", 4));
 }
 
-// —— 2. PumpDispatch：T/K/S 上行帧经 pump 分流到 Uplink 三回调 ——
+// —— 2. PumpDispatch：T/G/S 上行经 pump 分流到 Uplink 三回调（G01 手势文本行直收；
+//      K 原始链停用——260831 协议）——
 TEST(MCUDriver, PumpDispatchUplink) {
     MCUDriver d;
     d.setProtocolVersion(FCodec::Version::V3);
@@ -76,17 +77,16 @@ TEST(MCUDriver, PumpDispatchUplink) {
     d.setUplink(log.uplink());
 
     d.testInjectRaw(enc.encode("T25.5", 1));
-    d.testInjectRaw(enc.encode("KM1,1234", 2));
+    d.testInjectTextLine("G01 M1");
     d.testInjectRaw(enc.encode("S0A", 3));
     d.pump();
 
     EXPECT_EQ(log.temp, 1);
     EXPECT_EQ(log.lastT.channels, 1);
     EXPECT_DOUBLE_EQ(log.lastT.celsius[0], 25.5);
-    EXPECT_EQ(log.key, 1);
-    EXPECT_EQ(log.lastK.key, KeyId::Middle);
-    EXPECT_TRUE(log.lastK.pressed);
-    EXPECT_EQ(log.lastK.mcuMs, 1234u);
+    EXPECT_EQ(log.gesture, 1);
+    EXPECT_EQ(log.lastG.key, KeyId::Middle);
+    EXPECT_EQ(log.lastG.gesture, GestureEvent::Gesture::Short);
     EXPECT_EQ(log.status, 1);
     EXPECT_EQ(log.lastS.code, 0x0A);
 }
@@ -108,7 +108,7 @@ TEST(MCUDriver, AckRouting) {
     EXPECT_TRUE(ok);
 }
 
-// —— 4. V2AnonymousKeyDropped：v2 匿名 K1; 构不出 RawKeyEvent → onKey 不触发 ——
+// —— 4. V2AnonymousKeyDropped：v2 匿名 K1; 原始按键链停用 → 落 onParseFail，手势不触发 ——
 TEST(MCUDriver, V2AnonymousKeyDropped) {
     MCUDriver d;
     d.setProtocolVersion(FCodec::Version::V2);
@@ -116,7 +116,20 @@ TEST(MCUDriver, V2AnonymousKeyDropped) {
     d.setUplink(log.uplink());
     d.testInjectRaw("K1;");
     d.pump();
-    EXPECT_EQ(log.key, 0);
+    EXPECT_EQ(log.gesture, 0);
+}
+
+// —— 4b. MalformedG01Dropped：G01 格式不符（键位缺失/手势位非法）→ 不入环、不触发 ——
+TEST(MCUDriver, MalformedG01Dropped) {
+    MCUDriver d;
+    d.setProtocolVersion(FCodec::Version::V2);
+    UplinkLog log;
+    d.setUplink(log.uplink());
+    d.testInjectTextLine("G01 U");
+    d.testInjectTextLine("G01 U9");
+    d.testInjectTextLine("G01 X1");
+    d.pump();
+    EXPECT_EQ(log.gesture, 0);
 }
 
 // —— 5. LastRxUpdated：任何有效帧刷新通讯心跳时间戳（设计方案 §4-4）——
@@ -166,7 +179,7 @@ TEST(MCUDriver, V2LegacyEIgnored) {
     d.setUplink(log.uplink());
     d.testInjectRaw("E1;");
     d.pump();
-    EXPECT_EQ(log.temp + log.key + log.status, 0);
+    EXPECT_EQ(log.temp + log.gesture + log.status, 0);
 }
 
 // —— 9. ReopenDrainsRings：close 前未消费的环残留经 reopen 排空、对账基线/
@@ -175,20 +188,19 @@ TEST(MCUDriver, ReopenDrainsRings) {
     FrameLog io;
     MCUDriver d([&](const std::string& f) { return io.write(f); });
     d.setProtocolVersion(FCodec::Version::V3);
-    FCodec enc(FCodec::Version::V3);
     UplinkLog log;
     d.setUplink(log.uplink());
 
     d.open("");
-    d.testInjectRaw(enc.encode("KM1,1234", 1));
+    d.testInjectTextLine("G01 U1");
     d.pump();
-    EXPECT_EQ(log.key, 1);                          // 正常收到
+    EXPECT_EQ(log.gesture, 1);                          // 正常收到
 
-    d.testInjectRaw(enc.encode("KU1,2000", 2));     // 残留（未 pump 即关）
+    d.testInjectTextLine("G01 U2");                    // 残留（未 pump 即关）
     EXPECT_GT(d.lastRxTime(), 0u);
     d.close();
     d.open("");
-    EXPECT_EQ(d.lastRxTime(), 0u);                  // 心跳复位
-    d.pump();                                       // 残留已被 open 排空
-    EXPECT_EQ(log.key, 1);                          // 无任何回调再触发
+    EXPECT_EQ(d.lastRxTime(), 0u);                      // 心跳复位
+    d.pump();                                           // 残留已被 open 排空
+    EXPECT_EQ(log.gesture, 1);                          // 无任何回调再触发
 }

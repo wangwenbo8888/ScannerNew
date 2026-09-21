@@ -20,7 +20,7 @@ namespace Scanner::device {
 namespace {
 
 // 统一时基：system_clock 毫秒（与 MCUDriver 上行帧 ts 同域——Warmup tsMs/tick、
-// KeyManager pcClock、v2 兜底判据共用）
+// v2 兜底判据共用）
 int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -79,7 +79,6 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
       camFactory_(std::move(camFactory)),
       writeOverride_(std::move(serialWrite)),
       mcu_(std::make_unique<MCUDriver>(writeOverride_)),
-      keyMgr_(std::make_unique<KeyManager>(cfg_.keys, [] { return nowMs(); })),
       menu_(std::make_unique<MenuLogic>()),
       mode_(std::make_unique<ModeController>(std::move(gate))),
       warmup_(std::make_unique<WarmupSequence>(cfg_.warmup)) {
@@ -196,7 +195,8 @@ Result DeviceManager::open() {
         return Result::fail("MCU 打开失败: " + rm.message);
     }
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: 相机+MCU 并行段 {}ms", el());
-    // ③ 上行分流接线（onTemp 温度双警+记账+Warmup 喂入 / onKey→KeyManager / onStatus 记账）
+    // ③ 上行分流接线（onTemp 温度双警+记账+Warmup 喂入 / onGesture→KeySemantics 直收
+    //     MCU 已判手势 / onStatus 记账）
     hal::McuUplink up;
     up.onTemp = [this](const serial::TempFrame& t) {
         checkTempFaults(t);                      // 0x0803 爆表 / 0x0804 乱跳（D-T13）
@@ -204,7 +204,7 @@ Result DeviceManager::open() {
         tempRxTime_ = t.ts;
         warmup_->onTemperature(t.celsius[0], static_cast<int64_t>(t.ts));
     };
-    up.onKey = [this](const serial::RawKeyEvent& k) { keyMgr_->onRawEvent(k); };
+    up.onGesture = [this](const serial::GestureEvent& g) { dispatchGesture(g); };
     up.onStatus = [this](const serial::StatusFrame& s) {
         JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] S 状态帧 code={:#x}（码表待协议 §8-8）", s.code);
     };
@@ -281,13 +281,12 @@ void DeviceManager::logicLoop() {
 
 void DeviceManager::logicTick() {
     drainPosts();                               // ① 编队任务排空（首——本拍落地）
-    mcu_->pump();                               // ② 上行环排空（含 onAck 回填）
-    keyMgr_->tick(nowMs());                     // ③ 手势判定 PC 域兜底
-    for (const auto& g : keyMgr_->drain()) dispatchKeyGesture(g);
-    mcu_->channelTick();                        // ④ 对账/重传/3 败收口
+    mcu_->pump();                               // ② 上行环排空（含 onAck 回填）；手势已由
+                                                //    MCU 判定（G01），pump 直喂 semantics
+    mcu_->channelTick();                        // ③ 对账/重传/3 败收口
     const int64_t now = nowMs();
-    warmup_->tick(now);                         // ⑤ 预热超时兜底
-    // ⑥ v2 温度断流兜底：首个 T 帧后武装，超 1.2s 无帧 → N15 查询（发后重臂）
+    warmup_->tick(now);                         // ④ 预热超时兜底
+    // ⑤ v2 温度断流兜底：首个 T 帧后武装，超 1.2s 无帧 → N15 查询（发后重臂）
     if (cfg_.protocol == serial::FrameCodec::Version::V2 && tempRxTime_ > 0 &&
         now - static_cast<int64_t>(tempRxTime_) > kV2TempFallbackMs) {
         mcu_->queryTemperature(kV2TempQueryCh);
@@ -315,15 +314,15 @@ void DeviceManager::logicTick() {
             serialSilentLatched_ = false;       // 心跳恢复清锚
         }
     }
-    // ⑨ 按键队列挤爆（#6）：K 事件环满丢新计数增长即报（事件型——增量即边沿，
-    //    无需恢复语义；计数单调累计）
+    // ⑧ 按键队列挤爆（#6）：G01 手势环满丢新计数增长即报（事件型——增量即边沿，
+    //    无需恢复语义；计数单调累计；260831 协议源改 G01 手势环）
     if (const uint64_t kd = mcu_->keyDropCount(); kd > lastKeyDrop_) {
         publishFault(code(DevFault::KeyRingOverflow),
-                     "K 事件环满丢新 +" + std::to_string(kd - lastKeyDrop_) +
+                     "G01 手势环满丢新 +" + std::to_string(kd - lastKeyDrop_) +
                          "（累计 " + std::to_string(kd) + "）");
         lastKeyDrop_ = kd;
     }
-    // ⑩ seq 跳变丢帧（#9）：T seq 对账计数每拍增量达 seqGapWarn 即报（事件型；
+    // ⑨ seq 跳变丢帧（#9）：T seq 对账计数每拍增量达 seqGapWarn 即报（事件型；
     //    v2 无 seq 对账恒 0 不触发）
     if (const uint64_t sg = mcu_->seqGapCount();
         sg - lastSeqGap_ >= static_cast<uint64_t>(std::max(1, cfg_.seqGapWarn))) {
@@ -332,7 +331,7 @@ void DeviceManager::logicTick() {
                          "（累计 " + std::to_string(sg) + "）");
         lastSeqGap_ = sg;
     }
-    // ⑪ 快照刷新（菜单/温度/参数——跨线程读口统一互斥快照；轻拷）
+    // ⑩ 快照刷新（菜单/温度/参数——跨线程读口统一互斥快照；轻拷）
     refreshParamSnapshot();
     {
         std::lock_guard<std::mutex> lock(menuSnapMtx_);
@@ -342,12 +341,16 @@ void DeviceManager::logicTick() {
         std::lock_guard<std::mutex> lock(tempSnapMtx_);
         tempSnap_ = lastTemps_;
     }
-    // ⑫ 启动自检状态机推进（无阻塞；闲时 stage=-1 直返）
+    // ⑪ 启动自检状态机推进（无阻塞；闲时 stage=-1 直返）
     selfCheckTick(now);
 }
 
 void DeviceManager::testInjectRaw(const std::string& frameBytes) {
     mcu_->testInjectRaw(frameBytes);
+}
+
+void DeviceManager::testInjectTextLine(const std::string& line) {
+    mcu_->testInjectTextLine(line);           // 透传：测试缝（v2 G01 手势帧文本行路径）
 }
 
 // ============================================================================
@@ -700,8 +703,8 @@ void DeviceManager::applyAdjust(int dir) {
     }
 }
 
-void DeviceManager::dispatchKeyGesture(const KeyGesture& g) {
-    semantics_->onGesture(g, menu_->state());
+void DeviceManager::dispatchGesture(const serial::GestureEvent& g) {
+    semantics_->onGesture(g, menu_->state());   // KeySemantics 直收 MCU 已判手势（KeyManager 退役）
 }
 
 // ============================================================================

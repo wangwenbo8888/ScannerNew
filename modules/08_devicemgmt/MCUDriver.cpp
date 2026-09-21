@@ -166,7 +166,7 @@ Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     if (open_.load()) return Scanner::Result::ok("MCU已打开");
     applyVersion();
     // reopen 复位：排空残留上行环 + 清 seq 对账基线/心跳——上一会话数据不串染
-    drainRing(keyRing_);
+    drainRing(gestureRing_);
     drainRing(statusRing_);
     drainRing(ackRing_);
     drainRing(tempRing_);
@@ -336,15 +336,10 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
         else onParseFail(f.payload);
         break;
     }
-    case 'K': {
-        serial::RawKeyEvent k;
-        if (serial::parseKeyPayload(f.payload, k)) {
-            k.seq = f.seq; k.ts = now;
-            if (!keyRing_.push(k)) JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 事件环满丢新(K,计{})", keyRing_.dropped());
-        }
-        else onParseFail(f.payload);   // v2 匿名 K1;/K0; 落此（§2.5 按键链停用）
+    case 'K':
+        onParseFail(f.payload);   // v2 匿名 K1;/K0;（§2.5 按键链停用——260831 改走
+                                  // G01 手势帧文本行路径，K 原始按键链不再受理）
         break;
-    }
     case 'S': {
         serial::StatusFrame s;
         if (serial::parseStatusPayload(f.payload, s)) {
@@ -406,6 +401,17 @@ void MCUDriver::feedTextLine(const std::string& line) {
     // 温度双警的统一数据源；260919 用户口径：采集温度须上界面）
     if (line.size() >= 3 && line[0] == 'G' && line[1] == '0') {
         probeHit_.store(true, std::memory_order_release);
+        if (line[2] == '1') {                     // G01 手势帧：键+手势位（1短/2双/3长，
+                                                  // MCU 已判——KeySemantics 直收；KeyManager 退役口径）
+            serial::GestureEvent ge;
+            if (serial::parseG01Payload(line, ge)) {
+                ge.ts = systemNowMs();
+                if (!gestureRing_.push(ge)) JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 事件环满丢新(G01,计{})", gestureRing_.dropped());
+            } else {
+                JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] G01 格式不符（手势不入账）: '{}'", line);
+            }
+            return;
+        }
         if (line[2] == '2') {                     // G02 四路温度：逐标签 A/B/C/D 解析
             double v[4] = {0, 0, 0, 0};
             bool got[4] = {false, false, false, false};
@@ -460,8 +466,8 @@ void MCUDriver::feedTextLine(const std::string& line) {
 void MCUDriver::pump() {
     serial::AckFrame a;
     while (ackRing_.pop(a)) channel_.onAck(a.ackedSeq);        // A 先行：ACK 最速销项
-    serial::RawKeyEvent k;
-    while (keyRing_.pop(k)) { if (uplink_.onKey) uplink_.onKey(k); }
+    serial::GestureEvent g;
+    while (gestureRing_.pop(g)) { if (uplink_.onGesture) uplink_.onGesture(g); }
     serial::StatusFrame s;
     while (statusRing_.pop(s)) { if (uplink_.onStatus) uplink_.onStatus(s); }
     serial::TempFrame t;
@@ -543,8 +549,8 @@ uint64_t MCUDriver::seqGapCount() const { return seqGapCount_.load(std::memory_o
 
 void MCUDriver::channelTick() { channel_.tick(); }   // D-T12b：对账出口（逻辑线程驱动）
 
-uint64_t MCUDriver::keyDropCount() const {           // D-T13：K 环丢新计数出口
-    return keyRing_.dropped();
+uint64_t MCUDriver::keyDropCount() const {           // D-T13：G01 手势环丢新计数出口
+    return gestureRing_.dropped();
 }
 
 void MCUDriver::setAckTimeoutMs(int ms) {            // D-T12b：open 前注入生效
@@ -558,6 +564,10 @@ void MCUDriver::testInjectRaw(const std::string& frameBytes) {
     std::vector<serial::FrameCodec::Frame> out;
     codec_.feed(frameBytes, out);
     for (const auto& f : out) dispatchFrame(f);
+}
+
+void MCUDriver::testInjectTextLine(const std::string& line) {
+    feedTextLine(line);                 // 等价 rx 线程收到裸文本行（v2 G 帧路径）
 }
 
 } // namespace Scanner::device

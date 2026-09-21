@@ -40,21 +40,29 @@ TEST(McuFrameParse, TempStrictRejects) {
     EXPECT_FALSE(parseTempPayload(std::string("T25.3\0x", 7), f));   // 内嵌 NUL 残留
 }
 
-// —— parseKeyPayload：K+键号(U/L/M/R)+按下(0/1)+','+毫秒 ——
-TEST(McuFrameParse, KeyLegal) {
-    RawKeyEvent e;
-    ASSERT_TRUE(parseKeyPayload("KM1,1234", e));
-    EXPECT_EQ(e.key, KeyId::Middle);
-    EXPECT_TRUE(e.pressed);
-    EXPECT_EQ(e.mcuMs, 1234u);
+// —— parseG01Payload：G01 <键 U/L/M/R><手势位 1短/2双/3长>（键位前容忍空白）——
+TEST(McuFrameParse, G01Legal) {
+    GestureEvent e;
+    ASSERT_TRUE(parseG01Payload("G01 U1", e));
+    EXPECT_EQ(e.key, KeyId::Up);
+    EXPECT_EQ(e.gesture, GestureEvent::Gesture::Short);
+    GestureEvent g;
+    ASSERT_TRUE(parseG01Payload("G01 M2", g));
+    EXPECT_EQ(g.key, KeyId::Middle);
+    EXPECT_EQ(g.gesture, GestureEvent::Gesture::Double);
+    GestureEvent h;
+    ASSERT_TRUE(parseG01Payload("G01R3", h));     // 无空白变体
+    EXPECT_EQ(h.key, KeyId::Right);
+    EXPECT_EQ(h.gesture, GestureEvent::Gesture::Hold);
 }
 
-TEST(McuFrameParse, KeyIllegal) {
-    RawKeyEvent e;
-    EXPECT_FALSE(parseKeyPayload("KX1,1234", e));   // 键号非法
-    EXPECT_FALSE(parseKeyPayload("KM2,1234", e));   // 按下位非 0/1
-    EXPECT_FALSE(parseKeyPayload("KM1,12a4", e));   // 毫秒非纯数字
-    EXPECT_FALSE(parseKeyPayload("KM1", e));        // 缺逗号段
+TEST(McuFrameParse, G01Illegal) {
+    GestureEvent e;
+    EXPECT_FALSE(parseG01Payload("G01 X1", e));   // 键号非法
+    EXPECT_FALSE(parseG01Payload("G01 U9", e));   // 手势位非 1/2/3
+    EXPECT_FALSE(parseG01Payload("G01 U12", e));  // 多余字符
+    EXPECT_FALSE(parseG01Payload("G01 U", e));    // 缺手势位
+    EXPECT_FALSE(parseG01Payload("G02 U1", e));   // 前缀不符
 }
 
 // —— parseStatusPayload：S 后 1~2 个 hex 字符 ——

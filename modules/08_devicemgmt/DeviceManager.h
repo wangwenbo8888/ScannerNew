@@ -2,13 +2,13 @@
 // ============================================================================
 // DeviceManager.h — 设备管理门面 + 逻辑线程（D-T12b；设计方案 §4 五增量）
 //
-// 组合根：MCUDriver/KeyManager/KeySemantics/MenuLogic/ParamStore/WarmupSequence/
+// 组合根：MCUDriver/KeySemantics/MenuLogic/ParamStore/WarmupSequence/
 // ModeController 全 unique_ptr 内部持有（铁规：不漏零件指针/类型——对外只出值
 // 类型与薄转发；MCUDriver/KeySemantics 仅前向声明）。门禁回调注入不反链 07/10
 // （GateQuery 只进不出）。
 //
 // 线程纪律（Critical #1 修正，设计 §6.1「切模式经队列转逻辑线程执行」）：
-//   - 无锁零件（CommandChannel 表/ParamStore map/MenuLogic/Warmup/KeyManager）
+//   - 无锁零件（CommandChannel 表/ParamStore map/MenuLogic/Warmup）
 //     单一属主=逻辑线程；门面一切变异入口经 post() 任务队列编队（mutex+deque，
 //     容量 64 满丢新+warn），logicTick 开头排空执行；manualTick 模式下测试
 //     调 logicTick 即驱动。
@@ -25,9 +25,10 @@
 //     快照语义：拍后读即最新）。
 //
 // 逻辑线程一拍（logicTick，!manualTick 时 10ms 循环）：
-//   drain 任务队列 → pump 上行环 → 按键手势 drain/dispatch → CommandChannel
+//   drain 任务队列 → pump 上行环（G01 手势/温度/S 状态/Ack 对账——手势已在
+//   MCU 判定，pump 直喂 KeySemantics：KeyManager 退役）→ CommandChannel
 //   对账 tick（经 MCUDriver::channelTick——S-T5 口径：pump 不调 tick，归本类驱动）
-//   → Warmup tick → v2 温度断流兜底 → 故障巡检（相机掉线边沿/串口无声/K 环溢/
+//   → Warmup tick → v2 温度断流兜底 → 故障巡检（相机掉线边沿/串口无声/手势环溢/
 //   seq 跳变——D-T13 §6.2；温度双警在 onTemp 回调内）→ 参数快照。
 // 切模式 = 命令组步链（sendSeq：前一条 ACK 完成回调里发下一条；任一步 3 败
 // 整组短路+Fault）；组成功回调才擦板（ModeController「命令成功后才落板」）。
@@ -53,7 +54,6 @@
 // ============================================================================
 
 #include "IScannerCamera.h"
-#include "KeyManager.h"       // GestureThresholds（DeviceConfig 值成员）
 #include "MenuLogic.h"        // MenuState（menuState 返回值）
 #include "ModeController.h"   // DeviceMode（mode 返回值）
 #include "ParamStore.h"       // ParamEntry（getParam 返回值）
@@ -91,7 +91,8 @@ enum class DevFault : int64_t {
     TempSpike       = 0x0804,  // #4 温度乱跳：相邻 T 帧同路 |Δ|/Δt>tempSpikeC ℃/s；
                                //     次帧平稳清锚
     WarmupTimeout   = 0x0805,  // #5 预热超时：WarmupSequence onTimeout（只报不停加热）
-    KeyRingOverflow = 0x0806,  // #6 按键队列挤爆：K 事件环满丢新计数增长（事件型）
+    KeyRingOverflow = 0x0806,  // #6 按键队列挤爆：G01 手势环满丢新计数增长（事件型；
+                               //     260831 协议 K 原始链停用，源改 G01 手势环）
     CmdNoAck        = 0x0807,  // #7≡#8 命令无应答（含 ACK 重传 3 败——v3 下同源合并）：
                                //     单发/组链中段/自检/加热命令的 3 败收口均归此码，
                                //     detail 串区分命令名
@@ -108,7 +109,6 @@ struct DeviceConfig {
     // 固件升 v3 后改回 V3（reliable/ACK/CRC 链路自动启用）
     serial::FrameCodec::Version protocol = serial::FrameCodec::Version::V2;
     int ackTimeoutMs = 100;
-    GestureThresholds keys{};
     WarmupConfig warmup{};
     bool manualTick = false;      // 测试：不起逻辑线程，logicTick() 手动驱动
     // —— D-T13 故障巡检阈值（§6.2；产线默认值，测试可注入小值换快用例）——
@@ -198,6 +198,7 @@ public:
 
     void logicTick();                           // 逻辑线程主体一拍（manualTick 下测试驱动）
     void testInjectRaw(const std::string& frameBytes);   // 测试缝：等价 rx 收到原始字节
+    void testInjectTextLine(const std::string& line);    // 测试缝：等价 rx 收到裸文本行（v2 G01）
 
 private:
     // 与 hal::IMCU::DoneCb 结构一致的下行命令完成回调（不经 IMCU.h——不泄子零件头）
@@ -227,7 +228,7 @@ private:
     void checkTempFaults(const serial::TempFrame& t);  // 温度双警 0x0803/0x0804（onTemp 内）
     void publishFault(int64_t code, const std::string& detail);
     void publishEvent(EventType t, int64_t p1, int64_t p2);
-    void dispatchKeyGesture(const KeyGesture&);
+    void dispatchGesture(const serial::GestureEvent&);
     void buildKeyActions();                     // KeySemActions 11 出口的接线
     void applyAdjust(int dir);                  // 调节步进 → MenuLogic+ParamStore
     void sendSeq(std::vector<SeqStep> steps, std::function<void(bool)> onDone);
@@ -251,7 +252,6 @@ private:
     // —— 组合零件（全内部持有不外泄；MCUDriver/KeySemantics 前向声明）——
     std::unique_ptr<hal::IScannerCamera> camera_;
     std::unique_ptr<MCUDriver> mcu_;
-    std::unique_ptr<KeyManager> keyMgr_;
     std::unique_ptr<MenuLogic> menu_;
     std::unique_ptr<ModeController> mode_;
     std::unique_ptr<WarmupSequence> warmup_;
@@ -291,7 +291,7 @@ private:
     bool tempSpikeLatched_ = false;             // 0x0804 锁（次帧平稳清锚）
     serial::TempFrame prevTemps_{};             // 0x0804 上一 T 帧（速率分子/分母）
     bool prevTempsValid_ = false;
-    uint64_t lastKeyDrop_ = 0;                  // 0x0806 上拍 K 环丢新计数（单调累计对齐）
+    uint64_t lastKeyDrop_ = 0;                  // 0x0806 上拍 G01 手势环丢新计数（单调累计对齐）
     uint64_t lastSeqGap_ = 0;                   // 0x0808 上拍 seq 跳变计数（单调累计对齐）
     bool opened_ = false;
     std::atomic<bool> running_{false};

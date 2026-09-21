@@ -26,18 +26,6 @@ bool parseDoubleFull(const std::string& s, double& out) {
     return true;
 }
 
-// 纯十进制数字串 → uint32（from_chars：拒空串/符号/非数字/溢出；指针距离判全消费）
-bool parseU32Full(const std::string& s, uint32_t& out) {
-    if (s.empty()) return false;
-    const char* b = s.data();
-    const char* e = b + s.size();
-    uint32_t v = 0;
-    const auto r = std::from_chars(b, e, v, 10);
-    if (r.ec != std::errc{} || r.ptr != e) return false;
-    out = v;
-    return true;
-}
-
 // 纯 hex 字符串 → uint32（拒空串/非 hex 字符/溢出；限长由调用方保证）
 bool parseHexFull(const std::string& s, uint32_t& out) {
     if (s.empty()) return false;
@@ -69,19 +57,32 @@ bool parseTempPayload(const std::string& payload, TempFrame& out) {
     return true;
 }
 
-bool parseKeyPayload(const std::string& payload, RawKeyEvent& out) {
-    out = RawKeyEvent{};
-    if (payload.size() < 5 || payload[0] != 'K' || payload[3] != ',') return false;
-    switch (payload[1]) {
+bool parseG01Payload(const std::string& payload, GestureEvent& out) {
+    out = GestureEvent{};
+    // 格式：G01 <键><手势位> —— 键 U/L/M/R，手势位 1短/2双/3长（MCU 已判）。
+    // 容忍 G01 与键位之间可选空白（协议样例 "G01 U1"，真机文本行实测带空格）。
+    if (payload.size() < 5 || payload[0] != 'G' || payload[1] != '0' || payload[2] != '1')
+        return false;
+    auto isW = [](char c) { return c == ' ' || c == '\t'; };
+    size_t i = 3;
+    while (i < payload.size() && isW(payload[i])) ++i;
+    if (i + 2 > payload.size()) return false;
+    switch (payload[i]) {
         case 'U': out.key = KeyId::Up; break;
         case 'L': out.key = KeyId::Left; break;
         case 'M': out.key = KeyId::Middle; break;
         case 'R': out.key = KeyId::Right; break;
         default: return false;
     }
-    if (payload[2] != '0' && payload[2] != '1') return false;
-    out.pressed = (payload[2] == '1');
-    return parseU32Full(payload.substr(4), out.mcuMs);
+    switch (payload[i + 1]) {
+        case '1': out.gesture = GestureEvent::Gesture::Short; break;
+        case '2': out.gesture = GestureEvent::Gesture::Double; break;
+        case '3': out.gesture = GestureEvent::Gesture::Hold; break;
+        default: return false;
+    }
+    for (size_t j = i + 2; j < payload.size(); ++j)   // 键位后仅允尾随空白/回车（CRLF 行尾）
+        if (!isW(payload[j]) && payload[j] != '\r') return false;
+    return true;
 }
 
 bool parseStatusPayload(const std::string& payload, StatusFrame& out) {

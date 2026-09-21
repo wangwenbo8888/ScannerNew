@@ -39,7 +39,6 @@ set(GALAXY_DLL_DIR "${GALAXY_SDK_DIR}/lib/x64" CACHE PATH "Galaxy DLL dir")
 target_sources(mod_devicemgmt PRIVATE serial/McuFrame.cpp serial/FrameCodec.cpp serial/SerialPort.cpp serial/CommandChannel.cpp)
 
 # PC 侧零件（T6 起陆续登记于此）
-target_sources(mod_devicemgmt PRIVATE KeyManager.cpp)
 target_sources(mod_devicemgmt PRIVATE MenuLogic.cpp)
 target_sources(mod_devicemgmt PRIVATE KeySemantics.cpp)
 target_sources(mod_devicemgmt PRIVATE ModeController.cpp)

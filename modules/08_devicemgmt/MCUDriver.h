@@ -3,7 +3,8 @@
 // MCUDriver.h — 下位机 MCU 驱动 = 三小层组合壳（HAL 实现；设计方案 §2.2-§2.5）
 //
 // 组合：SerialPort(纯IO) + FrameCodec(v2/v3成拆帧) + CommandChannel(可靠下行)
-//       + 4 个有界环（K/S/A 事件环各 64 + T 遥测环 8——实现口径：分开实例化，
+//       + 4 个有界环（G01 手势 + S/A 事件环各 64 + T 遥测环 8——260831 协议：
+//       K 原始按键链停用，G01 帧文本行承载手势（MCU 已判）；实现口径：分开实例化，
 //       比 McuFrame.h 原型「K/S/A 合一环」更简：无变体分发，丢最旧语义各自独立）。
 // 线程：rx 线程（open 起，零业务：read→feed→按首字符入环）；
 //       逻辑线程 send*/setUplink/pump（排空环→Uplink 回调 + onAck 回填 + seq 对账）。
@@ -80,7 +81,7 @@ public:
     void channelTick();          // CommandChannel 对账 tick 出口（S-T5 口径：pump 不调
                                  // tick——重传/3 败收口归 DeviceManager 逻辑线程驱动）
     void setAckTimeoutMs(int ms);  // ACK 超时注入（open 前配；钳 ≥1；测试缩短重传周期用）
-    uint64_t keyDropCount() const;  // D-T13：K 事件环满丢新计数出口（门面 0x0806 巡检用；
+    uint64_t keyDropCount() const;  // D-T13：G01 事件环满丢新计数出口（门面 0x0806 巡检用；
                                     // 单调累计不随 open 复位——与 parseFailCount 同口径）
     // 串口收发监听（调试弹窗用）：TX=写线程实际出队帧（含分号），RX=上行完整帧
     // 载荷/裸文本行。回调可能来自 rx/写线程——订阅方自行切线程；open 前设置
@@ -88,6 +89,7 @@ public:
 
     // —— 测试缝（仅测试）：等价 rx 线程收到原始字节——喂 codec 并分发入环 ——
     void testInjectRaw(const std::string& frameBytes);
+    void testInjectTextLine(const std::string& line);   // 等价 rx 线程收到裸文本行（v2 G 帧路径）
 
 private:
     void rxLoop();                // rx 线程主体：read→feed→dispatch（含半帧超时推进）
@@ -111,7 +113,7 @@ private:
     serial::SerialPort serial_;
 
     // —— 上行 4 环（rx 生产 / pump 消费；满丢新各自计数——D-T12a 口径）——
-    serial::SpscRing<serial::RawKeyEvent, 64> keyRing_;
+    serial::SpscRing<serial::GestureEvent, 64> gestureRing_;
     serial::SpscRing<serial::StatusFrame, 64> statusRing_;
     serial::SpscRing<serial::AckFrame, 64> ackRing_;
     serial::SpscRing<serial::TempFrame, 8> tempRing_;

@@ -9,9 +9,9 @@ namespace Scanner::device {
 KeySemantics::KeySemantics(std::function<bool()> gate, KeySemActions actions)
     : gate_(std::move(gate)), actions_(std::move(actions)) {}
 
-void KeySemantics::onGesture(const KeyGesture& g, const MenuState& menu) {
+void KeySemantics::onGesture(const serial::GestureEvent& g, const MenuState& menu) {
     using K = serial::KeyId;
-    using G = KeyGesture::G;
+    using G = serial::GestureEvent::Gesture;
 
     // 一问门禁（M1 分类）：启停（M/S 主层）不问——采集门由 capturing 状态自身
     // 表达（DeviceManager 保证只有可采集态才可能收到）；其余菜单/模式/调节键
