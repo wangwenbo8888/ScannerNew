@@ -26,13 +26,18 @@ struct GestureEvent {
     enum class Gesture : uint8_t { Short = 1, Double = 2, Hold = 3 } gesture;
     TimestampMs ts = 0;          // 文本行无 seq，ts 由 MCUDriver 到达时刻填
 };
-struct StatusFrame { uint8_t code; uint16_t seq; TimestampMs ts; };  // 码表待协议方（§8-8 占位）
+struct StatusFrame { uint8_t code; uint16_t seq; TimestampMs ts; };  // 码表待协议方（§8-8 占位；
+                                                          // v3 遗留——当前固件上行仅 G01/G02/G03）
 struct AckFrame    { uint16_t ackedSeq; uint16_t seq; };
+// 260831 协议：G03 帧=触发/快门累计计数（帧计数对账源——0x0808 由 T-seq 跳变改源至此）
+struct ShotCountFrame { uint64_t count; TimestampMs ts; };  // 载荷 "G03 S<十进制计数器>"
 
 // —— 载荷解析（v3 默认口径；v2 由 MCUDriver 兜底路径绕过）——
 // T: "$T25.3,24.8<seq><crc>;"  G01: 文本行 "G01 U1"  S: "$S0A<seq><crc>;"  A: "$A0B<seq><crc>;"
+// G03: 文本行 "G03 S500"
 bool parseTempPayload(const std::string& payload, TempFrame& out);
 bool parseG01Payload(const std::string& payload, GestureEvent& out);
+bool parseG03Payload(const std::string& payload, ShotCountFrame& out);
 bool parseStatusPayload(const std::string& payload, StatusFrame& out);
 bool parseAckPayload(const std::string& payload, AckFrame& out);
 

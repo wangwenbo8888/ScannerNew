@@ -96,7 +96,8 @@ enum class DevFault : int64_t {
     CmdNoAck        = 0x0807,  // #7≡#8 命令无应答（含 ACK 重传 3 败——v3 下同源合并）：
                                //     单发/组链中段/自检/加热命令的 3 败收口均归此码，
                                //     detail 串区分命令名
-    SeqGap          = 0x0808,  // #9 seq 跳变丢帧：T seq 对账计数每拍增量 ≥seqGapWarn
+    SeqGap          = 0x0808,  // #9 帧计数对账丢帧：G03 触发计数跳变对账计数每拍增量
+                           //      ≥seqGapWarn（260831 协议改 G03 S 计数源——原 T-seq 跳变弃）
     // —— 表外既有路径（T12b 占位码 0x0801-0x0807 让位重排至 0x081x 开机段）——
     CameraOpenFail  = 0x0810,  // open 一条龙相机打开失败（同步倒序关）
     McuOpenFail     = 0x0811,  // open 一条龙 MCU 串口打开失败（同步倒序关）
@@ -115,7 +116,8 @@ struct DeviceConfig {
     int heartbeatTimeoutMs = 10000;  // 串口无声（#2/#10）：距末帧超此值报 0x0802
     double tempMaxC = 60.0;          // 温度爆表（#3）：任一路超此值报 0x0803
     double tempSpikeC = 2.0;         // 温度乱跳（#4）：同路相邻 T 帧速率超此 ℃/s 报 0x0804
-    int seqGapWarn = 5;              // seq 跳变（#9）：对账计数每拍增量达此值报 0x0808
+    int seqGapWarn = 5;              // 帧计数对账（#9）：G03 触发计数跳变丢帧数每拍增量
+                                 // 超此值报 0x0808（260831 改 G03 S 计数源）
 };
 
 class DeviceManager {

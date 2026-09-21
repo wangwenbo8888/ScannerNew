@@ -196,7 +196,7 @@ Result DeviceManager::open() {
     }
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: 相机+MCU 并行段 {}ms", el());
     // ③ 上行分流接线（onTemp 温度双警+记账+Warmup 喂入 / onGesture→KeySemantics 直收
-    //     MCU 已判手势 / onStatus 记账）
+    //     MCU 已判手势 / onShotCount G03 触发计数记账）
     hal::McuUplink up;
     up.onTemp = [this](const serial::TempFrame& t) {
         checkTempFaults(t);                      // 0x0803 爆表 / 0x0804 乱跳（D-T13）
@@ -205,8 +205,8 @@ Result DeviceManager::open() {
         warmup_->onTemperature(t.celsius[0], static_cast<int64_t>(t.ts));
     };
     up.onGesture = [this](const serial::GestureEvent& g) { dispatchGesture(g); };
-    up.onStatus = [this](const serial::StatusFrame& s) {
-        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] S 状态帧 code={:#x}（码表待协议 §8-8）", s.code);
+    up.onShotCount = [this](const serial::ShotCountFrame& sc) {
+        JMW_LOG_DEBUG("08-DeviceManager", "[DeviceManager] G03 触发计数累计 {}", sc.count);
     };
     mcu_->setUplink(up);
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: uplink 接线 {}ms", el());
@@ -322,12 +322,12 @@ void DeviceManager::logicTick() {
                          "（累计 " + std::to_string(kd) + "）");
         lastKeyDrop_ = kd;
     }
-    // ⑨ seq 跳变丢帧（#9）：T seq 对账计数每拍增量达 seqGapWarn 即报（事件型；
-    //    v2 无 seq 对账恒 0 不触发）
+    // ⑨ 帧计数对账丢帧（#9）：G03 触发计数跳变对账每拍增量达 seqGapWarn 即报
+    //    （事件型；260831 协议改 G03 S 计数源——原 T-seq 跳变弃，v2 无 seq 恒不触发）
     if (const uint64_t sg = mcu_->seqGapCount();
         sg - lastSeqGap_ >= static_cast<uint64_t>(std::max(1, cfg_.seqGapWarn))) {
         publishFault(code(DevFault::SeqGap),
-                     "T 帧 seq 跳变 +" + std::to_string(sg - lastSeqGap_) +
+                     "G03 帧计数对账丢帧 +" + std::to_string(sg - lastSeqGap_) +
                          "（累计 " + std::to_string(sg) + "）");
         lastSeqGap_ = sg;
     }

@@ -24,7 +24,7 @@ struct CaptureParams {              // N10 七参（协议 260831 §下行表；
 struct McuUplink {                  // 上行分流出口（DeviceManager 注册；均在逻辑线程回调）
     std::function<void(const Scanner::device::serial::TempFrame&)> onTemp;
     std::function<void(const Scanner::device::serial::GestureEvent&)> onGesture;
-    std::function<void(const Scanner::device::serial::StatusFrame&)> onStatus;
+    std::function<void(const Scanner::device::serial::ShotCountFrame&)> onShotCount;
 };
 
 class IMCU {
@@ -46,7 +46,8 @@ public:
     virtual void setUplink(McuUplink h) = 0;
     virtual void setProtocolVersion(Scanner::device::serial::FrameCodec::Version v) = 0; // open 前配
     virtual Scanner::TimestampMs lastRxTime() const = 0;    // 通讯心跳时间戳（设计方案 §4-4）
-    virtual uint64_t seqGapCount() const = 0;               // seq 跳变丢帧计数（对账 §6.2-9）
+    virtual uint64_t seqGapCount() const = 0;               // 帧计数对账丢帧计数（0x0808 源——
+                                                            // 260831 协议改 G03 S 帧计数对账，T-seq 跳变弃）
     virtual void pump() = 0;    // 逻辑线程调：排空 4 环→分流回调+onAck；回调内不得再调 pump/send（短平快铁律）
 };
 

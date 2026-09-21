@@ -3,11 +3,12 @@
 // MCUDriver.h — 下位机 MCU 驱动 = 三小层组合壳（HAL 实现；设计方案 §2.2-§2.5）
 //
 // 组合：SerialPort(纯IO) + FrameCodec(v2/v3成拆帧) + CommandChannel(可靠下行)
-//       + 4 个有界环（G01 手势 + S/A 事件环各 64 + T 遥测环 8——260831 协议：
-//       K 原始按键链停用，G01 帧文本行承载手势（MCU 已判）；实现口径：分开实例化，
-//       比 McuFrame.h 原型「K/S/A 合一环」更简：无变体分发，丢最旧语义各自独立）。
+//       + 5 个有界环（G01 手势 + S/Shot 事件环各 64 + A 环 64 + T 遥测环 8——
+//       260831 协议：K 原始按键链停用，G01 帧文本行承载手势（MCU 已判），
+//       G03 帧文本行承载触发计数（0x0808 对账源）；S 为 v3 遗留环（固件不产）；
+//       实现口径：分开实例化，无变体分发，丢最旧语义各自独立）。
 // 线程：rx 线程（open 起，零业务：read→feed→按首字符入环）；
-//       逻辑线程 send*/setUplink/pump（排空环→Uplink 回调 + onAck 回填 + seq 对账）。
+//       逻辑线程 send*/setUplink/pump（排空环→Uplink 回调 + onAck 回填 + G03 帧计数对账）。
 // typed N10–N16 见 IMCU.h；旧错牌命令（软触发/急停/N13 L/N14 B 等）已删净（§2.2）。
 // ============================================================================
 
@@ -96,7 +97,7 @@ private:
     void dispatchFrame(const serial::FrameCodec::Frame& f);       // 单帧按首字符入环（rx/测试共用）
     void feedTextLine(const std::string& line);                   // v2 固件裸文本行（数值=温度上报；任何行=链路活）
     void onParseFail(const std::string& payload);                 // 载荷弃帧：warn+计数
-    void accountTempSeq(uint16_t seq);                            // T seq 跳变对账（pump 内；v2 不对账）
+    void accountShotCount(uint64_t count);                        // G03 帧计数对账（pump 内；0x0808 源）
     bool writeFrame(const std::string& frame);                    // CommandChannel 写出口
     serial::CommandChannel::Deps makeDeps();                      // 组装 channel 依赖（写口/时钟/可靠开关）
     void applyVersion();                                          // version_ → codec_/channel_ 重建（须未 open）
@@ -112,9 +113,10 @@ private:
     serial::CommandChannel channel_;             // ctor/open/applyVersion 以 makeDeps() 重建
     serial::SerialPort serial_;
 
-    // —— 上行 4 环（rx 生产 / pump 消费；满丢新各自计数——D-T12a 口径）——
+    // —— 上行 5 环（rx 生产 / pump 消费；满丢新各自计数——D-T12a 口径）——
     serial::SpscRing<serial::GestureEvent, 64> gestureRing_;
-    serial::SpscRing<serial::StatusFrame, 64> statusRing_;
+    serial::SpscRing<serial::StatusFrame, 64> statusRing_;     // v3 遗留 S 帧（固件不产；无回调消费）
+    serial::SpscRing<serial::ShotCountFrame, 64> shotRing_;    // G03 触发计数（260831 协议）
     serial::SpscRing<serial::AckFrame, 64> ackRing_;
     serial::SpscRing<serial::TempFrame, 8> tempRing_;
 
@@ -143,13 +145,14 @@ private:
     std::thread rxThread_;
 
     std::atomic<Scanner::TimestampMs> lastRx_{0};   // 通讯心跳（任何有效上行帧刷新）
-    std::atomic<uint64_t> seqGapCount_{0};          // T seq 跳变丢帧计数
+    std::atomic<uint64_t> seqGapCount_{0};          // 帧计数对账丢帧计数（0x0808——260831 改
+                                                    // G03 S 计数源；原 T-seq 跳变已弃）
     std::atomic<uint64_t> parseFailCount_{0};       // 上行载荷解析失败计数（含 v2 匿名 K/旧 E）
     std::function<void(bool, const std::string&)> wireTap_;  // 串口收发监听（调试）
     std::mutex tapMtx_;                             // wireTap_ 装卸互斥（回调热路径无锁快查）
     void notifyTap(bool tx, const std::string& data);
-    bool hasTSeq_ = false;                          // T seq 对账基线（仅逻辑线程）
-    uint16_t lastTSeq_ = 0;
+    bool hasShot_ = false;                          // G03 帧计数对账基线（仅逻辑线程）
+    uint64_t lastShot_ = 0;                         // 上帧 G03 计数（MCU 累计触发/快门数）
 };
 
 } // namespace Scanner::device

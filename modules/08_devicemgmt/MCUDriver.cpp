@@ -165,13 +165,14 @@ Scanner::Result MCUDriver::open(const std::string& port) {
 Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     if (open_.load()) return Scanner::Result::ok("MCU已打开");
     applyVersion();
-    // reopen 复位：排空残留上行环 + 清 seq 对账基线/心跳——上一会话数据不串染
+    // reopen 复位：排空残留上行环 + 清 G03 帧计数对账基线/心跳——上一会话数据不串染
     drainRing(gestureRing_);
     drainRing(statusRing_);
+    drainRing(shotRing_);
     drainRing(ackRing_);
     drainRing(tempRing_);
-    hasTSeq_ = false;
-    lastTSeq_ = 0;
+    hasShot_ = false;
+    lastShot_ = 0;
     lastRx_.store(0, std::memory_order_release);
     probeN12Sent_.store(false, std::memory_order_release);
     {
@@ -447,6 +448,18 @@ void MCUDriver::feedTextLine(const std::string& line) {
             }
             return;
         }
+        if (line[2] == '3') {                     // G03 触发/快门计数：S<十进制>——帧计数
+                                                  // 对账源（0x0808），上行三帧凭据之一
+            serial::ShotCountFrame sc;
+            if (serial::parseG03Payload(line, sc)) {
+                sc.ts = systemNowMs();
+                if (!shotRing_.push(sc))
+                    JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] 事件环满丢新(G03,计{})", shotRing_.dropped());
+            } else {
+                JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] G03 格式不符（计数不入账）: '{}'", line);
+            }
+            return;
+        }
         JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] G 上行帧: '{}'", line);
         return;
     }
@@ -461,7 +474,7 @@ void MCUDriver::feedTextLine(const std::string& line) {
 }
 
 // ============================================================================
-// pump（逻辑线程）：排空 4 环 → Uplink 分流 / onAck 回填 / T seq 对账
+// pump（逻辑线程）：排空 5 环 → Uplink 分流 / onAck 回填 / G03 帧计数对账
 // ============================================================================
 void MCUDriver::pump() {
     serial::AckFrame a;
@@ -469,23 +482,34 @@ void MCUDriver::pump() {
     serial::GestureEvent g;
     while (gestureRing_.pop(g)) { if (uplink_.onGesture) uplink_.onGesture(g); }
     serial::StatusFrame s;
-    while (statusRing_.pop(s)) { if (uplink_.onStatus) uplink_.onStatus(s); }
+    while (statusRing_.pop(s)) { /* v3 遗留 S 帧：固件不产、无回调消费——仅排空 */ }
+    serial::ShotCountFrame sc;
+    while (shotRing_.pop(sc)) {
+        accountShotCount(sc.count);                             // 0x0808 帧计数对账
+        if (uplink_.onShotCount) uplink_.onShotCount(sc);
+    }
     serial::TempFrame t;
     while (tempRing_.pop(t)) {
-        accountTempSeq(t.seq);
         if (uplink_.onTemp) uplink_.onTemp(t);
     }
 }
 
-void MCUDriver::accountTempSeq(uint16_t seq) {
-    if (version_ != serial::FrameCodec::Version::V3) return;   // v2 seq 恒 0——不对账
-    if (hasTSeq_ && static_cast<uint8_t>(lastTSeq_ + 1) != static_cast<uint8_t>(seq)) {
-        seqGapCount_.fetch_add(1, std::memory_order_relaxed);
-        JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] T 帧 seq 跳变 {}→{}（丢帧对账计 {}）",
-                      lastTSeq_, seq, seqGapCount_.load());
+void MCUDriver::accountShotCount(uint64_t count) {
+    // G03 帧计数对账（260831 协议 0x0808 源）：MCU 累计触发/快门量单调递增，
+    // 跳变 = 丢帧/串口吞帧；全新会话首帧立基线（reopen 已复位 hasShot_）。
+    if (!hasShot_) { hasShot_ = true; lastShot_ = count; return; }
+    if (count > lastShot_) {
+        const uint64_t gap = count - lastShot_ - 1;             // 跳过 1 = 一帧之差（计数即帧号）
+        if (gap > 0) {
+            seqGapCount_.fetch_add(gap, std::memory_order_relaxed);
+            JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] G03 帧计数跳变 {}→{}（对账 +{}，计 {}）",
+                          lastShot_, count, gap, seqGapCount_.load());
+        }
+        lastShot_ = count;
+    } else if (count < lastShot_) {
+        JMW_LOG_WARN("08-MCUDriver", "[MCUDriver] G03 计数回绕 {}→{}（MCU 复位？重新基线）", lastShot_, count);
+        lastShot_ = count;                                      // 回绕：重基线不计差
     }
-    hasTSeq_ = true;
-    lastTSeq_ = seq;
 }
 
 // ============================================================================

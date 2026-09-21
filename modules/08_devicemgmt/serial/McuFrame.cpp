@@ -85,6 +85,33 @@ bool parseG01Payload(const std::string& payload, GestureEvent& out) {
     return true;
 }
 
+bool parseG03Payload(const std::string& payload, ShotCountFrame& out) {
+    out = ShotCountFrame{};
+    // 格式：G03 S<十进制> —— 触发/快门累计计数（帧计数对账源 0x0808）。
+    // 容忍 G03 与 S 之间可选空白；计数后仅允尾随空白/回车（CRLF 行尾）。
+    if (payload.size() < 5 || payload[0] != 'G' || payload[1] != '0' || payload[2] != '3')
+        return false;
+    auto isW = [](char c) { return c == ' ' || c == '\t'; };
+    size_t i = 3;
+    while (i < payload.size() && isW(payload[i])) ++i;
+    if (i >= payload.size() || payload[i] != 'S') return false;
+    const size_t numStart = ++i;
+    uint64_t v = 0;
+    if (numStart >= payload.size()) return false;
+    while (i < payload.size() && payload[i] >= '0' && payload[i] <= '9') {
+        v = v * 10 + static_cast<uint64_t>(payload[i] - '0');
+        if (v > UINT64_MAX / 10 && i + 1 < payload.size() &&
+            payload[i + 1] >= '0' && payload[i + 1] <= '9')
+            return false;                           // 溢出保护（下一个仍是数字）
+        ++i;
+    }
+    while (i < payload.size() && isW(payload[i])) ++i;
+    if (i < payload.size() && payload[i] == '\r') ++i;
+    if (i != payload.size()) return false;
+    out.count = v;
+    return true;
+}
+
 bool parseStatusPayload(const std::string& payload, StatusFrame& out) {
     out = StatusFrame{};
     if (payload.size() < 2 || payload.size() > 3 || payload[0] != 'S') return false;

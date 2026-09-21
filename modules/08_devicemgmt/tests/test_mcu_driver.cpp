@@ -30,16 +30,16 @@ struct FrameLog {
 
 // 上行回调记账
 struct UplinkLog {
-    int temp = 0, gesture = 0, status = 0;
+    int temp = 0, gesture = 0, shot = 0;
     TempFrame lastT{};
     GestureEvent lastG{};
-    StatusFrame lastS{};
+    ShotCountFrame lastSC{};
 
     McuUplink uplink() {
         McuUplink h;
-        h.onTemp    = [this](const TempFrame& t)     { ++temp;    lastT = t; };
-        h.onGesture = [this](const GestureEvent& g)  { ++gesture; lastG = g; };
-        h.onStatus  = [this](const StatusFrame& s)   { ++status;  lastS = s; };
+        h.onTemp      = [this](const TempFrame& t)    { ++temp;    lastT  = t; };
+        h.onGesture   = [this](const GestureEvent& g) { ++gesture; lastG  = g; };
+        h.onShotCount = [this](const ShotCountFrame& s) { ++shot;  lastSC = s; };
         return h;
     }
 };
@@ -67,8 +67,8 @@ TEST(MCUDriver, TypedPayloadV3) {
     EXPECT_EQ(io.frames[4], enc.encode("N15 V2", 4));
 }
 
-// —— 2. PumpDispatch：T/G/S 上行经 pump 分流到 Uplink 三回调（G01 手势文本行直收；
-//      K 原始链停用——260831 协议）——
+// —— 2. PumpDispatch：T/G01/G03 上行经 pump 分流到 Uplink 回调（G01 手势/ G03 触发
+//      计数文本行直收；K 原始链停用；S 为 v3 遗留环无回调——260831 协议）——
 TEST(MCUDriver, PumpDispatchUplink) {
     MCUDriver d;
     d.setProtocolVersion(FCodec::Version::V3);
@@ -78,7 +78,7 @@ TEST(MCUDriver, PumpDispatchUplink) {
 
     d.testInjectRaw(enc.encode("T25.5", 1));
     d.testInjectTextLine("G01 M1");
-    d.testInjectRaw(enc.encode("S0A", 3));
+    d.testInjectTextLine("G03 S500");
     d.pump();
 
     EXPECT_EQ(log.temp, 1);
@@ -87,8 +87,8 @@ TEST(MCUDriver, PumpDispatchUplink) {
     EXPECT_EQ(log.gesture, 1);
     EXPECT_EQ(log.lastG.key, KeyId::Middle);
     EXPECT_EQ(log.lastG.gesture, GestureEvent::Gesture::Short);
-    EXPECT_EQ(log.status, 1);
-    EXPECT_EQ(log.lastS.code, 0x0A);
+    EXPECT_EQ(log.shot, 1);
+    EXPECT_EQ(log.lastSC.count, 500u);
 }
 
 // —— 3. AckRouting：A 帧经 pump 回填 CommandChannel → 挂表命令 onDone(true) ——
@@ -142,20 +142,29 @@ TEST(MCUDriver, LastRxUpdated) {
     EXPECT_GT(d.lastRxTime(), 0u);
 }
 
-// —— 6. SeqGap：T 帧 seq 跳变丢帧计数（§6.2-9；v2 seq 恒 0 不对账）——
-TEST(MCUDriver, TempSeqGapCounted) {
+// —— 6. ShotCountGapCounted：G03 帧计数跳变（丢帧）对账（§6.2-9/260831 改 G03 源；
+//      首帧立基线、跳 1=一帧之不差、回绕重基线）——
+TEST(MCUDriver, ShotCountGapCounted) {
     MCUDriver d;
-    d.setProtocolVersion(FCodec::Version::V3);
-    FCodec enc(FCodec::Version::V3);
-    d.testInjectRaw(enc.encode("T25.5", 1));
+    d.setProtocolVersion(FCodec::Version::V2);
+    d.testInjectTextLine("G03 S1");      // 首帧立基线
     d.pump();
-    EXPECT_EQ(d.seqGapCount(), 0u);            // 首帧只立基线
-    d.testInjectRaw(enc.encode("T25.6", 5));   // 1→5 跳变
+    EXPECT_EQ(d.seqGapCount(), 0u);
+    d.testInjectTextLine("G03 S5");      // 1→5 跳变 = 丢 3 帧
     d.pump();
-    EXPECT_GE(d.seqGapCount(), 1u);
-    d.testInjectRaw(enc.encode("T25.7", 6));   // 连续不再计
+    EXPECT_EQ(d.seqGapCount(), 3u);
+    d.testInjectTextLine("G03 S6");      // 连续无新差
     d.pump();
-    EXPECT_EQ(d.seqGapCount(), 1u);
+    EXPECT_EQ(d.seqGapCount(), 3u);
+    d.testInjectTextLine("G03 S4");      // 回绕（MCU 复位）重基线
+    d.pump();
+    EXPECT_EQ(d.seqGapCount(), 3u);
+    d.testInjectTextLine("G03 S4");      // 回绕后连续
+    d.pump();
+    EXPECT_EQ(d.seqGapCount(), 3u);
+    d.testInjectTextLine("G03 S8");      // 4→8 = 丢 3
+    d.pump();
+    EXPECT_EQ(d.seqGapCount(), 6u);
 }
 
 // —— 7. V2TempSingleChannel：v2 旧 "T25.3;" 单路温度天然兼容（parse 1 通道）——
@@ -179,7 +188,7 @@ TEST(MCUDriver, V2LegacyEIgnored) {
     d.setUplink(log.uplink());
     d.testInjectRaw("E1;");
     d.pump();
-    EXPECT_EQ(log.temp + log.gesture + log.status, 0);
+    EXPECT_EQ(log.temp + log.gesture + log.shot, 0);
 }
 
 // —— 9. ReopenDrainsRings：close 前未消费的环残留经 reopen 排空、对账基线/

@@ -65,6 +65,27 @@ TEST(McuFrameParse, G01Illegal) {
     EXPECT_FALSE(parseG01Payload("G02 U1", e));   // 前缀不符
 }
 
+// —— parseG03Payload：G03 S<十进制累计触发/快门计数>（帧计数对账源）——
+TEST(McuFrameParse, G03Legal) {
+    ShotCountFrame e;
+    ASSERT_TRUE(parseG03Payload("G03 S500", e));
+    EXPECT_EQ(e.count, 500u);
+    ShotCountFrame g;
+    ASSERT_TRUE(parseG03Payload("G03S1", g));              // 无空白变体
+    EXPECT_EQ(g.count, 1u);
+    ShotCountFrame h;
+    ASSERT_TRUE(parseG03Payload("G03 S123456789012345678", h));   // 大数不溢出
+    EXPECT_EQ(h.count, 123456789012345678ull);
+}
+
+TEST(McuFrameParse, G03Illegal) {
+    ShotCountFrame e;
+    EXPECT_FALSE(parseG03Payload("G03 X1", e));   // 缺 S 前缀
+    EXPECT_FALSE(parseG03Payload("G03 S", e));    // 计数空
+    EXPECT_FALSE(parseG03Payload("G03 S1a", e));  // 非纯数字
+    EXPECT_FALSE(parseG03Payload("G01 S1", e));   // 前缀不符
+}
+
 // —— parseStatusPayload：S 后 1~2 个 hex 字符 ——
 TEST(McuFrameParse, StatusLegal) {
     StatusFrame f;

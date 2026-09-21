@@ -10,7 +10,7 @@
 // （预热窗以小阈值+毫秒级 sleep 换确定论）。手势=MCU 已判 G01 文本行注入
 // （KeyManager 退役：无 PC 侧消抖/时序合成），单发即单一手势。
 // 用例语义 = 08 设计方案 §7 集成行（T1–T12）+ T13/T14（并发冒烟/标定组链）+
-// F1–F7（§6.2 故障 8 码：掉线边沿/心跳/温度双警/预热超时/G01 手势环溢/seq 跳变）。
+// F1–F7（§6.2 故障 8 码：掉线边沿/心跳/温度双警/预热超时/G01 手势环溢/G03 帧计数对账）。
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -844,7 +844,7 @@ TEST(DeviceManager, F6_KeyRingOverflowFault) {
     EXPECT_EQ(rec.fault(FC(DevFault::KeyRingOverflow)), 1);
 }
 
-// —— F7（#9）：T 帧 seq 跳变 → 对账计数增长 → 0x0808 一次；连续 seq 不重复 ——
+// —— F7（#9）：G03 帧计数跳变（丢帧）对账 → 计数增长 → 0x0808 一次；连续不重复 ——
 TEST(DeviceManager, F7_SeqGapFault) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -859,13 +859,13 @@ TEST(DeviceManager, F7_SeqGapFault) {
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    dm.testInjectRaw(kit.enc.encode("T25.0", 10));             // 对账基线
+    dm.testInjectTextLine("G03 S1");             // 对账基线
     dm.logicTick();
     EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 0);
-    dm.testInjectRaw(kit.enc.encode("T25.0", 16));             // v3 下 seq 10→16 跳变
+    dm.testInjectTextLine("G03 S10");            // 1→10 跳变 = 丢 8 帧
     dm.logicTick();
     EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 1);
-    dm.testInjectRaw(kit.enc.encode("T25.0", 17));             // 连续 → 无增量不重复
+    dm.testInjectTextLine("G03 S11");            // 连续 → 无增量不重复
     dm.logicTick();
     EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 1);
 }
