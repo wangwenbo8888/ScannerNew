@@ -19,6 +19,8 @@
 #include "file_io.h"
 #include "PerfMonitor.h"   // A-T17：updateInfoSection 内 perfMonitor()->poll() 需完整类型
 #include "base/EventBus.h" // P2 渲染事件桥：faultSink lambda 需完整类型（publish）
+#include "IState.h"        // P1-2 UI 状态图标：SystemState 7 态完整枚举（switch/映射）
+#include "StateMachine.h"  // P1-2: getCurrentState() 需完整类型
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
 #include "modules/08_devicemgmt/ParamStore.h"      // ParamEntry::Source
@@ -352,10 +354,75 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
     m_integrateTestDialog = nullptr;
     m_calibDialog = nullptr;
 
+    // —— P1-2 UI 状态图标：状态栏右下角常驻态指示，订阅 10 状态机 StateChanged ——
+    m_stateIndicator = new QLabel(QStringLiteral("● 初始化"), this);
+    m_stateIndicator->setToolTip(QStringLiteral("系统状态机（10 可观测性）"));
+    statusBar()->addPermanentWidget(m_stateIndicator);
+    if (m_appCtx) {
+        if (auto* sm = m_appCtx->stateMachine())
+            updateStateIndicator(sm->getCurrentState());   // 初始态立即上屏（不等首发事件）
+        if (auto* bus = m_appCtx->eventBus()) {
+            // 锁内轻判红区：publish 持总线锁——handler 只拷贝 param2(新态)，
+            // 绝不 transition/publish/直写 UI；Queued 投递主线程后刷指示
+            m_stateChangedSubId_ = bus->subscribe(Scanner::EventType::StateChanged,
+                [this](const Scanner::Event& ev) {
+                    const int64_t newState = ev.param2;
+                    QMetaObject::invokeMethod(this, [this, newState]() {
+                        updateStateIndicator(static_cast<Scanner::service::SystemState>(newState));
+                    }, Qt::QueuedConnection);
+                });
+        }
+    }
+
     startInfoTimer();
 }
 
-MainWindow::~MainWindow() {}
+MainWindow::~MainWindow() {
+    // 退订生命周期：window 先于 appCtx 析构（main.cpp 声明顺序）——退订时 bus 必存活
+    if (m_stateChangedSubId_ && m_appCtx) {
+        if (auto* bus = m_appCtx->eventBus())
+            bus->unsubscribe(m_stateChangedSubId_);
+        m_stateChangedSubId_ = 0;
+    }
+}
+
+// —— P1-2 7 态文案/配色映射（10 状态机 SystemState；落点：状态栏右下角常驻件）——
+QString MainWindow::stateText(Scanner::service::SystemState s)
+{
+    switch (s)
+    {
+        case Scanner::service::SystemState::Init:            return QStringLiteral("初始化");
+        case Scanner::service::SystemState::Standby:         return QStringLiteral("待机");
+        case Scanner::service::SystemState::Calibrating:     return QStringLiteral("标定中");
+        case Scanner::service::SystemState::ScanMarker:      return QStringLiteral("扫描·标点");
+        case Scanner::service::SystemState::ScanMarkerLaser: return QStringLiteral("扫描·标志+激光");
+        case Scanner::service::SystemState::PostProcessing:  return QStringLiteral("后处理中");
+        case Scanner::service::SystemState::FaultSelfCheck:  return QStringLiteral("故障自检");
+    }
+    return QStringLiteral("未知");
+}
+
+QString MainWindow::stateColor(Scanner::service::SystemState s)
+{
+    switch (s)
+    {
+        case Scanner::service::SystemState::Init:            return QStringLiteral("#8E8E8E");
+        case Scanner::service::SystemState::Standby:         return QStringLiteral("#00AA00");
+        case Scanner::service::SystemState::Calibrating:     return QStringLiteral("#0066FF");
+        case Scanner::service::SystemState::ScanMarker:      return QStringLiteral("#00B0C4");
+        case Scanner::service::SystemState::ScanMarkerLaser: return QStringLiteral("#6C4FD6");
+        case Scanner::service::SystemState::PostProcessing:  return QStringLiteral("#E69112");
+        case Scanner::service::SystemState::FaultSelfCheck:  return QStringLiteral("#C0392B");
+    }
+    return QStringLiteral("#8E8E8E");
+}
+
+void MainWindow::updateStateIndicator(Scanner::service::SystemState s)
+{
+    if (!m_stateIndicator) return;
+    m_stateIndicator->setText(QStringLiteral("● ") + stateText(s));
+    m_stateIndicator->setStyleSheet(QStringLiteral("color:%1;").arg(stateColor(s)));
+}
 
 void MainWindow::onIntegrateTestClicked()
 {

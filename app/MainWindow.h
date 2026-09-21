@@ -14,6 +14,7 @@
 #include <QSvgRenderer>
 
 #include "OSGWidget.h"
+#include "base/EventBus.h"   // SubscriberId（P1-2 UI 状态图标订阅句柄）
 
 class ArrowSlider : public QSlider
 {
@@ -34,6 +35,7 @@ class CameraControl;
 class LEADSCANSeries;
 class AppContext;
 namespace calib_display { class CalibBoard2D; }
+namespace Scanner::service { enum class SystemState : uint8_t; }   // P1-2 前向声明（值传递签名）
 
 class QProgressDialog;
 class MainWindow : public QMainWindow
@@ -150,6 +152,16 @@ protected:
     QLabel *m_infoTempLabel = nullptr;
     QLabel *m_infoCpuLabel = nullptr;
     QLabel *m_infoMemLabel = nullptr;
+
+    // —— UI 状态图标（P1-2）：订阅 10 状态机 StateChanged（EventBus 主通道），
+    //    主线程刷 7 态指示。EventBus 同步分发持总线锁——锁内只拷贝 param2 再
+    //    QMetaObject::invokeMethod queued 投递主线程（对齐 P0-2 故障桥红线）。
+    // ——
+    Scanner::infra::SubscriberId m_stateChangedSubId_ = 0;
+    QLabel *m_stateIndicator = nullptr;                 // 状态栏右下角常驻态指示（色点+文案）
+    void updateStateIndicator(Scanner::service::SystemState s);   // UI 线程槽（仅设文案/配色）
+    static QString stateText(Scanner::service::SystemState s);    // 7 态文案映射
+    static QString stateColor(Scanner::service::SystemState s);   // 7 态配色映射
 
     void startInfoTimer();
     void updateInfoSection();
