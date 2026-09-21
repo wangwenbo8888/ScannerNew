@@ -219,7 +219,7 @@ TEST(CalibGateTest, RunEndWritesRepo) {
         Scanner::infra::EventBus bus;
         std::vector<int64_t> codes;
         auto sub = bus.subscribe(Scanner::EventType::FaultOccurred,
-                                 [&](const Scanner::Event& e) { codes.push_back(e.param1); });
+                                 [&](const Scanner::Event& e) { codes.push_back(e.param2); });
         FakeRepo repo;
         repo.ret = false;             // write 返回 false
         CalibComputePipeline pipe;

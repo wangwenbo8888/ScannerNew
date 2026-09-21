@@ -61,12 +61,12 @@ struct EventRecorder {
             if (e.type == EventType::UserDefined && e.param1 == p1) ++n;
         return n;
     }
-    // Fault 按码计数（D-T13：DevFault 码表断言）
+    // Fault 按码计数（D-T13：DevFault 码表断言；统一契约 param2=码 2026-09-20）
     int fault(int64_t faultCode) const {
         std::lock_guard<std::mutex> lock(m);
         int n = 0;
         for (const auto& e : ev)
-            if (e.type == EventType::FaultOccurred && e.param1 == faultCode) ++n;
+            if (e.type == EventType::FaultOccurred && e.param2 == faultCode) ++n;
         return n;
     }
 };

@@ -322,7 +322,7 @@ TEST(ScanPipelineTest, CudaOffDegradedToAMode) {
     Scanner::infra::EventBus bus;
     std::atomic<int> warns{0};
     bus.subscribe(Scanner::EventType::FaultOccurred, [&](const Scanner::Event& e) {
-        if (e.param1 == 1603) ++warns;
+        if (e.param2 == 1603) ++warns;   // 统一契约 param2=码（2026-09-20）
     });
 
     SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);
@@ -478,7 +478,7 @@ TEST(ScanPipelineTest, HookExceptionAutoStops) {
     Scanner::infra::EventBus bus;
     std::atomic<int> faults{0};
     bus.subscribe(Scanner::EventType::FaultOccurred, [&](const Scanner::Event& e) {
-        if (e.param1 == 1604) ++faults;
+        if (e.param2 == 1604) ++faults;   // 统一契约 param2=码（2026-09-20）
     });
 
     SlotRing<EnhancedFrame> ring(kRingSlots, SlotRing<EnhancedFrame>::WriterMode::Overwrite);

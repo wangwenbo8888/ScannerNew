@@ -867,8 +867,10 @@ void DeviceManager::publishFault(int64_t code, const std::string& detail) {
     Event e;
     e.type = EventType::FaultOccurred;
     e.sourceId = 8;                                // 08 模块来源标识
-    e.param1 = code;
-    e.param2 = 0;
+    // FaultOccurred 统一契约：sourceId=模块源、param1=severity、param2=码
+    // （08 故障均为 Error 级——对齐 10 FaultHandler 订阅语义 2026-09-20）
+    e.param1 = static_cast<int64_t>(Scanner::FaultSeverity::Error);
+    e.param2 = code;
     e.timestamp = static_cast<TimestampMs>(nowMs());
     bus_->publish(e);
 }

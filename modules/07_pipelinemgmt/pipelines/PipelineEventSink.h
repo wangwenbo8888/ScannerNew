@@ -36,7 +36,8 @@ private:
     Scanner::infra::EventBus* bus_;
     // 映射：Normal→不发布（report 路径）/Info（reportCompletion 路径）；
     //       Degraded→Warning；Warning→Warning；Fault→Error
-    // Event{type=FaultOccurred, sourceId=kPipelineEventSourceId(0x07), param1=code, param2=severity}
+    // Event{type=FaultOccurred, sourceId=kPipelineEventSourceId(0x07),
+    //        param1=severity, param2=code}（统一契约 2026-09-20）
 };
 
 } // namespace Scanner::pipeline

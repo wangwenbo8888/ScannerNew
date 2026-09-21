@@ -5,7 +5,7 @@
 // 漂移注入 R_init）。真算子路径真跑：GBA/Ceres（CPU）+ MarkerCloudFuseCPU（CPU）；
 // 激光重放与 GBA 失败路径用注入假实现（ILaserReplayFuse 工厂 / GbaFn）——免 GPU
 // 数据语义依赖、免故障真造（同 test_scan_fuseconsumer 注入式风格）。
-// 事件断言走真 EventBus（EventBusEventSink 发布 FaultOccurred，param1=事件码）。
+// 事件断言走真 EventBus（EventBusEventSink 发布 FaultOccurred，param2=事件码——统一契约 2026-09-20）。
 // 8 LaserReplayFailDegrades（I1）：假工厂部分帧 fuse 返回 false → quality=Degraded、
 //   sink 收 1609 恰一次、run 返回 degraded 而非 fail。
 // ============================================================================
@@ -177,7 +177,7 @@ std::unique_ptr<ILaserReplayFuse> makeFakeLaserReplay(
 }
 #endif
 
-/// 事件采集：订阅 FaultOccurred，记录 param1（事件码）
+/// 事件采集：订阅 FaultOccurred，记录 param2（事件码——统一契约 2026-09-20）
 struct EventCollector {
     EventBus bus;
     std::vector<int64_t> codes;
@@ -185,7 +185,7 @@ struct EventCollector {
 
     EventCollector() {
         sub = bus.subscribe(Scanner::EventType::FaultOccurred, [this](const Scanner::Event& e) {
-            codes.push_back(e.param1);
+            codes.push_back(e.param2);
         });
     }
     ~EventCollector() { bus.unsubscribe(sub); }

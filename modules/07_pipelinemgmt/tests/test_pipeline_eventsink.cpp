@@ -10,7 +10,7 @@ TEST(EventSink, MapsQualityToSeverityAndPublishes) {
     std::atomic<int> got{0};
     std::atomic<int> lastSeverity{-1};
     auto sub = bus.subscribe(Scanner::EventType::FaultOccurred, [&](const Scanner::Event& e) {
-        lastSeverity = static_cast<int>(e.param2); ++got; });   // param2 携带 severity（见下契约）
+        lastSeverity = static_cast<int>(e.param1); ++got; });   // 统一契约 param1=severity（2026-09-20）
     {
         EventBusEventSink sink(&bus);
         sink.report(Scanner::QualityFlag::Degraded, 1001, "帧降级");

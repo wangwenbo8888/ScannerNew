@@ -5,7 +5,7 @@
 //   · 故障档案表：{id, sourceId, severity, message, firstTimeMs, count}；
 //     同 source+severity 1s 窗口聚合计数（防风暴：不发事件不转态，§4.1）
 //   · 来源标识（修「事件丢 source」缺陷）：registerSource 稳定 id（重名同 id）；
-//     FaultOccurred(param1=severity, param2=sourceId)（§4.2）
+//     FaultOccurred(sourceId 字段=源, param1=severity, param2=码)（§4.2 · 统一契约 2026-09-20）
 //   · S7 故障链（§4.4）：Error 级以上且当前态非 S6（免疫）/S7（不重转）→
 //     transition(FaultOccurred) 成功 → safeStopCb_() + LedControl(param1=1 红)
 //     ——红灯不再复用 EmergencyStop 通道（§4.3，T8 删值前置）
@@ -15,7 +15,7 @@
 //     + LedControl(param1=2 绿)
 //   · bus 订阅口（start 后外部源直接 publish）仅记档：EventBus 同步分发持
 //     总线锁，锁内转态会经 StateChanged publish 重入死锁——故障链动作归
-//     reportFault 直调口（§4.6：08 落地接注入口）
+//     reportFault 直调口 + app 故障桥异步承接（§4.6：08 落地经 app 桥）
 //
 // 用真 StateMachine + 真 EventBus（模块内已有，不 mock）；safeStop 用
 // lambda 计数注入（setSafeStopCallback）。
@@ -36,15 +36,17 @@ using Scanner::FaultSeverity;
 
 namespace {
 
-// 事件计数小助手：订阅指定类型，计数并记录最近一次 param1/param2
+// 事件计数小助手：订阅指定类型，计数并记录最近一次 param1/param2/sourceId
 struct EventSpy {
     std::atomic<int> count{0};
     std::atomic<int64_t> param1{-1};
     std::atomic<int64_t> param2{-1};
+    std::atomic<uint32_t> sourceId{0};
     void subscribe(EventBus& bus, EventType type) {
         bus.subscribe(type, [this](const Event& e) {
             param1.store(e.param1);
             param2.store(e.param2);
+            sourceId.store(e.sourceId);
             count.fetch_add(1);
         });
     }
@@ -80,7 +82,8 @@ TEST(FH, ReportFaultEventCarriesSource) {
 
     EXPECT_EQ(spy.count.load(), 1);
     EXPECT_EQ(spy.param1.load(), static_cast<int64_t>(FaultSeverity::Warning));
-    EXPECT_EQ(spy.param2.load(), cam);  // 修「丢 source」：param2 携带来源 id
+    EXPECT_EQ(spy.sourceId.load(), static_cast<uint32_t>(cam));  // 修「丢 source」：统一契约 sourceId 字段携带来源 id
+    EXPECT_EQ(spy.param2.load(), 0);                             // 直调口无码（param2 留空）
 }
 
 TEST(FH, AggregateWithinWindow) {
@@ -251,8 +254,9 @@ TEST(FH, ExternalBusPublishEntersArchive) {
 
     Event evt;
     evt.type = EventType::FaultOccurred;
+    evt.sourceId = static_cast<uint32_t>(cam);   // 统一契约：sourceId=源、param1=severity、param2=码
     evt.param1 = static_cast<int64_t>(FaultSeverity::Error);
-    evt.param2 = cam;
+    evt.param2 = 0x0802;
     bus.publish(evt);  // 外部源（如 08）直接 publish 也能进档案
 
     const auto faults = fh.activeFaults();

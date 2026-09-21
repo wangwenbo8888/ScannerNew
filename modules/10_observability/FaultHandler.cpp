@@ -77,9 +77,11 @@ void FaultHandler::start() {
     subscriberId_ = eventBus_->subscribe(EventType::FaultOccurred,
         [this](const Event& evt) {
             if (t_selfPublish == this) return;  // 本线程自发布（reportFault 已处理）
-            handleFault(static_cast<int>(evt.param2),
+            // 统一契约（2026-09-20）：sourceId=模块源、param1=severity、param2=码
+            handleFault(static_cast<int>(evt.sourceId),
                         static_cast<FaultSeverity>(evt.param1),
-                        "external fault, source=" + std::to_string(evt.param2),
+                        "external fault, source=" + std::to_string(evt.sourceId) +
+                            " code=" + std::to_string(evt.param2),
                         /*viaBus=*/true);
         });
     started_ = true;
@@ -146,11 +148,12 @@ void FaultHandler::handleFault(int sourceId, FaultSeverity severity,
                      name, sourceId, static_cast<int>(severity), message);
     }
 
-    // ── 故障链（仅直调口，§4.4）：Error 级以上且非 S6（免疫）/S7（不重转）→ S7 ──
+// ── 故障链（仅直调口，§4.4）：Error 级以上且非 S6（免疫）/S7（不重转）→ S7 ──
     // 订阅口不做故障链动作：EventBus 同步分发持总线锁，锁内 transition 会经
-    // StateChanged publish 重入死锁——外部源按 §4.6 接 reportFault 注入口
+    // StateChanged publish 重入死锁——外部源经 app 桥异步承接（AppContext 订阅
+    // FaultOccurred 延时转 S7＋safeStop），此处只记档
     if (viaBus && severity >= FaultSeverity::Error) {
-        JMW_LOG_WARN("10-FaultHandler", "[FaultHandler] 外部 Error 级故障经总线通道仅记档——应接 reportFault 注入口走完整故障链");
+        JMW_LOG_DEBUG("10-FaultHandler", "[FaultHandler] 外部 Error 级故障经总线仅记档——S7 停机由 app 故障桥异步承接");
     }
     if (!viaBus && severity >= FaultSeverity::Error && stateMachine_) {
         const SystemState cur = stateMachine_->getCurrentState();
@@ -174,10 +177,11 @@ void FaultHandler::handleFault(int sourceId, FaultSeverity severity,
             explicit Guard(const void* self) : prev(t_selfPublish) { t_selfPublish = self; }
             ~Guard() { t_selfPublish = prev; }
         } guard(this);
-        Event evt;
+Event evt;
         evt.type = EventType::FaultOccurred;
+        evt.sourceId = static_cast<uint32_t>(sourceId);   // 统一契约 sourceId 字段
         evt.param1 = static_cast<int64_t>(severity);
-        evt.param2 = sourceId;
+        evt.param2 = 0;
         eventBus_->publish(evt);
     }
 }

@@ -40,11 +40,13 @@ void EventBusEventSink::publish(Scanner::QualityFlag q, int32_t code,
         break;
     }
 
-    Scanner::Event e;
+Scanner::Event e;
     e.type = Scanner::EventType::FaultOccurred;
     e.sourceId = kPipelineEventSourceId;
-    e.param1 = code;
-    e.param2 = static_cast<int64_t>(severity);
+    // FaultOccurred 统一契约：sourceId=模块源、param1=severity、param2=码
+    // （对齐 10 FaultHandler 订阅语义——三源归一 2026-09-20）
+    e.param1 = static_cast<int64_t>(severity);
+    e.param2 = code;
 
     // EventBus 为控制通道不携带载荷，msg 落 spdlog 留存（防静默丢失）
     if (severity == Scanner::FaultSeverity::Error) {

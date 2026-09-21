@@ -8,6 +8,7 @@
 // ============================================================================
 
 #include "base/types.h"
+#include "base/EventBus.h"   // EventBus::SubscriberId（故障桥订阅句柄）
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -16,6 +17,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <QObject>
 
 #include <opencv2/core.hpp>   // cv::Point3f（导入点云 stash）
 
@@ -30,7 +33,8 @@ namespace Scanner::device  { class DeviceManager; class HardwareMonitor; class S
 namespace Scanner::workflow{ class WorkflowContext; class ScanWorkflow; class CalibrationWorkflow; class PostProcessWorkflow; }
 namespace Scanner::pipeline{ class SimScanSource; }  // 中段模拟提取源（UI 开关组装）
 
-class AppContext {
+class AppContext : public QObject {
+    Q_OBJECT
 public:
     AppContext();
     ~AppContext();
@@ -206,4 +210,7 @@ private:
     std::unique_ptr<Scanner::pipeline::SimScanSource> simSource_;  // 会话期持有（start 建/stop 弃）
     std::atomic<bool> simExtract_{false};         // UI「模拟数据」开关（start_scan 时读取）
     std::vector<cv::Point3f> lastImportedCloud_;  // 「导入点云」stash（导入线程写/sim 启动读）
+
+    // —— 08 故障桥（P0-2）：EventBus FaultOccurred(Error+) → S7 安全停机链 ——
+    Scanner::infra::SubscriberId faultBridgeSubId_ = 0;
 };

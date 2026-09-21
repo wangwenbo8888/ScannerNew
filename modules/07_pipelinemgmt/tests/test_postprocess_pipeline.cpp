@@ -66,7 +66,7 @@ std::unique_ptr<RecordingOp> appendOp(const std::string& label,
     return op;
 }
 
-/// 事件采集（同 test_globaloptim：订阅 FaultOccurred，记录 param1=事件码）
+/// 事件采集（同 test_globaloptim：订阅 FaultOccurred，记录 param2=事件码——统一契约 2026-09-20）
 struct EventCollector {
     EventBus bus;
     std::vector<int64_t> codes;
@@ -74,7 +74,7 @@ struct EventCollector {
 
     EventCollector() {
         sub = bus.subscribe(Scanner::EventType::FaultOccurred,
-                            [this](const Scanner::Event& e) { codes.push_back(e.param1); });
+                            [this](const Scanner::Event& e) { codes.push_back(e.param2); });
     }
     ~EventCollector() { bus.unsubscribe(sub); }
     bool hasCode(int32_t code) const {

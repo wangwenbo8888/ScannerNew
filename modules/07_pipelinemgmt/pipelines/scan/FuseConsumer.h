@@ -86,6 +86,7 @@ public:
         FrameObsAccumulator* obs = nullptr;               // 必填（start 校验）
         PipelineEventSink* sink = nullptr;                // 可空=不上报
         int renderThrottleFrames = 5;                     // 首帧起每 N 帧 push 一次（第 1、N+1…；<=0 按 1）
+        int renderThrottleMinMs = 300;                    // 时间门控（260919）：两次 push 最小间隔；0=纯帧计数（测试用）
         const std::vector<int>* highPrecisionGlobalIds = nullptr;  // 可空=全部 false
     };
 

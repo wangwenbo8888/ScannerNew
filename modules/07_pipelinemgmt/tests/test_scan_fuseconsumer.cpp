@@ -315,6 +315,7 @@ TEST(FuseConsumerTest, RenderThrottle) {
     d.obs = &obs;
     d.sceneFeed = &sf;
     d.renderThrottleFrames = 3;
+    d.renderThrottleMinMs = 0;                   // 关时间门控（260919 后默认 300ms——此用例专注帧计数节流）
     FuseConsumer c(d);
     ASSERT_TRUE(c.start().success);
     c.join();

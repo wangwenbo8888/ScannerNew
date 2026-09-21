@@ -120,9 +120,10 @@ void FuseConsumer::processOne(FrameResult& fr) {
         static thread_local std::chrono::steady_clock::time_point s_lastPush{};
         const auto nowTp = std::chrono::steady_clock::now();
         const bool timeOk =
+            deps_.renderThrottleMinMs <= 0 ||
             s_lastPush.time_since_epoch().count() == 0 ||
             std::chrono::duration_cast<std::chrono::milliseconds>(nowTp - s_lastPush).count() >=
-                300;
+                static_cast<std::chrono::milliseconds::rep>(deps_.renderThrottleMinMs);
         if (deps_.sceneFeed && timeOk &&
             n % static_cast<uint64_t>(deps_.renderThrottleFrames) == 0) {
             s_lastPush = nowTp;

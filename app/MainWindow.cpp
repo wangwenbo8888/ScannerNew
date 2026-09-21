@@ -333,15 +333,16 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                     });
         }
         // ② 03 渲染事件 → EventBus（P1.4 桥：码表见 RenderSanity.h RenderEvent；
-        //    对齐 07 EventBusEventSink 口径——param1=码 param2=severity，文本走日志）
+        //    FaultOccurred 统一契约 param1=severity param2=码，sourceId=0x03；
+        //    Degraded→Warning（对齐 07 EventBusEventSink 映射），文本走日志）
         if (auto* bus = m_appCtx->eventBus()) {
             m_3dView->setFaultSink([bus](int code, const std::string& msg) {
                 JMW_LOG_WARN("app-MainWindow", "[render] 0x{:04X} {}", code, msg);
                 Scanner::Event ev;
                 ev.type = Scanner::EventType::FaultOccurred;
                 ev.sourceId = 0x03;
-                ev.param1 = code;
-                ev.param2 = static_cast<int64_t>(Scanner::QualityFlag::Degraded);
+                ev.param1 = static_cast<int64_t>(Scanner::FaultSeverity::Warning);
+                ev.param2 = code;
                 bus->publish(ev);
             });
         }

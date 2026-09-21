@@ -9,8 +9,9 @@
 #include "DeviceStateCache.h"
 
 #include <algorithm>
-#include <cstdlib>              // std::getenv（JMW_SIM_MARKERS_PLY 场景覆写）
+#include <cstdlib>              // std::getenv——JMW_SIM_MARKERS_PLY 数据集可写
 #include <fstream>
+#include <QTimer>
 #include <nlohmann/json.hpp>
 #include "sched/CpuTopology.h"   // 自检起点 CPU 拓扑记录（2026-09-01）
 #include "pipelines/scan/SimScanSource.h"   // 中段模拟提取源（UI 开关组装）
@@ -74,6 +75,37 @@ void AppContext::initialize() {
         if (deviceManager_) deviceManager_->toIdle();
     });
     faultHandler_->start();
+
+    // 08 故障桥（P0-2，10 文档 §2.4 待办②）：外部 Error 级 FaultOccurred（08 相机/串口/
+    // 温度等）→ 完整故障链 S7 安全停机。EventBus 同步分发持总线锁——锁内不得调
+    // transition（StateChanged publish 重入死锁），故 QTimer 延后到主线程事件循环执行。
+    // 档层记档仍由 FaultHandler 订阅完成；本桥只补「转态＋safeStop＋红灯」链段。
+    faultBridgeSubId_ = eventBus_->subscribe(Scanner::EventType::FaultOccurred,
+        [this](const Scanner::Event& evt) {
+            if (evt.param1 < static_cast<int64_t>(Scanner::FaultSeverity::Error)) return;
+            const auto cur = stateMachine_
+                ? stateMachine_->getCurrentState() : Scanner::service::SystemState::Init;
+            if (cur == Scanner::service::SystemState::PostProcessing ||
+                cur == Scanner::service::SystemState::FaultSelfCheck)
+                return;  // 与 handler 口径一致：S6 保活/S7 已停机不重转
+            QTimer::singleShot(0, this, [this] {
+                if (!stateMachine_) return;
+                if (stateMachine_->getCurrentState() ==
+                    Scanner::service::SystemState::FaultSelfCheck)
+                    return;  // 已转 S7（防多帧风暴重复转）
+                if (stateMachine_->transition(Scanner::EventType::FaultOccurred).success) {
+                    if (deviceManager_) deviceManager_->toIdle();  // safeStop 语义（对齐直调口）
+                    if (eventBus_) {
+                        Scanner::Event led;
+                        led.type = Scanner::EventType::LedControl;
+                        led.param1 = 1;  // 红
+                        eventBus_->publish(led);
+                    }
+                    JMW_LOG_WARN("app-AppContext",
+                                 "[AppContext] 故障桥：外部 Error 级故障→S7 安全停机（led 红）");
+                }
+            });
+        });
 
     commandGate_ = std::make_unique<Scanner::service::CommandGate>(stateMachine_.get(), eventBus_.get());
     // P5-T14 01 标定接线：注册前逐个填 handler（DefaultCommands 返回时全空）
@@ -599,6 +631,9 @@ void AppContext::shutdown() {
     if (finishThread_.joinable()) finishThread_.join();         // 完成收尾线程（GBA 终局遍）先收
     if (devStartThread_.joinable()) devStartThread_.join();   // 设备启动收尾再关（防竞态）
     if (hwMonitor_) hwMonitor_->stop();
+    if (faultBridgeSubId_ != 0 && eventBus_)
+        eventBus_->unsubscribe(faultBridgeSubId_);
+    faultBridgeSubId_ = 0;
     if (scanWf_)    scanWf_->stop();
     simSource_.reset();                                          // 模拟源随后者弃（lane 已 join）
     if (calibWf_)   calibWf_->stop();
