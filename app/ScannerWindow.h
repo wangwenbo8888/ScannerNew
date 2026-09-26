@@ -56,8 +56,6 @@ private:
     QTimer* m_fpsTimer = nullptr;
     QTimer* m_consumerTimer = nullptr;
     QComboBox* m_resCombo = nullptr;
-    int m_pendingWidth = 0;
-    int m_pendingHeight = 0;
 
     uint64_t m_frameCount = 0;
     uint64_t m_prevFrameCount = 0;

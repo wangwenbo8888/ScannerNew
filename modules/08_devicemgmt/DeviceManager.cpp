@@ -195,6 +195,16 @@ Result DeviceManager::open() {
         return Result::fail("MCU 打开失败: " + rm.message);
     }
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: 相机+MCU 并行段 {}ms", el());
+    // ②b 相机 ROI 应用：UI 预设分辨率（setCameraResolution 记账）→ 开相机后落地；
+    //     0 值=未设过，用传感器缺省不动
+    if (camera_) {
+        const int pw = m_pendingResW_.load(std::memory_order_acquire);
+        const int ph = m_pendingResH_.load(std::memory_order_acquire);
+        if (pw > 0 && ph > 0) {
+            const Result rr = camera_->setResolution(pw, ph);
+            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 应用相机分辨率 {}x{}: {}", pw, ph, rr.message);
+        }
+    }
     // ③ 上行分流接线（onTemp 温度双警+记账+Warmup 喂入 / onGesture→KeySemantics 直收
     //     MCU 已判手势 / onShotCount G03 触发计数记账）
     hal::McuUplink up;
@@ -570,17 +580,17 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
         selfCheck_.stageStartMs = nowMs();
         selfCheck_.report("mcuLink", mcu_->isOpen());
 
-        // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V1 C0 D0 L50（七参·协议 260831；
-        // auto 搜口已探测合一发过且回显命中——通常此处直接判过；manual 口/回显未达
-        // 时补发兜底），停留 1 秒（2026-09-06 用户口径，原 5 秒）→ N11 H0 收口
-        //（停扫描，固件关灯）
+        // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V1 C0 D0 L50（七参·协议 260831）。
+        // 只发一个：auto 搜口已发同参 N10（兼探测+点灯，probeN10Sent 凭据）——此处
+        // 省略；manual 口（无探测帧）且回显未达才补发兜底。停留 1 秒（2026-09-06
+        // 用户口径，原 5 秒）→ N11 H0 收口（停扫描，固件关灯）
         hal::CaptureParams on{};
         on.freqHz = 50; on.bgLight = 50;
         on.laserT = 1; on.laserV = 1; on.laserC = 0; on.laserD = 0;
         on.laserLevel = 50;
         selfCheck_.expectEcho = "N10 H50 B50 T1 V1 C0 D0 L50";
-        if (mcu_->lastEchoPayload() != selfCheck_.expectEcho) {
-            mcu_->setCaptureParams(on, nullptr);   // 兜底补发（manual 口路径）
+        if (mcu_->lastEchoPayload() != selfCheck_.expectEcho && !mcu_->probeN10Sent()) {
+            mcu_->setCaptureParams(on, nullptr);   // 兜底补发（仅 manual 口）
         }
     });
 }
@@ -779,6 +789,19 @@ Result DeviceManager::setCameraExposure(double ms) {
     return Result::ok("已编队");
 }
 
+Result DeviceManager::setCameraResolution(int width, int height) {
+    if (!camera_) return Result::fail("未配置相机");
+    if (width <= 0 || height <= 0) return Result::fail("分辨率非法");
+    // 记账为待生效（open 重开应用）；采集中不变 ROI（抖动扰流，停采/重开生效）
+    m_pendingResW_.store(width, std::memory_order_release);
+    m_pendingResH_.store(height, std::memory_order_release);
+    post([this, width, height] {
+        if (camera_ && camera_->isOpen() && !isCapturing())
+            camera_->setResolution(width, height);   // 未采集中立即生效
+    });
+    return Result::ok("已编队");
+}
+
 Result DeviceManager::startFrameStream(hal::FrameCallback cb) {
     if (!camera_ || !camera_->isOpen()) return Result::fail("相机未就绪");
     post([this, cb = std::move(cb)]() mutable {
@@ -832,26 +855,35 @@ void DeviceManager::checkTempFaults(const serial::TempFrame& t) {
     } else if (!over) {
         tempHotLatched_ = false;                // 全路回落清锚
     }
-    // #4 乱跳：相邻 T 帧同路 |Δ|/Δt >tempSpikeC ℃/s → 边沿一次；次帧平稳清锚
-    //（dt 下钳 1ms：同拍连注两帧按 1ms 算——测试回灌口径）
+    // #4 乱跳：相邻 T 帧同路 |Δ| 超 tempSpikeAbsC（绝对钳大跳）或 速率超 tempSpikeC ℃/s
+    //（双阈值——速率灵敏、绝对防量化；任一命中→边沿一次；次帧平稳清锚）
+    //（dt 下钳 1ms：同拍连注两帧按 1ms 算——速率档测试回灌口径；绝对档不受 dt 影响）
     if (prevTempsValid_) {
         const int pn = std::min<int>(prevTemps_.channels, 4);
         const int64_t dtMs =
             std::max<int64_t>(1, static_cast<int64_t>(t.ts) - static_cast<int64_t>(prevTemps_.ts));
         bool spiky = false;
-        double worst = 0.0;
+        double worst = 0.0;         // 峰值速率（绝对档仅置位，报文带差量）
+        double worstAbs = 0.0;      // 峰值绝对差
         for (int i = 0; i < n && i < pn; ++i) {
-            const double rate =
-                std::abs(t.celsius[i] - prevTemps_.celsius[i]) * 1000.0 / static_cast<double>(dtMs);
+            const double d = std::abs(t.celsius[i] - prevTemps_.celsius[i]);
+            const double rate = d * 1000.0 / static_cast<double>(dtMs);
             if (rate > cfg_.tempSpikeC) {
                 spiky = true;
                 worst = std::max(worst, rate);
             }
+            if (d > cfg_.tempSpikeAbsC) {
+                spiky = true;
+                worstAbs = std::max(worstAbs, d);
+            }
         }
         if (spiky && !tempSpikeLatched_) {
             tempSpikeLatched_ = true;
-            publishFault(code(DevFault::TempSpike),
-                         "温度乱跳: 峰值速率 " + std::to_string(worst) + "C/s");
+            std::string msg = "温度乱跳: ";
+            if (worst > 0.0) msg += "峰值速率 " + std::to_string(worst) + "C/s";
+            if (worst > 0.0 && worstAbs > 0.0) msg += "，";
+            if (worstAbs > 0.0) msg += "峰值差 " + std::to_string(worstAbs) + "C";
+            publishFault(code(DevFault::TempSpike), msg);
         } else if (!spiky) {
             tempSpikeLatched_ = false;          // 次帧平稳清锚
         }

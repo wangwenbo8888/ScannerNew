@@ -154,6 +154,7 @@ std::string MCUDriver::lastEchoPayload() const {
 }
 
 bool MCUDriver::probeDidSelfCheck() const { return probeN12Sent_.load(std::memory_order_acquire); }
+bool MCUDriver::probeN10Sent() const { return probeN10Sent_.load(std::memory_order_acquire); }
 
 // ============================================================================
 // open/close（close 倒序：停 rx 线程 → 关串口）
@@ -239,12 +240,14 @@ std::string MCUDriver::probeAutoPort(int baud) {
         rxThread_ = std::thread(&MCUDriver::rxLoop, this);
         lastRx_.store(0, std::memory_order_release);
         probeHit_.store(false, std::memory_order_release);
-        probeN12Sent_.store(false, std::memory_order_release);
+    probeN12Sent_.store(false, std::memory_order_release);
+    probeN10Sent_.store(false, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(echoMtx_);
             lastEcho_.clear();             // 每口探测前清档（回显只作记档不作凭据）
         }
         channel_.sendFireAndForget("N10 H50 B50 T1 V1 C0 D0 L50");
+        probeN10Sent_.store(true, std::memory_order_release);   // 自检兜底省略凭据（该口已发同参帧）
         bool hit = false;
         for (int waited = 0; waited < 3000; waited += 10) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));

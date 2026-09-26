@@ -1091,6 +1091,7 @@ QWidget *MainWindow::createTitleBar()
     btnMin->setObjectName("btnWindowControl");
     btnMin->setFixedSize(40, 36);
     btnMin->setText(QStringLiteral("--"));
+    connect(btnMin, &QPushButton::clicked, this, &QWidget::showMinimized);
     layout->addWidget(btnMin);
 
     QPushButton *btnClose = new QPushButton();

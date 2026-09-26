@@ -74,6 +74,8 @@ public:
     void resetSerialWriteOwner(); // 写权交还：open 调用线程末次直写（探测/N12Z1 自检）后、
                                   // 逻辑线程首发前调（R2-A1 登记复位；否则逻辑线程首写被拒）
     bool probeDidSelfCheck() const;  // auto 搜口是否已发过 N12Z1（幂等省略口径；open 查）
+    bool probeN10Sent() const;       // auto 搜口是否已发过 N10 探测帧（同参省略口径——
+                                     // startupSelfCheck 兜底补发前查：搜口已发则不再补发）
     // 回环验证（启动自检用）：发 payload → timeoutMs 内收到固件回显同载荷帧即 true。
     // v2 固件对每条命令整帧回显——链路级"MCU 真收到"凭据。调用线程=逻辑线程（已持写权）
     bool sendEchoProbe(const std::string& payload, int timeoutMs = 400);
@@ -124,6 +126,7 @@ private:
     std::string lineBuf_;                        // v2 行缓冲（rx 线程私有；';'→codec 帧路径，'\n'→文本行）
     std::atomic<bool> probeHit_{false};          // 自动搜口命中凭据：数值行（温度上报；回显/纯回环不算）
     std::atomic<bool> probeN12Sent_{false};      // 搜口探测已发 N12Z1（open 幂等省略口径）
+    std::atomic<bool> probeN10Sent_{false};      // 搜口探测已发 N10 点灯帧（自检兜底省略口径）
     mutable std::mutex echoMtx_;                 // lastEcho_ 保护（rx 写 / lastEchoPayload const 读）
     std::string lastEcho_;                       // 最近一次回显载荷（v2 固件整帧回显下行命令）
 

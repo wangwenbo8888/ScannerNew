@@ -116,6 +116,8 @@ struct DeviceConfig {
     int heartbeatTimeoutMs = 10000;  // 串口无声（#2/#10）：距末帧超此值报 0x0802
     double tempMaxC = 60.0;          // 温度爆表（#3）：任一路超此值报 0x0803
     double tempSpikeC = 2.0;         // 温度乱跳（#4）：同路相邻 T 帧速率超此 ℃/s 报 0x0804
+    double tempSpikeAbsC = 10.0;     // 温度乱跳（#4）第二判据：同路相邻 T 帧绝对差值超此 ℃
+                                 //     即报（双阈值——速率灵敏、绝对钳大跳，任一命中）
     int seqGapWarn = 5;              // 帧计数对账（#9）：G03 触发计数跳变丢帧数每拍增量
                                  // 超此值报 0x0808（260831 改 G03 S 计数源）
 };
@@ -168,6 +170,7 @@ public:
     // —— 相机薄转发（统一编队：返回值=前置检查，实际动作逻辑线程异步执行）——
     bool isCameraOpen() const;
     Result setCameraExposure(double ms);
+    Result setCameraResolution(int width, int height);
     Result startFrameStream(hal::FrameCallback cb);
     Result stopFrameStream();
 
@@ -280,6 +283,8 @@ private:
     std::atomic<uint64_t> m_rxCnt_{0};          // 帧回调计数（帧率差分——相机线程写）
     std::atomic<int> m_measuredFps{0};          // 实测帧率（1s 窗口差分——UI 读）
     std::chrono::steady_clock::time_point m_lastFpsTick_{};  // 差分基点（相机线程）
+    std::atomic<int> m_pendingResW_{0};   // UI 分辨率待生效（open 时应用；采集中仅记账，
+    std::atomic<int> m_pendingResH_{0};   //     0 值=不动传感器缺省）
     serial::TempFrame lastTemps_{};             // 逻辑线程账本（快照源）
     TimestampMs tempRxTime_ = 0;                // 最近 T 帧到达时刻（v2 兜底判据）
     std::function<void(bool)> warmupDone_;      // 当前预热完成回调（onStable/onTimeout 消费）

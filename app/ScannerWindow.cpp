@@ -469,16 +469,18 @@ void ScannerWindow::onSliderExposeChanged(int v)
 void ScannerWindow::onResolutionChanged(int index)
 {
     QSize res = m_resCombo->itemData(index).toSize();
-    m_pendingWidth = res.width();
-    m_pendingHeight = res.height();
 
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
-    if (dm && dm->isCameraOpen()) {
-        ui.textEdit_Info->append(QString("分辨率将在下次打开相机时生效: %1x%2")
-            .arg(res.width()).arg(res.height()));
-        ui.textEdit_Info->append("请先关闭相机，再重新打开");
+    if (dm) {
+        // 真正下发后台：DeviceManager 记账＋未采集中立即 setResolution／采集中重开生效
+        const Scanner::Result r = dm->setCameraResolution(res.width(), res.height());
+        ui.textEdit_Info->append(r.success
+            ? QString("分辨率已下发后台: %1x%2（未采集中立即生效/采集中重开相机生效）")
+                  .arg(res.width()).arg(res.height())
+            : QString("分辨率下发失败: %1").arg(QString::fromStdString(r.message)));
     } else {
-        ui.textEdit_Info->append(QString("分辨率预设: %1x%2").arg(res.width()).arg(res.height()));
+        ui.textEdit_Info->append(QString("分辨率预设（后台未就绪）: %1x%2")
+            .arg(res.width()).arg(res.height()));
     }
 }
 

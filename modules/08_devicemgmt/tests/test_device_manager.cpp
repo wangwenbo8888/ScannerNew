@@ -869,3 +869,26 @@ TEST(DeviceManager, F7_SeqGapFault) {
     dm.logicTick();
     EXPECT_EQ(rec.fault(FC(DevFault::SeqGap)), 1);
 }
+
+// —— T15：启动自检只发一个 N10（2026-09-26 用户口径）——open 不发；startupSelfCheck
+// 兜底恰一次（manual/测试注入路径）；stage0 等待期不重发。auto 搜口省略凭据
+// （probeN10Sent）需真串口逐口探测，无注入缝——真机回归口径 ——
+TEST(DeviceManager, T15_SelfCheckSingleN10) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+    EXPECT_EQ(mock.count("N10 H50"), 0);                         // open 不发 N10
+
+    dm.startupSelfCheck([](const std::string&, bool) {});
+    dm.logicTick();                                              // 跑投稿：兜底补发恰一次
+    EXPECT_EQ(mock.count("N10 H50"), 1);
+    dm.logicTick();                                              // stage0 等回显期不重发
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H50"), 1);
+}
