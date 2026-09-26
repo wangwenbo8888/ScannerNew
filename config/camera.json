@@ -5,6 +5,7 @@
     "deviceIndexRight": 1,
     "rotateRight180": true,
     "triggerSource": "Line2",
-    "previewFps": 10
+    "previewFps": 10,
+    "pairStrictFrameId": false
   }
 }

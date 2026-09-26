@@ -21,12 +21,40 @@ public:
         : m_owner(owner), m_sideIndex(sideIndex), m_rotateRight(rotateRight) {}
 
     void DoOnImageCaptured(CImageDataPointer& imageData, void* /*pUserParam*/) override {
-        if (imageData->GetStatus() != GX_FRAME_STATUS_SUCCESS) return;
+        if (imageData->GetStatus() != GX_FRAME_STATUS_SUCCESS) {
+            // 坏帧可见性（260926）：链路错误/传输不完整帧此前静默吞——计数＋首帧/每
+            // 100 帧记一条（status 对照 GX_FRAME_STATUS_LIST；与帧号回退同源＝USB
+            // 拥塞指纹——双目全分辨率带宽顶格时链路层出错重开）
+            try {
+                const uint64_t n = s_badFrames[static_cast<size_t>(m_sideIndex)]
+                                       .fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n == 1 || n % 100 == 0) {
+                    JMW_LOG_WARN("08-CameraControl",
+                        "[CameraControl] 坏帧丢弃（side={} 累计 {}，status={}，fid={}）"
+                        "——USB 链路错误/传输不完整指纹",
+                        m_sideIndex, n, static_cast<int>(imageData->GetStatus()),
+                        imageData->GetFrameID());
+                }
+            } catch (...) {}
+            return;
+        }
 
         try {
         int w = static_cast<int>(imageData->GetWidth());
         int h = static_cast<int>(imageData->GetHeight());
         uint64_t fid = imageData->GetFrameID();
+
+        // 帧号回退检测（260926）：同侧帧号不升反降＝相机/USB 链路层自发重开出流
+        //（BlockID 归零——app 未重启流）。真机实证：左右轮流回跳 1~6、另一侧正常
+        // 爬升，为配对丢组＋偏移翻转采纳的根因指纹（全分辨率×50Hz×双目≈3.1Gbps
+        // 顶格 USB3 单控制器实用上限）
+        if (m_lastFid != 0 && fid < m_lastFid) {
+            JMW_LOG_WARN("08-CameraControl",
+                "[CameraControl] 帧号回退（side={}：{}→{}）——相机/USB 链路层重开出流"
+                "指纹（查带宽/USB 控制器分配/线缆）",
+                m_sideIndex, m_lastFid, fid);
+        }
+        m_lastFid = fid;
 
         // 1. 先处理到局部变量（不加锁）
         cv::Mat processed(h, w, CV_8UC1);
@@ -48,7 +76,15 @@ public:
 
         // 3. 尝试配对交付
         tryDeliver();
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            // 回调异常可见性（260926）：此前 catch(...) 静默吞——SDK 回调线程里任何
+            // 异常都意味着丢帧且无痕
+            JMW_LOG_ERROR("08-CameraControl",
+                "[CameraControl] 采集回调异常（side={}）: {}", m_sideIndex, e.what());
+        } catch (...) {
+            JMW_LOG_ERROR("08-CameraControl",
+                "[CameraControl] 采集回调异常（side={}）: 未知类型", m_sideIndex);
+        }
     }
 
 private:
@@ -75,8 +111,11 @@ private:
         // 260912c 阈值 30→8：每次触发重启（切模式/暂停续采/调参 N10 重发）后
         // 偏移都要重学——30 帧≈0.5-1s 预览全停，快速操作观感即「点了没反应」；
         // 8 帧≈0.13s。误采纳风险低：单侧真丢帧产生的偏移本就该采纳（新现实）
+        // 260926 实验开关 pairStrictFrameId=false：整段校验旁路——双方 ready 即
+        // 按时间对齐交付（链路重开致帧号频繁归零时测真实接收帧率用；扫描数据
+        // 同刻性/T-V 归属不保证，仅实验）
         int64_t off = 0;
-        if (leftBuf.frameId != rightBuf.frameId) {
+        if (m_owner->m_config.pairStrictFrameId && leftBuf.frameId != rightBuf.frameId) {
             off = static_cast<int64_t>(leftBuf.frameId) -
                   static_cast<int64_t>(rightBuf.frameId);
             // 偏移估计器（恒跑：失配≠已采纳偏移时计数；漂移后同样可再收敛）
@@ -133,6 +172,10 @@ private:
     CameraControl* m_owner;
     int m_sideIndex;
     bool m_rotateRight;
+    // 坏帧计数（per-side、跨会话累计——与 tryDeliver 内 s_mismatchDrops 同口径）
+    inline static std::atomic<uint64_t> s_badFrames[2]{};
+    uint64_t m_lastFid = 0;   // 本侧最近帧号（每侧回调单线程——无锁；帧号回退检测基线，
+                              // 新会话随 handler 重建归零）
 };
 
 // ============================================================================
@@ -495,6 +538,11 @@ Result CameraControl::startCapture() {
         m_pairOffset = 0;
         m_lastMismatchOff = 0;
         m_mismatchStreak = 0;
+    }
+    if (!m_config.pairStrictFrameId) {
+        JMW_LOG_WARN("08-CameraControl",
+            "[CameraControl] 帧号严格配对已关（pairStrictFrameId=false）——按时间对齐"
+            "交付：仅限带宽/帧率实测（T/V 奇偶归属与立体同刻性不保证，数据不可用于扫描）");
     }
 
     try {

@@ -82,10 +82,10 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
     connect(ui.horizontalSlider_ExposeTime, &QSlider::valueChanged, this, &ScannerWindow::onSliderExposeChanged);
 
     // A-T17 修复（运行时钳，.ui 设计量程同步）：滑条范围对齐 ParamStore spec
-    // （协议批3 终态：freq 1-200 默认 60 / bg 0-100 默认 10 / laser 0-100 默认
-    // 40——灯控量程实测 0-100；exposure 1-5ms 默认 3——260912 用户口径，60Hz
-    // 触发周期 16.7ms，>5ms 过曝拖影），初值自账本快照同步——setValue 触发
-    // valueChanged→setParam 同值记账（无副作用）
+    // （协议批3 终态：freq 1-200 默认 120（260926 用户口径，原 60）/ bg 0-100 默认
+    // 10 / laser 0-100 默认 40——灯控量程实测 0-100；exposure 1-5ms 默认 3——
+    // 260912 用户口径，120Hz 触发周期 8.3ms，>5ms 过曝拖影），初值自账本快照同步
+    // ——setValue 触发 valueChanged→setParam 同值记账（无副作用）
     if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
         ui.horizontalSlider_Freq->setRange(1, 200);
         ui.horizontalSlider_Background_Lighting->setRange(0, 100);

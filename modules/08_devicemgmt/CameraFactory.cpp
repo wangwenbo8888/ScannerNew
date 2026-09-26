@@ -10,12 +10,14 @@ namespace Scanner::device {
 std::unique_ptr<hal::IScannerCamera> createGalaxyStereoCamera(int deviceIndexLeft,
                                                               int deviceIndexRight,
                                                               bool rotateRight180,
-                                                              const std::string& triggerSource) {
+                                                              const std::string& triggerSource,
+                                                              bool pairStrictFrameId) {
     StereoPairConfig cfg;
     cfg.deviceIndexLeft = deviceIndexLeft;
     cfg.deviceIndexRight = deviceIndexRight;
     cfg.rotateRight180 = rotateRight180;
     cfg.triggerSource = triggerSource;
+    cfg.pairStrictFrameId = pairStrictFrameId;
     return std::make_unique<CameraControl>(cfg);
 }
 

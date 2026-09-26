@@ -13,10 +13,12 @@
 namespace Scanner::device {
 
 /// 大恒 Galaxy 双目相机（装机口径参数自 config/camera.json 由装配根喂入；
-/// triggerSource＝硬件触发源，缺省 Line2）
+/// triggerSource＝硬件触发源，缺省 Line2；pairStrictFrameId=false＝帧号校验旁路
+/// （按时间对齐交付——带宽/帧率实测实验口径，缺省 true 严格配对）
 std::unique_ptr<hal::IScannerCamera> createGalaxyStereoCamera(int deviceIndexLeft,
                                                               int deviceIndexRight,
                                                               bool rotateRight180,
-                                                              const std::string& triggerSource = "Line2");
+                                                              const std::string& triggerSource = "Line2",
+                                                              bool pairStrictFrameId = true);
 
 } // namespace Scanner::device

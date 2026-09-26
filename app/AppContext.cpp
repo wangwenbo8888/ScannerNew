@@ -279,6 +279,7 @@ void AppContext::initialize() {
         bool rotateRight180 = true;
         std::string triggerSource = "Line2";
         int previewFps = 10;
+        bool pairStrictFrameId = true;   // 帧号严格配对（false=按时间对齐交付——实测实验口径）
     };
     CameraSetupCfg camCfg;
     {
@@ -296,10 +297,12 @@ void AppContext::initialize() {
                 camCfg.rotateRight180 = c.value("rotateRight180", camCfg.rotateRight180);
                 camCfg.triggerSource = c.value("triggerSource", camCfg.triggerSource);
                 camCfg.previewFps = c.value("previewFps", camCfg.previewFps);
+                camCfg.pairStrictFrameId = c.value("pairStrictFrameId", camCfg.pairStrictFrameId);
                 JMW_LOG_INFO("app-AppContext",
-                             "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={}",
+                             "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} pairStrict={}",
                              camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
-                             camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps);
+                             camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps,
+                             camCfg.pairStrictFrameId);
             } catch (const std::exception& e) {
                 JMW_LOG_WARN("app-AppContext",
                              "[AppContext] camera.json 解析失败（{}）——用内置默认", e.what());
@@ -327,7 +330,7 @@ void AppContext::initialize() {
             // 装机口径自 config/camera.json（捕获值构造）
             return Scanner::device::createGalaxyStereoCamera(
                 camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
-                camCfg.rotateRight180, camCfg.triggerSource);
+                camCfg.rotateRight180, camCfg.triggerSource, camCfg.pairStrictFrameId);
         });
     // 设备启动（open+自检）后台化：此处不再阻塞主窗口——main 在 window.show() 后
     // 调 startDevicesAsync()（相机枚举+自动搜口实测 ~5s，同步跑=白屏等）

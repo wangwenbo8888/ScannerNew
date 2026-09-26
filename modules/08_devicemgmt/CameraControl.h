@@ -25,6 +25,8 @@ struct StereoPairConfig {
     int deviceIndexRight = 1;
     bool rotateRight180  = true;
     std::string triggerSource = "Line2";   // 硬件触发源（装机接线口径——config/camera.json）
+    bool pairStrictFrameId = true;         // 帧号严格配对开关（false=按时间对齐交付——
+                                           // 带宽/帧率实测实验用；T/V 奇偶归属不保证）
 };
 
 // ============================================================================

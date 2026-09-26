@@ -1940,9 +1940,9 @@ void MainWindow::applyMeshPreset() {
     dm->setParam("exposure",   3.0, src);
     dm->setParam("bgLight",   10.0, src);
     dm->setParam("laserLevel", 40.0, src);
-    dm->setParam("freqHz",    60.0, src);
+    dm->setParam("freqHz",    120.0, src);
     statusBar()->showMessage(
-        QStringLiteral("面片扫描推荐参数已套用（B=10/L=40/H=60/曝光3ms）"), 3000);
+        QStringLiteral("面片扫描推荐参数已套用（B=10/L=40/H=120/曝光3ms）"), 3000);
 }
 
 // 标点扫描推荐预设（260912 用户口径）：补光 B=40（2026-08 真机标点检测成功
@@ -1958,8 +1958,8 @@ void MainWindow::applyMarkerPreset() {
         m_param1Slider->setValue(kKnobBg40);   // 触发 valueChanged→pushParam1Scaled 记账
     else
         pushParam1Scaled(dm, kKnobBg40);
-    dm->setParam("freqHz", 60.0, Scanner::device::ParamEntry::Source::Ui);
-    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（B=40/H=60）"), 3000);
+    dm->setParam("freqHz", 120.0, Scanner::device::ParamEntry::Source::Ui);
+    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（B=40/H=120）"), 3000);
 }
 
 // 参数1 三参比例压账本（260912 用户口径 B'）：启动扫描前调用——按旋钮 1-100

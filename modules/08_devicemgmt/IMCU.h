@@ -15,7 +15,7 @@
 namespace Scanner::hal {
 
 struct CaptureParams {              // N10 七参（协议 260831 §下行表；H 1-200 / B 0-100 / T V C D 0|1 / L 0-100）
-    int freqHz = 60;
+    int freqHz = 120;   // 260926 用户口径（原 60）
     int bgLight = 10;
     int laserT = 1, laserV = 1, laserC = 0, laserD = 0;   // 四激光管开关（ScanMode 映射，见 DeviceManager::effectiveN10）
     int laserLevel = 40;
