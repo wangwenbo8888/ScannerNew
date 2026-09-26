@@ -892,3 +892,45 @@ TEST(DeviceManager, T15_SelfCheckSingleN10) {
     dm.logicTick();
     EXPECT_EQ(mock.count("N10 H50"), 1);
 }
+
+// —— T16：自检亮灯总窗 ~2s（2026-09-26 用户口径）——stage0 1s 上行活证提前过关＋
+// stage1 停留 1s → N11 H0 收口。无回显固件口径：MockMcu 不回显 N10（v3 无整帧回
+// 显）、自动 ACK 刷 lastRx_ 即活证。0.8s 未收口；≤4s 内 N11 H0 恰一次；全程 N10
+// 恰一次（真钟驱动，real-time 用例 ~2.5s）——
+TEST(DeviceManager, T16_SelfCheckLightWindowTwoSeconds) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    int bgOk = 0;
+    dm.startupSelfCheck([&](const std::string& item, bool ok) {
+        if (item == "bgLight" && ok) ++bgOk;
+    });
+    dm.logicTick();                                              // stage0 起（N10 兜底恰一次）
+    EXPECT_EQ(mock.count("N10 H50"), 1);
+    EXPECT_EQ(mock.count("N12 T5"), 1);                          // 温度回传保证（N12 T5）同发恰一次
+
+    for (int i = 0; i < 16; ++i) {                               // ~0.8s：1s 线未到
+        sleepMs(50);
+        dm.logicTick();
+    }
+    EXPECT_EQ(mock.count("N11 H0"), 0);                          // 未过关未收口
+
+    bool closed = false;                                         // 至 ~2s：活证过关＋停留满收口
+    for (int i = 0; i < 64 && !closed; ++i) {                    // 上界 3.2s（余量）
+        sleepMs(50);
+        dm.logicTick();
+        closed = mock.count("N11 H0") > 0;
+    }
+    EXPECT_TRUE(closed);
+    EXPECT_EQ(mock.count("N11 H0"), 1);
+    EXPECT_EQ(mock.count("N10 H50"), 1);                         // 全程未重发
+    EXPECT_EQ(mock.count("N12 T5"), 1);                          // N12 T5 亦不重发
+    EXPECT_GE(bgOk, 1);                                          // 灯项活证过关已报
+}

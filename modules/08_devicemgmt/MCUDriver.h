@@ -74,6 +74,8 @@ public:
     void resetSerialWriteOwner(); // 写权交还：open 调用线程末次直写（探测/N12Z1 自检）后、
                                   // 逻辑线程首发前调（R2-A1 登记复位；否则逻辑线程首写被拒）
     bool probeDidSelfCheck() const;  // auto 搜口是否已发过 N12Z1（幂等省略口径；open 查）
+    void setTempReportInterval(int ms);  // N12 T<ms>（260831 协议）：设定 G02 温度回传间隔
+                                         // （发不等——G02 到达即为凭据；自检入口发，保证上行活证/温度管线有源）
     bool probeN10Sent() const;       // auto 搜口是否已发过 N10 探测帧（同参省略口径——
                                      // startupSelfCheck 兜底补发前查：搜口已发则不再补发）
     // 回环验证（启动自检用）：发 payload → timeoutMs 内收到固件回显同载荷帧即 true。

@@ -542,6 +542,9 @@ void MCUDriver::flushWrites(int timeoutMs) {
     waitWriteDrained(timeoutMs);
 }
 void MCUDriver::enterSelfCheck(DoneCb cb)   { channel_.send("N12 Z1", std::move(cb)); }
+void MCUDriver::setTempReportInterval(int ms) {
+    channel_.sendFireAndForget("N12 T" + std::to_string(ms));
+}
 void MCUDriver::exitSelfCheck(DoneCb cb)    { channel_.send("N12 Z0", std::move(cb)); }
 void MCUDriver::enterStandby(DoneCb cb)     { channel_.send("N13 E1", std::move(cb)); }
 void MCUDriver::exitStandby(DoneCb cb)      { channel_.send("N13 E0", std::move(cb)); }
