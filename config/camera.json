@@ -6,6 +6,6 @@
     "rotateRight180": true,
     "triggerSource": "Line2",
     "previewFps": 10,
-    "pairStrictFrameId": false
+    "pairStrictFrameId": true
   }
 }
