@@ -672,6 +672,14 @@ void MainWindow::onCalibDeviceClicked()
 // 就绪态）且有点云。不满足→拒并状态栏提示（工具栏编辑工具统一走此口）
 bool MainWindow::ensureEditAllowed() {
     if (m_appCtx && m_appCtx->canEnterEditSession()) return true;
+    // 拒绝留痕（260927 排障插桩：套索点击无反应时定位三条件哪个不满足）
+    if (m_appCtx) {
+        const size_t mk = m_appCtx->sceneFeed() ? m_appCtx->sceneFeed()->latestMarkers().size() : 0;
+        const auto pc = m_appCtx->pointCloudBuffer() ? m_appCtx->pointCloudBuffer()->getTotalPointCount() : 0;
+        JMW_LOG_WARN("app-MainWindow",
+            "[编辑门禁] 拒绝——标志点={} 点云={}（状态/暂停详情见 canEnterEditSession 口径）",
+            mk, pc);
+    }
     statusBar()->showMessage(
         QStringLiteral("编辑不可用：需处于待机/扫描就绪态且有标志点或激光点云"), 3000);
     return false;
@@ -948,6 +956,62 @@ void MainWindow::showCameraMonitor() {
     m_camDlg->show();
     m_camDlg->raise();
     m_camDlg->activateWindow();
+}
+
+// 扫描就绪窗口（260927 就绪流程·用户口径）：UI 模式键→会话备好（模式/帧流/
+// 工作流，不启采）→弹此窗——「按设备 M 键开始扫描」；200ms 轮询 isCapturing
+// （M 键 captureToggle 启采）自动关闭；取消＝终止会话（stopScanSession＋键复原）
+void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
+    if (!m_scanReadyDlg) {
+        m_scanReadyDlg = new QDialog(this);
+        m_scanReadyDlg->setWindowTitle(QStringLiteral("扫描就绪"));
+        m_scanReadyDlg->setModal(false);
+        m_scanReadyDlg->setFixedWidth(360);
+        auto* lay = new QVBoxLayout(m_scanReadyDlg);
+        m_scanReadyLabel = new QLabel(m_scanReadyDlg);
+        m_scanReadyLabel->setAlignment(Qt::AlignCenter);
+        m_scanReadyLabel->setStyleSheet(
+            "font-size:14px; padding:12px 8px; color:#202225;");
+        lay->addWidget(m_scanReadyLabel);
+        auto* cancel = new QPushButton(QStringLiteral("取消（终止会话）"), m_scanReadyDlg);
+        lay->addWidget(cancel);
+        connect(cancel, &QPushButton::clicked, this, [this]() {
+            if (m_appCtx) {
+                const auto r = m_appCtx->stopScanSession();
+                if (!r.success)
+                    statusBar()->showMessage(QString::fromStdString("终止被拒: " + r.message));
+            }
+            if (m_scanReadyBtnIdx >= 0) setScanButtonVisual(m_scanReadyBtnIdx, false);
+            m_activeScanToolIdx = -1;
+            if (m_scanReadyPoll) m_scanReadyPoll->stop();
+            m_scanReadyDlg->close();
+        });
+        // 轮询：M 键开扫（isCapturing 翻真）自动关；会话已亡（他路终止）也关
+        m_scanReadyPoll = new QTimer(this);
+        m_scanReadyPoll->setInterval(200);
+        connect(m_scanReadyPoll, &QTimer::timeout, this, [this]() {
+            if (!m_appCtx) { m_scanReadyPoll->stop(); return; }
+            auto* dm = m_appCtx->deviceManager();
+            if ((dm && dm->isCapturing()) || !m_appCtx->isScanSessionActive()) {
+                m_scanReadyPoll->stop();
+                if (m_scanReadyDlg->isVisible()) {
+                    m_scanReadyDlg->close();
+                    if (dm && dm->isCapturing())
+                        statusBar()->showMessage(
+                            QStringLiteral("扫描中——按设备 M 键停止"), 5000);
+                }
+            }
+        });
+    }
+    m_scanReadyBtnIdx = btnIdx;
+    m_scanReadyLabel->setText(
+        QStringLiteral("%1 已就绪\n\n按设备【M 键】开始扫描\n（扫描中再按 M 停止）")
+            .arg(modeTitle));
+    m_scanReadyDlg->show();
+    m_scanReadyDlg->raise();
+    m_scanReadyDlg->activateWindow();
+    m_scanReadyPoll->start();
+    statusBar()->showMessage(modeTitle + QStringLiteral(" 已就绪——按设备 M 键开始扫描"));
 }
 
 // 单键扫描按钮态视觉：idx=2 标点/3 面片/4 精细/5 深孔——活跃＝红框＋红字"停止扫描"，
@@ -1419,10 +1483,12 @@ QWidget *MainWindow::createToolBar()
                 else
                     applyParam1ToLedger();     // 精细/深孔：三参压旋钮值（待真机标定预设）
                 m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
-                const auto r = m_appCtx->startScanSession(mode);   // 四值模式直传（⑨b：精细/深孔 07 链配对待裁决）
+                // 260927 就绪流程（用户口径）：UI 模式键只备会话（模式/帧流/工作流），
+                // 不启采——正式开扫由设备 M 键触发（captureToggle→N10 四管掩码）
+                const auto r = m_appCtx->armScanSession(mode);
                 if (!r.success) {
                     QMessageBox::warning(this, title,
-                        QString::fromStdString("扫描启动被拒:\n" + r.message));
+                        QString::fromStdString("扫描就绪被拒:\n" + r.message));
                 } else {
                     setScanButtonVisual(myIdx, true);          // 只有本键变红
                     m_activeScanToolIdx = myIdx;
@@ -1443,8 +1509,7 @@ QWidget *MainWindow::createToolBar()
                         m_markerRootItem->setExpanded(true);
                     }
                     showCameraMonitor();                       // 调试：弹相机左右图监视
-                    statusBar()->showMessage(QString::fromStdString(r.message) +
-                                             QStringLiteral("——再点停止"));
+                    showScanReadyPrompt(title, myIdx);         // 就绪窗口：等设备 M 键
                 }
             });
         }

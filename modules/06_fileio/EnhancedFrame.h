@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <opencv2/core.hpp>
+#include "base/types.h"
 
 namespace Scanner::data {
 
@@ -33,6 +34,9 @@ struct EnhancedFrame {
     // tvKnown=false＝未知（sim 帧/未锚定）——消费方（07 ScanChains）回退帧号奇偶
     bool tvKnown = false;
     bool tvLeftSkew = true;                // true=左斜 T 组 / false=右斜 V 组
+    // 采集模式随帧贯通（260927：08 captureMode 原子快照随帧下行）——07 帧级激光
+    // 种类分派依据：面片=T/V 交替（tvKnown 判）、精细=D 管帧帧同族、深孔=C 管
+    Scanner::ScanMode scanMode = Scanner::ScanMode::MarkerPlusLaser;
     CalibSnapshot snapshot;
 };
 

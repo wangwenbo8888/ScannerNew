@@ -94,7 +94,8 @@ public:
     /// 线程＝相机回调线程（SlotRing 单生产者约定——只从这一个线程调）
     void pushSessionFrame(const cv::Mat& grayL, const cv::Mat& grayR,
                           double temperatureC, uint64_t frameId,
-                          bool tvKnown = false, bool tvLeftSkew = true);
+                          bool tvKnown = false, bool tvLeftSkew = true,
+                          Scanner::ScanMode scanMode = Scanner::ScanMode::MarkerPlusLaser);
     /// enrich fail 丢帧累计（挂 10 故障桥的口径源）
     uint64_t droppedSessionFrames() const;
 

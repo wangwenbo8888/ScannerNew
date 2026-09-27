@@ -55,6 +55,7 @@ public:
     void enterStandby(DoneCb cb) override;
     void exitStandby(DoneCb cb) override;
     void setHeatTarget(int celsius, DoneCb cb) override;
+    void setDeviceLed(int s1to4) override;    // N14 S1-S4 设备指示灯（发不等；协议(2)）
     void queryTemperature(int v0to2) override;
     void enterCalibration(DoneCb cb) override;
     void exitCalibration(DoneCb cb) override;
@@ -104,6 +105,9 @@ private:
     void rxLoop();                // rx 线程主体：read→feed→dispatch（含半帧超时推进）
     void dispatchFrame(const serial::FrameCodec::Frame& f);       // 单帧按首字符入环（rx/测试共用）
     void feedTextLine(const std::string& line);                   // v2 固件裸文本行（数值=温度上报；任何行=链路活）
+    void handleUpstreamLine(const std::string& line);             // G0x/数值行统一解析体（260927：
+                                                                  // 固件 G01 以 ';' 帧上行——dispatchFrame
+                                                                  // 'G' 分支与 feedTextLine 共用；tap 已各归各路）
     void onParseFail(const std::string& payload);                 // 载荷弃帧：warn+计数
     void accountShotCount(uint64_t count);                        // G03 帧计数对账（pump 内；0x0808 源）
     bool writeFrame(const std::string& frame);                    // CommandChannel 写出口

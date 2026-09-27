@@ -494,20 +494,28 @@ ScanChains::Hooks ScanChains::assemble() {
                 }
                 if (eiR.interpCount == 0 || !hasPts(eiR.d_interpPoints)) return 0;
 
-                // —— 激光线种类判定（架构口径 2026-09-05）：激光线共四组——
-                // 左斜 25 条/右斜 25 条/精细 7 条/深孔 1 条。判定链＝用户经软件
-                // 按钮选择扫描模式 → 状态机（10）记录当前模式 → 设备管理（08）
-                // 向 MCU 下发对应激光模式命令 → 收到图像后按当前扫描模式判定
-                // 激光线种类（本链）。
-                // 260927 判据切换（时间戳奇偶法）：tvKnown＝CameraControl 按设备
-                // 时间戳算的脉冲序奇偶（偶=T 左斜）——时间轴数 MCU 实发脉冲，免疫
-                // 链路重开（BlockID 归零不再翻相）与相机漏帧；锚=开扫首帧 T（N11
-                // H1 后首脉冲恒 T——固件确认中）。tvKnown=false（sim 帧/未锚定）
-                // 回退帧号奇偶旧法（偶=左斜 T 组用 left_skew，奇=右斜 V 组用右斜
-                // 参数——未标定暂用左斜重建）。模式驱动落地后本判定仅作面片扫描
-                // 内左/右斜帧的细分派
-                const bool leftSkewFrame =
-                    frame->tvKnown ? frame->tvLeftSkew : ((frame->frameId % 2) == 0);
+                // —— 激光线种类判定（架构口径 2026-09-05，260927 模式贯通收口）——
+                // 激光线共四组：左斜 25 条/右斜 25 条/精细 7 条/深孔 1 条。判定链＝
+                // 用户选扫描模式 → 08 按模式下发 N10 四管掩码（cycleMode/菜单①②
+                // 落地 lastCaptureMode_）→ captureMode() 随帧透传（EnhancedFrame.
+                // scanMode）→ 本链按模式分派帧级种类：
+                //   · 面片（MarkerPlusLaser）：T/V 逐触发交替——tvKnown（时间戳
+                //     奇偶法，260927）判左右斜；未知回退帧号奇偶旧法
+                //   · 精细（FineScan，D 管）/深孔（DeepHoleScan，C 管）：单管模式
+                //     帧帧同族（协议 260831：仅已开启管轮流——单开即恒同一管），
+                //     无 T/V 交替概念，leftSkew 恒 true（族别=模式管）
+                //   · 标点（MarkerOnly）：无激光帧（本链自然无激光点产出）
+                // 后续按模式管接入对应重建参数（右斜/精细/深孔参数标定落地后）
+                const auto frMode = frame->scanMode;
+                bool leftSkewFrame;
+                if (frMode == Scanner::ScanMode::FineScan ||
+                    frMode == Scanner::ScanMode::DeepHoleScan) {
+                    leftSkewFrame = true;    // 单管模式：帧帧同族（模式驱动分派）
+                } else {
+                    leftSkewFrame = frame->tvKnown
+                        ? frame->tvLeftSkew
+                        : ((frame->frameId % 2) == 0);
+                }
 
                 // —— 激光左右匹配（2026-09-06 用户口径：先出链路效果不看精度）——
                 // 最简固定视差：L 矫正点直接减 30px 视差作 R 匹配，跳过极线插值＋

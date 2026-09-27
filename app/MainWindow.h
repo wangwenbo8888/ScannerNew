@@ -88,6 +88,9 @@ private slots:
     /// 相机预览监视弹窗（调试）：扫描启动时弹出，实时显示左右相机灰度图
     /// （观察灯帧交替/标记点可见性）。数据走 AppContext 调试帧分路
     void showCameraMonitor();
+    /// 扫描就绪窗口（260927 就绪流程）：UI 模式键→armScanSession 备好会话后弹出
+    /// ——「按设备 M 键开始扫描」；轮询 isCapturing 自动关闭，取消＝终止会话
+    void showScanReadyPrompt(const QString& modeTitle, int btnIdx);
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
@@ -101,6 +104,10 @@ protected:
     QLabel *m_camLeft = nullptr;      // 左相机图
     QLabel *m_camRight = nullptr;
     QLabel *m_camFrameLabel = nullptr; // 左右帧号＋偏移显示（调试）
+    QDialog *m_scanReadyDlg = nullptr;      // 扫描就绪窗口（260927 就绪流程，懒建）
+    QLabel *m_scanReadyLabel = nullptr;     // 就绪提示文案（模式名注入）
+    class QTimer *m_scanReadyPoll = nullptr; // 就绪轮询（200ms 查 isCapturing→自动关）
+    int m_scanReadyBtnIdx = -1;             // 就绪对应的模式键（取消时复原视觉）
     QList<QPushButton*> m_navLeftButtons;
     QList<QPushButton*> m_navRightButtons;
     QList<QPushButton*> m_toolButtons;

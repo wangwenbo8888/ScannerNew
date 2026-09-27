@@ -87,6 +87,9 @@ public:
     /// 就绪检查→帧流双投递注册（预览＋会话环）→startCapture→命令通道 start_scan(模式)。
     /// 拒绝原因随 Result 返回（日志同步由 gate/门面各"不走打印点"落）
     Scanner::Result startScanSession(Scanner::ScanMode mode);
+    Scanner::Result armScanSession(Scanner::ScanMode mode);   // 260927 就绪流程：会话/
+                                                              // 帧流/模式备好但不启采——
+                                                              // 设备 M 键才正式开扫
     /// finish_scan 点火（工作流合账）＋采集停止（08 stopCapture）
     Scanner::Result stopScanSession();
     /// 扫描会话是否活跃（Running/Paused——按钮启停切换判据）
@@ -220,4 +223,5 @@ private:
 
     // —— 08 故障桥（P0-2）：EventBus FaultOccurred(Error+) → S7 安全停机链 ——
     Scanner::infra::SubscriberId faultBridgeSubId_ = 0;
+    Scanner::infra::SubscriberId ledSubId_ = 0;      // G8 设备指示灯：StateChanged→N14 S 码
 };

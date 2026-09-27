@@ -13,11 +13,14 @@ void KeySemantics::onGesture(const serial::GestureEvent& g, const MenuState& men
     using K = serial::KeyId;
     using G = serial::GestureEvent::Gesture;
 
-    // 一问门禁（M1 分类）：启停（M/S 主层）不问——采集门由 capturing 状态自身
-    // 表达（DeviceManager 保证只有可采集态才可能收到）；其余菜单/模式/调节键
-    // （含 M/S layer=2 的 menuSelect）gate 关一律丢弃。
+    // 一问门禁（M1 分类＋260927 增补）：启停（M/S 主层）不问——采集门由 capturing
+    // 状态自身表达（DeviceManager 保证只有可采集态才可能收到）；切模式（M/D）亦
+    // 不问——260927 用户口径：采集中双击实时切模式（N10 四管掩码全参重发，D1
+    // 口径同滑条改参；激光管轮流随新掩码重排，帧级种类由 scanMode 随帧分派）。
+    // 其余菜单/调节键（含 M/S layer=2 的 menuSelect）gate 关一律丢弃。
     const bool startStop = g.key == K::Middle && g.gesture == G::Short && menu.layer == 1;
-    if (!startStop && !gate_()) {
+    const bool modeSwitch = g.key == K::Middle && g.gesture == G::Double;
+    if (!startStop && !modeSwitch && !gate_()) {
         actions_.dropped("门禁");
         return;
     }

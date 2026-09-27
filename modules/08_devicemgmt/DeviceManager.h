@@ -62,6 +62,7 @@
 #include "base/types.h"
 #include "serial/FrameCodec.h"
 #include "serial/McuFrame.h"  // TempFrame（getLastTemperatures 返回值）
+#include "PresetLadder.h"     // G6 档位梯（Brightness 调节上下文的三参组合步进）
 
 #include <atomic>
 #include <chrono>
@@ -129,9 +130,16 @@ public:
     // 串口写测试缝（MCUDriver 透传；std::function 直传不泄子零件类型）
     using SerialWriteOverride = std::function<bool(const std::string& frameBytes)>;
 
+    // 参数档 IO（G7 落盘·260927 补缺口）：组合根注入文件读写——08 不做文件 IO；
+    // 空=不落盘（测试口径）。防抖 2s＋close 兜底归 DeviceManager（见 logicTick ⑩）
+    struct ParamIo {
+        std::function<std::string()> load;                  // 读档（空串=无档）
+        std::function<bool(const std::string&)> persist;    // 落盘（"key=value;..."）
+    };
     DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* bus,
                   CameraFactory camFactory = nullptr,
-                  SerialWriteOverride serialWriteOverride = nullptr);
+                  SerialWriteOverride serialWriteOverride = nullptr,
+                  ParamIo paramIo = {});
     ~DeviceManager();
     DeviceManager(const DeviceManager&) = delete;
     DeviceManager& operator=(const DeviceManager&) = delete;
@@ -165,6 +173,9 @@ public:
     serial::TempFrame getLastTemperatures() const;
     bool isCapturing() const;                   // 采集子态真相源（ModeController 黑板）
     DeviceMode mode() const;                    // 模式黑板快照（UI/测试）
+    Scanner::ScanMode captureMode() const {     // 当前采集 ScanMode（四管掩码真相源；
+        return lastCaptureMode_.load(std::memory_order_relaxed);   // 原子——任意线程可读，
+    }                                                               // app 帧回调随帧透传给 07）
     MenuState menuState() const;                // 菜单账本快照（UI 常显）
 
     // —— 相机薄转发（统一编队：返回值=前置检查，实际动作逻辑线程异步执行）——
@@ -180,6 +191,11 @@ public:
     //    灯型按 ScanMode 映射四管掩码（协议 260831 定版）：A=T0V0C0D0+L0+B40 /
     //    B(缺省)=T1V1 / 精细=D管 / 深孔=C管；采集期参数变更重发同样生效
     void startCapture(Scanner::ScanMode mode = Scanner::ScanMode::MarkerPlusLaser);
+    void setCaptureMode(Scanner::ScanMode mode);   // 只设采集模式不启采（260927 就绪
+                                                   // 流程：UI 选模式备好→设备 M 键才
+                                                   // N10/N11H1 开扫——captureToggle 消费）
+    void setDeviceLed(int s1to4);                  // G8 设备指示灯（N14 S1-S4；app 随状态
+                                                   // 机/故障下发——去重后编队，未开门直返）
     void stopCapture();
     /// 实测相机帧率（配对交付差分 1s 窗口——帧回调链内计数，UI 只读）
     int measuredCameraFps() const { return m_measuredFps.load(std::memory_order_relaxed); }
@@ -243,6 +259,8 @@ private:
     void onParamDispatch(const std::string& key, double v, ParamStore::Done done);
     void startStreamIfReady();
     void refreshParamSnapshot();                // 全参数拷入互斥快照（≤6 项）
+    void persistParamsIfDue(int64_t nowMs_);    // G7 落盘：脏账防抖 2s 拍尾冲刷
+                                                //（失败保脏下拍重试；close 兜底另调）
     // 切模式/启停的命令组主体（逻辑线程执行——门禁已在调用方线程过）
     std::vector<SeqStep> captureSeqSteps();      // 采集组公共步链：N10(账本)→N11H1
     void enterScanOnLogic();
@@ -253,6 +271,11 @@ private:
 
     // —— 配置与依赖（声明序即初始化序）——
     DeviceConfig cfg_;
+    ParamIo paramIo_;              // 参数档 IO（空=不落盘；逻辑线程使用）
+    bool paramDirty_ = false;      // G7：改账未落盘（bootstrap 装载不算）
+    int64_t paramLastChangeMs_ = 0;// 末次改账时刻（防抖 2s 起点拍）
+    bool paramBootLoading_ = false;// bootstrap 装载期（抑制脏账标记）
+    int lastDeviceLed_ = 0;        // G8：末次已发指示灯码（去重；逻辑线程属主）
     infra::EventBus* bus_;
     CameraFactory camFactory_;
     SerialWriteOverride writeOverride_;
@@ -261,6 +284,8 @@ private:
     std::unique_ptr<hal::IScannerCamera> camera_;
     std::unique_ptr<MCUDriver> mcu_;
     std::unique_ptr<MenuLogic> menu_;
+    PresetLadder ladder_;           // G6 档位梯（Brightness 上下文：曝光/激光/补光
+                                    // 三参组合，内置 3 档钳制不环绕；逻辑线程属主）
     std::unique_ptr<ModeController> mode_;
     std::unique_ptr<WarmupSequence> warmup_;
     std::unique_ptr<KeySemantics> semantics_;   // ctor 体内 buildKeyActions 接线
@@ -292,7 +317,10 @@ private:
     TimestampMs tempRxTime_ = 0;                // 最近 T 帧到达时刻（v2 兜底判据）
     std::function<void(bool)> warmupDone_;      // 当前预热完成回调（onStable/onTimeout 消费）
     bool standbyActive_ = false;                // MCU 侧待机记账（切模式前退待机判据）
-    Scanner::ScanMode lastCaptureMode_ = Scanner::ScanMode::MarkerPlusLaser;  // 采集灯型（逻辑线程属主；N10 四管掩码组帧依据）
+    std::atomic<Scanner::ScanMode> lastCaptureMode_{Scanner::ScanMode::MarkerPlusLaser};
+    // 采集灯型（写=逻辑线程〔startCapture/按键切模式〕；N10 四管掩码组帧依据）。
+    // 260927 模式随帧贯通：原子化——app 帧回调（相机 SDK 线程）经 captureMode()
+    // 无锁快照，随帧透传给 07 管线做帧级激光种类分派
     // —— D-T13 故障边沿锚（逻辑线程属主；恢复清锚防复报）——
     bool camFaultLatched_ = false;              // 0x0801 掉线锁（相机重开清锚）
     bool camWasOpen_ = false;                   // 0x0801 前置锚：相机曾开（open 成功即置）

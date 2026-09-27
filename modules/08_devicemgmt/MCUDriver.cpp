@@ -386,6 +386,12 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
     case 'E':
         onParseFail(f.payload);   // v2 旧 E1; 急停牌已删——忽略+warn（§2.2 列净）
         break;
+    case 'G':
+        // G0x 以 ';' 帧格式上行（260927 真机实证：G01 手势带分号、G02/G03 为
+        // '\n' 文本行——固件双格式并存）→ 统一走文本行解析体（tap 已在函数头
+        // 以帧口径记过，这里不重复 tap）
+        handleUpstreamLine(f.payload);
+        break;
     default: {
         // v2 固件对下行命令整帧回显（实测）；新固件回显带 "CMD: " 前缀（260917
         // 真机日志实证）——剥离前缀归一化，'N' 打头载荷即回显，记档供 sendEchoProbe
@@ -419,6 +425,15 @@ void MCUDriver::onParseFail(const std::string& payload) {
 // 数值行/G0x 帧兼作自动搜口命中凭据（回显/纯回环线不产上行帧，不会误命中）。
 void MCUDriver::feedTextLine(const std::string& line) {
     notifyTap(false, line);                       // 调试监视：RX 裸文本行
+    handleUpstreamLine(line);
+}
+
+// G0x/数值行统一解析体（feedTextLine 与 dispatchFrame 'G' 分支共用）——
+// 260927 真机实证：固件 G01 以 ';' 帧格式上行（tap 行带分号），而 G02/G03 为
+// '\n' 文本行（tap 行不带）——两种进路都要解析（原 dispatchFrame 无 'G' 分支，
+// ';' 帧 G01 全落 default 弃帧＝按键链真机「按了没作用」根因）
+void MCUDriver::handleUpstreamLine(const std::string& line) {
+    // 任何行=链路活：刷 lastRx_（0x0802 心跳口径——文本行/';' 帧两进路统一在此）
     lastRx_.store(systemNowMs(), std::memory_order_release);
     // G0x 上行帧（260831 协议风格固件）：G01 手势/G02 四路温度/G03 计数——任一
     // 即固件在线凭据（自动搜口 probeHit_）。G02 A/B/C/D ℃ → TempFrame 入 T 环
@@ -572,6 +587,12 @@ void MCUDriver::enterStandby(DoneCb cb)     { channel_.send("N13 E1", std::move(
 void MCUDriver::exitStandby(DoneCb cb)      { channel_.send("N13 E0", std::move(cb)); }
 void MCUDriver::setHeatTarget(int celsius, DoneCb cb) {
     channel_.send("N14 T" + std::to_string(celsius), std::move(cb));
+}
+void MCUDriver::setDeviceLed(int s1to4) {
+    // 协议(2) 260831：S1 黄(初始化)/S2 红(故障)/S3 绿(待机/后处理)/S4 蓝(标定/扫描)
+    //——上位机状态回显，发不等；与 N14 T（加热，xlsx 版口径）参数字母并存不冲突
+    if (s1to4 < 1 || s1to4 > 4) return;
+    channel_.sendFireAndForget("N14 S" + std::to_string(s1to4));
 }
 void MCUDriver::queryTemperature(int v0to2) {
     channel_.sendFireAndForget("N15 V" + std::to_string(v0to2));

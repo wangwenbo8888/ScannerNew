@@ -228,12 +228,13 @@ uint64_t ScanWorkflow::droppedFrameCount() const {
 // ============================================================================
 void ScanWorkflow::pushSessionFrame(const cv::Mat& grayL, const cv::Mat& grayR,
                                     double temperatureC, uint64_t frameId,
-                                    bool tvKnown, bool tvLeftSkew) {
+                                    bool tvKnown, bool tvLeftSkew,
+                                    Scanner::ScanMode scanMode) {
     // 会话期外丢弃（app 回调常驻注册：预览/标定期帧不进扫描环）
     const auto st = state_.load(std::memory_order_acquire);
     if (st != WorkflowState::Running && st != WorkflowState::Paused) return;
     // enrich 出口查表→Overwrite 环（fail 丢帧计数挂 session.droppedFrames）
-    session_.pushFrame(grayL, grayR, temperatureC, frameId, tvKnown, tvLeftSkew);
+    session_.pushFrame(grayL, grayR, temperatureC, frameId, tvKnown, tvLeftSkew, scanMode);
 }
 
 uint64_t ScanWorkflow::droppedSessionFrames() const {

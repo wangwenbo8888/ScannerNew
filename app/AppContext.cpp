@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <cstdlib>              // std::getenv——JMW_SIM_MARKERS_PLY 数据集可写
 #include <fstream>
+#include <sstream>
+#include <filesystem>
+#include <system_error>
 #include <QTimer>
 #include <nlohmann/json.hpp>
 #include "sched/CpuTopology.h"   // 自检起点 CPU 拓扑记录（2026-09-01）
@@ -104,7 +107,24 @@ void AppContext::initialize() {
                     JMW_LOG_WARN("app-AppContext",
                                  "[AppContext] 故障桥：外部 Error 级故障→S7 安全停机（led 红）");
                 }
+                // G8：设备红灯随 Error 故障（无论转态成败——红优先于状态映射）
+                if (deviceManager_) deviceManager_->setDeviceLed(2);
             });
+        });
+
+    // G8 设备指示灯（260927 补缺口·协议(2) N14 S1-S4）：状态机切态随发状态回显
+    // ——S1 黄 Init/S2 红 Fault/S3 绿 Standby·PostProcessing/S4 蓝 Calibrating·扫描；
+    // 去重归 DeviceManager（同码不重发）；MCU 未开时编队直返，open 成功后补发当前态
+    ledSubId_ = eventBus_->subscribe(Scanner::EventType::StateChanged,
+        [this](const Scanner::Event& evt) {
+            if (!deviceManager_) return;
+            using S = Scanner::service::SystemState;
+            const auto s = static_cast<S>(evt.param2);   // param2=新态（◆图标同口径）
+            const int led = s == S::Init              ? 1   // 黄（初始化）
+                          : s == S::FaultSelfCheck    ? 2   // 红（故障）
+                          : (s == S::Standby || s == S::PostProcessing) ? 3   // 绿
+                          : 4;                              // 蓝（标定/扫描两态）
+            deviceManager_->setDeviceLed(led);
         });
 
     commandGate_ = std::make_unique<Scanner::service::CommandGate>(stateMachine_.get(), eventBus_.get());
@@ -315,6 +335,25 @@ void AppContext::initialize() {
     Scanner::device::DeviceConfig devCfg;
     devCfg.serialPort = "auto";   // 串口自动搜（MCUDriver 逐口发 N12 T100 等 G 帧凭据认定）；固定口填 "COMx"
     // baud 115200 固定（260831 唯一口径：裸';' 分帧无版本号，DeviceConfig 缺省即产线口径）
+    // G7 参数档 IO（260927 补缺口）：config/device_params.txt——"key=value;..." 手写
+    // 格式（ParamStore 序列化）；防抖 2s＋close 兜底归 DeviceManager，此处只管文件
+    Scanner::device::DeviceManager::ParamIo paramIo;
+    paramIo.load = [] {
+        std::ifstream f("config/device_params.txt");
+        if (!f.is_open()) return std::string{};
+        std::stringstream ss;
+        ss << f.rdbuf();
+        return ss.str();
+    };
+    paramIo.persist = [](const std::string& text) {
+        std::error_code ec;
+        std::filesystem::create_directories("config", ec);   // 首次落盘建目录
+        std::ofstream f("config/device_params.txt", std::ios::trunc);
+        if (!f.is_open()) return false;
+        f << text;
+        f.flush();
+        return static_cast<bool>(f);
+    };
     deviceManager_ = std::make_unique<Scanner::device::DeviceManager>(
         devCfg,
         [this](const std::string& op) -> Scanner::Result {
@@ -334,7 +373,8 @@ void AppContext::initialize() {
                 camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
                 camCfg.rotateRight180, camCfg.triggerSource, camCfg.pairStrictFrameId,
                 camCfg.timestampPairing);
-        });
+        },
+        nullptr, std::move(paramIo));
     // 设备启动（open+自检）后台化：此处不再阻塞主窗口——main 在 window.show() 后
     // 调 startDevicesAsync()（相机枚举+自动搜口实测 ~5s，同步跑=白屏等）
     JMW_LOG_INFO("app-AppContext", "[AppContext] 组件装配完成（设备启动转后台 startDevicesAsync）");
@@ -436,6 +476,15 @@ void AppContext::startDevicesAsync() {
         notifySelfCheckItem("license", true);   // 占位（狗到货接实检）
 
         if (devR.success) {
+            // G8 设备指示灯：open 成功补发当前态（此前 StateChanged 已过——MCU 未开
+            // 时的码被去重缓存，此处按当前态重发一次落地）
+            if (deviceManager_ && stateMachine_) {
+                using S = Scanner::service::SystemState;
+                const auto s = stateMachine_->getCurrentState();
+                deviceManager_->setDeviceLed(
+                    s == S::Init ? 1 : s == S::FaultSelfCheck ? 2
+                    : (s == S::Standby || s == S::PostProcessing) ? 3 : 4);
+            }
             // 设备状态落缓存（UI 连接状态显示源——2026-09-01：此前全工程无
             // 写入者，"未连接"恒定；app 桥接 08→06：相机/MCU open 成功即 Connected）
             if (deviceStateCache_) {
@@ -474,7 +523,7 @@ void AppContext::startDevicesAsync() {
 // ============================================================================
 // 扫描会话点火——统一入口（工具栏标点/面片扫描＋ScannerWindow 共用同一条真链）
 // ============================================================================
-Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
+Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
     const auto t0 = std::chrono::steady_clock::now();   // 启停耗时打点（分段排查）
     {
     auto* dm = deviceManager_.get();
@@ -482,7 +531,7 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
         JMW_LOG_WARN("app-AppContext", "[AppContext] 扫描点火被拦: 设备未就绪（门面空/相机或 MCU 未开）");
         return Scanner::Result::fail("设备未就绪——请等待自检完成（相机/串口）");
     }
-    // 帧流双投递注册（单槽语义：后注册生效）＋采集启动（N10 账本全参→N11H1→开流）
+    // 帧流双投递注册（单槽语义：后注册生效）——就绪即挂：M 键开扫后帧直达预览/会话
     dm->startFrameStream([this, dm](const Scanner::hal::StereoFrame& frame) {
         // ① 预览链：06 FrameBuffer（ScannerWindow 10fps 消费）
         if (frameBuffer_) {
@@ -498,7 +547,7 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
             const auto t = dm->getLastTemperatures();
             const double tempC = (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
             scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId,
-                                      frame.tvKnown, frame.tvLeftSkew);
+                                      frame.tvKnown, frame.tvLeftSkew, dm->captureMode());
         }
         // ③ 调试分路：相机预览监视弹窗（相机 SDK 线程直调；订阅方切线程+节流自理）
         // 260912 终审证据：tap 空（监视窗未挂/已关）vs tap 心跳（活着）双路日志
@@ -521,9 +570,9 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
     // "按上次采集参数重启"会重置灯态（2026-08-22 实测），组序内 N10 灯型一次到位。
     // 协议 260831 七参恢复（260919）：T/V/C/D=四管开关按 ScanMode 映射（A=纯补光；
     // B=T1V1 交叉；精细=D 管；深孔=C 管）——五参帧固件不解析=面片无激光线根因
-    dm->startCapture(mode);
-    JMW_LOG_INFO("app-AppContext",
-        "[AppContext] 采集启动（N10 七参·四管掩码，mode={}）", static_cast<int>(mode));
+    // 260927 就绪流程：只设模式不启采（原 dm->startCapture 挪至 M 键路径/
+    // startScanSession 直启兼容口）——四管掩码 N10/N11H1 推迟到设备 M 键按下
+    dm->setCaptureMode(mode);
     }   // ← 设备段结束（真机前端——中段模拟提取时设备照常采集，提取结果在 07 链内替换）
 
     // 命令通道点火（门禁/前置/装配失败均带因返回；各"不走打印点"已落日志）
@@ -542,9 +591,21 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
     {
         const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - t0).count();
-        JMW_LOG_INFO("app-AppContext", "[AppContext] ▶启动同步段完成 t+{}ms（灯命令已编队/装配转后台）", el);
+        JMW_LOG_INFO("app-AppContext", "[AppContext] ▶就绪同步段完成 t+{}ms（会话备好，等设备 M 键开扫）", el);
     }
     return Scanner::Result::ok(modeName);
+}
+
+// 直启兼容口（模拟数据/旧调用）：就绪＋立即启采（原 startScanSession 行为）
+Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
+    const auto r = armScanSession(mode);
+    if (!r.success) return r;
+    if (auto* dm = deviceManager_.get()) {
+        dm->startCapture(mode);
+        JMW_LOG_INFO("app-AppContext",
+            "[AppContext] 采集启动（N10 七参·四管掩码，mode={}）", static_cast<int>(mode));
+    }
+    return r;
 }
 
 // P1-1：后处理点火（04/07-E）——输出路径/跳段位注入工作流后经命令通道
@@ -646,10 +707,17 @@ bool AppContext::canEnterEditSession() const {
     const auto s = stateMachine_
         ? stateMachine_->getCurrentState() : Scanner::service::SystemState::Init;
     const bool idle = (s == Scanner::service::SystemState::Standby) || isScanSessionPaused();
-    if (!idle) return false;
-    if (sceneFeed_ && !sceneFeed_->latestMarkers().empty()) return true;   // 有标志点
-    if (pointCloudBuffer_ && pointCloudBuffer_->getTotalPointCount() > 0) return true;  // 有激光点云
-    return false;
+    const size_t mk = sceneFeed_ ? sceneFeed_->latestMarkers().size() : 0;
+    const auto pc = pointCloudBuffer_ ? pointCloudBuffer_->getTotalPointCount() : 0;
+    const bool dataOk = (mk > 0) || (pc > 0);
+    if (!idle || !dataOk) {
+        // 拒绝留痕（260927 排障插桩：套索点击无反应时四值一目了然）
+        JMW_LOG_WARN("app-AppContext",
+            "[编辑门禁] 拒绝——SM态={} 暂停={} 标志点={} 点云={}（需：待机/暂停 且 数据>0）",
+            static_cast<int>(s), isScanSessionPaused(), mk, pc);
+        return false;
+    }
+    return true;
 }
 
 void AppContext::shutdown() {
@@ -665,6 +733,9 @@ void AppContext::shutdown() {
     if (faultBridgeSubId_ != 0 && eventBus_)
         eventBus_->unsubscribe(faultBridgeSubId_);
     faultBridgeSubId_ = 0;
+    if (ledSubId_ != 0 && eventBus_)
+        eventBus_->unsubscribe(ledSubId_);     // G8 设备灯订阅
+    ledSubId_ = 0;
     if (scanWf_)    scanWf_->stop();
     simSource_.reset();                                          // 模拟源随后者弃（lane 已 join）
     if (calibWf_)   calibWf_->stop();

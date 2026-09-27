@@ -30,7 +30,8 @@ public:
     // → Result 透传且帧仍入环（快照档数据自证降级）。
     Scanner::Result pushFrame(const cv::Mat& grayL, const cv::Mat& grayR,
                               double temperatureC, uint64_t frameId,
-                              bool tvKnown = false, bool tvLeftSkew = true);
+                              bool tvKnown = false, bool tvLeftSkew = true,
+                              Scanner::ScanMode scanMode = Scanner::ScanMode::MarkerPlusLaser);
 
     SlotRing<EnhancedFrame>& ring() { return ring_; }
     size_t ringCapacity() const { return ringSlots_; }

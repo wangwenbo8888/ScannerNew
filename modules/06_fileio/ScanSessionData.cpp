@@ -23,7 +23,8 @@ Scanner::Result ScanSessionData::assemble(const CalibrationRepository& repo) {
 
 Scanner::Result ScanSessionData::pushFrame(const cv::Mat& grayL, const cv::Mat& grayR,
                                            double temperatureC, uint64_t frameId,
-                                           bool tvKnown, bool tvLeftSkew) {
+                                           bool tvKnown, bool tvLeftSkew,
+                                           Scanner::ScanMode scanMode) {
     EnhancedFrame out;
     const Result r =
         enrich(grayL, grayR, temperatureC, stereoTable_, laserTiers_, frameId, out);
@@ -38,6 +39,7 @@ Scanner::Result ScanSessionData::pushFrame(const cv::Mat& grayL, const cv::Mat& 
     }
     out.tvKnown = tvKnown;                  // T/V 判定随帧透传（260927 时间戳奇偶法）
     out.tvLeftSkew = tvLeftSkew;
+    out.scanMode = scanMode;                // 采集模式随帧透传（260927——07 帧级种类分派）
     // 选档留痕（用户口径 2026-09-05）：会话首帧＋档位变化时打一条——当前温度与
     // 立体/激光档索引（-1=无表自证）；稳态零噪音，排障可回查「查到的温度是多少」
     if (tierLogFirst_ || out.snapshot.stereoTier != lastStereoTier_ ||

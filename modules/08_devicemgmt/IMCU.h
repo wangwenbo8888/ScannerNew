@@ -40,6 +40,9 @@ public:
     virtual void enterSelfCheck(DoneCb) = 0; virtual void exitSelfCheck(DoneCb) = 0; // N12 Z1/Z0
     virtual void enterStandby(DoneCb) = 0; virtual void exitStandby(DoneCb) = 0;     // N13 E1/E0
     virtual void setHeatTarget(int celsius, DoneCb) = 0;                             // N14 T..
+    virtual void setDeviceLed(int s1to4) = 0;   // N14 S1-S4 设备指示灯（协议(2) 260831：
+                                                // S1 黄初始化/S2 红故障/S3 绿待机后处理/S4 蓝标定扫描；
+                                                // 与 N14 T 加热参数字母并存——两版协议冲突待固件裁决，互不干扰）
     virtual void queryTemperature(int v0to2) = 0;                                    // N15（发不等）
     virtual void enterCalibration(DoneCb) = 0; virtual void exitCalibration(DoneCb) = 0; // N16 B1/B0
 

@@ -298,7 +298,8 @@ void ScannerWindow::onStartScanner()
                 (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
             m_appCtx->scanWorkflow()->pushSessionFrame(frame.leftGray, frame.rightGray,
                                                        tempC, frame.frameId,
-                                                       frame.tvKnown, frame.tvLeftSkew);
+                                                       frame.tvKnown, frame.tvLeftSkew,
+                                                       dm->captureMode());
         }
     });
     dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 面片默认（T1V1 激光，N10 七参组）

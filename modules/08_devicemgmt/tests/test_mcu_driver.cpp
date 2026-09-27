@@ -91,6 +91,30 @@ TEST(MCUDriver, PumpDispatchUplink) {
     EXPECT_EQ(log.lastSC.count, 500u);
 }
 
+// —— 2b. SemicolonFramedG0x：G0x 以 ';' 帧格式上行（260927 真机实证：固件 G01
+//        带分号、G02/G03 为 '\n' 文本行——双格式并存）→ dispatchFrame 'G' 分支
+//        统一走文本行解析体，手势/计数照常入环（原缺口：无 'G' 分支全落 default
+//        弃帧＝按键链真机「按了没作用」根因，日志 16 条 G01 全被丢）——
+TEST(MCUDriver, SemicolonFramedG0x) {
+    MCUDriver d;
+    d.setProtocolVersion(FCodec::Version::V2);
+    UplinkLog log;
+    d.setUplink(log.uplink());
+
+    d.testInjectRaw("G01 M1;");      // ';' 帧（v2 codec 成帧）→ dispatchFrame 'G'
+    d.testInjectRaw("G03 S42;");
+    d.testInjectRaw("G02 A25.3 B25.4 C26.0 D24.5;");   // 帧格式 G02 亦兼容
+    d.pump();
+
+    EXPECT_EQ(log.gesture, 1);
+    EXPECT_EQ(log.lastG.key, KeyId::Middle);
+    EXPECT_EQ(log.lastG.gesture, GestureEvent::Gesture::Short);
+    EXPECT_EQ(log.shot, 1);
+    EXPECT_EQ(log.lastSC.count, 42u);
+    EXPECT_EQ(log.temp, 1);          // G02 帧进路同样入温账
+    EXPECT_EQ(log.lastT.channels, 4);
+}
+
 // —— 3. AckRouting：A 帧经 pump 回填 CommandChannel → 挂表命令 onDone(true) ——
 TEST(MCUDriver, AckRouting) {
     FrameLog io;

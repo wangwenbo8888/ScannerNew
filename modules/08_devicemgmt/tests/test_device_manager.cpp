@@ -391,14 +391,17 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
 
     kit.doublePress('U');                                      // 上键双击：None→View
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::View);
-    kit.shortPress('R');                                       // View 上下文：暂仅日志（曝光不动）
-    const double base = dm.getParam("exposure").value;
+    kit.shortPress('R');                                       // View 上下文：暂仅日志（参数不动）
     kit.doublePress('U');                                      // View→Brightness
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::Brightness);
-    kit.shortPress('R');                                       // 右键短按：曝光 +1ms（相机直设）
-    EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, base + 1.0);
-    kit.shortPress('L');                                       // 左键短按：曝光 -1ms
-    EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, base);
+    kit.shortPress('R');                                       // 右键短按：档位梯 档1→2（G6 三参组合）
+    EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, 3.0);
+    EXPECT_DOUBLE_EQ(dm.getParam("laserLevel").value, 70.0);
+    EXPECT_DOUBLE_EQ(dm.getParam("bgLight").value, 40.0);
+    kit.shortPress('L');                                       // 左键短按：档2→1（回落）
+    EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, 1.0);
+    EXPECT_DOUBLE_EQ(dm.getParam("laserLevel").value, 40.0);
+    EXPECT_DOUBLE_EQ(dm.getParam("bgLight").value, 10.0);
     kit.doublePress('U');                                      // Brightness→None
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::None);
 
@@ -934,4 +937,219 @@ TEST(DeviceManager, T16_SelfCheckLightWindowThreeSeconds) {
     EXPECT_EQ(mock.count("N10 H50"), 1);                         // 全程未重发
     EXPECT_EQ(mock.count("N12 T5"), 0);                          // 260927 排障隔离：N12 T5 停发（原 1）
     EXPECT_GE(bgOk, 1);                                          // 灯项活证过关已报
+}
+
+// —— T17：按键模式落地（260927 完善按键管理）——中键双击切模式＋菜单①②确认
+// → captureToggle 启采按新模式组帧 N10 四管掩码（原缺口：cycleMode/①② 仅菜单
+// 记账，采集恒用 app 上次传入模式）。掩码映射：普通交叉 T1V1 / 精细 D / 深孔 C ——
+TEST(DeviceManager, T17_KeyModeDispatchToN10) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    // 默认 modeCursor=3（普通交叉）→ 首次启采＝面片掩码 T1V1
+    dm.testInjectTextLine("G01 M1");             // 主层中键短按＝启采
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 1);
+
+    // 采集中双击（260927 用户口径：实时切模式）——3→1 精细：N10 全参重发 D 管
+    dm.testInjectTextLine("G01 M2");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::FineScan);     // 模式随帧贯通读取口
+    EXPECT_EQ(mock.count("N10 H120 B10 T0 V0 C0 D1 L40"), 1);     // 采集态重发精细掩码
+    dm.testInjectTextLine("G01 M1");             // 停采
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N11 H0"), 1);
+
+    // 空闲双击：1→2 深孔——下次启采生效
+    dm.testInjectTextLine("G01 M2");
+    dm.logicTick();
+    EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::DeepHoleScan);
+    dm.testInjectTextLine("G01 M1");             // 再启采
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H120 B10 T0 V0 C1 D0 L40"), 1);     // 深孔掩码
+    dm.testInjectTextLine("G01 M1");             // 停采
+    dm.logicTick(); dm.logicTick();
+
+    // 菜单路径：U1 进菜单（游标回①）→ M2 切 2→3 普通交叉 → M1 选中①确认 → 退菜单启采
+    dm.testInjectTextLine("G01 U1");             // layer 2
+    dm.logicTick();
+    dm.testInjectTextLine("G01 M2");             // 2→3 普通交叉
+    dm.logicTick();
+    dm.testInjectTextLine("G01 M1");             // layer2 M1＝menuSelect ① → 落地
+    dm.logicTick();
+    dm.testInjectTextLine("G01 U1");             // 退菜单（layer2 U1＝ExitMenu）
+    dm.logicTick();
+    dm.testInjectTextLine("G01 M1");             // 启采
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 2);     // 面片掩码（第二次）
+    dm.testInjectTextLine("G01 M1");             // 停采收口
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N11 H0"), 3);          // 三轮启停各恰一次
+}
+
+// —— T18：标点会话按键隔离（260927 用户口径）——标点扫描中按键只做启停：
+// M 双击不切面片/精细/深孔（cycleMode 丢弃）、菜单①②模式设定被拒；
+// 模式切换仅在激光族会话中可用；M 短按启停照常 ——
+TEST(DeviceManager, T18_MarkerSessionKeyIsolation) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.setCaptureMode(Scanner::ScanMode::MarkerOnly);   // 就绪流程：标点会话
+    dm.logicTick();
+    dm.testInjectTextLine("G01 M1");                    // 启采（标点掩码 B40 激光全关）
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H120 B40 T0 V0 C0 D0 L0"), 1);
+
+    dm.testInjectTextLine("G01 M2");                    // 双击切模式→标点会话被拒
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerOnly);   // 模式不变
+    EXPECT_EQ(mock.count("N10 H120 B10 T0 V0 C0 D1 L40"), 0);     // 无精细掩码重发
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 0);     // 无面片掩码重发
+
+    dm.testInjectTextLine("G01 U1");                    // 进菜单（游标①）
+    dm.logicTick();
+    dm.testInjectTextLine("G01 M1");                    // menuSelect①→模式设定被拒
+    dm.logicTick();
+    EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerOnly);   // 仍标点
+
+    dm.testInjectTextLine("G01 U1");                    // 退菜单回主层
+    dm.logicTick();
+    dm.testInjectTextLine("G01 M1");                    // 停采（启停不受隔离影响）
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N11 H0"), 1);
+
+    // 停采后（仍标点模式）双击依旧被拒——隔离按「当前模式=标点」判，不问采集态
+    dm.testInjectTextLine("G01 M2");
+    dm.logicTick();
+    EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerOnly);
+}
+
+// —— T19：PresetLadder 档位梯（G6 缺口·260927）——Brightness 调节上下文左右键＝
+// 曝光/激光/补光三参组合档位步进（内置 3 档，钳制不环绕），经 ParamStore 记账 ——
+TEST(DeviceManager, T19_PresetLadderAdjust) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    auto expectParams = [&](double exp, double laser, double bg) {
+        EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, exp);
+        EXPECT_DOUBLE_EQ(dm.getParam("laserLevel").value, laser);
+        EXPECT_DOUBLE_EQ(dm.getParam("bgLight").value, bg);
+    };
+
+    dm.testInjectTextLine("G01 U2");   // ctx None→View
+    dm.logicTick();
+    dm.testInjectTextLine("G01 U2");   // View→Brightness
+    dm.logicTick();
+
+    dm.testInjectTextLine("G01 R1");   // 档1→2（中）
+    dm.logicTick(); dm.logicTick();
+    expectParams(3.0, 70.0, 40.0);
+
+    dm.testInjectTextLine("G01 R1");   // 档2→3（高）
+    dm.logicTick(); dm.logicTick();
+    expectParams(5.0, 100.0, 80.0);
+
+    dm.testInjectTextLine("G01 R1");   // 已到顶——无效（钳制不环绕）
+    dm.logicTick(); dm.logicTick();
+    expectParams(5.0, 100.0, 80.0);
+
+    dm.testInjectTextLine("G01 L1");   // 档3→2（下调）
+    dm.logicTick(); dm.logicTick();
+    expectParams(3.0, 70.0, 40.0);
+}
+
+// —— T20：设备指示灯（G8 缺口·260927）——N14 S1-S4 下发＋同码去重＋非法码拒绝 ——
+TEST(DeviceManager, T20_DeviceLedDedupe) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.setDeviceLed(3);                // 绿
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N14 S3"), 1);
+    dm.setDeviceLed(3);                // 同码去重
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N14 S3"), 1);
+    dm.setDeviceLed(4);                // 蓝
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N14 S4"), 1);
+    dm.setDeviceLed(9);                // 非法码拒绝
+    dm.logicTick();
+    EXPECT_EQ(mock.count("N14 S9"), 0);
+}
+
+// —— T21：参数档落盘（G7 缺口·260927）——防抖 2s 冲刷＋close 兜底＋开档读档回账 ——
+TEST(DeviceManager, T21_ParamPersistDebounceAndBoot) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    std::string saved;
+    int saveCalls = 0;
+    {
+        DeviceConfig cfg = makeCfg();
+        DeviceManager::ParamIo pio;
+        pio.load = [] { return std::string(); };        // 无档起步
+        pio.persist = [&](const std::string& text) {
+            saved = text;
+            ++saveCalls;
+            return true;
+        };
+        DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                         [&](const std::string& f) { return mock.write(f); }, std::move(pio));
+        mock.dm = &dm;
+        ASSERT_TRUE(dm.open().success);
+
+        dm.setParam("bgLight", 55.0, Scanner::device::ParamEntry::Source::Ui);
+        dm.logicTick(); dm.logicTick();
+        EXPECT_EQ(saveCalls, 0);                        // 防抖窗内不落盘
+        sleepMs(2100);                                  // 过防抖窗
+        dm.logicTick(); dm.logicTick();
+        EXPECT_EQ(saveCalls, 1);                        // 拍尾冲刷恰一次
+        EXPECT_NE(saved.find("bgLight=55"), std::string::npos);
+
+        dm.setParam("laserLevel", 66.0, Scanner::device::ParamEntry::Source::Ui);
+        dm.logicTick();                                 // 防抖窗内 close
+        dm.close();                                     // close 兜底（无条件冲）
+        EXPECT_EQ(saveCalls, 2);
+        EXPECT_NE(saved.find("laserLevel=66"), std::string::npos);
+    }
+    {   // 二代实例：读档回账（bgLight=55/laserLevel=66 复现）
+        DeviceConfig cfg = makeCfg();
+        DeviceManager::ParamIo pio;
+        pio.load = [&saved] { return saved; };
+        DeviceManager dm2(cfg, gateOk, &bus, nullptr,
+                          [&](const std::string& f) { return mock.write(f); }, std::move(pio));
+        ASSERT_TRUE(dm2.open().success);
+        dm2.logicTick();
+        EXPECT_DOUBLE_EQ(dm2.getParam("bgLight").value, 55.0);
+        EXPECT_DOUBLE_EQ(dm2.getParam("laserLevel").value, 66.0);
+    }
 }

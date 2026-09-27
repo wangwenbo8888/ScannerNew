@@ -202,23 +202,25 @@ TEST(KeySemantics, LeftRightNoCtxDropped) {
     EXPECT_EQ(c.drops[1], "无效");
 }
 
-// —— 14. GateBlocksMenuKeys：gate=false → M/S 主层启停仍放行，其余全 dropped("门禁") ——
+// —— 14. GateBlocksMenuKeys：gate=false → M/S 主层启停与 M/D 切模式仍放行
+//      （260927 增补：采集中实时切模式），其余全 dropped("门禁") ——
 TEST(KeySemantics, GateBlocksMenuKeys) {
     Counters c;
     auto k = referee(c, [] { return false; });           // 菜单类键全关
     k.onGesture(kg(KeyId::Middle, Gest::Short), ms(1));  // 启停不问门禁 → 放行
     EXPECT_EQ(c.captureToggle, 1);
+    k.onGesture(kg(KeyId::Middle, Gest::Double), ms(1));          // cycleMode 不问门禁（260927）→ 放行
+    EXPECT_EQ(c.cycleMode, 1);
     k.onGesture(kg(KeyId::Middle, Gest::Short), ms(2));           // menuSelect 菜单类
     k.onGesture(kg(KeyId::Up, Gest::Short), ms(1));               // enterMenu
     k.onGesture(kg(KeyId::Up, Gest::Short), ms(2));               // exitMenu
-    k.onGesture(kg(KeyId::Middle, Gest::Double), ms(1));          // cycleMode
     k.onGesture(kg(KeyId::Up, Gest::Double), ms(1));              // cycleAdjustCtx
     k.onGesture(kg(KeyId::Left, Gest::Short), ms(2));             // cursorLeft
     k.onGesture(kg(KeyId::Right, Gest::Short), ms(2));            // cursorRight
     k.onGesture(kg(KeyId::Left, Gest::Short), ms(1, Ctx::View));  // adjustDown
     k.onGesture(kg(KeyId::Right, Gest::Short), ms(1, Ctx::View)); // adjustUp
-    EXPECT_EQ(c.fired(), 1);                             // 全程仅启停放行
-    ASSERT_EQ(c.drops.size(), 9u);
+    EXPECT_EQ(c.fired(), 2);                             // 仅启停＋切模式放行
+    ASSERT_EQ(c.drops.size(), 8u);
     for (const auto& d : c.drops) EXPECT_EQ(d, "门禁");
 }
 

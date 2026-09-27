@@ -66,6 +66,17 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
     return p;
 }
 
+// 按键模式光标 → ScanMode（MenuLogic §4.2.3：1 精细/2 深孔/3 普通交叉，默认 3）。
+// 260927 完善按键管理：cycleMode（中键双击）与菜单①②确认后经此落地
+// lastCaptureMode_——按键切模式真正生效（原缺口：仅菜单记账，采集恒用 app
+// 上次传入模式）。切模式在非采集态（M2/菜单键过 gate=!capturing 门禁），
+// 落地值于下次 captureToggle 启采时组帧 N10 四管掩码
+constexpr Scanner::ScanMode scanModeFromMenuCursor(int modeCursor) {
+    return modeCursor == 1 ? Scanner::ScanMode::FineScan
+         : modeCursor == 2 ? Scanner::ScanMode::DeepHoleScan
+                           : Scanner::ScanMode::MarkerPlusLaser;
+}
+
 } // namespace
 
 // ============================================================================
@@ -73,8 +84,10 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
 // ============================================================================
 
 DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* bus,
-                             CameraFactory camFactory, SerialWriteOverride serialWrite)
+                             CameraFactory camFactory, SerialWriteOverride serialWrite,
+                             ParamIo paramIo)
     : cfg_(std::move(cfg)),
+      paramIo_(std::move(paramIo)),
       bus_(bus),
       camFactory_(std::move(camFactory)),
       writeOverride_(std::move(serialWrite)),
@@ -91,6 +104,12 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
             onParamDispatch(key, v, done);
         });
     params_->onParamChanged = [this](const std::string& key, const ParamEntry& e) {
+        // G7 落盘脏账（260927 补缺口）：改账即脏＋记时（bootstrap 装载不算脏），
+        // logicTick 拍尾防抖 2s 冲刷、close 兜底
+        if (!paramBootLoading_) {
+            paramDirty_ = true;
+            paramLastChangeMs_ = nowMs();
+        }
         int64_t idx = -1;                       // 参数索引=specs 登记序号（Minor #9）
         for (size_t i = 0; i < paramKeys_.size(); ++i)
             if (paramKeys_[i] == key) idx = static_cast<int64_t>(i);
@@ -221,7 +240,9 @@ Result DeviceManager::open() {
     mcu_->setUplink(up);
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: uplink 接线 {}ms", el());
     // ⑤ 参数装载（Load 空档=全默认值；逐参数广播）+ 快照立即可读（单线程时刻）
-    params_->bootstrap([] { return ""; });
+    paramBootLoading_ = true;       // 装载期改账不算脏（档值回写档=无意义写）
+    params_->bootstrap([&] { return paramIo_.load ? paramIo_.load() : std::string(); });
+    paramBootLoading_ = false;
     refreshParamSnapshot();
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: bootstrap+快照 {}ms", el());
     // ⑦ （2026-08-30 去自检模式：不再发 N12 Z1——固件进自检态会强制亮灯且
@@ -249,6 +270,10 @@ Result DeviceManager::close() {
     if (logicThread_.joinable()) {
         running_.store(false);
         logicThread_.join();
+    }
+    // G7 落盘 close 兜底：脏账无条件冲一次（防抖窗内退出的最后改动作不丢）
+    if (paramIo_.persist && paramDirty_) {
+        if (params_->persist(paramIo_.persist)) paramDirty_ = false;
     }
     {
         std::lock_guard<std::mutex> lock(postMutex_);
@@ -351,6 +376,9 @@ void DeviceManager::logicTick() {
         std::lock_guard<std::mutex> lock(tempSnapMtx_);
         tempSnap_ = lastTemps_;
     }
+    // ⑩b G7 参数落盘（拍尾冲刷）：脏账距末次改账 ≥2s 才落（防抖——连调滑条不
+    // 逐拍写盘）；失败保脏下拍重试；close 另有无条件兜底
+    persistParamsIfDue(now);
     // ⑪ 启动自检状态机推进（无阻塞；闲时 stage=-1 直返）
     selfCheckTick(now);
     //（⑫ 链路自动恢复已撤——260927 用户口径：改时间戳直配（CameraControl 方案B）
@@ -424,7 +452,7 @@ void DeviceManager::sendSeq(std::vector<SeqStep> steps, std::function<void(bool)
 // （单帧 N11 H0，不发 N10）
 std::vector<DeviceManager::SeqStep> DeviceManager::captureSeqSteps() {
     return {{"N10", [this](McuDone cb) {
-                 mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_), std::move(cb));
+                 mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_.load(std::memory_order_relaxed)), std::move(cb));
              }},
             {"FLUSH", [this](McuDone cb) {
                  mcu_->flushWrites(300);        // 有界：残余慢写最多 300ms
@@ -487,8 +515,33 @@ void DeviceManager::toIdleOnLogic() {
 
 void DeviceManager::startCapture(Scanner::ScanMode mode) {
     post([this, mode] {
-        lastCaptureMode_ = mode;                   // 采集灯型（逻辑线程属主；N10 组帧生效）
+        lastCaptureMode_.store(mode, std::memory_order_relaxed);   // 采集灯型（逻辑线程写；N10 组帧生效）
         startCaptureOnLogic();
+    });
+}
+
+// 只设模式不启采（260927 就绪流程）：UI 模式键→armScanSession→此口记账，
+// 正式开扫由设备 M 键（captureToggle→startCaptureOnLogic）触发——四管掩码
+// 组帧推迟到那一刻
+void DeviceManager::setCaptureMode(Scanner::ScanMode mode) {
+    post([this, mode] {
+        lastCaptureMode_.store(mode, std::memory_order_relaxed);
+        JMW_LOG_INFO("08-DeviceManager",
+            "[DeviceManager] 采集模式就绪：ScanMode={}（等设备 M 键开扫）",
+            static_cast<int>(mode));
+    });
+}
+
+// G8 设备指示灯（260927 补缺口）：N14 S1-S4 状态回显——去重（同码不重发）后
+// 编队下发；MCU 未开直返且**不记码**（open 后 app 补发当前态才能穿透去重落地）
+void DeviceManager::setDeviceLed(int s1to4) {
+    post([this, s1to4] {
+        if (s1to4 < 1 || s1to4 > 4) return;
+        if (!mcu_->isOpen()) return;              // 未开：不记码不发（补发口径见上）
+        if (s1to4 == lastDeviceLed_) return;
+        lastDeviceLed_ = s1to4;
+        mcu_->setDeviceLed(s1to4);
+        JMW_LOG_DEBUG("08-DeviceManager", "[DeviceManager] 设备指示灯 S{}", s1to4);
     });
 }
 
@@ -690,8 +743,20 @@ void DeviceManager::buildKeyActions() {
     a.menuSelect = [this] {                      // 按 cursor 分叉（裁判只给信号）
         const int cur = menu_->state().cursor;
         if (cur == 1 || cur == 2) {
-            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 菜单选中①/②：视野模式设定（modeCursor={} 账本为准）",
-                         menu_->state().modeCursor);
+            // 标点会话隔离（260927 用户口径）：标点扫描中按键只做启停——①② 的
+            // 模式落地只对激光族（面片/精细/深孔）生效，标点会话不许经按键切走
+            if (lastCaptureMode_.load(std::memory_order_relaxed) ==
+                Scanner::ScanMode::MarkerOnly) {
+                JMW_LOG_INFO("08-DeviceManager",
+                    "[DeviceManager] 标点扫描会话中——菜单①②模式设定被拒（标点只启停）");
+                return;
+            }
+            // 视野项①②：确认模式光标 → 采集模式落地（260927 完善——原仅日志，
+            // 按键切的模式从不生效；现同步 lastCaptureMode_，下次启采按此组帧）
+            lastCaptureMode_.store(scanModeFromMenuCursor(menu_->state().modeCursor), std::memory_order_relaxed);
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] 菜单选中①/②：扫描模式落地 modeCursor={} → ScanMode={}",
+                menu_->state().modeCursor, static_cast<int>(lastCaptureMode_.load(std::memory_order_relaxed)));
         } else {
             // ③扫描完成/④开始后处理：派工作流归 app 订阅——门面只广播。
             // UserDefined+param1=3/4（Important #4：待 base 增专用事件类型，人工过会后改）
@@ -699,7 +764,36 @@ void DeviceManager::buildKeyActions() {
             JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 菜单选中③/④：派发工作流事件 cursor={}", cur);
         }
     };
-    a.cycleMode = [this] { menu_->apply(MenuOp::CycleMode); };
+    a.cycleMode = [this] {                       // 中键双击切模式：记账＋即时落地
+        // 标点会话隔离（260927 用户口径）：标点扫描中双击不切面片/精细/深孔——
+        // 按键只启停标点；模式切换仅在激光族会话（面片/精细/深孔）中可用
+        if (lastCaptureMode_.load(std::memory_order_relaxed) ==
+            Scanner::ScanMode::MarkerOnly) {
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] 标点扫描会话中——切模式手势丢弃（标点只启停）");
+            return;
+        }
+        menu_->apply(MenuOp::CycleMode);
+        lastCaptureMode_.store(scanModeFromMenuCursor(menu_->state().modeCursor),
+                               std::memory_order_relaxed);
+        if (mode_->isCapturing()) {
+            // 采集中切模式（260927 用户口径）：N10 全参实时重发——四管掩码即时
+            // 换灯（D1 口径同滑条改参）；帧级激光种类由 scanMode 随帧分派接管
+            mcu_->setCaptureParams(
+                effectiveN10(*params_, lastCaptureMode_.load(std::memory_order_relaxed)),
+                nullptr);
+            JMW_LOG_WARN("08-DeviceManager",
+                "[DeviceManager] 采集中切模式：N10 全参重发 modeCursor={} → ScanMode={}"
+                "（激光掩码即时生效）",
+                menu_->state().modeCursor,
+                static_cast<int>(lastCaptureMode_.load(std::memory_order_relaxed)));
+        } else {
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] 中键双击切模式：modeCursor={} → ScanMode={}（下次启采生效）",
+                menu_->state().modeCursor,
+                static_cast<int>(lastCaptureMode_.load(std::memory_order_relaxed)));
+        }
+    };
     a.enterMenu = [this] { menu_->apply(MenuOp::EnterMenu); };
     a.exitMenu = [this] { menu_->apply(MenuOp::ExitMenu); };
     a.cycleAdjustCtx = [this] { menu_->apply(MenuOp::CycleAdjustCtx); };
@@ -723,8 +817,23 @@ void DeviceManager::applyAdjust(int dir) {
     const int steps = menu_->takeAdjustSteps();   // 净步数（本拍 ±1）
     const auto ctx = menu_->state().adjustCtx;
     if (ctx == MenuState::AdjustCtx::Brightness && steps != 0) {
-        params_->setValue("exposure", params_->get("exposure").value + steps,
-                          ParamEntry::Source::Key);
+        // G6 档位梯（260927 补缺口）：Brightness 上下文左右键＝档位步进（曝光/
+        // 激光/补光三参组合，内置 3 档钳制不环绕）——经 ParamStore 记账，下发/
+        // 广播/落盘全走既有链（采集中自动 N10 全参重发 D1 口径）
+        if (ladder_.step(steps > 0 ? +1 : -1)) {
+            const auto& s = ladder_.current();
+            params_->setValue("exposure",   s.exposureMs,  ParamEntry::Source::Key);
+            params_->setValue("laserLevel", s.laserLevel,  ParamEntry::Source::Key);
+            params_->setValue("bgLight",    s.bgLight,     ParamEntry::Source::Key);
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] 档位 {} → {}/{}（曝光{:.0f}ms 激光{:.0f} 补光{:.0f}）",
+                ladder_.index(), steps > 0 ? "上调" : "下调",
+                static_cast<int>(ladder_.ladder().size()),
+                s.exposureMs, s.laserLevel, s.bgLight);
+        } else {
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] 档位已到顶/底（index={}）——步进无效", ladder_.index());
+        }
     } else {
         JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 调节步进 ctx={}（View 上下文暂仅记账）",
                      static_cast<int>(ctx));
@@ -753,7 +862,7 @@ void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore
     // 空闲仅记账 done(true,false)（enterScan 时自账本组帧下发）。v2 通道发不等
     // → done(true,false)
     if (mode_->isCapturing()) {
-        mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_),
+        mcu_->setCaptureParams(effectiveN10(*params_, lastCaptureMode_.load(std::memory_order_relaxed)),
                                [done](bool ok, const std::string&) { done(ok, ok); });
     } else {
         done(true, false);
@@ -763,6 +872,19 @@ void DeviceManager::onParamDispatch(const std::string& key, double v, ParamStore
 void DeviceManager::refreshParamSnapshot() {
     std::lock_guard<std::mutex> lock(snapshotMutex_);
     for (const auto& k : paramKeys_) paramSnapshot_[k] = params_->get(k);
+}
+
+// G7 落盘拍尾冲刷（260927 补缺口）：脏账静默 ≥2s → persist；成功清脏，失败保脏
+// 下拍重试（I/O 毛刺自愈）。无注入（测试）＝恒直返
+void DeviceManager::persistParamsIfDue(int64_t nowMs_) {
+    if (!paramIo_.persist || !paramDirty_) return;
+    if (nowMs_ - paramLastChangeMs_ < 2000) return;   // 防抖窗内（连调不逐拍写盘）
+    if (params_->persist(paramIo_.persist)) {
+        paramDirty_ = false;
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 参数档已落盘（防抖 2s 冲刷）");
+    } else {
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 参数档落盘失败——保脏下拍重试");
+    }
 }
 
 ParamEntry DeviceManager::getParam(const std::string& key) const {
