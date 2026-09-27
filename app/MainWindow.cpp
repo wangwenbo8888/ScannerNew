@@ -1412,69 +1412,21 @@ QWidget *MainWindow::createToolBar()
                     }
                 };
                 if (m_appCtx->isScanSessionActive()) {
+                    // —— 关闭会话（260927 用户口径）：点模式键＝完成当前会话——
+                    //    finish_scan 后台链含 GBA 终局批（全局优化）＋合账落库；
+                    //    编辑成果先物理化。本键＝纯关闭（面片扫描点面片键即触发
+                    //    全局优化）；他键＝关闭旧会话后落下启动新模式。
+                    //    （原「本键暂停/续采」路径退役——采集启停归设备 M 键：
+                    //    arm 就绪→M 开扫→M 停采→点键关闭+GBA，闭环）
                     const bool wasSelf = (m_activeScanToolIdx == myIdx);
-                    if (m_appCtx->isScanSessionPaused()) {
-                        // —— 就绪态（P3）：本键＝续采（出口①）；他键＝完成旧会话
-                        //    （合账落库，出口③雏形）＋启动新模式 ——
-                        // （续采/完成前先物理化编辑成果）
-                        if (wasSelf) {
-                            // —— 开关变体检测（260917）：「模拟数据」开关在会话期间翻转
-                            //    时，续采改为完整重启——新会话装配读新开关值（中段
-                            //    模拟提取源随之注入/移除）；未变=原语义就绪态续采 ——
-                            if (m_appCtx->simExtract() == m_sessionSimExtract) {
-                                materializeEdits();
-                                auto rr = m_appCtx->resumeScanSession();
-                                if (rr.success) {
-                                    setScanButtonVisual(myIdx, true);
-                                    // 260912：续采重挂监视窗（注册 tap＋重显）——resume
-                                    // 原不重注册，关闭过的对话框＝tap 空＝预览死
-                                    showCameraMonitor();
-                                    statusBar()->showMessage(QString::fromStdString(rr.message) +
-                                                             QStringLiteral("——再点停止采集"));
-                                } else {
-                                    statusBar()->showMessage(
-                                        QString::fromStdString("续采被拒: " + rr.message));
-                                }
-                                return;
-                            }
-                            // 开关已变：完成旧会话（完整停）→落下走下方公共启动路径
-                            materializeEdits();
-                            auto sr = m_appCtx->stopScanSession();
-                            if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
-                            m_activeScanToolIdx = -1;
-                            if (!sr.success)
-                                statusBar()->showMessage(
-                                    QString::fromStdString("完成被拒: " + sr.message));
-                            // 落下：按新开关状态重启（继续启动）
-                        } else {
-                            materializeEdits();
-                            auto sr = m_appCtx->stopScanSession();
-                            if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
-                            m_activeScanToolIdx = -1;
-                            if (!sr.success)
-                                statusBar()->showMessage(
-                                    QString::fromStdString("完成被拒: " + sr.message));
-                            // 落下：继续启动新模式
-                        }
-                    } else {
-                        // —— 运行态：本键＝停止采集→就绪（保活，05 D2 编辑时机）；
-                        //    他键＝完整停旧（模式切换）—— ——
-                        if (wasSelf) {
-                            auto pr = m_appCtx->pauseScanSession();
-                            statusBar()->showMessage(pr.success
-                                ? QStringLiteral("已停止采集（就绪）——再点续采")
-                                : QString::fromStdString("停止被拒: " + pr.message));
-                            if (pr.success) setScanButtonVisual(myIdx, false);   // 就绪＝复原（会话保活）
-                            return;
-                        }
-                        auto sr = m_appCtx->stopScanSession();
-                        if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
-                        m_activeScanToolIdx = -1;
-                        if (!sr.success)
-                            statusBar()->showMessage(
-                                QString::fromStdString("停止被拒: " + sr.message));
-                        // 落下：停旧启新（模式切换）
-                    }
+                    materializeEdits();
+                    auto sr = m_appCtx->stopScanSession();
+                    if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                    m_activeScanToolIdx = -1;
+                    statusBar()->showMessage(sr.success
+                        ? QStringLiteral("会话已关闭——全局优化（GBA）后台执行中")
+                        : QString::fromStdString("关闭被拒: " + sr.message));
+                    if (wasSelf || !sr.success) return;   // 本键＝纯关闭；他键落下启新
                 }
                 if (mode == Scanner::ScanMode::MarkerOnly)
                     applyMarkerPreset();       // 标点：推荐预设＋旋钮同步（260912）
