@@ -931,7 +931,7 @@ void MainWindow::showCameraMonitor() {
                             .arg(pipelineFps, 0, 'f', 1)
                             .arg(static_cast<qulonglong>(fidL))
                             .arg(static_cast<qulonglong>(fidR))
-                            .arg(static_cast<qulonglong>(fidL) - static_cast<qulonglong>(fidR)));
+                            .arg(static_cast<qint64>(fidL) - static_cast<qint64>(fidR)));  // 有符号——右超前时显示负偏移（原 qulonglong 相减下溢出巨数）
             }
         }, Qt::QueuedConnection);
         } catch (const std::exception& e) {

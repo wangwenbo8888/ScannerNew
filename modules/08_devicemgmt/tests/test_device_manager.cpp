@@ -893,11 +893,12 @@ TEST(DeviceManager, T15_SelfCheckSingleN10) {
     EXPECT_EQ(mock.count("N10 H50"), 1);
 }
 
-// —— T16：自检亮灯总窗 ~9s（2026-09-27 用户口径，历程 ~9s→~2s→~9s）——stage0 1s
-// 上行活证提前过关＋stage1 停留 8s → N11 H0 收口。无回显固件口径：MockMcu 不回显
-// N10（v3 无整帧回显）、自动 ACK 刷 lastRx_ 即活证。0.8s 未收口；≤12s 内 N11 H0
-// 恰一次；全程 N10 恰一次（真钟驱动，real-time 用例 ~9.5s）——
-TEST(DeviceManager, T16_SelfCheckLightWindowNineSeconds) {
+// —— T16：自检亮灯总窗 ~3s（2026-09-27 用户口径「灯亮三秒」，历程 ~9s→~2s→
+// ~9s→~3s）——stage0 1s 上行活证提前过关＋stage1 停留 2s → N11 H0 收口。
+// 无回显固件口径：MockMcu 不回显 N10（v3 无整帧回显）、自动 ACK 刷 lastRx_
+// 即活证。0.8s 未收口；≤5s 内 N11 H0 恰一次；全程 N10 恰一次（真钟驱动，
+// real-time 用例 ~3.5s）——
+TEST(DeviceManager, T16_SelfCheckLightWindowThreeSeconds) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
@@ -922,8 +923,8 @@ TEST(DeviceManager, T16_SelfCheckLightWindowNineSeconds) {
     }
     EXPECT_EQ(mock.count("N11 H0"), 0);                          // 未过关未收口
 
-    bool closed = false;                                         // 至 ~9s：活证过关＋停留 8s 满收口
-    for (int i = 0; i < 240 && !closed; ++i) {                   // 上界 12s（余量）
+    bool closed = false;                                         // 至 ~3s：活证过关＋停留 2s 满收口
+    for (int i = 0; i < 100 && !closed; ++i) {                   // 上界 5s（余量）
         sleepMs(50);
         dm.logicTick();
         closed = mock.count("N11 H0") > 0;
