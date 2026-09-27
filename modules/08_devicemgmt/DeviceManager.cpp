@@ -38,7 +38,7 @@ constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
     return {
         {"exposure", 10.0, 1.0, 100.0},        // 曝光 ms（相机直设）
-        {"freqHz", 30.0, 1.0, 200.0},         // N10 H 拍照频率（默认 30——260926 用户口径 H120→30：USB 带宽实测饱和链路重开，30Hz×双目全分辨率≈1.5Gbps 留余量；协议 260831 域 1-200）
+        {"freqHz", 120.0, 1.0, 200.0},        // N10 H 拍照频率（默认 120——260927 用户口径回调（60→120→30→120）；H120×双目全分辨率≈6Gbps 超 USB3 单控制器上限、帧号回退 ~2 次/秒（2b3155d 实测留痕，用户知情）；协议 260831 域 1-200）
         {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10——B 模式成功配置基线；B30 过曝毁检测 ROI 跌至 4）
         {"laserLevel", 40.0, 0.0, 100.0},      // N10 L 激光强度（默认 40；60 过亮→40 折中）
     };
@@ -580,16 +580,18 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
         selfCheck_.stageStartMs = nowMs();
         selfCheck_.report("mcuLink", mcu_->isOpen());
 
-        // 温度回传保证（2026-09-26 用户口径）：260831 协议 G02 温度回传由 N12 间隔
-        // 驱动——部分固件启动默认不上报，不发电磁静默 → stage0 上行活证 8s 判败
-        // 兜底＋温度监控无源。自检入口同发 N12 T5 一次，保证 G02 有源
-        mcu_->setTempReportInterval(5);
+        // N12 温度回传兜底（260927 用户口径·条件发送）：N10 落线后 0.5s 内有 G02
+        // 温度上行→不发 N12（真机 A/B 实证：伴随 N12 固件不点灯、N10 单发即亮）；
+        // 未到→auto 搜口内补发 N12 T5（probeN12TSent 凭据）。此处（自检入口）恒
+        // 不发——manual 口走 stage0 1s 活证观察，温度无源由固件方定位，不盲补
+        //（260926 曾在此无条件发 N12 T5，260927 证伪撤销）
 
         // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V1 C0 D0 L50（七参·协议 260831）。
         // 只发一个：auto 搜口已发同参 N10（兼探测+点灯，probeN10Sent 凭据）——此处
-        // 省略；manual 口（无探测帧）且回显未达才补发兜底。亮灯总窗 ~2s（stage0
-        // 1s 上行活证过关＋stage1 停留 1s，2026-09-26 用户口径；原 stage1 5s→1s
-        // 为 2026-09-06 口径）→ N11 H0 收口（停扫描，固件关灯）
+        // 省略；manual 口（无探测帧）且回显未达才补发兜底。亮灯总窗 ~9s（stage0
+        // 1s 上行活证过关＋stage1 停留 8s，2026-09-27 用户口径；历程：stage1 5s→
+        // 1s〔2026-09-06〕→总窗 ~2s〔2026-09-26〕→停留 8s〔2026-09-27〕）
+        // → N11 H0 收口（停扫描，固件关灯）
         hal::CaptureParams on{};
         on.freqHz = 50; on.bgLight = 50;
         on.laserT = 1; on.laserV = 1; on.laserC = 0; on.laserD = 0;
@@ -609,8 +611,8 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
         // 回显窗给足 8s；正常路径 <100ms 即过。无回显固件（260919 现行——只周期
         // 上行 G02 温度 ~300ms）不再恒走满 8s：1s 后凭上行活证提前过关（降级凭据
         // 同口径——3s 内收到过任一上行帧=链路+固件活，N10 已落线；回环线不产上行
-        // 帧不误判）→ 亮灯总窗 ~2s（此处 1s＋stage1 停留 1s，2026-09-26 用户口径
-        // "亮灯两秒"，原恒走满 8s 灯亮 ~9s）；上行亦静默才落到 8s 判败（判败 →
+        // 帧不误判）→ 亮灯总窗 ~9s（此处 1s＋stage1 停留 8s，2026-09-27 用户口径；
+        // 原恒走满 8s 灯亮 ~9s、2026-09-26 曾缩 ~2s）；上行亦静默才落到 8s 判败（判败 →
         // system_ready 永不触发 → 状态机卡 Init → start_scan 恒被拒，260919 真机实证）
         {
             const int64_t elapsed = nowMs_ - selfCheck_.stageStartMs;
@@ -636,10 +638,11 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
             }
         }
         break;
-    case 1:  // 补光灯/激光器亮 1 秒（停留窗口；不起相机流——相机 USB 流量会
+    case 1:  // 补光灯/激光器停留窗口（不起相机流——相机 USB 流量会
              // 干扰 CH343 串口收发，2026-08-30 真机实测灭灯帧被丢的诱因。
-             // 5s→1s：用户口径 2026-09-06）
-        if (nowMs_ - selfCheck_.stageStartMs >= 1000) {
+             // 1s→8s：260927 用户口径（拉长亮灯窗供肉眼确认点灯；历史 5s→1s
+             // 为 2026-09-06 口径、~2s 总窗为 2026-09-26 口径）
+        if (nowMs_ - selfCheck_.stageStartMs >= 8000) {
             selfCheck_.stage = 2;
             selfCheck_.stageStartMs = nowMs();
         }

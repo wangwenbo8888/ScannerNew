@@ -308,7 +308,7 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
 
     kit.shortPress('M');                                       // 主层中键短按 → 启采集（单帧 N10）
     EXPECT_EQ(mock.count("N11 H1"), 0);                         // 启动不发 N11 H1（a9bfe53 口径）
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 1);             // 每次启采集发 N10（账本默认全参）
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 1);             // 每次启采集发 N10（账本默认全参）
     EXPECT_TRUE(dm.isCapturing());
     kit.shortPress('M');                                       // 再按 → 停采集（单发 N11 H0）
     EXPECT_EQ(mock.count("N11 H0"), 1);
@@ -317,12 +317,12 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     dm.startCapture();                                         // 直调重复启：幂等无新帧
     dm.logicTick();
     EXPECT_EQ(mock.count("N11 H1"), 0);                         // 全程无 N11 H1
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 2);
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 2);
     EXPECT_TRUE(dm.isCapturing());
     dm.startCapture();                                         // 采集已开：幂等无新 N10/N11
     dm.logicTick();
     EXPECT_EQ(mock.count("N11 H1"), 0);
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 2);
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 2);
     dm.stopCapture();                                          // 直调重复停：幂等无新帧
     dm.logicTick();
     dm.stopCapture();
@@ -466,7 +466,7 @@ TEST(DeviceManager, T8_CameraDisconnectDuringCaptureFaultNoAutoStop) {
     fake->openState = false;                                   // 相机掉线
     dm.logicTick();                                            // 下一拍巡检点
     EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 1);              // 启采集单帧 N10
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 1);              // 启采集单帧 N10
     EXPECT_EQ(mock.count("N11 H0"), 0);                         // 无自主停采
     EXPECT_FALSE(dm.isDeviceReady());
 }
@@ -497,7 +497,7 @@ TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
     kit.shortPress('M');                                       // v3 手势链正常
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 1);              // 启采集=单帧 N10（v2 会话 close 的 N11 H0/N12 Z0 不计入）
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 1);              // 启采集=单帧 N10（v2 会话 close 的 N11 H0/N12 Z0 不计入）
     EXPECT_TRUE(dm.isCapturing());
 }
 
@@ -517,20 +517,20 @@ TEST(DeviceManager, T10_AckLossRetransmitNonBlocking) {
 
     dm.startCapture();
     dm.logicTick();                                            // 编队任务落地（N10 首发）
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 1);
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 1);
     const auto t0 = std::chrono::steady_clock::now();          // 非阻塞证明：连 10 拍立即返回
     for (int i = 0; i < 10; ++i) dm.logicTick();
     const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
     EXPECT_LT(dt, 500);
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 1);             // 无时间推进 → 无重传
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 1);             // 无时间推进 → 无重传
 
-    for (int i = 0; i < 50 && mock.count("N10 H30 B10 T1 V1 C0 D0 L40") < 4; ++i) {  // 重传×3 + 3 败收口
+    for (int i = 0; i < 50 && mock.count("N10 H120 B10 T1 V1 C0 D0 L40") < 4; ++i) {  // 重传×3 + 3 败收口
         sleepMs(5);
         dm.logicTick();
     }
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 4);
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 4);
     EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
     EXPECT_FALSE(dm.isCapturing());
 }
@@ -550,12 +550,12 @@ TEST(DeviceManager, T11_V2DegradedFullChain) {
     dm.startCapture();                                         // v2：编队执行 send 内立即回调 ok「未确认」
     dm.logicTick();
     EXPECT_TRUE(dm.isCapturing());
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 1);
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 1);
     for (int i = 0; i < 10; ++i) {
         sleepMs(10);
         dm.logicTick();
     }
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 1);             // 无 ACK 不重传不判败
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 1);             // 无 ACK 不重传不判败
     EXPECT_EQ(rec.count(EventType::FaultOccurred), 0);
 
     dm.testInjectRaw("T25.3;");                                // v2 被动收现状 T 帧（单路）
@@ -605,7 +605,7 @@ TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
     mock.noAck.clear();                                        // 对照：全 ACK 路径
     dm.enterScan();
     for (int i = 0; i < 10; ++i) dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H30 B10 T1 V1 C0 D0 L40"), 5);             // N10 全参自账本（首段 3 败 4 帧 + 本段 1）
+    EXPECT_EQ(mock.count("N10 H120 B10 T1 V1 C0 D0 L40"), 5);             // N10 全参自账本（首段 3 败 4 帧 + 本段 1）
     EXPECT_EQ(mock.count("N13 E0"), 1);                         // 待机已退：本段无 N13 E0
     EXPECT_EQ(dm.mode(), DeviceMode::Scanning);
     EXPECT_TRUE(dm.isCapturing());
@@ -893,11 +893,11 @@ TEST(DeviceManager, T15_SelfCheckSingleN10) {
     EXPECT_EQ(mock.count("N10 H50"), 1);
 }
 
-// —— T16：自检亮灯总窗 ~2s（2026-09-26 用户口径）——stage0 1s 上行活证提前过关＋
-// stage1 停留 1s → N11 H0 收口。无回显固件口径：MockMcu 不回显 N10（v3 无整帧回
-// 显）、自动 ACK 刷 lastRx_ 即活证。0.8s 未收口；≤4s 内 N11 H0 恰一次；全程 N10
-// 恰一次（真钟驱动，real-time 用例 ~2.5s）——
-TEST(DeviceManager, T16_SelfCheckLightWindowTwoSeconds) {
+// —— T16：自检亮灯总窗 ~9s（2026-09-27 用户口径，历程 ~9s→~2s→~9s）——stage0 1s
+// 上行活证提前过关＋stage1 停留 8s → N11 H0 收口。无回显固件口径：MockMcu 不回显
+// N10（v3 无整帧回显）、自动 ACK 刷 lastRx_ 即活证。0.8s 未收口；≤12s 内 N11 H0
+// 恰一次；全程 N10 恰一次（真钟驱动，real-time 用例 ~9.5s）——
+TEST(DeviceManager, T16_SelfCheckLightWindowNineSeconds) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
@@ -914,7 +914,7 @@ TEST(DeviceManager, T16_SelfCheckLightWindowTwoSeconds) {
     });
     dm.logicTick();                                              // stage0 起（N10 兜底恰一次）
     EXPECT_EQ(mock.count("N10 H50"), 1);
-    EXPECT_EQ(mock.count("N12 T5"), 1);                          // 温度回传保证（N12 T5）同发恰一次
+    EXPECT_EQ(mock.count("N12 T5"), 0);                          // 260927 排障隔离：N12 T5 停发（原 1）
 
     for (int i = 0; i < 16; ++i) {                               // ~0.8s：1s 线未到
         sleepMs(50);
@@ -922,8 +922,8 @@ TEST(DeviceManager, T16_SelfCheckLightWindowTwoSeconds) {
     }
     EXPECT_EQ(mock.count("N11 H0"), 0);                          // 未过关未收口
 
-    bool closed = false;                                         // 至 ~2s：活证过关＋停留满收口
-    for (int i = 0; i < 64 && !closed; ++i) {                    // 上界 3.2s（余量）
+    bool closed = false;                                         // 至 ~9s：活证过关＋停留 8s 满收口
+    for (int i = 0; i < 240 && !closed; ++i) {                   // 上界 12s（余量）
         sleepMs(50);
         dm.logicTick();
         closed = mock.count("N11 H0") > 0;
@@ -931,6 +931,6 @@ TEST(DeviceManager, T16_SelfCheckLightWindowTwoSeconds) {
     EXPECT_TRUE(closed);
     EXPECT_EQ(mock.count("N11 H0"), 1);
     EXPECT_EQ(mock.count("N10 H50"), 1);                         // 全程未重发
-    EXPECT_EQ(mock.count("N12 T5"), 1);                          // N12 T5 亦不重发
+    EXPECT_EQ(mock.count("N12 T5"), 0);                          // 260927 排障隔离：N12 T5 停发（原 1）
     EXPECT_GE(bgOk, 1);                                          // 灯项活证过关已报
 }

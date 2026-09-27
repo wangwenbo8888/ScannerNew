@@ -71,11 +71,15 @@ public:
                                   // N10 参数即灯态；close 场景调，写权已随逻辑线程 join 交接）
     void flushWrites(int timeoutMs = 300);  // 等写队列排空（有界）：停采集前用——熄灯帧
                                   // 落线后再触发相机停流（其 USB 风暴会把串口写堵 2~2.5s）
-    void resetSerialWriteOwner(); // 写权交还：open 调用线程末次直写（探测/N12Z1 自检）后、
+    void resetSerialWriteOwner(); // 写权交还：open 调用线程末次直写（历史：探测帧直写期，
+                                  // 现探测帧已改走写线程队列，暂无调用方——待退役）后、
                                   // 逻辑线程首发前调（R2-A1 登记复位；否则逻辑线程首写被拒）
-    bool probeDidSelfCheck() const;  // auto 搜口是否已发过 N12Z1（幂等省略口径；open 查）
+    bool probeN12TSent() const;      // auto 搜口是否已发过 N12 T5（0.5s 无 G02 兜底路径，
+                                      // 260927 用户口径；幂等省略凭据——startupSelfCheck 查）
     void setTempReportInterval(int ms);  // N12 T<ms>（260831 协议）：设定 G02 温度回传间隔
-                                         // （发不等——G02 到达即为凭据；自检入口发，保证上行活证/温度管线有源）
+                                         // （发不等——G02 到达即为凭据；⚠ 260927 真机实证
+                                         // 伴随发送会致固件不点灯——仅搜口 0.5s 无温度时
+                                         // 兜底用，勿在 N10 点灯帧前后无条件发）
     bool probeN10Sent() const;       // auto 搜口是否已发过 N10 探测帧（同参省略口径——
                                      // startupSelfCheck 兜底补发前查：搜口已发则不再补发）
     // 回环验证（启动自检用）：发 payload → timeoutMs 内收到固件回显同载荷帧即 true。
@@ -127,7 +131,10 @@ private:
     hal::McuUplink uplink_;                      // 逻辑线程设置/回调
     std::string lineBuf_;                        // v2 行缓冲（rx 线程私有；';'→codec 帧路径，'\n'→文本行）
     std::atomic<bool> probeHit_{false};          // 自动搜口命中凭据：数值行（温度上报；回显/纯回环不算）
-    std::atomic<bool> probeN12Sent_{false};      // 搜口探测已发 N12Z1（open 幂等省略口径）
+    std::atomic<bool> probeSawTemp_{false};      // 搜口 0.5s 温度观察窗判据：G02 四路/T 帧
+                                                  // 解析成功置位（260927——未到才补发 N12）
+    std::atomic<bool> probeN12Sent_{false};      // 搜口探测已发 N12 T5（0.5s 无温度兜底路径；
+                                                  // open 复位/每口重置）
     std::atomic<bool> probeN10Sent_{false};      // 搜口探测已发 N10 点灯帧（自检兜底省略口径）
     mutable std::mutex echoMtx_;                 // lastEcho_ 保护（rx 写 / lastEchoPayload const 读）
     std::string lastEcho_;                       // 最近一次回显载荷（v2 固件整帧回显下行命令）

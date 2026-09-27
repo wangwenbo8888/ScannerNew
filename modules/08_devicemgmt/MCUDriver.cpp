@@ -153,7 +153,7 @@ std::string MCUDriver::lastEchoPayload() const {
     return lastEcho_;
 }
 
-bool MCUDriver::probeDidSelfCheck() const { return probeN12Sent_.load(std::memory_order_acquire); }
+bool MCUDriver::probeN12TSent() const { return probeN12Sent_.load(std::memory_order_acquire); }
 bool MCUDriver::probeN10Sent() const { return probeN10Sent_.load(std::memory_order_acquire); }
 
 // ============================================================================
@@ -175,6 +175,7 @@ Scanner::Result MCUDriver::open(const std::string& port, int baud) {
     hasShot_ = false;
     lastShot_ = 0;
     lastRx_.store(0, std::memory_order_release);
+    probeSawTemp_.store(false, std::memory_order_release);
     probeN12Sent_.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(echoMtx_);
@@ -223,8 +224,10 @@ void MCUDriver::stopWriteThread() {
     }
 }
 
-// 自动搜口（open 前置，调用线程执行）：逐口 开→发 N10 点灯探测帧→3s 内收到
-// 任一有效上行（G0x 帧/数值行，rx 侧置 probeHit_）即认定 MCU。半途收 rx 线程+
+// 自动搜口（open 前置，调用线程执行）：逐口 开→发 N10 点灯探测帧→0.5s 内 G02
+// 温度上行到即命中且不发 N12；未到才补发 N12 T5 启动回传（260927 用户口径——N12
+// 条件兜底：真机 A/B 实证伴随 N12 固件不点灯、N10 单发即亮）→3s 内收到任一有效
+// 上行（G0x 帧/数值行，rx 侧置 probeHit_）即认定 MCU。半途收 rx 线程+
 // 关串口再试下一口。凭据=上行活证而非命令回显——260919 真机实证：现固件不回显
 // 下行命令（只周期上行 G02 温度 ~300ms），回显判据恒 miss → 搜口失败 → open 失败
 // → startupSelfCheck 整链不跑（自检收口 N11 H0 缺失根因）；回环线只会回显不产
@@ -240,18 +243,35 @@ std::string MCUDriver::probeAutoPort(int baud) {
         rxThread_ = std::thread(&MCUDriver::rxLoop, this);
         lastRx_.store(0, std::memory_order_release);
         probeHit_.store(false, std::memory_order_release);
-    probeN12Sent_.store(false, std::memory_order_release);
-    probeN10Sent_.store(false, std::memory_order_release);
+        probeSawTemp_.store(false, std::memory_order_release);
+        probeN12Sent_.store(false, std::memory_order_release);
+        probeN10Sent_.store(false, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(echoMtx_);
             lastEcho_.clear();             // 每口探测前清档（回显只作记档不作凭据）
         }
+        // 260927 用户口径（N12 条件兜底）：只发 N10 点灯帧——0.5s 内 G02 温度上行
+        // 到→不发 N12（真机 A/B 实证：伴随 N12 固件不点灯、N10 单发即亮）；未到才
+        // 补发 N12 T5 启动回传（无自报固件〔91ed3ad 口径〕的温度源兜底）
         channel_.sendFireAndForget("N10 H50 B50 T1 V1 C0 D0 L50");
         probeN10Sent_.store(true, std::memory_order_release);   // 自检兜底省略凭据（该口已发同参帧）
         bool hit = false;
+        bool n12Sent = false;
         for (int waited = 0; waited < 3000; waited += 10) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            if (probeHit_.load(std::memory_order_acquire)) { hit = true; break; }
+            const bool sawTemp = probeSawTemp_.load(std::memory_order_acquire);
+            if (!n12Sent && waited >= 490 && !sawTemp) {        // 0.5s 温度观察满仍未到
+                setTempReportInterval(5);
+                probeN12Sent_.store(true, std::memory_order_release);
+                n12Sent = true;
+                JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 0.5s 无 G02 温度上行——补发 N12 T5 启动回传");
+            }
+            // 命中即出（G02 即命中源，正常路径 ~100ms 内带温度出）；非温度命中且
+            // 温度未到→睡满 0.5s 观察窗再出（用户口径"等 0.5 秒"不截断）
+            if (probeHit_.load(std::memory_order_acquire) && (sawTemp || waited >= 490)) {
+                hit = true;
+                break;
+            }
         }
         if (hit) {
             JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 自动搜口命中: {}（{} 口中，上行帧凭据；N10 点灯帧已发）",
@@ -334,6 +354,7 @@ void MCUDriver::dispatchFrame(const serial::FrameCodec::Frame& f) {
     case 'T': {
         serial::TempFrame t;
         if (serial::parseTempPayload(f.payload, t)) {
+            probeSawTemp_.store(true, std::memory_order_release);  // 搜口 0.5s 温度观察窗判据（260927，v3 T 帧路径）
             t.seq = f.seq; t.ts = now;
             if (!tempRing_.push(t)) JMW_LOG_DEBUG("08-MCUDriver", "[MCUDriver] 遥测环满丢新(计{})", tempRing_.dropped());
         }
@@ -438,6 +459,7 @@ void MCUDriver::feedTextLine(const std::string& line) {
                 i = static_cast<size_t>(endp - line.c_str());
             }
             if (got[0] && got[1] && got[2] && got[3]) {
+                probeSawTemp_.store(true, std::memory_order_release);  // 搜口 0.5s 温度观察窗判据（260927）
                 serial::TempFrame t{};
                 t.celsius[0] = v[0]; t.celsius[1] = v[1];
                 t.celsius[2] = v[2]; t.celsius[3] = v[3];
