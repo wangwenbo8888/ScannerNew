@@ -19,6 +19,13 @@ struct StereoFrame {
     FrameId frameIdLeft = 0;    // 左相机原始帧号（调试——相机预览显示用）
     FrameId frameIdRight = 0;   // 右相机原始帧号（同上）
     TimestampMs timestamp = 0;
+    FrameId timestampLeft = 0;   // 左相机设备时间戳（原始单位——260927 方案B实验：
+                                 // 时间戳配对判据/调试用，与右机时钟不可直比）
+    FrameId timestampRight = 0;  // 右相机设备时间戳（同上）
+    bool tvKnown = false;        // T/V 判定已知（时间戳奇偶法——CameraControl 计算；
+                                 // false=未知〔sim 帧/Δ 未锚定〕消费方自行回退帧号奇偶）
+    bool tvLeftSkew = true;      // true=左斜 T 组 / false=右斜 V 组（tvKnown 时有效；
+                                 // 锚：开扫首帧=T〔N11 H1 后首脉冲恒 T，固件确认中〕）
     cv::Mat leftGray;   // 左图灰度 CV_8UC1
     cv::Mat rightGray;  // 右图灰度 CV_8UC1
 };

@@ -280,6 +280,7 @@ void AppContext::initialize() {
         std::string triggerSource = "Line2";
         int previewFps = 10;
         bool pairStrictFrameId = true;   // 帧号严格配对（false=按时间对齐交付——实测实验口径）
+        bool timestampPairing = true;    // 方案B：帧号不等时时间戳判组兜底（260927 实验）
     };
     CameraSetupCfg camCfg;
     {
@@ -298,11 +299,12 @@ void AppContext::initialize() {
                 camCfg.triggerSource = c.value("triggerSource", camCfg.triggerSource);
                 camCfg.previewFps = c.value("previewFps", camCfg.previewFps);
                 camCfg.pairStrictFrameId = c.value("pairStrictFrameId", camCfg.pairStrictFrameId);
+                camCfg.timestampPairing = c.value("timestampPairing", camCfg.timestampPairing);
                 JMW_LOG_INFO("app-AppContext",
-                             "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} pairStrict={}",
+                             "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} pairStrict={} tsPair={}",
                              camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
                              camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps,
-                             camCfg.pairStrictFrameId);
+                             camCfg.pairStrictFrameId, camCfg.timestampPairing);
             } catch (const std::exception& e) {
                 JMW_LOG_WARN("app-AppContext",
                              "[AppContext] camera.json 解析失败（{}）——用内置默认", e.what());
@@ -330,7 +332,8 @@ void AppContext::initialize() {
             // 装机口径自 config/camera.json（捕获值构造）
             return Scanner::device::createGalaxyStereoCamera(
                 camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
-                camCfg.rotateRight180, camCfg.triggerSource, camCfg.pairStrictFrameId);
+                camCfg.rotateRight180, camCfg.triggerSource, camCfg.pairStrictFrameId,
+                camCfg.timestampPairing);
         });
     // 设备启动（open+自检）后台化：此处不再阻塞主窗口——main 在 window.show() 后
     // 调 startDevicesAsync()（相机枚举+自动搜口实测 ~5s，同步跑=白屏等）
@@ -494,7 +497,8 @@ Scanner::Result AppContext::startScanSession(Scanner::ScanMode mode) {
         if (scanWf_) {
             const auto t = dm->getLastTemperatures();
             const double tempC = (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
-            scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId);
+            scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId,
+                                      frame.tvKnown, frame.tvLeftSkew);
         }
         // ③ 调试分路：相机预览监视弹窗（相机 SDK 线程直调；订阅方切线程+节流自理）
         // 260912 终审证据：tap 空（监视窗未挂/已关）vs tap 心跳（活着）双路日志

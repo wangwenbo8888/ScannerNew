@@ -14,11 +14,14 @@ namespace Scanner::device {
 
 /// 大恒 Galaxy 双目相机（装机口径参数自 config/camera.json 由装配根喂入；
 /// triggerSource＝硬件触发源，缺省 Line2；pairStrictFrameId=false＝帧号校验旁路
-/// （按时间对齐交付——带宽/帧率实测实验口径，缺省 true 严格配对）
+/// （按时间对齐交付——带宽/帧率实测实验口径，缺省 true 严格配对）；
+/// timestampPairing＝方案B 时间戳配对兜底（帧号不等时 |L.ts−R.ts−Δ|<ε 判组，
+/// 260927 实验，缺省 true——时钟随流重开复位则恒不命中自然回落老路径）
 std::unique_ptr<hal::IScannerCamera> createGalaxyStereoCamera(int deviceIndexLeft,
                                                               int deviceIndexRight,
                                                               bool rotateRight180,
                                                               const std::string& triggerSource = "Line2",
-                                                              bool pairStrictFrameId = true);
+                                                              bool pairStrictFrameId = true,
+                                                              bool timestampPairing = true);
 
 } // namespace Scanner::device

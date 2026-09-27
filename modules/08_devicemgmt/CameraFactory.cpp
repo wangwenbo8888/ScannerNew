@@ -11,13 +11,15 @@ std::unique_ptr<hal::IScannerCamera> createGalaxyStereoCamera(int deviceIndexLef
                                                               int deviceIndexRight,
                                                               bool rotateRight180,
                                                               const std::string& triggerSource,
-                                                              bool pairStrictFrameId) {
+                                                              bool pairStrictFrameId,
+                                                              bool timestampPairing) {
     StereoPairConfig cfg;
     cfg.deviceIndexLeft = deviceIndexLeft;
     cfg.deviceIndexRight = deviceIndexRight;
     cfg.rotateRight180 = rotateRight180;
     cfg.triggerSource = triggerSource;
     cfg.pairStrictFrameId = pairStrictFrameId;
+    cfg.timestampPairing = timestampPairing;
     return std::make_unique<CameraControl>(cfg);
 }
 

@@ -29,7 +29,8 @@ public:
     // droppedFrames 计数（挂 10 故障桥）＋Result 透传；warning（越界 clamp/单表空）
     // → Result 透传且帧仍入环（快照档数据自证降级）。
     Scanner::Result pushFrame(const cv::Mat& grayL, const cv::Mat& grayR,
-                              double temperatureC, uint64_t frameId);
+                              double temperatureC, uint64_t frameId,
+                              bool tvKnown = false, bool tvLeftSkew = true);
 
     SlotRing<EnhancedFrame>& ring() { return ring_; }
     size_t ringCapacity() const { return ringSlots_; }

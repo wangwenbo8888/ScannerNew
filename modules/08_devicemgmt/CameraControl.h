@@ -27,6 +27,10 @@ struct StereoPairConfig {
     std::string triggerSource = "Line2";   // 硬件触发源（装机接线口径——config/camera.json）
     bool pairStrictFrameId = true;         // 帧号严格配对开关（false=按时间对齐交付——
                                            // 带宽/帧率实测实验用；T/V 奇偶归属不保证）
+    bool timestampPairing = true;          // 260927 方案B实验：帧号不等时按时间戳判组
+                                           //（|L.ts−R.ts−Δ|<ε=周期/4，Δ 在线 EMA）；
+                                           // 时钟若随流重开复位则恒不命中——自然回落
+                                           // 丢组/偏移采纳现行路径（无需开关旁路）
 };
 
 // ============================================================================
@@ -92,6 +96,7 @@ private:
     struct SideBuffer {
         cv::Mat image;
         uint64_t frameId = 0;
+        uint64_t timestamp = 0;   // 设备时间戳原始单位（GetTimeStamp——方案B配对判据）
         std::atomic<bool> ready{false};
     };
 
@@ -108,6 +113,22 @@ private:
     int m_mismatchStreak = 0;
     std::atomic<bool> m_firstPairPending{false}; // 开流后首组日志武装（260927 方案A
                                                  // 实验——自动恢复成活判据可见性）
+
+    // —— 时间戳配对（260927 方案B实验）——Δ=L.ts−R.ts 两机钟差：两相机各自上电
+    // 起算不可直比，但同触发曝光对的钟差近似恒定（晶拖 ppm 级由 EMA 自跟踪）；
+    // 链路重开帧号归零而时钟自由跑→Δ 仍有效＝零中断配对（核心假设，真机验证）——
+    int64_t m_pairTsDelta = 0;                   // 仅在 m_bufferMutex 内触碰（EMA α=1/16）
+    bool m_pairTsValid = false;                  // Δ 已锚定（首个严格等值对起；只由
+                                                 // fid 等值对喂——防救回对锁死错误 Δ）
+    std::atomic<uint64_t> m_sideTsPeriod[2]{};   // per-side 相邻帧 ts 差（≈触发周期，
+                                                 // ε=period/4 单位无关；handler 各侧单写）
+
+    // —— T/V 激光组判定（260927 时间戳奇偶法）：family(t)=parity(round((t−t₀)/
+    //    周期))——时间轴数的是 MCU 实际发出的脉冲序，免疫链路重开（BlockID 归零）
+    //    与相机漏帧（无帧=轴上无缝隙）。锚 t₀=开流首交付对 ts（假设：N11 H1 后
+    //    首脉冲恒打 T 左斜——固件确认中；确认前 tvKnown 恒 false 可整体旁路）——
+    uint64_t m_tvT0 = 0;                         // 锚（m_bufferMutex 内；首对锚定）
+    bool m_tvT0Valid = false;                    // t₀ 已锚定（同上）
 
     // 标定缓存（注入式 B3：app 从 06 标定结果仓库喂入，08 不做第二真相源）
     mutable std::mutex m_calibMutex;

@@ -836,6 +836,9 @@ void MainWindow::showCameraMonitor() {
             cv::resize(f.rightGray, rSmall, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
         const auto fidL = f.frameIdLeft;
         const auto fidR = f.frameIdRight;
+        // T/V 激光组判定（260927 时间戳奇偶法，CameraControl 随帧）：预览监视显示
+        const bool tvKnown = f.tvKnown;
+        const bool tvLeft = f.tvLeftSkew;
 
         // —— 激光线宽度测量（2026-09-06）：260912 诊断隔离（用户指令）——整块
         //    暂停调用：验证预览卡死是否与其相关（tap 内异常被相机回调外层
@@ -874,7 +877,8 @@ void MainWindow::showCameraMonitor() {
         // }
         const int laserWidth = s_laserWidth.load();
 
-        QMetaObject::invokeMethod(this, [this, lSmall, rSmall, fidL, fidR, laserWidth]() {
+        QMetaObject::invokeMethod(this, [this, lSmall, rSmall, fidL, fidR, laserWidth,
+                                         tvKnown, tvLeft]() {
             // 260912：isVisible 闸移除——帧流/窗开/定时器活三者俱证时预览仍停，
             // 该闸为残余嫌疑（隐藏窗 setPixmap 无害且 10fps 开销可忽略）；空判保留
             if (m_camDlg) {
@@ -889,9 +893,12 @@ void MainWindow::showCameraMonitor() {
                 // 标题栏活体指示：帧号跳动＝链路活；整窗冻结（含标题）＝渲染层/ghost
                 if (m_camDlg)
                     m_camDlg->setWindowTitle(
-                        QStringLiteral("相机预览监视（左 / 右）——帧 L%1 R%2  刷新%3")
+                        QStringLiteral("相机预览监视（左 / 右）——帧 L%1 R%2  激光组 %3  刷新%4")
                             .arg(static_cast<qulonglong>(fidL))
                             .arg(static_cast<qulonglong>(fidR))
+                            .arg(tvKnown ? (tvLeft ? QStringLiteral("T 左斜")
+                                                   : QStringLiteral("V 右斜"))
+                                         : QStringLiteral("—"))
                             .arg(s_uiRefresh.load()));
                 m_camLeft->setPixmap(QPixmap::fromImage(camMatToImage(lSmall))
                                            .scaled(m_camLeft->size(), Qt::KeepAspectRatio));
@@ -915,7 +922,10 @@ void MainWindow::showCameraMonitor() {
                 }
                 if (m_camFrameLabel)
                     m_camFrameLabel->setText(
-                        QStringLiteral("激光线宽: %1 px    接收: %2 fps    流水线: %3 fps    左帧号: %4    右帧号: %5    偏移: %6")
+                        QStringLiteral("激光组: %1    激光线宽: %2 px    接收: %3 fps    流水线: %4 fps    左帧号: %5    右帧号: %6    偏移: %7")
+                            .arg(tvKnown ? (tvLeft ? QStringLiteral("T 左斜")
+                                                   : QStringLiteral("V 右斜"))
+                                         : QStringLiteral("未知(帧号奇偶)"))
                             .arg(laserWidth)
                             .arg(s_rxFps.load())
                             .arg(pipelineFps, 0, 'f', 1)

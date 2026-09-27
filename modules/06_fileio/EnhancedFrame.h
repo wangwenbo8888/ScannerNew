@@ -29,6 +29,10 @@ struct EnhancedFrame {
     void* d_grayL = nullptr;
     void* d_grayR = nullptr;
     double temperature = 0.0;              // 查表用帧温（℃）
+    // T/V 激光组判定（260927 时间戳奇偶法，CameraControl 算好透传）：
+    // tvKnown=false＝未知（sim 帧/未锚定）——消费方（07 ScanChains）回退帧号奇偶
+    bool tvKnown = false;
+    bool tvLeftSkew = true;                // true=左斜 T 组 / false=右斜 V 组
     CalibSnapshot snapshot;
 };
 

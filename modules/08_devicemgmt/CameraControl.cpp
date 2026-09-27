@@ -43,6 +43,16 @@ public:
         int w = static_cast<int>(imageData->GetWidth());
         int h = static_cast<int>(imageData->GetHeight());
         uint64_t fid = imageData->GetFrameID();
+        const uint64_t ts = imageData->GetTimeStamp();
+
+        // 时间戳配对·周期估计（260927 方案B）：相邻帧 ts 差≈触发周期——ε=period/4
+        // 的单位无关基准；重开首帧跨零/巨跳（>2^40）不入账防污染
+        if (m_lastTs != 0 && ts > m_lastTs) {
+            const uint64_t d = ts - m_lastTs;
+            if (d < (1ull << 40))
+                m_owner->m_sideTsPeriod[m_sideIndex].store(d, std::memory_order_relaxed);
+        }
+        m_lastTs = ts;
 
         // 帧号回退检测（260926）：同侧帧号不升反降＝相机/USB 链路层自发重开出流
         //（BlockID 归零——app 未重启流）。真机实证：左右轮流回跳 1~6、另一侧正常
@@ -73,6 +83,7 @@ public:
             auto& buf = m_owner->m_buffers[m_sideIndex];
             buf.image = std::move(processed);
             buf.frameId = fid;
+            buf.timestamp = ts;
             buf.ready.store(true, std::memory_order_relaxed);
         }
 
@@ -107,25 +118,50 @@ private:
             return;
         }
 
-        // —— 帧号配对（用户口径 2026-09-05 严格等值；260911 补稳定偏移采纳）——
-        // 严格等值保奇偶分派（激光 T/V 左斜/右斜组别）与立体同刻性；不等则丢
-        // 落后侧图像（保留超前侧待追平）。**实机实证（260911 日志）**：模式切换/
-        // 调参触发 N10 重发后，某侧多吃/漏吃一个触发沿→L-R 恒差 ±1 且永不收敛
-        // ——严格等值=每帧全丢（预览冻结/零数据，双相机实都在出流）。故补：
-        // 连续同号失配即采纳该偏移，按时间对齐配对交付；激光 T/V 奇偶归属可能
-        // 有疑（无法从帧号判定哪侧失步）——采纳时 WARN 大声告警，frameIdLeft/
-        // Right 原始帧号照带上报供监视窗「偏移」显示。
-        // 260912c 阈值 30→8：每次触发重启（切模式/暂停续采/调参 N10 重发）后
-        // 偏移都要重学——30 帧≈0.5-1s 预览全停，快速操作观感即「点了没反应」；
-        // 8 帧≈0.13s。误采纳风险低：单侧真丢帧产生的偏移本就该采纳（新现实）
-        // 260926 实验开关 pairStrictFrameId=false：整段校验旁路——双方 ready 即
-        // 按时间对齐交付（链路重开致帧号频繁归零时测真实接收帧率用；扫描数据
-        // 同刻性/T-V 归属不保证，仅实验）
-        int64_t off = 0;
-        if (m_owner->m_config.pairStrictFrameId && leftBuf.frameId != rightBuf.frameId) {
-            off = static_cast<int64_t>(leftBuf.frameId) -
-                  static_cast<int64_t>(rightBuf.frameId);
-            // 偏移估计器（恒跑：失配≠已采纳偏移时计数；漂移后同样可再收敛）
+        // —— 配对判组（260927 用户定版：时间戳直接配对）——
+        // 方案B 主判据：Δ（两机钟差）已锚定即以 |L.ts−R.ts−Δ| < ε=周期/4 为唯一
+        // 同触发判据——帧号不参与判组（只作信息随帧/回退检测源）。真机实证
+        //（260927 日志）：时间戳不随流重开复位（三次重开 Δ 变化仅 ~24µs≈3ppm
+        // 晶振漂移级），链路重开/漏触发后零中断续配；d>ε=L 超前丢 R、d<−ε=R
+        // 超前丢 L（被丢帧的伙伴已物理丢失，等不回）。ε 用 min(周期L,周期R)——
+        // 单侧重启间隙会污染本侧周期估计（实测 266ms 混入），取健康侧为准。
+        // Δ 锚定前（新开流首对）与开关关闭时走下方案遗留路径：帧号严格等值
+        //（2026-09-05 口径）＋稳定偏移采纳（260911）——其严格等值交付同时锚定 Δ
+        //（此时新开流两侧帧号同步起步，等值对即同触发对，锚定可靠）。
+        // 260926 实验开关 pairStrictFrameId=false：遗留路径整段旁路——双方 ready
+        // 即按时间对齐交付（测帧率用；同刻性/T-V 归属不保证，仅实验）
+        const bool tsDirect = m_owner->m_config.timestampPairing && m_owner->m_pairTsValid;
+        if (tsDirect) {
+            const uint64_t pl = m_owner->m_sideTsPeriod[0].load(std::memory_order_relaxed);
+            const uint64_t pr = m_owner->m_sideTsPeriod[1].load(std::memory_order_relaxed);
+            const uint64_t period = pl < pr ? pl : pr;   // min：健康侧周期为准
+            const int64_t d = static_cast<int64_t>(leftBuf.timestamp) -
+                              static_cast<int64_t>(rightBuf.timestamp) -
+                              m_owner->m_pairTsDelta;
+            const int64_t eps = static_cast<int64_t>(period / 4);
+            const bool hit = d < eps && d > -eps;
+            static std::atomic<uint64_t> s_tsStats{0};   // 直配可观测性（首对+每 200 对）
+            if (!hit || s_tsStats.fetch_add(1, std::memory_order_relaxed) % 200 == 0) {
+                JMW_LOG_INFO("08-CameraControl",
+                    "[CameraControl] 时间戳直配{}：L.fid={} R.fid={} d={}ns ε={}ns Δ={}ns"
+                    "（{}）",
+                    hit ? "命中" : "未命中丢旧", leftBuf.frameId, rightBuf.frameId,
+                    d, eps, m_owner->m_pairTsDelta,
+                    hit ? "" : "——被丢帧的伙伴已物理丢失");
+            }
+            if (!hit) {
+                auto& stale = (d >= eps) ? rightBuf : leftBuf;   // 超前侧保留等下一伙伴
+                stale.image.release();
+                stale.ready.store(false, std::memory_order_release);
+                return;
+            }
+        } else if (m_owner->m_config.pairStrictFrameId && leftBuf.frameId != rightBuf.frameId) {
+            // —— 遗留路径（Δ 未锚定/方案B关闭）：帧号严格等值＋偏移采纳 ——
+            //（历史实证：模式切换/调参 N10 重发后某侧多吃漏吃一触发沿→L-R 恒差
+            // ±1 永不收敛，严格等值=每帧全丢——连续 8 次同号失配即采纳偏移按
+            // 时间对齐交付；T/V 奇偶归属可能有疑——WARN 留痕）
+            const int64_t off = static_cast<int64_t>(leftBuf.frameId) -
+                                static_cast<int64_t>(rightBuf.frameId);
             if (off != m_owner->m_pairOffset) {
                 if (off == m_owner->m_lastMismatchOff) {
                     if (++m_owner->m_mismatchStreak >= 8) {
@@ -162,23 +198,60 @@ private:
         leftBuf.ready.store(false, std::memory_order_release);
         rightBuf.ready.store(false, std::memory_order_release);
 
+        // —— 方案B·Δ 学习：直配模式所有交付对喂（命中对 d 天然小，EMA 稳收敛且
+        //    跟踪晶拖）；遗留路径仅严格等值对喂（偏移采纳对可能跨触发，防错误
+        //    锚定）。首对锚定，其后 EMA α=1/16——
+        if (tsDirect || leftBuf.frameId == rightBuf.frameId) {
+            const int64_t d = static_cast<int64_t>(leftBuf.timestamp) -
+                              static_cast<int64_t>(rightBuf.timestamp);
+            m_owner->m_pairTsDelta = m_owner->m_pairTsValid
+                ? m_owner->m_pairTsDelta + (d - m_owner->m_pairTsDelta) / 16
+                : d;
+            m_owner->m_pairTsValid = true;
+        }
+
         hal::StereoFrame frame;
         frame.frameId = leftBuf.frameId;   // 严格配对下左右相等（偏移配对=左号为准）
         frame.frameIdLeft = leftBuf.frameId;    // 原始帧号（调试显示）
         frame.frameIdRight = rightBuf.frameId;
         frame.timestamp = 0;
+        frame.timestampLeft = leftBuf.timestamp;    // 设备原始时间戳（方案B 可观测性）
+        frame.timestampRight = rightBuf.timestamp;
+        // —— T/V 激光组判定（260927 时间戳奇偶法）：脉冲序＝round((tsL−t₀)/周期)
+        //    的奇偶（偶=T 左斜）；t₀ 未锚定（开流首对）在本对锚定并判 T。周期用
+        //    min(双侧)（健康侧为准）；周期未知时本帧不判（tvKnown=false——消费方
+        //    回退帧号奇偶），锚照常立（下帧起可判）——
+        {
+            const uint64_t pl = m_owner->m_sideTsPeriod[0].load(std::memory_order_relaxed);
+            const uint64_t pr = m_owner->m_sideTsPeriod[1].load(std::memory_order_relaxed);
+            const uint64_t tvPeriod = (pl && pr) ? (pl < pr ? pl : pr) : 0;
+            if (!m_owner->m_tvT0Valid) {
+                m_owner->m_tvT0 = leftBuf.timestamp;
+                m_owner->m_tvT0Valid = true;
+            }
+            if (tvPeriod > 0 && leftBuf.timestamp >= m_owner->m_tvT0) {
+                const uint64_t idx =
+                    (leftBuf.timestamp - m_owner->m_tvT0 + tvPeriod / 2) / tvPeriod;
+                frame.tvKnown = true;
+                frame.tvLeftSkew = (idx % 2) == 0;   // 偶脉冲=T 左斜（锚=首脉冲 T）
+            }
+        }
         frame.leftGray  = leftBuf.image.clone();
         frame.rightGray = rightBuf.image.clone();
 
         // 开流/复采后首组可见性（260927 方案A实验）：自动恢复编排的成活判据——
         // 严格等值首组 L==R 且从 0 起步＝双流重开对齐成功；偏移配对首组＝有侧漏
-        // 首触发（T/V 相位存疑，需复核）
+        // 首触发（T/V 相位存疑，需复核）。附带方案B 基线值（Δ/周期）供判读
         if (m_owner->m_firstPairPending.exchange(false, std::memory_order_acq_rel)) {
             JMW_LOG_INFO("08-CameraControl",
-                "[CameraControl] 开流后首组：L={} R={}（{}配对，采纳偏移={}）",
+                "[CameraControl] 开流后首组：L={} R={}（{}配对，采纳偏移={}）"
+                " tsΔ={} 周期L/R={}/{}",
                 leftBuf.frameId, rightBuf.frameId,
                 leftBuf.frameId == rightBuf.frameId ? "严格等值" : "偏移",
-                m_owner->m_pairOffset);
+                m_owner->m_pairOffset,
+                m_owner->m_pairTsValid ? m_owner->m_pairTsDelta : 0,
+                m_owner->m_sideTsPeriod[0].load(std::memory_order_relaxed),
+                m_owner->m_sideTsPeriod[1].load(std::memory_order_relaxed));
         }
 
         std::lock_guard cbLock(m_owner->m_callbackMutex);
@@ -194,6 +267,7 @@ private:
     inline static std::atomic<uint64_t> s_badFrames[2]{};
     uint64_t m_lastFid = 0;   // 本侧最近帧号（每侧回调单线程——无锁；帧号回退检测基线，
                               // 新会话随 handler 重建归零）
+    uint64_t m_lastTs = 0;    // 本侧最近时间戳（周期估计用——同上单线程无锁）
 };
 
 // ============================================================================
@@ -556,6 +630,8 @@ Result CameraControl::startCapture() {
         m_pairOffset = 0;
         m_lastMismatchOff = 0;
         m_mismatchStreak = 0;
+        m_pairTsValid = false;          // 方案B：钟差随新开流重锚（首严格等值对起）
+        m_tvT0Valid = false;            // T/V 锚随新开流重立（首交付对=T 左斜）
     }
     m_firstPairPending.store(true, std::memory_order_release);   // 首组日志武装（260927）
     if (!m_config.pairStrictFrameId) {
