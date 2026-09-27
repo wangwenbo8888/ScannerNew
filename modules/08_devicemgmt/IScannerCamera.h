@@ -88,6 +88,10 @@ public:
     // 温度
     virtual double getTemperature() const = 0;
 
+    // 帧号回退累计（同侧 BlockID 下降＝链路自发重开出流指纹；缺省 0=不支持）——
+    // DeviceManager 链路自动恢复（260927 方案A实验）检测源
+    virtual uint64_t frameRollbackCount() const { return 0; }
+
     // 平台
     virtual std::string getPlatform() const = 0;  // "Windows" / "Jetson"
 };

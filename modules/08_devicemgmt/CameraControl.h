@@ -73,6 +73,8 @@ public:
 
     double getTemperature() const override;
 
+    uint64_t frameRollbackCount() const override;   // 双侧帧号回退累计（自动恢复检测源）
+
     static int enumerateDevices();
 
 private:
@@ -104,6 +106,8 @@ private:
     int64_t m_pairOffset = 0;                    // 仅在 m_bufferMutex 内触碰
     int64_t m_lastMismatchOff = 0;
     int m_mismatchStreak = 0;
+    std::atomic<bool> m_firstPairPending{false}; // 开流后首组日志武装（260927 方案A
+                                                 // 实验——自动恢复成活判据可见性）
 
     // 标定缓存（注入式 B3：app 从 06 标定结果仓库喂入，08 不做第二真相源）
     mutable std::mutex m_calibMutex;

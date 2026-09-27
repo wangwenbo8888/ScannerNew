@@ -49,6 +49,8 @@ public:
         // 爬升，为配对丢组＋偏移翻转采纳的根因指纹（全分辨率×50Hz×双目≈3.1Gbps
         // 顶格 USB3 单控制器实用上限）
         if (m_lastFid != 0 && fid < m_lastFid) {
+            s_rollbacks[static_cast<size_t>(m_sideIndex)]
+                .fetch_add(1, std::memory_order_relaxed);   // 回退累计出口（自动恢复检测源）
             JMW_LOG_WARN("08-CameraControl",
                 "[CameraControl] 帧号回退（side={}：{}→{}）——相机/USB 链路层重开出流"
                 "指纹（查带宽/USB 控制器分配/线缆）",
@@ -86,6 +88,11 @@ public:
                 "[CameraControl] 采集回调异常（side={}）: 未知类型", m_sideIndex);
         }
     }
+
+public:
+    // 帧号回退计数（per-side、跨会话累计）——DeviceManager 链路自动恢复检测源
+    //（260927 方案A实验；跨会话不归零与 s_badFrames/s_mismatchDrops 同口径——消费侧记基线）
+    inline static std::atomic<uint64_t> s_rollbacks[2]{};
 
 private:
     void tryDeliver() {
@@ -162,6 +169,17 @@ private:
         frame.timestamp = 0;
         frame.leftGray  = leftBuf.image.clone();
         frame.rightGray = rightBuf.image.clone();
+
+        // 开流/复采后首组可见性（260927 方案A实验）：自动恢复编排的成活判据——
+        // 严格等值首组 L==R 且从 0 起步＝双流重开对齐成功；偏移配对首组＝有侧漏
+        // 首触发（T/V 相位存疑，需复核）
+        if (m_owner->m_firstPairPending.exchange(false, std::memory_order_acq_rel)) {
+            JMW_LOG_INFO("08-CameraControl",
+                "[CameraControl] 开流后首组：L={} R={}（{}配对，采纳偏移={}）",
+                leftBuf.frameId, rightBuf.frameId,
+                leftBuf.frameId == rightBuf.frameId ? "严格等值" : "偏移",
+                m_owner->m_pairOffset);
+        }
 
         std::lock_guard cbLock(m_owner->m_callbackMutex);
         if (m_owner->m_frameCallback) {
@@ -539,6 +557,7 @@ Result CameraControl::startCapture() {
         m_lastMismatchOff = 0;
         m_mismatchStreak = 0;
     }
+    m_firstPairPending.store(true, std::memory_order_release);   // 首组日志武装（260927）
     if (!m_config.pairStrictFrameId) {
         JMW_LOG_WARN("08-CameraControl",
             "[CameraControl] 帧号严格配对已关（pairStrictFrameId=false）——按时间对齐"
@@ -592,6 +611,12 @@ Result CameraControl::stopCapture() {
 }
 
 bool CameraControl::isCapturing() const { return m_isCapturing; }
+
+// 帧号回退累计（双侧求和；跨会话单调——消费侧 DeviceManager 记基线取增量）
+uint64_t CameraControl::frameRollbackCount() const {
+    return CaptureEventHandler::s_rollbacks[0].load(std::memory_order_relaxed) +
+           CaptureEventHandler::s_rollbacks[1].load(std::memory_order_relaxed);
+}
 
 // ============================================================================
 // 同步抓帧

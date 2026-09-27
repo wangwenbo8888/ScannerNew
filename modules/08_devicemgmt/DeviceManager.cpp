@@ -353,6 +353,8 @@ void DeviceManager::logicTick() {
     }
     // ⑪ 启动自检状态机推进（无阻塞；闲时 stage=-1 直返）
     selfCheckTick(now);
+    // ⑫ 链路自动恢复检测（260927 方案A实验；闲时/无相机/不在采集中=直返）
+    linkRecoveryTick(now);
 }
 
 void DeviceManager::testInjectRaw(const std::string& frameBytes) {
@@ -658,6 +660,65 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
         break;
     }
     }
+}
+
+// ============================================================================
+// 链路自动恢复（260927 方案A）——判定即恢复（无冷却/无上限）：任一侧帧号回退
+// ＝丢帧，左右相机一并重置帧号（双侧流重启 BlockID 归 0）。编排：N11 H0 停扫 →
+// 双侧相机流重启 → N10 全参＋N11 H1 复采；成活判据＝「开流后首组」L==R 日志
+// ============================================================================
+
+void DeviceManager::linkRecoveryTick(int64_t) {
+    if (recovery_.busy) return;
+    if (!camera_ || !mode_->isCapturing()) return;   // 只在采集中恢复（自检/待机不碰）
+    const uint64_t cur = camera_->frameRollbackCount();
+    if (cur <= recovery_.baseline) return;           // 无新回退
+    recovery_.baseline = cur;                        // 消化（左/右任一侧回退都触发）
+    ++recovery_.count;
+    recovery_.busy = true;
+    JMW_LOG_WARN("08-DeviceManager",
+        "[DeviceManager] 检测到相机帧号回退（累计 {}，恢复第 {} 次）——左右相机一并"
+        "重置帧号：N11 H0 停扫→双流重启→N10＋N11 H1 复采",
+        cur, recovery_.count);
+    runLinkRecovery();
+}
+
+void DeviceManager::runLinkRecovery() {
+    // ① N11 H0 停扫——先掐触发（重启窗内单侧计数=白干；v2 盲发恒 ok 即回）
+    mcu_->stopScan([this](bool ok, const std::string& p) {
+        if (!ok) {
+            JMW_LOG_ERROR("08-DeviceManager",
+                "[DeviceManager] 链路恢复①停扫失败（{}）——本轮放弃，下次回退再试", p);
+            recovery_.busy = false;
+            return;
+        }
+        mode_->setCapturing(false);
+        mcu_->flushWrites(300);                      // 熄灯帧落线（相机停流 USB 风暴前）
+        // ② 双侧相机流重启——左右都重置（不区分哪侧回退）：StopGrab→
+        //    AcquisitionStop→(重开流)→StartGrab→AcquisitionStart，BlockID 归 0
+        const auto sr = camera_->stopAsyncCapture();
+        const auto st = sr.success ? camera_->startAsyncCapture(frameCb_) : sr;
+        if (!st.success) {
+            JMW_LOG_ERROR("08-DeviceManager",
+                "[DeviceManager] 链路恢复②双流重启失败（{}）——本轮放弃", st.message);
+            recovery_.busy = false;
+            return;
+        }
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 链路恢复②左右相机双流重启 ok（BlockID 归 0）");
+        // ③ 复采：N10 账本全参＋N11 H1——触发恢复，两侧从 0 锁步；成活看
+        //    CameraControl「开流后首组」日志（严格等值 L==R）
+        sendSeq(captureSeqSteps(), [this](bool ok) {
+            recovery_.busy = false;
+            if (!ok) {
+                JMW_LOG_ERROR("08-DeviceManager",
+                    "[DeviceManager] 链路恢复③复采命令组 3 败——需人工介入（停采重开）");
+                return;
+            }
+            mode_->setCapturing(true);
+            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 链路恢复完成（第 {} 次）",
+                         recovery_.count);
+        });
+    });
 }
 
 // ============================================================================

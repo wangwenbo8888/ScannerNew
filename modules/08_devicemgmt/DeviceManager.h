@@ -119,7 +119,7 @@ struct DeviceConfig {
     double tempSpikeAbsC = 10.0;     // 温度乱跳（#4）第二判据：同路相邻 T 帧绝对差值超此 ℃
                                  //     即报（双阈值——速率灵敏、绝对钳大跳，任一命中）
     int seqGapWarn = 5;              // 帧计数对账（#9）：G03 触发计数跳变丢帧数每拍增量
-                                 // 超此值报 0x0808（260831 改 G03 S 计数源）
+                                 //     超此值报 0x0808（260831 改 G03 S 计数源）
 };
 
 class DeviceManager {
@@ -227,6 +227,19 @@ private:
         std::atomic<bool> frameValid{false};     // 双目图非空凭据
     } selfCheck_;
     void selfCheckTick(int64_t nowMs_);       // logicTick 末驱动（单次 µs 级；名避让 nowMs()）
+
+    // —— 链路自动恢复（260927 方案A；逻辑线程私有）——
+    // 检测：camera_ frameRollbackCount 增量（任一侧 BlockID 下降＝丢帧/链路重开）
+    // 编排：N11 H0 停扫（掐触发）→ 双侧相机流重启（BlockID 一并归 0——不区分
+    //       哪侧回退，左右都重置）→ N10 全参＋N11 H1 复采（相机先 armed 后放
+    //       触发）→ 首组 L==R 日志判据（CameraControl「开流后首组」）
+    struct LinkRecovery {
+        uint64_t baseline = 0;        // 已消化的回退计数基线（增量检测）
+        int      count = 0;           // 累计恢复次数（仅日志编号）
+        bool     busy = false;        // 编排在途防重入（停扫回调跨拍完成——必需）
+    } recovery_;
+    void linkRecoveryTick(int64_t nowMs_);    // logicTick 末驱动（判定即恢复，无冷却）
+    void runLinkRecovery();                   // 恢复编排（逻辑线程；busy 窗内不重入）
     std::mutex openMtx_;                         // open/close 串行化（启动后台线程与
                                                 // ScannerWindow 设备线程可能并发 open）
     void drainPosts();                          // logicTick 开头排空（逻辑线程属主）
