@@ -706,6 +706,15 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
         // camera 项以相机 open 状态判定（不起流验证——避免 USB 扰动串口）
         mcu_->stopScan(nullptr);              // N11 H0
         mcu_->flushWrites(2000);
+        // G02 回传周期定版 1s（260927 用户口径「下位机 1s 上传一次」）：自检收口
+        //（灯已灭——避开「伴随 N12 固件不点灯」干扰窗）后发一次 N12 T1000。
+        // 真机实证（260927）：T1000 生效——G02 周期 100ms→1s；T5 曾无效疑被固件
+        // 钳到 100ms 下限。收口后发送点灯不受影响。probe 兜底已发过则不重发
+        if (!mcu_->probeN12TSent()) {
+            mcu_->setTempReportInterval(1000);
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] G02 回传周期定版 1s——自检收口后发 N12 T1000");
+        }
         selfCheck_.report("camera", camera_ && camera_->isOpen());
         JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 启动自检完成（相机 open={}）",
                      camera_ && camera_->isOpen());

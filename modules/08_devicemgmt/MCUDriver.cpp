@@ -252,7 +252,8 @@ std::string MCUDriver::probeAutoPort(int baud) {
         }
         // 260927 用户口径（N12 条件兜底）：只发 N10 点灯帧——0.5s 内 G02 温度上行
         // 到→不发 N12（真机 A/B 实证：伴随 N12 固件不点灯、N10 单发即亮）；未到才
-        // 补发 N12 T5 启动回传（无自报固件〔91ed3ad 口径〕的温度源兜底）
+        // 补发 N12 T1000 启动回传（无自报固件〔91ed3ad 口径〕的温度源兜底；回传
+        // 周期 1s＝260927 用户口径）
         channel_.sendFireAndForget("N10 H50 B50 T1 V1 C0 D0 L50");
         probeN10Sent_.store(true, std::memory_order_release);   // 自检兜底省略凭据（该口已发同参帧）
         bool hit = false;
@@ -261,10 +262,10 @@ std::string MCUDriver::probeAutoPort(int baud) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             const bool sawTemp = probeSawTemp_.load(std::memory_order_acquire);
             if (!n12Sent && waited >= 490 && !sawTemp) {        // 0.5s 温度观察满仍未到
-                setTempReportInterval(5);
+                setTempReportInterval(1000);                    // T1000＝1s 回传周期（260927 口径）
                 probeN12Sent_.store(true, std::memory_order_release);
                 n12Sent = true;
-                JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 0.5s 无 G02 温度上行——补发 N12 T5 启动回传");
+                JMW_LOG_INFO("08-MCUDriver", "[MCUDriver] 0.5s 无 G02 温度上行——补发 N12 T1000（1s 回传）");
             }
             // 命中即出（G02 即命中源，正常路径 ~100ms 内带温度出）；非温度命中且
             // 温度未到→睡满 0.5s 观察窗再出（用户口径"等 0.5 秒"不截断）
