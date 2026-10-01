@@ -1438,9 +1438,25 @@ QWidget *MainWindow::createToolBar()
                     auto sr = m_appCtx->stopScanSession();
                     if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                     m_activeScanToolIdx = -1;
-                    statusBar()->showMessage(sr.success
-                        ? QStringLiteral("会话已关闭——全局优化（GBA）后台执行中")
-                        : QString::fromStdString("关闭被拒: " + sr.message));
+                    if (sr.success) {
+                        // 260927 弹窗与进度回调解耦：关闭即弹「全局优化中」——GBA 降级
+                        // 秒完/无进度回调（真机迭代=0 终局遍 195ms）时用户亦有可见反馈；
+                        // 完成关闭归 endedHandler 兜底/100% 路径
+                        if (!m_finalBADlg) {
+                            m_finalBADlg = new QProgressDialog(
+                                QStringLiteral("全局优化中，请稍候……"), QString(), 0, 100, this);
+                            m_finalBADlg->setWindowTitle(QStringLiteral("全局优化"));
+                            m_finalBADlg->setWindowModality(Qt::ApplicationModal);
+                            m_finalBADlg->setMinimumDuration(0);
+                            m_finalBADlg->setAutoClose(false);
+                            m_finalBADlg->show();
+                        }
+                        statusBar()->showMessage(
+                            QStringLiteral("会话已关闭——全局优化（GBA）后台执行中"));
+                    } else {
+                        statusBar()->showMessage(
+                            QString::fromStdString("关闭被拒: " + sr.message));
+                    }
                     if (wasSelf || !sr.success) return;   // 本键＝纯关闭；他键落下启新
                 }
                 if (mode == Scanner::ScanMode::MarkerOnly)

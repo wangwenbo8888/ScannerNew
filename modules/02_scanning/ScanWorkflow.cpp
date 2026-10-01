@@ -471,6 +471,16 @@ void ScanWorkflow::runFinalBA() {
             static_cast<int>(out.quality), r.message);
     } catch (const std::exception& e) {
         JMW_LOG_ERROR("02-ScanWorkflow", "[终局遍] 异常（不影响会话收尾）: {}", e.what());
+        // 260927：异常也发 100% 收口——否则进度弹窗永卡末次百分比（真机 50% 卡死
+        // 实证：体素越界异常被吞后无任何完成信号）
+        if (finalBAProgress_) {
+            try { finalBAProgress_(100, "终局遍异常收口（降级）"); } catch (...) {}
+        }
+    } catch (...) {
+        JMW_LOG_ERROR("02-ScanWorkflow", "[终局遍] 未知异常（不影响会话收尾）");
+        if (finalBAProgress_) {
+            try { finalBAProgress_(100, "终局遍未知异常收口（降级）"); } catch (...) {}
+        }
     }
 }
 

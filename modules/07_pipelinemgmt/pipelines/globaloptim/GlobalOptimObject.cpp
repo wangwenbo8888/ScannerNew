@@ -303,12 +303,26 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
                 pts[k].z = static_cast<float>(fo.markerObs[k].xyz[2]);
                 // 法线缺省 (0,0,1)、半径 0：obs 未携带法线/半径（重融合仅位置，如实注明）
             }
-            auto r = mFuse.Execute(pts, matxFromArr9(out_.poses[i].R),
-                                   vec3FromArr3(out_.poses[i].t));
-            if (!r.success) {
+            // 帧级兜异常（260927 真机实证：GBA 降级初值位姿下 marker 变换坐标
+            // 可越体素 21 位界→Execute 抛异常炸掉整个终局遍——弹窗永卡 50%）：
+            // 逐帧 catch 计入 markerFuseFails 降级续跑（与激光重放同口径）
+            try {
+                auto r = mFuse.Execute(pts, matxFromArr9(out_.poses[i].R),
+                                       vec3FromArr3(out_.poses[i].t));
+                if (!r.success) {
+                    ++markerFuseFails;
+                    JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] marker 重放融合失败 frameId={}: {}",
+                                 fo.frameId, r.message);
+                }
+            } catch (const std::exception& e) {
                 ++markerFuseFails;
-                JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] marker 重放融合失败 frameId={}: {}",
-                             fo.frameId, r.message);
+                JMW_LOG_WARN("07-GlobalOptim",
+                    "[GlobalOptim] marker 重放融合异常 frameId={}: {}（计降级续跑）",
+                    fo.frameId, e.what());
+            } catch (...) {
+                ++markerFuseFails;
+                JMW_LOG_WARN("07-GlobalOptim",
+                    "[GlobalOptim] marker 重放融合未知异常 frameId={}（计降级续跑）", fo.frameId);
             }
         }
         out_.markerCloud = mFuse.GetFusedPoints();
@@ -345,9 +359,21 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
                 const size_t slot = snap.obs[i].laserCacheSlot;
                 if (slot == FrameObs::kNoLaserSlot) continue;   // 本帧无激光（A 帧/空帧）
                 if (slot >= snap.laserFrames.size()) continue;  // 防御（契约不会发生）
-                if (!replayLaser_->fuse(snap.laserFrames[slot], out_.poses[i].R,
-                                        out_.poses[i].t))
+                // 帧级兜异常（同 marker 重放口径——260927：异常帧计失败降级，不炸终局遍）
+                try {
+                    if (!replayLaser_->fuse(snap.laserFrames[slot], out_.poses[i].R,
+                                            out_.poses[i].t))
+                        ++laserFuseFails;
+                } catch (const std::exception& e) {
                     ++laserFuseFails;
+                    JMW_LOG_WARN("07-GlobalOptim",
+                        "[GlobalOptim] 激光重放融合异常 frameId={}（slot={}）: {}（计失败续跑）",
+                        snap.obs[i].frameId, slot, e.what());
+                } catch (...) {
+                    ++laserFuseFails;
+                    JMW_LOG_WARN("07-GlobalOptim",
+                        "[GlobalOptim] 激光重放融合未知异常（slot={}，计失败续跑）", slot);
+                }
             }
             if (!cancel.cancelled()) {
                 out_.laserReplayed = true;

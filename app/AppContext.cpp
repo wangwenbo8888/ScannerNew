@@ -253,6 +253,9 @@ void AppContext::initialize() {
                         return;
                     }
                     commandGate_->notifyCompleted("finish_scan", ok);
+                    // 260927：完成必调 endedHandler（原仅装配失败路径调）——终局遍
+                    // 弹窗兜底关闭＋按钮复原的普适安全网（正常 100% 路径已关则幂等）
+                    if (scanSessionEndedHandler_) scanSessionEndedHandler_(ok);
                 });
                 return Scanner::Result::ok("完成中（终局优化后台执行）");
             };

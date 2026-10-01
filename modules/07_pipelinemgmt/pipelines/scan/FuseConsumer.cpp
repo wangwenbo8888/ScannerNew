@@ -172,10 +172,13 @@ void FuseConsumer::processOne(FrameResult& fr) {
             laserDegradeReported_ = true;     // 一次性（只报首次降级）
         }
     } catch (...) {
-        // 单帧兜底：融合消费属持续服务——丢该帧续跑，不崩不退线程
+        // 单帧兜底：融合消费属持续服务——丢该帧续跑，不崩不退线程。
+        // 260927 严重度纠正：报 Warning 不报 Fault——「丢帧续跑」语义不停机；
+        // 原 Fault→Error 级曾致故障桥 S7 全局停机，会话卡死连 finish_scan 都被
+        // 门禁拒（真机日志 14:41/14:42 两帧异常→S7→关闭被拒实证）
         JMW_LOG_ERROR("07-FuseConsumer", "[FuseConsumer] 单帧处理异常 frameId={}，丢弃该帧续跑", fr.frameId);
         if (deps_.sink) {
-            deps_.sink->report(Scanner::QualityFlag::Fault, kEvtFuseFrameFault,
+            deps_.sink->report(Scanner::QualityFlag::Warning, kEvtFuseFrameFault,
                                "融合消费单帧处理异常，丢帧续跑");
         }
     }
