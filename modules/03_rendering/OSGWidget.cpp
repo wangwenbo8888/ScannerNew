@@ -2347,6 +2347,17 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
                                  const std::vector<osg::Vec3>& normals)
 {
     if (markers.empty()) return;
+    // 排障插桩（260927 标志点不显示）：圆盘版入口留痕（n/半径/包围盒/可见开关）
+    {
+        osg::BoundingBox bb;
+        for (const auto& p : markers) bb.expandBy(p);
+        JMW_LOG_INFO("03-OSGWidget",
+            "[标志点排障] 圆盘版加载 n={} 半径={}mm 包围盒=[{:.0f},{:.0f},{:.0f}]"
+            "~[{:.0f},{:.0f},{:.0f}] 可见={} nodeMask=0x{:x}",
+            markers.size(), m_markerDiscRadiusMm,
+            bb.xMin(), bb.yMin(), bb.zMin(), bb.xMax(), bb.yMax(), bb.zMax(),
+            m_markersVisible, m_markerRoot ? m_markerRoot->getNodeMask() : 0u);
+    }
 
     if (!m_markerRoot || m_markerRoot->getNumParents() == 0) {
         // 重建判定/贴图同点精灵版（复用同心圆贴图）

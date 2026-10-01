@@ -257,6 +257,17 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                               .arg(pts.size()));
                         }
                         if (!m_3dView || pts.empty()) return;
+                        // 排障插桩（260927 标志点不显示）：信号到达＋首点坐标量级留痕
+                        {
+                            static std::atomic<uint64_t> s_mkLog{0};
+                            if (s_mkLog.fetch_add(1) % 60 == 0) {
+                                JMW_LOG_INFO("app-MainWindow",
+                                    "[标志点排障] markersUpdated：n={} 首点=({:.1f},{:.1f},{:.1f})"
+                                    " 3D可见开关={}",
+                                    pts.size(), pts[0].x, pts[0].y, pts[0].z,
+                                    m_3dView ? m_3dView->markerPointsVisible() : false);
+                            }
+                        }
                         // —— 260912 导出补链：标志点快照入 PointCloudBuffer——
                         //    setMarkers 原零调用者（导出标志点恒空，同激光病）。
                         //    快照语义（整表替换）与融合云瞬时快照口径一致
@@ -1348,6 +1359,10 @@ QWidget *MainWindow::createToolBar()
                            "QPushButton:hover { background-color: rgba(0,0,0,0.05); }");
         layout->addWidget(btn);
         m_toolButtons.append(btn);
+
+        // 精细/深孔键隐藏（260927 用户口径）：两模式由设备按键（M 双击循环）调节，
+        // 软件界面不体现——钮与接线保留（同悬浮条操作组先例），仅 hide
+        if (i == 4 || i == 5) btn->hide();
 
         if (i == 1) {
             connect(btn, &QPushButton::clicked, this, &MainWindow::onCalibDeviceClicked);
