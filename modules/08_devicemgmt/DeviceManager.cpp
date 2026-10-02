@@ -707,6 +707,17 @@ void DeviceManager::stopCaptureOnLogic() {
             return;
         }
         mode_->setCapturing(false);
+        // 261002 临时测试机熄灯补帧：N11 H0 停触发但灯态保持（激光管/补光常亮
+        // ——真机固件 N11 关灯、临时 ESP32 不关，17:26 真机日志实证）。补发全零
+        // N10（B0/L0/四管全关）——真机实测此帧不关灯（无害），临时机关灯
+        {
+            hal::CaptureParams off{};
+            off.freqHz = static_cast<int>(params_->get("freqHz").value);
+            off.bgLight = 0;
+            off.laserLevel = 0;
+            off.laserT = off.laserV = off.laserC = off.laserD = 0;
+            mcu_->setCaptureParams(off, nullptr);
+        }
         // 灯态收口：单帧 N11 H0 即灭灯（真机+工厂软件同款验证；原 lightsOff
         // 补发属重复帧，2026-08-30 删）。停相机流前先冲队列——相机停流瞬间
         // USB 风暴会堵串口写（flush 有界 300ms）
