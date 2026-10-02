@@ -53,6 +53,7 @@ void ScannerWindow::pushFrameToBuffer(const Scanner::hal::StereoFrame& frame)
     fd.timestamp = frame.timestamp;
     fd.leftGray = frame.leftGray;
     fd.rightGray = frame.rightGray;
+    fd.lightPhase = frame.lightPhase;   // 261002 标定五态灯序相位随帧透传
     m_frameBuffer->pushFrame(fd);
 }
 
@@ -400,6 +401,8 @@ void ScannerWindow::onCalibrateClicked()
     }
 
     ui.textEdit_Info->append("开始标定流程...");
+    ui.textEdit_Info->append(
+        QStringLiteral("采集灯序：补光→左斜→右斜→精细→深孔（每态1帧循环，帧带相位标记）"));
     auto* calib = m_appCtx->calibWorkflow();
     calib->setProgressCallback([this](const Scanner::workflow::WorkflowProgress& p) {
         QMetaObject::invokeMethod(this, [this, p]() {
@@ -409,12 +412,15 @@ void ScannerWindow::onCalibrateClicked()
         });
     });
 
-    // 启动采集供标定使用（经门面：帧出口接线 + N10 启采 + 开流）
+    // 启动采集供标定使用（经门面：帧出口接线 + 五态灯序启采 + 开流）——
+    // 261002 用户口径：标定采集时序＝补光无激光→左斜→右斜→精细→深孔，
+    // 每态 1 帧软件逐态切灯循环（替代原固定面片灯型；帧逐帧带 lightPhase
+    // 相位标记，消费方按灯型分派）。建议标定前把频率滑条调低（≤30Hz）
     if (!dm->isCapturing()) {
         dm->startFrameStream([this](const Scanner::hal::StereoFrame& frame) {
             pushFrameToBuffer(frame);
         });
-        dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 缺省 B 灯型（与原缺省行为一致）
+        dm->startCalibLightCycle();
     }
 
     // P5-T14：经统一命令通道点火（门禁 S2→S3）——initialize+start 移入 gate

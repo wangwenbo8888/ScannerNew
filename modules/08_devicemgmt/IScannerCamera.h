@@ -26,6 +26,9 @@ struct StereoFrame {
                                  // false=未知〔sim 帧/Δ 未锚定〕消费方自行回退帧号奇偶）
     bool tvLeftSkew = true;      // true=左斜 T 组 / false=右斜 V 组（tvKnown 时有效；
                                  // 锚：开扫首帧=T〔N11 H1 后首脉冲恒 T，固件确认中〕）
+    int lightPhase = -1;         // 261002 用户标定五态灯序相位（-1=非灯序态；
+                                 // 0=补光无激光/1=左斜/2=右斜/3=精细/4=深孔——
+                                 // DeviceManager 标定灯序逐帧打点，消费方按灯型分派）
     cv::Mat leftGray;   // 左图灰度 CV_8UC1
     cv::Mat rightGray;  // 右图灰度 CV_8UC1
 };

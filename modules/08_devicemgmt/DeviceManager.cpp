@@ -86,6 +86,21 @@ constexpr Scanner::ScanMode scanModeFromMenuCursor(int modeCursor) {
                            : Scanner::ScanMode::MarkerPlusLaser;
 }
 
+// 用户标定五态灯序相位参数（261002 用户口径：补光无激光/左斜/右斜/精细/深孔，
+// 每态 1 帧循环；管语义 T=精细 V=左斜 C=右斜 D=深孔占位）。B/L 取账本值，
+// 补光态（phase 0）激光亮度压 0（灯全关只留补光）。调用点均在逻辑线程
+hal::CaptureParams calibPhaseParams(const ParamStore& params, int phase) {
+    hal::CaptureParams p;
+    p.freqHz = static_cast<int>(params.get("freqHz").value);   // 灯序节奏＝触发频率
+    p.bgLight = static_cast<int>(params.get("bgLight").value);
+    p.laserLevel = (phase == 0) ? 0 : static_cast<int>(params.get("laserLevel").value);
+    p.laserT = (phase == 3) ? 1 : 0;   // 精细
+    p.laserV = (phase == 1) ? 1 : 0;   // 左斜
+    p.laserC = (phase == 2) ? 1 : 0;   // 右斜
+    p.laserD = (phase == 4) ? 1 : 0;   // 深孔
+    return p;
+}
+
 } // namespace
 
 // ============================================================================
@@ -534,7 +549,50 @@ void DeviceManager::toIdleOnLogic() {
 void DeviceManager::startCapture(Scanner::ScanMode mode) {
     post([this, mode] {
         lastCaptureMode_.store(mode, std::memory_order_relaxed);   // 采集灯型（逻辑线程写；N10 组帧生效）
+        calibPhase_.store(-1, std::memory_order_relaxed);          // 常规启采退出标定灯序
         startCaptureOnLogic();
+    });
+}
+
+// ============================================================================
+// 用户标定五态灯序（261002 用户口径：补光无激光/左斜/右斜/精细/深孔，每态 1 帧
+// 循环，软件逐态切灯）——启动即发补光态 N10（a9bfe53 单帧启采口径，无需 N11 H1），
+// 此后帧出口逐帧打点相位并切下一态。前置：open 完成；相机流由调用方
+// startFrameStream 接好。标定建议账本 H 调低（切灯 N10 需先于下一触发落线）
+// ============================================================================
+
+void DeviceManager::startCalibLightCycle() {
+    post([this] {
+        if (!mcu_->isOpen()) {
+            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 标定灯序启动被拒：MCU 未开");
+            return;
+        }
+        if (mode_->isCapturing()) {
+            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 标定灯序启动被拒：已在采集中（先停止）");
+            return;
+        }
+        // 顺序铁律（同 startCaptureOnLogic）：相机先布防等触发→再发 N10——防
+        // 左右相机布防间隙抢脉冲致帧号错位（2026-09-06 根因修正同款）
+        startStreamIfReady();
+        calibPhase_.store(0, std::memory_order_relaxed);
+        mcu_->setCaptureParams(calibPhaseParams(*params_, 0),
+            [this](bool ok, const std::string& p) {
+                if (!ok) {
+                    calibPhase_.store(-1, std::memory_order_relaxed);
+                    publishFault(code(DevFault::CmdNoAck), "N10(标定灯序) " + p);
+                    return;
+                }
+                mode_->setCapturing(true);       // 落黑板：stopCapture/M 键收口可用
+            });
+        JMW_LOG_INFO("08-DeviceManager",
+            "[DeviceManager] 用户标定五态灯序启动：补光→左斜→右斜→精细→深孔 每态1帧循环");
+    });
+}
+
+void DeviceManager::stopCalibLightCycle() {
+    post([this] {
+        if (calibPhase_.exchange(-1, std::memory_order_relaxed) >= 0)
+            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 标定灯序停止");
     });
 }
 
@@ -617,6 +675,7 @@ void DeviceManager::startCaptureOnLogic() {
 
 void DeviceManager::stopCaptureOnLogic() {
     if (!mode_->isCapturing()) return;
+    calibPhase_.store(-1, std::memory_order_relaxed);   // 标定灯序随停采退出
     mcu_->stopScan([this](bool ok, const std::string& p) {
         if (!ok) {
             publishFault(code(DevFault::CmdNoAck), "N11H0 " + p);   // 3 败=无应答（#7≡#8）
@@ -1004,7 +1063,21 @@ Result DeviceManager::startFrameStream(hal::FrameCallback cb) {
                 m_rxCnt_.store(0, std::memory_order_relaxed);
                 m_lastFpsTick_ = now;
             }
-            userCb(f);      // 转发上层回调
+            // 261002 用户标定五态灯序：帧打点当前相位＋切下一态（N10 经编队落
+            // 逻辑线程——串口落线节奏跟不上触发时相位边界可能偏 1 帧，标定建议
+            // 账本 H 调低（≤30Hz）保证切灯先于下一触发）
+            hal::StereoFrame out = f;
+            const int phase = calibPhase_.load(std::memory_order_relaxed);
+            if (phase >= 0) {
+                out.lightPhase = phase;
+                const int next = (phase + 1) % 5;
+                calibPhase_.store(next, std::memory_order_relaxed);
+                post([this, next] {
+                    if (calibPhase_.load(std::memory_order_relaxed) >= 0 && mcu_->isOpen())
+                        mcu_->setCaptureParams(calibPhaseParams(*params_, next), nullptr);
+                });
+            }
+            userCb(out);      // 转发上层回调
         };
         if (camera_ && camera_->isOpen()) camera_->startAsyncCapture(frameCb_);
     });

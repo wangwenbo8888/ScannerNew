@@ -210,6 +210,16 @@ public:
     /// N10 灯字段即时生效：基线=面片灯型（V1C1+账本 B/L，261002 临时测试机管语义），bgOn/laserOn=false 置 0
     void setLights(bool bgOn, bool laserOn);
 
+    // —— 用户标定五态灯序（261002 用户口径：补光无激光→左斜→右斜→精细→深孔，
+    //    每态 1 帧软件逐态切灯循环）——帧逐帧打点 lightPhase 供消费方按灯型分派 ——
+    /// 启动（编队执行）：相机先布防→发补光态 N10（单帧启采）→落黑板；此后每交付
+    /// 一帧切下一态。前置 open 完成；建议账本 H 调低（≤30Hz）保证切灯先于下一触发
+    void startCalibLightCycle();
+    /// 停止灯序（stopCapture 亦自动退出；N11 H0 收口灭灯）
+    void stopCalibLightCycle();
+    /// 当前灯序相位（-1=未在跑；0=补光/1=左斜/2=右斜/3=精细/4=深孔）
+    int calibLightPhase() const { return calibPhase_.load(std::memory_order_relaxed); }
+
     // —— 打光场景封装（灯型三态；N10 即时生效，组合语义见各自注释）——
     /// 只打补光灯（标志点扫描 A 模式）：B=账本值，激光管全关
     void lightsBgOnly();
@@ -329,6 +339,8 @@ private:
     // 采集灯型（写=逻辑线程〔startCapture/按键切模式〕；N10 四管掩码组帧依据）。
     // 260927 模式随帧贯通：原子化——app 帧回调（相机 SDK 线程）经 captureMode()
     // 无锁快照，随帧透传给 07 管线做帧级激光种类分派
+    std::atomic<int> calibPhase_{-1};   // 261002 用户标定五态灯序相位（-1=未跑；
+                                        // 写=相机帧回调推进/逻辑线程启停；帧打点用）
     // —— D-T13 故障边沿锚（逻辑线程属主；恢复清锚防复报）——
     bool camFaultLatched_ = false;              // 0x0801 掉线锁（相机重开清锚）
     bool camWasOpen_ = false;                   // 0x0801 前置锚：相机曾开（open 成功即置）
