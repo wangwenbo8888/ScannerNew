@@ -93,6 +93,16 @@ target_include_directories(scan_demo PRIVATE
     ${OSG_ROOT}/include
 )
 
+# OSG 按配置分库（261002 修复）：Debug 链 d 后缀库（osg161-osgd.dll 等）——原写死
+# Release 库名，Debug scan_demo 混链 Release OSG（/MDd exe 配 /MD DLL），CRT/迭代器
+# 布局跨 DLL 不匹配，OSGWidget::initializeGL 首个 OSG 对象构造即跳 0x0 崩溃
+# （0xC0000005 执行位置 0x0，261002 VS2022 Debug 实证；F: 的 OSG 带 debug 库/PDB）
+foreach(_osg_lib osg osgDB osgViewer osgGA osgUtil osgText OpenThreads)
+    list(APPEND APP_OSG_LIBS
+        "$<$<CONFIG:Debug>:${OSG_ROOT}/lib/${_osg_lib}d.lib>"
+        "$<$<NOT:$<CONFIG:Debug>>:${OSG_ROOT}/lib/${_osg_lib}.lib>")
+endforeach()
+
 target_link_libraries(scan_demo PRIVATE
     base
     mod_devicemgmt
@@ -105,13 +115,7 @@ target_link_libraries(scan_demo PRIVATE
     Qt5::OpenGL
     Qt5::Svg
     Qt5::SerialPort
-    ${OSG_ROOT}/lib/osg.lib
-    ${OSG_ROOT}/lib/osgDB.lib
-    ${OSG_ROOT}/lib/osgViewer.lib
-    ${OSG_ROOT}/lib/osgGA.lib
-    ${OSG_ROOT}/lib/osgUtil.lib
-    ${OSG_ROOT}/lib/osgText.lib
-    ${OSG_ROOT}/lib/OpenThreads.lib
+    ${APP_OSG_LIBS}
     Eigen3::Eigen
     ${OpenCV_LIBS}
     nlohmann_json::nlohmann_json
