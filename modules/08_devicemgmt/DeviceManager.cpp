@@ -88,10 +88,12 @@ constexpr Scanner::ScanMode scanModeFromMenuCursor(int modeCursor) {
 
 // 用户标定五态灯序相位参数（261002 用户口径：补光无激光/左斜/右斜/精细/深孔，
 // 自动循环——一种状态拍一帧即换下一状态）。B/L 取账本值，补光态（phase 0）
-// 激光亮度压 0（灯全关只留补光）。H 自动钳低：切灯 N10 串口落线（~10ms）必须
-// 先于下一触发脉冲（50ms@20Hz），保证每态恰好一帧、帧-灯型不错位——全自动，
-// 无需用户调滑条。调用点均在逻辑线程
-constexpr int kCalibCycleMaxHz = 20;
+// 激光亮度压 0（灯全关只留补光）。H 自动钳低：切灯 N10 串口落线（实测 ~5-10ms：
+// post 编队＋写队列＋115200 传输 ~3ms）必须先于下一触发脉冲，保证每态恰好一帧、
+// 帧-灯型不错位——全自动，无需用户调滑条。钳 50Hz（周期 20ms，≥2 倍落线余量；
+// 每秒 10 张补光图/2 轮完整循环）；若实测灯型错位（左斜图落在右斜相位）再回落 30。
+// 调用点均在逻辑线程
+constexpr int kCalibCycleMaxHz = 50;
 hal::CaptureParams calibPhaseParams(const ParamStore& params, int phase) {
     hal::CaptureParams p;
     p.freqHz = std::min(static_cast<int>(params.get("freqHz").value), kCalibCycleMaxHz);
@@ -593,7 +595,7 @@ void DeviceManager::startCalibLightCycleOnLogic() {
             mode_->setCapturing(true);       // 落黑板：M 键再按即停（stopCaptureOnLogic 收口）
         });
     JMW_LOG_INFO("08-DeviceManager",
-        "[DeviceManager] 用户标定五态灯序启动：补光→左斜→右斜→精细→深孔 自动循环（每态1帧，H 钳 ≤20Hz）");
+        "[DeviceManager] 用户标定五态灯序启动：补光→左斜→右斜→精细→深孔 自动循环（每态1帧，H 钳 ≤50Hz）");
 }
 
 void DeviceManager::stopCalibLightCycle() {
