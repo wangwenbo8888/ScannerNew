@@ -727,9 +727,15 @@ void MainWindow::onCalibDeviceClicked()
 
         statusBar()->showMessage(QStringLiteral("标定显示模式"));
     }
-    // 261002 临时测试机：校准设备同样带出虚拟按键表盘（无实体键——标定过程中
-    // 菜单/调参等按键操作经表盘注入）
+    // 261002 用户标定五态循环采集（用户口径：点校准设备→点 M 开拍→再点 M 停）：
+    // 布防后 M 键启采分流进五态灯序（补光→左斜→右斜→精细→深孔 自动循环，
+    // 每态1帧）；扫描流程会自动撤防
+    if (m_appCtx && m_appCtx->deviceManager())
+        m_appCtx->deviceManager()->setCalibCaptureArmed(true);
     showVirtualKeypad();
+    statusBar()->showMessage(
+        QStringLiteral("校准设备：按 M 键（或虚拟按键中键单击）开始五态循环采集"
+                       "——补光→左斜→右斜→精细→深孔；再按 M 停止"), 8000);
 }
 
 // P0-3 编辑门禁唯一事实源：经 AppContext::canEnterEditSession()（SM==S2 或暂停
@@ -794,6 +800,8 @@ void MainWindow::onScanClicked()
     }
     applyMeshPreset();       // 导航"扫描"＝面片：推荐预设＋旋钮同步（260912）
     m_laserSessionLatched = false;   // 新会话：激光仓库基线待重锁（260912c）
+    if (m_appCtx->deviceManager())
+        m_appCtx->deviceManager()->setCalibCaptureArmed(false);   // 扫描会话撤标定布防
     auto r = m_appCtx->startScanSession(Scanner::ScanMode::MarkerPlusLaser);
     if (!r.success) {
         QMessageBox::warning(this, QStringLiteral("扫描"),
@@ -1605,6 +1613,8 @@ QWidget *MainWindow::createToolBar()
                 m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
                 // 260927 就绪流程（用户口径）：UI 模式键只备会话（模式/帧流/工作流），
                 // 不启采——正式开扫由设备 M 键触发（captureToggle→N10 四管掩码）
+                if (m_appCtx->deviceManager())
+                    m_appCtx->deviceManager()->setCalibCaptureArmed(false);   // 扫描会话撤标定布防
                 const auto r = m_appCtx->armScanSession(mode);
                 if (!r.success) {
                     QMessageBox::warning(this, title,

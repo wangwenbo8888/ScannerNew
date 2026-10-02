@@ -219,6 +219,10 @@ public:
     void startCalibLightCycle();
     /// 停止灯序（stopCapture 亦自动退出；N11 H0 收口灭灯）
     void stopCalibLightCycle();
+    /// 标定采集布防（261002 用户口径：点「校准设备」布防→设备 M 键开拍→五态灯序
+    /// 自动循环；再按 M 停）。armed 时 M 键启采分流进灯序而非常规模式掩码；
+    /// startCapture(mode) 显式启采/扫描会话布防自动撤防
+    void setCalibCaptureArmed(bool on);
     /// 当前灯序相位（-1=未在跑；0=补光/1=左斜/2=右斜/3=精细/4=深孔）
     int calibLightPhase() const { return calibPhase_.load(std::memory_order_relaxed); }
 
@@ -286,6 +290,7 @@ private:
     void toIdleOnLogic();
     void startCaptureOnLogic();
     void stopCaptureOnLogic();
+    void startCalibLightCycleOnLogic();   // 五态灯序启采本体（M 键分流/直调共用）
 
     // —— 配置与依赖（声明序即初始化序）——
     DeviceConfig cfg_;
@@ -343,6 +348,8 @@ private:
     // 无锁快照，随帧透传给 07 管线做帧级激光种类分派
     std::atomic<int> calibPhase_{-1};   // 261002 用户标定五态灯序相位（-1=未跑；
                                         // 写=相机帧回调推进/逻辑线程启停；帧打点用）
+    std::atomic<bool> calibArmed_{false};   // 标定采集布防（校准设备入口置位；
+                                            // M 键启采分流进灯序；扫描流程撤防）
     // —— D-T13 故障边沿锚（逻辑线程属主；恢复清锚防复报）——
     bool camFaultLatched_ = false;              // 0x0801 掉线锁（相机重开清锚）
     bool camWasOpen_ = false;                   // 0x0801 前置锚：相机曾开（open 成功即置）

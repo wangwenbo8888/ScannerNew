@@ -553,6 +553,7 @@ void DeviceManager::startCapture(Scanner::ScanMode mode) {
     post([this, mode] {
         lastCaptureMode_.store(mode, std::memory_order_relaxed);   // 采集灯型（逻辑线程写；N10 组帧生效）
         calibPhase_.store(-1, std::memory_order_relaxed);          // 常规启采退出标定灯序
+        calibArmed_.store(false, std::memory_order_relaxed);       // 显式模式启采＝常规扫描，撤标定布防
         startCaptureOnLogic();
     });
 }
@@ -565,31 +566,34 @@ void DeviceManager::startCapture(Scanner::ScanMode mode) {
 // ============================================================================
 
 void DeviceManager::startCalibLightCycle() {
-    post([this] {
-        if (!mcu_->isOpen()) {
-            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 标定灯序启动被拒：MCU 未开");
-            return;
-        }
-        if (mode_->isCapturing()) {
-            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 标定灯序启动被拒：已在采集中（先停止）");
-            return;
-        }
-        // 顺序铁律（同 startCaptureOnLogic）：相机先布防等触发→再发 N10——防
-        // 左右相机布防间隙抢脉冲致帧号错位（2026-09-06 根因修正同款）
-        startStreamIfReady();
-        calibPhase_.store(0, std::memory_order_relaxed);
-        mcu_->setCaptureParams(calibPhaseParams(*params_, 0),
-            [this](bool ok, const std::string& p) {
-                if (!ok) {
-                    calibPhase_.store(-1, std::memory_order_relaxed);
-                    publishFault(code(DevFault::CmdNoAck), "N10(标定灯序) " + p);
-                    return;
-                }
-                mode_->setCapturing(true);       // 落黑板：stopCapture/M 键收口可用
-            });
-        JMW_LOG_INFO("08-DeviceManager",
-            "[DeviceManager] 用户标定五态灯序启动：补光→左斜→右斜→精细→深孔 每态1帧循环");
-    });
+    post([this] { startCalibLightCycleOnLogic(); });
+}
+
+// 逻辑线程本体（M 键分流/直调共用）
+void DeviceManager::startCalibLightCycleOnLogic() {
+    if (!mcu_->isOpen()) {
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 标定灯序启动被拒：MCU 未开");
+        return;
+    }
+    if (mode_->isCapturing()) {
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 标定灯序启动被拒：已在采集中（先停止）");
+        return;
+    }
+    // 顺序铁律（同 startCaptureOnLogic）：相机先布防等触发→再发 N10——防
+    // 左右相机布防间隙抢脉冲致帧号错位（2026-09-06 根因修正同款）
+    startStreamIfReady();
+    calibPhase_.store(0, std::memory_order_relaxed);
+    mcu_->setCaptureParams(calibPhaseParams(*params_, 0),
+        [this](bool ok, const std::string& p) {
+            if (!ok) {
+                calibPhase_.store(-1, std::memory_order_relaxed);
+                publishFault(code(DevFault::CmdNoAck), "N10(标定灯序) " + p);
+                return;
+            }
+            mode_->setCapturing(true);       // 落黑板：M 键再按即停（stopCaptureOnLogic 收口）
+        });
+    JMW_LOG_INFO("08-DeviceManager",
+        "[DeviceManager] 用户标定五态灯序启动：补光→左斜→右斜→精细→深孔 自动循环（每态1帧，H 钳 ≤20Hz）");
 }
 
 void DeviceManager::stopCalibLightCycle() {
@@ -597,6 +601,15 @@ void DeviceManager::stopCalibLightCycle() {
         if (calibPhase_.exchange(-1, std::memory_order_relaxed) >= 0)
             JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 标定灯序停止");
     });
+}
+
+// 标定采集布防（261002 用户口径：点「校准设备」布防→设备 M 键开拍五态循环→
+// 再按 M 停）。armed 时 M 键启采（captureToggle→startCaptureOnLogic）分流进
+// 灯序；startCapture(mode) 显式启采/扫描会话布防自动撤防
+void DeviceManager::setCalibCaptureArmed(bool on) {
+    calibArmed_.store(on, std::memory_order_relaxed);
+    JMW_LOG_INFO("08-DeviceManager",
+        "[DeviceManager] 标定采集布防={}（M 键启采将走五态灯序自动循环）", on);
 }
 
 // 只设模式不启采（260927 就绪流程）：UI 模式键→armScanSession→此口记账，
@@ -664,6 +677,13 @@ void DeviceManager::stopCapture() {
 
 void DeviceManager::startCaptureOnLogic() {
     if (mode_->isCapturing()) return;            // 幂等：黑板同值直返
+    // 261002 标定布防分流：点「校准设备」后 M 键启采走五态灯序（补光→左斜→
+    // 右斜→精细→深孔自动循环）而非常规模式掩码；再按 M 停（captureToggle 落
+    // stopCaptureOnLogic，N11 H0 收口＋灯序退出）
+    if (calibArmed_.load(std::memory_order_relaxed)) {
+        startCalibLightCycleOnLogic();
+        return;
+    }
     // —— 启动顺序（2026-09-06 帧号错位根因修正）：**相机先启→再发 N10** ——
     // 原序（N10→回调→startStream）在 N10 到达后 MCU 立即触发，而相机尚在
     // 配置中（左 42ms/右 82ms 后才就绪）——左比右多吃 2~3 个触发脉冲，
