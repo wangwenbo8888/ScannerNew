@@ -90,6 +90,18 @@ public:
         uint64_t finalizeFails = 0; // 帧主体钩子异常计数（异常即停机）
     };
 
+    // 261002 lane 级活性统计（重建吞吐诊断——实测 7 lane 配置下等效单 lane 串行
+    // ~37fps：每 lane 独记 抓帧/GPU/终段/空转 累计耗时，drainAndShutdown 收尾
+    // 汇总打印，定位并行铺不开还是单帧太贵。owner lane 独写，join 后读＝无锁安全）
+    struct LaneAcc {
+        uint64_t frames = 0;      // 本 lane eFinalize 成功帧数
+        uint64_t idleSpins = 0;   // 空转轮数（无新帧）
+        double grabMs = 0;        // 抓帧段累计（含互斥等待——争抢度）
+        double gpuMs = 0;         // GPU 段累计（槽获取＋gpuChain 含同步等待）
+        double efinMs = 0;        // eFinalize 段累计（含 fut.get() 等 P 链完成）
+        double idleMs = 0;        // 无帧空转累计（1ms 小睡等）
+    };
+
     SchedulerRuntime() = default;
     ~SchedulerRuntime();
 
@@ -156,6 +168,7 @@ private:
 
     mutable std::mutex lifecycleMutex_;               // start / drainAndShutdown 互斥
     std::vector<std::thread> lanes_;
+    std::vector<LaneAcc> laneAcc_;                    // 261002 lane 级活性（start 重建；owner 独写）
     std::atomic<bool> stopFlag_{false};
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> processed_{0};
@@ -231,6 +244,7 @@ Result SchedulerRuntime::start(const SchedConfig& cfg, IFrameSource<TFrame>& sou
     droppedSkips_.store(0);
     gpuRejects_.store(0);
     finalizeFails_.store(0);
+    laneAcc_.assign(static_cast<size_t>(lanes), LaneAcc{});   // 261002 lane 统计清零
     lastCounter_.store(startCounter, std::memory_order_relaxed);   // 消费水位基线（restart 注入）
     activeLanes_.store(lanes);                        // lane 退出时递减（0=全退）
     stopFlag_.store(false);
@@ -313,10 +327,17 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
         if (laneIdx >= 0 && laneIdx < static_cast<int>(laneBeats_.size()))
             laneBeats_[static_cast<size_t>(laneIdx)]->store(nowMsBeat(), std::memory_order_release);
     };
+    // 261002 lane 级耗时累计（owner 独写；drain 后汇总打印）
+    LaneAcc& acc = laneAcc_[static_cast<size_t>(laneIdx)];
+    using LaneCLK = std::chrono::steady_clock;
+    auto msSince = [](LaneCLK::time_point t) {
+        return std::chrono::duration<double, std::milli>(LaneCLK::now() - t).count();
+    };
     while (!stopFlag_.load()) {                       // 帧边界检查点（抓帧前）
         beat();                                       // 每轮打卡（无帧空转也打）
         try {                                         // 顶层异常捕获：钩子异常不蔓延到线程
             std::shared_ptr<const TFrame> frame;
+            const auto tg0 = LaneCLK::now();
             {
                 std::lock_guard<std::mutex> g(grabMutex);  // 串行抓帧：帧不重复分发
                 if (sequential) {
@@ -329,16 +350,22 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
                 // 水位镜像（锁内随 counter 单调推进）：drain 后 lastCounter() 即最终值
                 lastCounter_.store(sharedCounter, std::memory_order_relaxed);
             }
+            acc.grabMs += msSince(tg0);
             if (!frame) {
                 // sequential：grabNext 内部已阻塞一个超时周期，直接重查 stop；
                 // grabLatest 空转（无新帧）小睡防忙转
+                const auto ti0 = LaneCLK::now();
                 if (!sequential) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                acc.idleMs += msSince(ti0);
+                ++acc.idleSpins;
                 continue;
             }
 
+            const auto tgi0 = LaneCLK::now();
             auto guard = gpu_->acquire(gpuTimeout);   // 超时丢帧
             if (!guard) {
                 gpuRejects_.fetch_add(1);
+                acc.gpuMs += msSince(tgi0);
                 continue;
             }
 
@@ -357,6 +384,7 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
             };
 
             const bool gpuOk = hooks.gpuChain(*guard, frame, *front, frontReady);
+            acc.gpuMs += msSince(tgi0);               // 槽获取＋gpuChain（含同步等待）
             if (!gpuOk) {                             // false=帧销毁
                 gpuRejects_.fetch_add(1);
                 if (submitted.load()) {
@@ -374,8 +402,12 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
             if (!submitted.load()) {
                 frontReady();                         // 兜底提交：gpuChain 返回 true 且未触发（A 模式）
             }
-            if (hooks.eFinalize(frame, *front, *result, fut).success) {
+            const auto te0 = LaneCLK::now();
+            const bool efinOk = hooks.eFinalize(frame, *front, *result, fut).success;
+            acc.efinMs += msSince(te0);               // 含 fut.get() 等 P 链完成
+            if (efinOk) {
                 processed_.fetch_add(1);
+                ++acc.frames;
             }
         } catch (const std::exception& e) {
             spdlog::error("SchedulerRuntime: lane 帧主体钩子异常, 停机: {}", e.what());

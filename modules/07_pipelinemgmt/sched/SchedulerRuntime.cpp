@@ -78,6 +78,17 @@ void SchedulerRuntime::drainAndShutdown(std::chrono::milliseconds laneJoinTimeou
         }
     }
     lanes_.clear();
+    // 261002 lane 级活性汇总（join 后读＝无锁安全）：frames 均衡度=并行铺开程度，
+    // grab/gpu/efin/idle 分布=争抢点与饥饿定位（重建吞吐诊断）
+    if (!laneAcc_.empty()) {
+        for (size_t i = 0; i < laneAcc_.size(); ++i) {
+            const auto& a = laneAcc_[i];
+            spdlog::info("[SchedulerRuntime] lane[{}] 统计: frames={} idle={}次/{:.0f}ms "
+                         "grab={:.0f}ms gpu={:.0f}ms efin={:.0f}ms",
+                         i, a.frames, a.idleSpins, a.idleMs,
+                         a.grabMs, a.gpuMs, a.efinMs);
+        }
+    }
     broker_.shutdown();                          // 排空任务队列后 join workers
     if (gpu_) {
         gpu_->shutdown();                        // 逆序收摊：lanes → broker → gpu
