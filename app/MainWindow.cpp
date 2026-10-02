@@ -53,6 +53,7 @@
 #include <QFileDialog>
 #include <QStatusBar>
 #include <QProgressDialog>
+#include <QGridLayout>     // 虚拟按键表盘（261002 临时测试机）
 #include <cstdio>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1049,13 +1050,86 @@ void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
     }
     m_scanReadyBtnIdx = btnIdx;
     m_scanReadyLabel->setText(
-        QStringLiteral("%1 已就绪\n\n按设备【M 键】开始扫描\n（扫描中再按 M 停止）")
+        QStringLiteral("%1 已就绪\n\n按设备【M 键】开始扫描（扫描中再按 M 停止）\n"
+                       "临时测试机无实体键：点「⌨ 按键」表盘中键【单击】")
             .arg(modeTitle));
     m_scanReadyDlg->show();
     m_scanReadyDlg->raise();
     m_scanReadyDlg->activateWindow();
     m_scanReadyPoll->start();
-    statusBar()->showMessage(modeTitle + QStringLiteral(" 已就绪——按设备 M 键开始扫描"));
+    showVirtualKeypad();   // 261002 临时测试机：无实体键——表盘随就绪窗自动弹出
+    statusBar()->showMessage(modeTitle + QStringLiteral(" 已就绪——按设备 M 键开始扫描（临时机用虚拟按键表盘）"));
+}
+
+// 261002 临时测试机：无实体按键——虚拟按键表盘（弹窗）模拟扫描仪面板五键。
+// U/L/R/M 四键经 DeviceManager::testInjectTextLine 注入 G01 手势帧，与真机 rx
+// 路径完全同链（文本行→手势环→KeySemantics→动作）——表盘点按即等价真机按键；
+// 下键（第五键）260831 协议 G01 键位白名单无此键（McuFrame.cpp parseG01Payload
+// 仅 U/L/M/R）——置灰标注，待协议方补充后启用
+void MainWindow::showVirtualKeypad() {
+    if (!m_vkeyPad) {
+        m_vkeyPad = new QDialog(this);
+        m_vkeyPad->setWindowTitle(QStringLiteral("虚拟按键表盘（模拟扫描仪面板 G01）"));
+        m_vkeyPad->setModal(false);
+        m_vkeyPad->setFixedWidth(380);
+        auto* lay = new QGridLayout(m_vkeyPad);
+        const QStringList gestures{
+            QStringLiteral("单击"), QStringLiteral("双击"), QStringLiteral("长按")};
+        for (int g = 0; g < 3; ++g) {
+            auto* h = new QLabel(gestures[g], m_vkeyPad);
+            h->setAlignment(Qt::AlignCenter);
+            h->setStyleSheet("font-weight: bold;");
+            lay->addWidget(h, 0, g + 1);
+        }
+        struct RowDef { QString name; QChar key; bool enabled; QString tip; };
+        const RowDef rows[] = {
+            { QStringLiteral("上键 U"), QChar('U'), true,
+              QStringLiteral("单击＝进/退菜单；双击＝切换调节上下文") },
+            { QStringLiteral("下键 D"), QChar('D'), false,
+              QStringLiteral("260831 协议 G01 无此键（键位仅 U/L/M/R）——扫描仪第五键"
+                             "未进协议，置灰待补") },
+            { QStringLiteral("左键 L"), QChar('L'), true,
+              QStringLiteral("单击＝调参 −（菜单态＝游标左移）") },
+            { QStringLiteral("右键 R"), QChar('R'), true,
+              QStringLiteral("单击＝调参 ＋（菜单态＝游标右移）") },
+            { QStringLiteral("中键 M"), QChar('M'), true,
+              QStringLiteral("单击＝启动/停止扫描（菜单态＝确认）；双击＝切换扫描模式") },
+        };
+        for (int r = 0; r < 5; ++r) {
+            const auto& row = rows[r];
+            auto* lbl = new QLabel(row.name, m_vkeyPad);
+            lbl->setStyleSheet(row.enabled ? QStringLiteral("font-weight: bold;")
+                                           : QStringLiteral("color:#999;"));
+            lay->addWidget(lbl, r + 1, 0);
+            for (int g = 0; g < 3; ++g) {
+                auto* btn = new QPushButton(gestures[g], m_vkeyPad);
+                const QString line = QStringLiteral("G01 %1%2").arg(row.key).arg(g + 1);
+                if (row.enabled) {
+                    btn->setToolTip(row.tip);
+                    connect(btn, &QPushButton::clicked, this, [this, line, row]() {
+                        if (m_appCtx && m_appCtx->deviceManager())
+                            m_appCtx->deviceManager()->testInjectTextLine(line.toStdString());
+                        statusBar()->showMessage(
+                            QStringLiteral("虚拟按键注入: %1（%2）")
+                                .arg(line, row.tip), 3000);
+                    });
+                } else {
+                    btn->setEnabled(false);
+                    btn->setToolTip(row.tip);
+                }
+                lay->addWidget(btn, r + 1, g + 1);
+            }
+        }
+        auto* note = new QLabel(
+            QStringLiteral("261002 临时测试机：经 G01 注入测试缝下发，与真机按键同链路"),
+            m_vkeyPad);
+        note->setStyleSheet("color:#888; font-size:11px;");
+        note->setAlignment(Qt::AlignCenter);
+        lay->addWidget(note, 6, 0, 1, 4);
+    }
+    m_vkeyPad->show();
+    m_vkeyPad->raise();
+    m_vkeyPad->activateWindow();
 }
 
 // 单键扫描按钮态视觉：idx=2 标点/3 面片/4 精细/5 深孔——活跃＝红框＋红字"停止扫描"，
@@ -1285,6 +1359,17 @@ QWidget *MainWindow::createNavBar()
     leftLayout->addWidget(btnReloadCloud);
     m_navLeftButtons.append(btnReloadCloud);
     connect(btnReloadCloud, &QPushButton::clicked, this, &MainWindow::onReloadPointCloud);
+
+    // 虚拟按键表盘（261002 临时测试机·无实体键）：弹窗模拟扫描仪面板五键
+    QPushButton *btnVKeys = new QPushButton(QStringLiteral("⌨ 按键"));
+    btnVKeys->setObjectName("navButton");
+    btnVKeys->setFixedHeight(42);
+    btnVKeys->setFixedWidth(64);
+    btnVKeys->setToolTip(QStringLiteral(
+        "虚拟按键表盘（261002 临时测试机）：模拟扫描仪面板按键，G01 注入与真机同链路"));
+    leftLayout->addWidget(btnVKeys);
+    m_navLeftButtons.append(btnVKeys);
+    connect(btnVKeys, &QPushButton::clicked, this, &MainWindow::showVirtualKeypad);
 
     layout->addWidget(leftGroup);
     layout->addStretch();

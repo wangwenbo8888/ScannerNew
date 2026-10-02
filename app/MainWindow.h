@@ -91,6 +91,10 @@ private slots:
     /// 扫描就绪窗口（260927 就绪流程）：UI 模式键→armScanSession 备好会话后弹出
     /// ——「按设备 M 键开始扫描」；轮询 isCapturing 自动关闭，取消＝终止会话
     void showScanReadyPrompt(const QString& modeTitle, int btnIdx);
+    /// 虚拟按键表盘（261002 临时测试机·无实体键）：弹窗模拟扫描仪面板五键——
+    /// U/L/R/M 经 G01 注入测试缝走与真机完全相同的链路（rx 文本行→手势环→
+    /// KeySemantics→动作）；下键 D 不在 260831 协议 G01 键位表（置灰标注）
+    void showVirtualKeypad();
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
@@ -108,6 +112,7 @@ protected:
     QLabel *m_scanReadyLabel = nullptr;     // 就绪提示文案（模式名注入）
     class QTimer *m_scanReadyPoll = nullptr; // 就绪轮询（200ms 查 isCapturing→自动关）
     int m_scanReadyBtnIdx = -1;             // 就绪对应的模式键（取消时复原视觉）
+    QDialog *m_vkeyPad = nullptr;           // 虚拟按键表盘（261002 临时测试机，懒建）
     QList<QPushButton*> m_navLeftButtons;
     QList<QPushButton*> m_navRightButtons;
     QList<QPushButton*> m_toolButtons;
