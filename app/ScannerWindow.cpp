@@ -76,24 +76,20 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
     connect(ui.pushButton_Start_Scanner, &QPushButton::clicked, this, &ScannerWindow::onStartScanner);
     connect(ui.pushButton_Stop_Scanner, &QPushButton::clicked, this, &ScannerWindow::onStopScanner);
 
-    // 连接滑块
-    connect(ui.horizontalSlider_Freq, &QSlider::valueChanged, this, &ScannerWindow::onSliderFreqChanged);
+    // 连接滑块（261002 按键域定稿：拍照频率＝固定值无任何调节入口——频率滑条
+    // 移除（历史测试临时件）；freqHz 仅账本存值供 N10 组帧读取，当前固定 60Hz）
     connect(ui.horizontalSlider_Background_Lighting, &QSlider::valueChanged, this, &ScannerWindow::onSliderBackgroundChanged);
     connect(ui.horizontalSlider_Laser_Lighting, &QSlider::valueChanged, this, &ScannerWindow::onSliderLaserChanged);
     connect(ui.horizontalSlider_ExposeTime, &QSlider::valueChanged, this, &ScannerWindow::onSliderExposeChanged);
 
     // A-T17 修复（运行时钳，.ui 设计量程同步）：滑条范围对齐 ParamStore spec
-    // （协议批3 终态：freq 1-200 默认 120（260927 用户口径回调，60→120→30→120——
-    // H120 带宽饱和留痕 2b3155d）/ bg 0-100 默认 10 / laser 0-100 默认 40——灯控量程
-    // 实测 0-100；exposure 1-5ms 默认 3——260912 用户口径），初值自账本快照同步
+    // （bg 0-100 默认 10 / laser 0-100 默认 40——灯控量程实测 0-100；
+    // exposure 1-5ms 默认 3——260912 用户口径），初值自账本快照同步
     // ——setValue 触发 valueChanged→setParam 同值记账（无副作用）
     if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
-        ui.horizontalSlider_Freq->setRange(1, 200);
         ui.horizontalSlider_Background_Lighting->setRange(0, 100);
         ui.horizontalSlider_Laser_Lighting->setRange(0, 100);
         ui.horizontalSlider_ExposeTime->setRange(1, 5);
-        ui.horizontalSlider_Freq->setValue(
-            static_cast<int>(dm->getParam("freqHz").value));
         ui.horizontalSlider_Background_Lighting->setValue(
             static_cast<int>(dm->getParam("bgLight").value));
         ui.horizontalSlider_Laser_Lighting->setValue(
@@ -433,17 +429,10 @@ void ScannerWindow::onCalibrateClicked()
 }
 
 // ============================================================================
-// 滑块（A-T17 修复：freq/bg/laser 三滑条接 ParamStore 账本——原死控件复活；
-// 采集中变更经 Dispatch 全参重发 N10，空闲记账 enterScan/startCapture 组链下发）
+// 滑块（A-T17 修复：bg/laser/exposure 滑条接 ParamStore 账本；
+// 采集中变更经 Dispatch 全参重发 N10，空闲记账 enterScan/startCapture 组链下发。
+// 261002 频率滑条移除：freqHz 固定值 60Hz 无调节入口，仅 N10 组帧读取）
 // ============================================================================
-void ScannerWindow::onSliderFreqChanged(int v)
-{
-    ui.label_Freq_Value->setText(QString::number(v));
-    if (auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr)
-        dm->setParam("freqHz", static_cast<double>(v),
-                     Scanner::device::ParamEntry::Source::Ui);
-}
-
 void ScannerWindow::onSliderBackgroundChanged(int v)
 {
     ui.label_Background_Value->setText(QString::number(v));

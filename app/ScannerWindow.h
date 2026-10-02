@@ -37,8 +37,7 @@ private slots:
     void onStopScanner();
     void onCalibrateClicked();
 
-    void onSliderFreqChanged(int v);
-    void onSliderBackgroundChanged(int v);
+    void onSliderBackgroundChanged(int v);   // 261002：频率滑条移除（freqHz 固定 60 无入口）
     void onSliderLaserChanged(int v);
     void onSliderExposeChanged(int v);
     void onResolutionChanged(int index);
