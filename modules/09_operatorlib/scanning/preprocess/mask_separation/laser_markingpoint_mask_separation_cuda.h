@@ -133,6 +133,9 @@ struct LaserMarkingSeparationResult {
     std::shared_ptr<cv::cuda::GpuMat> d_laserMask;       ///< 激光线（大提取物）掩膜
     std::shared_ptr<cv::cuda::GpuMat> d_markingPointMask; ///< 标记点（小提取物）掩膜
     std::shared_ptr<cv::cuda::GpuMat> d_combinedMask;     ///< 两者合并掩膜（step3 输出）
+    std::shared_ptr<cv::cuda::GpuMat> d_gray;             ///< 设备端灰度图（261002：
+                                                          ///< 流序拷贝回传，下游激光链
+                                                          ///< 复用免二次上传）
     MaskSeparationTimings timings;
 
     LaserMarkingSeparationResult() = default;

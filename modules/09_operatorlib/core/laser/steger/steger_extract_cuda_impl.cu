@@ -491,15 +491,21 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
         int cols = d_grayImage.cols;
         cudaStream_t cuda_stream = cv::cuda::StreamAccessor::getStream(stream);
 
+        // 261002 计时采样化（1/300）：原逐次建/销 7 事件＋全等待＋BENCH 日志
+        // （×L/R 每帧两次）——异步链开销与刷盘俱增。非采样轮不建事件不等待
         cudaEvent_t ev_start, ev_s1, ev_s2, ev_s3, ev_s5, ev_s6, ev_end;
-        cudaEventCreate(&ev_start);
-        cudaEventCreate(&ev_s1);
-        cudaEventCreate(&ev_s2);
-        cudaEventCreate(&ev_s3);
-        cudaEventCreate(&ev_s5);
-        cudaEventCreate(&ev_s6);
-        cudaEventCreate(&ev_end);
-        cudaEventRecord(ev_start, cuda_stream);
+        static std::atomic<uint64_t> s_stegerTimingCnt{0};
+        const bool sampleTiming = (s_stegerTimingCnt.fetch_add(1) % 300 == 0);
+        if (sampleTiming) {
+            cudaEventCreate(&ev_start);
+            cudaEventCreate(&ev_s1);
+            cudaEventCreate(&ev_s2);
+            cudaEventCreate(&ev_s3);
+            cudaEventCreate(&ev_s5);
+            cudaEventCreate(&ev_s6);
+            cudaEventCreate(&ev_end);
+            cudaEventRecord(ev_start, cuda_stream);
+        }
 
         // === Step 1: CV_8UC1 → CV_32FC1 ===
         if (d_float_.empty() || d_float_.cols != cols || d_float_.rows != rows) {
@@ -520,7 +526,7 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
             d_grayImage.ptr<uchar>(), d_float_.ptr<float>(),
             rows, cols, d_grayImage.step, d_float_.step);
 
-        cudaEventRecord(ev_s1, cuda_stream);
+        if (sampleTiming) cudaEventRecord(ev_s1, cuda_stream);
 
         // === Step 2: Separable Gaussian Convolution ===
         // 2a: Ix = (g' ⊗_row g) * I
@@ -578,7 +584,7 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
             rows, cols, d_temp_.step, d_ixy_.step,
             thrust::raw_pointer_cast(d_gx_kernel_.data()), actualKernelSize_);
 
-        cudaEventRecord(ev_s2, cuda_stream);
+        if (sampleTiming) cudaEventRecord(ev_s2, cuda_stream);
 
         cudaError_t op_err = cudaGetLastError();
         if (op_err != cudaSuccess) {
@@ -606,7 +612,7 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
             thrust::raw_pointer_cast(d_point_count_.data()),
             max_points);
 
-        cudaEventRecord(ev_s3, cuda_stream);
+        if (sampleTiming) cudaEventRecord(ev_s3, cuda_stream);
 
         op_err = cudaGetLastError();
         if (op_err != cudaSuccess) {
@@ -637,7 +643,7 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
             d_valid_points.begin(), d_valid_points.end(),
             SubpixelPointLabelComp());
 
-        cudaEventRecord(ev_s5, cuda_stream);
+        if (sampleTiming) cudaEventRecord(ev_s5, cuda_stream);
 
         // === Step 5.5: Build GPU output arrays (d_centerPoints + d_line_ids) ===
         {
@@ -685,8 +691,9 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
             centerPoints[pt.label].emplace_back(pt.px, pt.py);
         }
 
-        cudaEventRecord(ev_s6, cuda_stream);
-        cudaEventRecord(ev_end, cuda_stream);
+        if (sampleTiming) cudaEventRecord(ev_s6, cuda_stream);
+        if (sampleTiming) cudaEventRecord(ev_end, cuda_stream);
+        if (sampleTiming) {
         cudaEventSynchronize(ev_end);
 
         float ms_total=0, ms_s1=0, ms_s2=0, ms_s3=0, ms_s5=0, ms_s6=0;
@@ -707,6 +714,7 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
         cudaEventDestroy(ev_s5);
         cudaEventDestroy(ev_s6);
         cudaEventDestroy(ev_end);
+        }   // ← sampleTiming 计时段收口（261002）
 
         result.centerPoints = std::move(centerPoints);
         result.totalPointCount = point_count;

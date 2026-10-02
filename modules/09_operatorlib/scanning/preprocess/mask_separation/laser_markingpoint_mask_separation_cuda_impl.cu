@@ -269,17 +269,23 @@ void LaserMarkingSeparationCUDA::Impl::executePipeline(
     // Step 6: dilate(k6) marking
     launchDilate(gp(d_marking_raw), gp(d_marking_final), w, h, params_.step6_dilateSize, cs);
     cudaEventRecord(event_step6_done_, cs);
-
-    cudaEventSynchronize(event_step6_done_);
-    float ms;
-    cudaEventElapsedTime(&ms, event_start_, event_upload_done_);          timings.upload_ms = ms;
-    cudaEventElapsedTime(&ms, event_upload_done_, event_step1_done_);     timings.step1_gaussian_threshold_ms = ms;
-    cudaEventElapsedTime(&ms, event_step1_done_, event_step2_done_);      timings.step2_remove_small_noise_ms = ms;
-    cudaEventElapsedTime(&ms, event_step2_done_, event_step3_done_);      timings.step3_remove_large_noise_ms = ms;
-    cudaEventElapsedTime(&ms, event_step3_done_, event_step4_done_);      timings.step4_extract_laser_ms = ms;
-    cudaEventElapsedTime(&ms, event_step4_done_, event_step5_done_);      timings.step5_extract_marking_ms = ms;
-    cudaEventElapsedTime(&ms, event_step5_done_, event_step6_done_);      timings.step6_dilate_marking_ms = ms;
-    cudaEventElapsedTime(&ms, event_start_, event_step6_done_);           timings.total_pipeline_ms = ms;
+    // 261002 计时采样化（1/300）：原每调用 cudaEventSynchronize 全 GPU 等待＋
+    // 逐次日志——异步链被掐死（wall 40-145ms vs 内核 2-5ms 的主因之一）。
+    // 非采样路径不等待不计时（事件仅 Record，开销微）
+    static std::atomic<uint64_t> s_sepTimingCnt{0};
+    const bool sampleTiming = (s_sepTimingCnt.fetch_add(1) % 300 == 0);
+    if (sampleTiming) {
+        cudaEventSynchronize(event_step6_done_);
+        float ms;
+        cudaEventElapsedTime(&ms, event_start_, event_upload_done_);          timings.upload_ms = ms;
+        cudaEventElapsedTime(&ms, event_upload_done_, event_step1_done_);     timings.step1_gaussian_threshold_ms = ms;
+        cudaEventElapsedTime(&ms, event_step1_done_, event_step2_done_);      timings.step2_remove_small_noise_ms = ms;
+        cudaEventElapsedTime(&ms, event_step2_done_, event_step3_done_);      timings.step3_remove_large_noise_ms = ms;
+        cudaEventElapsedTime(&ms, event_step3_done_, event_step4_done_);      timings.step4_extract_laser_ms = ms;
+        cudaEventElapsedTime(&ms, event_step4_done_, event_step5_done_);      timings.step5_extract_marking_ms = ms;
+        cudaEventElapsedTime(&ms, event_step5_done_, event_step6_done_);      timings.step6_dilate_marking_ms = ms;
+        cudaEventElapsedTime(&ms, event_start_, event_step6_done_);           timings.total_pipeline_ms = ms;
+    }
 }
 
 void LaserMarkingSeparationCUDA::Impl::warmup(int rows, int cols) {
@@ -337,9 +343,18 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
         result.success = true;
         result.message = "Separation successful";
         result.qualityFlag = calib::QualityFlag::Normal;
-        result.d_laserMask = std::make_shared<cv::cuda::GpuMat>(d_laser_mask.clone());
-        result.d_markingPointMask = std::make_shared<cv::cuda::GpuMat>(d_marking_final.clone());
-        result.d_combinedMask = std::make_shared<cv::cuda::GpuMat>(d_combined.clone());
+        // 261002 掩膜改流序拷贝：原 .clone() 走默认流（与调用流互斥＝隐式全流
+        // 串行化）——改 copyTo(stream) 保持在调用流内异步有序
+        result.d_laserMask = std::make_shared<cv::cuda::GpuMat>();
+        d_laser_mask.copyTo(*result.d_laserMask, stream);
+        result.d_markingPointMask = std::make_shared<cv::cuda::GpuMat>();
+        d_marking_final.copyTo(*result.d_markingPointMask, stream);
+        result.d_combinedMask = std::make_shared<cv::cuda::GpuMat>();
+        d_combined.copyTo(*result.d_combinedMask, stream);
+        // 261002 设备灰度图随结果回传（流序拷贝）：下游激光链（steger 等）复用
+        // 免二次上传（原每帧 grayL/R 再传 6MB PCIe）
+        result.d_gray = std::make_shared<cv::cuda::GpuMat>();
+        d_inputBuffer.copyTo(*result.d_gray, stream);
 
         // —— 分步诊断（2026-09-06 激光掩膜全零排查）：Step1 二值像素＋Step2
         //    像素＋combined 像素＋laser_mask 像素（每 30 帧打一条）
@@ -361,16 +376,22 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
             }
         }
 
-        CALIB_LOG_INFO("Pipeline timings (ms): upload={:.3f} step1={:.3f} "
-            "step2={:.3f} step3={:.3f} step4={:.3f} step5={:.3f} "
-            "step6={:.3f} total={:.3f}",
-            result.timings.upload_ms, result.timings.step1_gaussian_threshold_ms,
-            result.timings.step2_remove_small_noise_ms,
-            result.timings.step3_remove_large_noise_ms,
-            result.timings.step4_extract_laser_ms,
-            result.timings.step5_extract_marking_ms,
-            result.timings.step6_dilate_marking_ms,
-            result.timings.total_pipeline_ms);
+        // 261002 逐次计时的 Pipeline timings 日志随采样化（1/300；原逐次 71-94 条/s 刷盘）
+        {
+            static std::atomic<uint64_t> s_sepLogCnt{0};
+            if (s_sepLogCnt.fetch_add(1) % 300 == 0) {
+                CALIB_LOG_INFO("Pipeline timings (ms): upload={:.3f} step1={:.3f} "
+                    "step2={:.3f} step3={:.3f} step4={:.3f} step5={:.3f} "
+                    "step6={:.3f} total={:.3f}",
+                    result.timings.upload_ms, result.timings.step1_gaussian_threshold_ms,
+                    result.timings.step2_remove_small_noise_ms,
+                    result.timings.step3_remove_large_noise_ms,
+                    result.timings.step4_extract_laser_ms,
+                    result.timings.step5_extract_marking_ms,
+                    result.timings.step6_dilate_marking_ms,
+                    result.timings.total_pipeline_ms);
+            }
+        }
     } catch (const cv::Exception& e) {
         result.success=false; result.message=std::string("OpenCV: ")+e.what();
         result.qualityFlag=calib::QualityFlag::Degraded;

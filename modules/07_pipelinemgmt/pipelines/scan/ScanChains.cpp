@@ -439,8 +439,19 @@ ScanChains::Hooks ScanChains::assemble() {
         //    C++ 异常，try/catch 兜不住——逐级查空，空即跳出。
         auto laserStatus = [&]() -> int {
             try {
-                ops.d_grayL.upload(frame->grayL, stream);
-                ops.d_grayR.upload(frame->grayR, stream);
+                // 261002 消双重上传：sep 已上传设备灰度图（结果 d_gray 流序回传）
+                // ——steger 直接复用；旧路径再传 grayL/R＝每帧多 6MB PCIe。
+                // 复用条件：sep 结果带 d_gray；否则回退原上传（兼容老算子/测试桩）
+                if (sepL.d_gray && !sepL.d_gray->empty()) {
+                    ops.d_grayL = *sepL.d_gray;
+                } else {
+                    ops.d_grayL.upload(frame->grayL, stream);
+                }
+                if (sepR.d_gray && !sepR.d_gray->empty()) {
+                    ops.d_grayR = *sepR.d_gray;
+                } else {
+                    ops.d_grayR.upload(frame->grayR, stream);
+                }
 
                 auto hasPts = [](const std::shared_ptr<cv::cuda::GpuMat>& m) {
                     return m && !m->empty();

@@ -287,15 +287,9 @@ Result SchedulerRuntime::start(const SchedConfig& cfg, IFrameSource<TFrame>& sou
                 activeLanes_.fetch_sub(1, std::memory_order_release);   // 退出即减（异常停可被上层发现）
                 (void)laneCount;
             });
-            auto& t = lanes_.back();
-            // 绑 E 核 eMasks 轮转；无 E 核（非 hybrid）不绑；绑核（mask≠0）才提实时优先级
-            const uint64_t mask = (topo.hybrid && !topo.eMasks.empty())
-                                      ? topo.eMasks[static_cast<size_t>(i) % topo.eMasks.size()]
-                                      : 0;
-            if (mask != 0) {
-                CpuTopology::pinThread(t, mask);
-                CpuTopology::setRealtime(t);
-            }
+            // 261002 撤 E 核钉核：lane 线程承担 CUDA launch/同步/下载（E 核 launch
+            // 开销放大 3-5 倍——lane 统计 gpu 段 100% 瓶颈的成分之一）。改浮动
+            // 调度（P 核 broker 钉核不变，worker 仍独占 P 核 1..N）
         }
     } catch (...) {
         // 线程创建失败（资源耗尽等）：逆序回收已建部分
