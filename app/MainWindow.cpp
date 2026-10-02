@@ -728,14 +728,16 @@ void MainWindow::onCalibDeviceClicked()
         statusBar()->showMessage(QStringLiteral("标定显示模式"));
     }
     // 261002 用户标定五态循环采集（用户口径：点校准设备→点 M 开拍→再点 M 停）：
-    // 布防后 M 键启采分流进五态灯序（补光→左斜→右斜→精细→深孔 自动循环，
-    // 每态1帧）；扫描流程会自动撤防
-    if (m_appCtx && m_appCtx->deviceManager())
-        m_appCtx->deviceManager()->setCalibCaptureArmed(true);
+    // 布防＝帧流接线＋标定布防（AppContext::armCalibCapture——不接帧流则相机
+    // 不开流零帧，灯序停在补光态不循环）；M 键启采分流进五态灯序自动循环
+    if (m_appCtx) {
+        const auto r = m_appCtx->armCalibCapture();
+        statusBar()->showMessage(r.success
+            ? QStringLiteral("校准设备：按 M 键（或虚拟按键中键单击）开始五态循环采集"
+                             "——补光→左斜→右斜→精细→深孔；再按 M 停止")
+            : QString::fromStdString("校准采集布防失败: " + r.message), 8000);
+    }
     showVirtualKeypad();
-    statusBar()->showMessage(
-        QStringLiteral("校准设备：按 M 键（或虚拟按键中键单击）开始五态循环采集"
-                       "——补光→左斜→右斜→精细→深孔；再按 M 停止"), 8000);
 }
 
 // P0-3 编辑门禁唯一事实源：经 AppContext::canEnterEditSession()（SM==S2 或暂停

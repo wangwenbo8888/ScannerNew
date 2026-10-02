@@ -90,6 +90,9 @@ public:
     Scanner::Result armScanSession(Scanner::ScanMode mode);   // 260927 就绪流程：会话/
                                                               // 帧流/模式备好但不启采——
                                                               // 设备 M 键才正式开扫
+    /// 261002 用户标定五态循环采集布防：帧流接线（预览＋调试分路，不走扫描会话
+    /// 环）＋标定布防——设备 M 键开拍五态灯序循环，再按 M 停
+    Scanner::Result armCalibCapture();
     /// finish_scan 点火（工作流合账）＋采集停止（08 stopCapture）
     Scanner::Result stopScanSession();
     /// 扫描会话是否活跃（Running/Paused——按钮启停切换判据）

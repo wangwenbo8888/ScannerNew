@@ -550,6 +550,38 @@ void AppContext::startDevicesAsync() {
 // ============================================================================
 // 扫描会话点火——统一入口（工具栏标点/面片扫描＋ScannerWindow 共用同一条真链）
 // ============================================================================
+// 261002 用户标定五态循环采集布防：帧流接线（预览＋调试分路，不走扫描会话环）
+// ＋标定布防。M 键开拍后五态灯序（补光→左斜→右斜→精细→深孔）帧驱动自动循环；
+// 再按 M 停。此前校准流程不接帧流——相机不开流零帧，灯序停在补光态不循环
+// （261002 17:09 真机日志实证），故布防必须先挂帧出口
+// ============================================================================
+Scanner::Result AppContext::armCalibCapture() {
+    auto* dm = deviceManager_.get();
+    if (!dm || !dm->isDeviceReady())
+        return Scanner::Result::fail("设备未就绪——请等待自检完成（相机/串口）");
+    dm->startFrameStream([this](const Scanner::hal::StereoFrame& frame) {
+        // ① 预览链：06 FrameBuffer（帧带 lightPhase 相位标记，消费方按灯型分派）
+        if (frameBuffer_) {
+            Scanner::data::FrameData fd;
+            fd.frameId = frame.frameId;
+            fd.timestamp = frame.timestamp;
+            fd.leftGray = frame.leftGray;
+            fd.rightGray = frame.rightGray;
+            fd.lightPhase = frame.lightPhase;
+            frameBuffer_->pushFrame(fd);
+        }
+        // ② 调试分路：相机预览监视弹窗（订阅方切线程+节流自理）
+        {
+            std::lock_guard<std::mutex> lock(debugTapMtx_);
+            if (debugFrameTap_) debugFrameTap_(frame);
+        }
+    });
+    dm->setCalibCaptureArmed(true);
+    JMW_LOG_INFO("app-AppContext", "[AppContext] 校准采集布防完成——M 键开拍五态灯序循环");
+    return Scanner::Result::ok("校准采集已就绪——按设备 M 键开始五态循环采集，再按 M 停止");
+}
+
+// ============================================================================
 Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
     const auto t0 = std::chrono::steady_clock::now();   // 启停耗时打点（分段排查）
     {
@@ -567,6 +599,7 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
             fd.timestamp = frame.timestamp;
             fd.leftGray = frame.leftGray;
             fd.rightGray = frame.rightGray;
+            fd.lightPhase = frame.lightPhase;   // 261002 标定灯序相位随帧透传
             frameBuffer_->pushFrame(fd);
         }
         // ② 扫描链：02 会话环（enrich 出口查表→SlotRing；非扫描期该口自弃）
