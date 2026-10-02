@@ -516,6 +516,10 @@ void MainWindow::onCalibDeviceClicked()
             }
 
             const int numFrames = 15;
+            // 打光（261002 补）：相机标定＝棋盘格场景只开补光（激光线会毁角点
+            // 检测）；采完全灭。经门面灯控＝N10 即时生效，无需启采集
+            if (m_appCtx && m_appCtx->deviceManager())
+                m_appCtx->deviceManager()->lightsBgOnly();
             calibration::CameraCalibInput input;
             input.imageWidth = 2048;
             input.imageHeight = 1536;
@@ -531,6 +535,8 @@ void MainWindow::onCalibDeviceClicked()
                     input.rightImages.push_back(right.clone());
                 }
             }
+            if (m_appCtx && m_appCtx->deviceManager())
+                m_appCtx->deviceManager()->lightsAllOff();
 
             statusBar()->showMessage(QStringLiteral("正在执行相机标定算法..."));
             QApplication::processEvents();
@@ -569,12 +575,22 @@ void MainWindow::onCalibDeviceClicked()
             statusBar()->showMessage(QStringLiteral("采集激光线图像..."));
             QApplication::processEvents();
 
+            // 打光（261002 补）：激光线标定必须点亮激光——左右斜交叉 V1C1
+            // （261002 临时测试机管语义；经门面灯控＝N10 即时生效，无需启采集），
+            // 采完全灭
+            if (m_appCtx && m_appCtx->deviceManager())
+                m_appCtx->deviceManager()->lightsBgAndCrossLaser();
+
             cv::Mat left, right;
             cam->GetScannerImages(left, right, 10000);
             if (left.empty() || right.empty()) {
+                if (m_appCtx && m_appCtx->deviceManager())
+                    m_appCtx->deviceManager()->lightsAllOff();
                 QMessageBox::warning(this, QStringLiteral("激光线标定"), QStringLiteral("图像采集失败"));
                 return;
             }
+            if (m_appCtx && m_appCtx->deviceManager())
+                m_appCtx->deviceManager()->lightsAllOff();
 
             statusBar()->showMessage(QStringLiteral("正在执行激光线标定算法..."));
             QApplication::processEvents();
