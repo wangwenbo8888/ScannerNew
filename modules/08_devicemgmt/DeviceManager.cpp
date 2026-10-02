@@ -49,10 +49,17 @@ std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红
 // 根因）：标志点 A（MarkerOnly）T0V0C0D0＋L=0＋B 抬 40（真标志点亮斑须超分离阈值
 // 80，高补光代偿激光缺失）；面片 B（MarkerPlusLaser）T1V1；精细 C（FineScan）D 管；
 // 深孔 D（DeepHoleScan）C 管（260910 用户口径对调定版）。调用点均在逻辑线程
-constexpr int kMarkerOnlyBg = 40;              // A 模式补光抬升基线（成功配置基线）
+constexpr int kMarkerOnlyBg = 10;   // A 模式补光基线（260927 真机回调：B40 过曝——标志点
+                                    // 检测只剩 1 点/光流配准 0<3 全败；B10=面片模式同场景
+                                    // 36 点实证基线。原 B40「高补光代偿」口径作废，待定表）
 hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode) {
     hal::CaptureParams p;
     p.freqHz = static_cast<int>(params.get("freqHz").value);
+    // 标点模式帧率钳制 ≤30Hz（260927 真机实证）：H120×全分辨率≈6Gbps 超 USB3
+    // 单控制器上限——扫描中相机链路反复重开（配对日志 L.fid=0 频现/R 检测 12↔6
+    // 跳），标志点检测/立体匹配全线恶化。标点扫描静止对板无需高帧率；面片等
+    // 激光模式维持账本值（用户 120 口径不变）
+    if (mode == Scanner::ScanMode::MarkerOnly && p.freqHz > 30) p.freqHz = 30;
     p.bgLight = (mode == Scanner::ScanMode::MarkerOnly)
                     ? kMarkerOnlyBg
                     : static_cast<int>(params.get("bgLight").value);
@@ -113,7 +120,9 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
         int64_t idx = -1;                       // 参数索引=specs 登记序号（Minor #9）
         for (size_t i = 0; i < paramKeys_.size(); ++i)
             if (paramKeys_[i] == key) idx = static_cast<int64_t>(i);
-        publishEvent(EventType::UserDefined, idx, 0);   // base 暂无 ParamChanged——占位
+        publishEvent(EventType::UserDefined, 1000 + idx, 0);   // base 暂无 ParamChanged——占位
+        //（260927 错峰：p1=1000+idx——原裸 idx(0..3) 与菜单③④/视点(1..4/100)在
+        // UserDefined 上撞车，laserLevel 改账(p1=3)会被误当「扫描完成」消费）
         JMW_LOG_DEBUG("08-DeviceManager", "[DeviceManager] 参数改账 {}={:.3f} confirmed={}", key, e.value,
                       e.confirmed);
     };
@@ -372,6 +381,9 @@ void DeviceManager::logicTick() {
         std::lock_guard<std::mutex> lock(menuSnapMtx_);
         menuSnap_ = menu_->state();
     }
+    // 键控回显快照（260927）：档位梯状态随菜单快照同拍刷新（UI 状态栏常显）
+    ladderIndexSnap_.store(ladder_.index(), std::memory_order_relaxed);
+    ladderSizeSnap_.store(static_cast<int>(ladder_.ladder().size()), std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(tempSnapMtx_);
         tempSnap_ = lastTemps_;
@@ -843,8 +855,15 @@ void DeviceManager::applyAdjust(int dir) {
             JMW_LOG_INFO("08-DeviceManager",
                 "[DeviceManager] 档位已到顶/底（index={}）——步进无效", ladder_.index());
         }
+    } else if (ctx == MenuState::AdjustCtx::View && steps != 0) {
+        // View 上下文＝视点缩放（260927 按设计接线：协作文档「档位与视点调节」
+        // ——事件口径 UserDefined p1=100，param2=+1 拉近/-1 拉远；app 订阅方驱动
+        // OSGWidget::zoomView）
+        publishEvent(EventType::UserDefined, 100, steps > 0 ? 1 : -1);
+        JMW_LOG_INFO("08-DeviceManager",
+            "[DeviceManager] 视点缩放：{}（View 上下文按键步进）", steps > 0 ? "拉近" : "拉远");
     } else {
-        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 调节步进 ctx={}（View 上下文暂仅记账）",
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 调节步进 ctx={}（本上下文无动作）",
                      static_cast<int>(ctx));
     }
 }
@@ -934,6 +953,14 @@ Result DeviceManager::setCameraExposure(double ms) {
     if (!camera_) return Result::fail("未配置相机");   // 前置检查同步；动作编队
     post([this, ms] {
         if (camera_ && camera_->isOpen()) camera_->setExposure(ms);
+    });
+    return Result::ok("已编队");
+}
+
+Result DeviceManager::setCameraContrast(int leftValue, int rightValue) {
+    if (!camera_) return Result::fail("未配置相机");
+    post([this, leftValue, rightValue] {
+        if (camera_ && camera_->isOpen()) camera_->setContrast(leftValue, rightValue);
     });
     return Result::ok("已编队");
 }

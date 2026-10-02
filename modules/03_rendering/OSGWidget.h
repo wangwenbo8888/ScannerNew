@@ -98,6 +98,7 @@ public:
     RenderStats renderStats() const;
 
     void setCameraManipulator(osgGA::CameraManipulator* manipulator);
+    void zoomView(double factor);   // 视点缩放（按键 View 上下文：factor<1 拉近/>1 拉远）
     void home();
 
     // Lasso / polyline selection

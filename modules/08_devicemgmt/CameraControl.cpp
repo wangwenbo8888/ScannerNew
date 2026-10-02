@@ -70,7 +70,45 @@ public:
 
         // 1. 先处理到局部变量（不加锁）
         cv::Mat processed(h, w, CV_8UC1);
-        std::memcpy(processed.data, imageData->GetBuffer(), static_cast<size_t>(h) * w);
+        // 对比度·左右分置（260927→1002 换自建 LUT）：SDK ImageImprovment 对 Mono8
+        // 实测静默 no-op（返回 null 不变换）——改用 OpenCV cv::LUT 逐像素真实对比度
+        // 变换（教科书公式 output=(input−128)×factor+128，factor=1+ctr/100）。
+        // 0=直通零开销；LUT 256 项懒建/值变重建（仅本侧回调线程触碰 side 资源）
+        const int ctr = (m_sideIndex == 0)
+            ? m_owner->m_contrastL.load(std::memory_order_relaxed)
+            : m_owner->m_contrastR.load(std::memory_order_relaxed);
+        if (ctr != 0) {
+            auto& side = m_owner->m_sides[m_sideIndex];
+            if (side.lutContrast != ctr || side.contrastLut.empty()) {
+                const double factor = 1.0 + ctr / 100.0;
+                side.contrastLut = cv::Mat(1, 256, CV_8UC1);
+                for (int i = 0; i < 256; ++i) {
+                    const int v = static_cast<int>((i - 128) * factor + 128 + 0.5);
+                    side.contrastLut.at<uint8_t>(0, i) =
+                        static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+                }
+                side.lutContrast = ctr;
+            }
+            // 源帧建 Mat 头（零拷贝）→ LUT 变换到 processed（一次遍历＝拷贝＋对比度）
+            cv::Mat srcMat(h, w, CV_8UC1, const_cast<void*>(imageData->GetBuffer()));
+            cv::LUT(srcMat, side.contrastLut, processed);
+            // 一次性数值探针（260927）：原始 vs 变换后前 4 像素——数学铁证
+            {
+                static std::atomic<uint64_t> s_lutProbe{0};
+                if (s_lutProbe.fetch_add(1, std::memory_order_relaxed) < 2) {
+                    const auto* raw = static_cast<const uint8_t*>(imageData->GetBuffer());
+                    JMW_LOG_INFO("08-CameraControl",
+                        "[CameraControl] LUT 探针 side={} ctr={} 原始[0..3]={},{},{},{} "
+                        "→ 变换后={},{},{},{}",
+                        m_sideIndex, ctr,
+                        raw[0], raw[1], raw[2], raw[3],
+                        processed.data[0], processed.data[1],
+                        processed.data[2], processed.data[3]);
+                }
+            }
+        } else {
+            std::memcpy(processed.data, imageData->GetBuffer(), static_cast<size_t>(h) * w);
+        }
         if (m_sideIndex == 1 && m_rotateRight) {
             cv::Mat tmp;
             cv::rotate(processed, tmp, cv::ROTATE_180);
@@ -315,13 +353,22 @@ Result CameraControl::open() {
 
     IGXFactory::GetInstance().Init();
 
+    // 枚举重试（260927 真机实证：快速重启时前一实例刚退出、USB 相机未及重枚举
+    // ——首枚举 0 台即失败＝自检全链红根因）。0 台时 1.5s 间隔重试，总窗 ~8s
     GxIAPICPP::gxdeviceinfo_vector deviceList;
-    IGXFactory::GetInstance().UpdateDeviceList(300, deviceList);   // 枚举完成即返（原 1000ms 等满）
-    JMW_LOG_INFO("08-CameraControl", "[CameraControl] open 计时: Init+枚举 {}ms（{} 台）", el(), deviceList.size());
-
-    if (static_cast<int>(deviceList.size()) <= m_config.deviceIndexRight) {
-        IGXFactory::GetInstance().Uninit();
-        return Result::fail(-1, "设备数量不足");
+    for (int attempt = 1; ; ++attempt) {
+        deviceList.clear();
+        IGXFactory::GetInstance().UpdateDeviceList(300, deviceList);   // 枚举超时减半（原 1000ms 起步快）
+        JMW_LOG_INFO("08-CameraControl",
+            "[CameraControl] open 计时: Init+枚举 {}ms（{} 台，第 {} 次）",
+            el(), deviceList.size(), attempt);
+        if (static_cast<int>(deviceList.size()) > m_config.deviceIndexRight) break;
+        if (attempt >= 6) {
+            IGXFactory::GetInstance().Uninit();
+            return Result::fail(-1, "设备枚举不足（重试 6 次仍 0 台——检查相机 USB/"
+                                    "是否残留实例占用，重插后重启）");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     }
 
     for (int i = 0; i < 2; ++i) {
@@ -454,10 +501,23 @@ Result CameraControl::setGain(double dB) {
     return Result::ok();
 }
 
+// 软件端对比度·左右分置（260927→1002）：仅记账原子值——逐帧应用在采集回调
+//（ImageProcess 懒建配置，值变重建）；0=直通零开销。设备端无对比度特性
+//（SDK 官方口径：软件图像增强 SetContrastParam，0=不变/>0 增强/<0 减弱）
+Result CameraControl::setContrast(int leftValue, int rightValue) {
+    const auto clamp = [](int v) { return v < -100 ? -100 : (v > 100 ? 100 : v); };
+    const int lv = clamp(leftValue);
+    const int rv = clamp(rightValue);
+    m_contrastL.store(lv, std::memory_order_relaxed);
+    m_contrastR.store(rv, std::memory_order_relaxed);
+    JMW_LOG_INFO("08-CameraControl",
+        "[CameraControl] 对比度设置·左右分置: L={} R={}（0=直通；逐帧软件增强）", lv, rv);
+    return Result::ok();
+}
+
 Result CameraControl::setResolution(int width, int height) {
     if (!m_isOpen) return Result::fail("设备未打开");
     JMW_LOG_INFO("08-CameraControl", "[CameraControl] setResolution: 请求 {}x{}", width, height);
-
     for (int i = 0; i < 2; ++i) {
         auto& fc = m_sides[i].featureControl;
         if (fc.IsNull()) continue;

@@ -34,10 +34,10 @@ struct KeySemActions {        // 判出的动作出口（DeviceManager 接）
 class KeySemantics {
 public:
     // gate：这类键现在让按吗（DeviceManager 注入——采集态门控 M1 规矩＋260927
-    // 增补）。门控分类：启停键=M/S 主层不问 gate（采集态门控由 capturing 状态
-    // 自身表达，DeviceManager 保证只有可采集态才可能收到）；切模式键=M/D 亦
-    // 不问（260927 用户口径：采集中实时切模式——N10 四管掩码全参重发）；
-    // 菜单/调节键（含 M/S layer=2 的 menuSelect）=gate 关一律丢弃。
+    // 两轮增补）。门控分类：启停键=M/S 主层不问 gate；切模式键=M/D 不问（采集
+    // 中实时切模式）；调节键=U/D 与 L/R/S 不问（采集态实时调档同 UI 滑条口径
+    // ——N10 全参重发/相机直设）；菜单键（M/S layer=2 选中、U/S 进退、游标）
+    // =gate 关一律丢弃（采集态 layer 恒 1，调节键无游标歧义）。
     // capturing：采集子态（ModeController 黑板真相源）——裁判不看，启停同信号。
     KeySemantics(std::function<bool()> gate, KeySemActions actions);
 

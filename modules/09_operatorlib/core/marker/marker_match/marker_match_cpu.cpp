@@ -585,7 +585,43 @@ struct MarkerMatchCPU::Impl {
                 neighbor_disparities_buffer_.push_back(disparity);
                 matched_count++;
             } else if (N_L > 1 || N_R > 1) {
-                ambiguous_count += N_L;
+                // —— 行带内多候选消歧（260927 真机根因修复）：原「整带弃配」令
+                // 成排标志点（标定板行结构）恒 0 匹配——真机 15 点场景全带歧义。
+                // 矫正立体标准行匹配法：带内两侧各按 x 升序，同序位配对（矫正行
+                // 内左右视线顺序单调）；视差正性校验（d=xL-xR>0 且有限），不过校
+                // 验的序位跳过不配。1 对 1 孤立行走上方原路径不变。
+                std::sort(left_window_buffer_.begin(),
+                          left_window_buffer_.begin() + static_cast<std::ptrdiff_t>(N_L),
+                          [&](uint32_t a, uint32_t b) {
+                              return left_points[a].x < left_points[b].x;
+                          });
+                std::sort(right_window_buffer_.begin(),
+                          right_window_buffer_.begin() + static_cast<std::ptrdiff_t>(N_R),
+                          [&](uint32_t a, uint32_t b) {
+                              return right_points[a].x < right_points[b].x;
+                          });
+                const size_t pair_n = std::min(N_L, N_R);
+                for (size_t k = 0; k < pair_n; ++k) {
+                    const uint32_t li = left_window_buffer_[k];
+                    const uint32_t ri = right_window_buffer_[k];
+                    const float d = left_points[li].x - right_points[ri].x;
+                    if (!(d > 0.0f) || !std::isfinite(d)) continue;  // 视差非正/异常 → 跳序位
+                    const float* neighbor_ptr = neighbor_disparities_buffer_.empty()
+                                                   ? nullptr
+                                                   : neighbor_disparities_buffer_.data();
+                    const size_t neighbor_count = neighbor_disparities_buffer_.size();
+                    const float conf = calculateConfidence(
+                        left_points[li].y, right_points[ri].y, y_tol,
+                        d, neighbor_ptr, neighbor_count, params_.y_tolerance);
+                    result.disparities[li] = d;
+                    result.valid_flags[li] = 1;
+                    result.confidence[li] = conf;
+                    result.centerMatches[li] = static_cast<int>(ri);
+                    neighbor_disparities_buffer_.push_back(d);
+                    matched_count++;
+                }
+                ambiguous_count += (N_L > pair_n ? N_L - pair_n : 0)
+                                 + (N_R > pair_n ? N_R - pair_n : 0);
             }
         }
 

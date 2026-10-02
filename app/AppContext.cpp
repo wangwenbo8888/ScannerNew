@@ -304,6 +304,8 @@ void AppContext::initialize() {
         int previewFps = 10;
         bool pairStrictFrameId = true;   // 帧号严格配对（false=按时间对齐交付——实测实验口径）
         bool timestampPairing = true;    // 方案B：帧号不等时时间戳判组兜底（260927 实验）
+        int contrastLeft = 95;         // 对比度·左默认（软件端增强；0=直通。260927→1002）
+        int contrastRight = 100;       // 对比度·右默认
     };
     CameraSetupCfg camCfg;
     {
@@ -323,11 +325,16 @@ void AppContext::initialize() {
                 camCfg.previewFps = c.value("previewFps", camCfg.previewFps);
                 camCfg.pairStrictFrameId = c.value("pairStrictFrameId", camCfg.pairStrictFrameId);
                 camCfg.timestampPairing = c.value("timestampPairing", camCfg.timestampPairing);
+                camCfg.contrastLeft = c.value("contrastLeft", camCfg.contrastLeft);
+                camCfg.contrastRight = c.value("contrastRight", camCfg.contrastRight);
+                cameraContrastL_ = camCfg.contrastLeft;   // open 成功后经门面下发
+                cameraContrastR_ = camCfg.contrastRight;
                 JMW_LOG_INFO("app-AppContext",
-                             "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} pairStrict={} tsPair={}",
+                             "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} pairStrict={} tsPair={} contrastL={} contrastR={}",
                              camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
                              camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps,
-                             camCfg.pairStrictFrameId, camCfg.timestampPairing);
+                             camCfg.pairStrictFrameId, camCfg.timestampPairing,
+                             camCfg.contrastLeft, camCfg.contrastRight);
             } catch (const std::exception& e) {
                 JMW_LOG_WARN("app-AppContext",
                              "[AppContext] camera.json 解析失败（{}）——用内置默认", e.what());
@@ -472,13 +479,35 @@ void AppContext::startDevicesAsync() {
                          topo.pCores, topo.eCores, topo.hybrid, lanes);
         }
         const auto devR = deviceManager_->open();   // 相机枚举→MCU 自动搜口（N12 T100
-        // 探测）→上行接线→参数装载→N12 定版→逻辑线程；不预亮灯（启采=N10 才亮）
+        // 探测）→串口接线→装配载→N12 定版→逻辑线程；预点灯＝N10 探测帧（成败皆亮）
         JMW_LOG_INFO("app-AppContext", "[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
 
         notifySelfCheckItem("serialPort", devR.success);
         notifySelfCheckItem("license", true);   // 占位（狗到货接实检）
 
-        if (devR.success) {
+        if (!devR.success) {
+            // open 失败立即收口（260927 真机实证：探针 N10 已点灯——失败后不收口
+            // 灯亮到程序退出，观感「初始化没发关灯命令」）。close()＝N11 H0 熄灯
+            // ＋N12 Z0＋冲写队列＋关串口/相机＋黑板复位——幂等，与析构路径同款
+            JMW_LOG_WARN("app-AppContext",
+                "[AppContext] open 失败收口：熄灯/关串口（探针点灯不残留）: {}", devR.message);
+            notifySelfCheckItem("mcuLink", false);
+            notifySelfCheckItem("bgLight", false);
+            notifySelfCheckItem("laser", false);
+            notifySelfCheckItem("camera", false);
+            {
+                std::lock_guard<std::mutex> lock(selfCheckMtx_);
+                selfCheck_.done = true;
+            }
+            deviceManager_->close();
+            return;
+        }
+        {   //（早退保真：此处起恒为成功路径）
+            // 相机对比度启动默认值·左右分置（260927→1002）：camera.json
+            // "contrastLeft"/"contrastRight"（0=直通不设）；软件端逐帧增强——
+            // 若机型/SDK 路径异常自动回落直通（驱动内已兜）
+            if (cameraContrastL_ != 0 || cameraContrastR_ != 0)
+                deviceManager_->setCameraContrast(cameraContrastL_, cameraContrastR_);
             // G8 设备指示灯：open 成功补发当前态（此前 StateChanged 已过——MCU 未开
             // 时的码被去重缓存，此处按当前态重发一次落地）
             if (deviceManager_ && stateMachine_) {
@@ -511,15 +540,10 @@ void AppContext::startDevicesAsync() {
                 std::lock_guard<std::mutex> lock(selfCheckMtx_);
                 if (selfCheck_.reportedCount >= 6) selfCheck_.done = true;
             });
-        } else {
-            // 设备没开成功：余项判失败收尾（S1 卡住原因状态栏可见）
-            notifySelfCheckItem("mcuLink", false);
-            notifySelfCheckItem("bgLight", false);
-            notifySelfCheckItem("laser", false);
-            notifySelfCheckItem("camera", false);
-            std::lock_guard<std::mutex> lock(selfCheckMtx_);
-            selfCheck_.done = true;
         }
+        //（open 失败路径已于上方早退并 close() 收口熄灯——余项失败上报随之并入
+        //  早退段：serialPort(=open败)+license 已报，mcuLink/bgLight/laser/camera
+        //  四项失败上报见早退前，done 置位同早退段）
     });
 }
 

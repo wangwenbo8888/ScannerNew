@@ -177,10 +177,16 @@ public:
         return lastCaptureMode_.load(std::memory_order_relaxed);   // 原子——任意线程可读，
     }                                                               // app 帧回调随帧透传给 07）
     MenuState menuState() const;                // 菜单账本快照（UI 常显）
+    int presetLadderIndex() const { return ladderIndexSnap_.load(std::memory_order_relaxed); }
+    int presetLadderSize() const { return ladderSizeSnap_.load(std::memory_order_relaxed); }
+    //（260927 键控回显：状态栏「调节 档2/3」——logicTick 末随菜单快照刷新）
 
     // —— 相机薄转发（统一编队：返回值=前置检查，实际动作逻辑线程异步执行）——
     bool isCameraOpen() const;
     Result setCameraExposure(double ms);
+    Result setCameraContrast(int leftValue, int rightValue);  // 对比度·左右分置（软件端
+                                              // 增强；0=直通。启动默认值自 camera.json
+                                              // "contrastLeft"/"contrastRight" 由 app 装载）
     Result setCameraResolution(int width, int height);
     Result startFrameStream(hal::FrameCallback cb);
     Result stopFrameStream();
@@ -276,6 +282,8 @@ private:
     int64_t paramLastChangeMs_ = 0;// 末次改账时刻（防抖 2s 起点拍）
     bool paramBootLoading_ = false;// bootstrap 装载期（抑制脏账标记）
     int lastDeviceLed_ = 0;        // G8：末次已发指示灯码（去重；逻辑线程属主）
+    std::atomic<int> ladderIndexSnap_{1};   // 键控回显：档位快照（logicTick 末刷新）
+    std::atomic<int> ladderSizeSnap_{3};    // 键控回显：档数快照（setLadder 后刷新）
     infra::EventBus* bus_;
     CameraFactory camFactory_;
     SerialWriteOverride writeOverride_;

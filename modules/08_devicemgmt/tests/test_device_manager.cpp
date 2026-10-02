@@ -98,6 +98,7 @@ struct FakeCamera : Scanner::hal::IScannerCamera {
     }
     Result setGain(double) override { return Result::ok(); }
     Result setResolution(int, int) override { return Result::ok(); }
+    Result setContrast(int, int) override { return Result::ok(); }   // 软件对比度口·左右分置（260927→1002）
     Result setCalibration(const Scanner::hal::CameraIntrinsics&,
                           const Scanner::hal::CameraIntrinsics&,
                           const Scanner::hal::StereoExtrinsics&) override { return Result::ok(); }
@@ -1010,9 +1011,9 @@ TEST(DeviceManager, T18_MarkerSessionKeyIsolation) {
 
     dm.setCaptureMode(Scanner::ScanMode::MarkerOnly);   // 就绪流程：标点会话
     dm.logicTick();
-    dm.testInjectTextLine("G01 M1");                    // 启采（标点掩码 B40 激光全关）
+    dm.testInjectTextLine("G01 M1");                    // 启采（标点：B=kMarkerOnlyBg〔40→10〕＋H 钳 30〔120 带宽饱和链路重开，260927〕激光全关）
     dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H120 B40 T0 V0 C0 D0 L0"), 1);
+    EXPECT_EQ(mock.count("N10 H30 B10 T0 V0 C0 D0 L0"), 1);
 
     dm.testInjectTextLine("G01 M2");                    // 双击切模式→标点会话被拒
     dm.logicTick(); dm.logicTick();
@@ -1036,6 +1037,38 @@ TEST(DeviceManager, T18_MarkerSessionKeyIsolation) {
     dm.testInjectTextLine("G01 M2");
     dm.logicTick();
     EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerOnly);
+}
+
+// —— T22：View 上下文视点缩放事件＋参数占位错峰（260927 按设计接线）——View
+// 上下文左右键发 UserDefined p1=100（param2=±1）；参数改账占位 p1=1000+idx 与
+// 菜单③④(3/4)/视点(100) 不撞车 ——
+TEST(DeviceManager, T22_ViewZoomEventAndParamOffset) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+
+    dm.testInjectTextLine("G01 U2");   // None→View
+    dm.logicTick();
+    const int64_t zoomIn0 = rec.userParam(100);
+    dm.testInjectTextLine("G01 R1");   // 视点拉近
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(rec.userParam(100), zoomIn0 + 1);
+    dm.testInjectTextLine("G01 L1");   // 视点拉远
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(rec.userParam(100), zoomIn0 + 2);
+
+    // 参数改账占位错峰：bgLight(idx2) 改账广播 p1=1002——不落 3/4/100 门内
+    //（open 的 bootstrap 装载也广播一次——基线先记）
+    const int64_t bgEvt0 = rec.userParam(1002);
+    dm.setParam("bgLight", 55.0, Scanner::device::ParamEntry::Source::Ui);
+    dm.logicTick();
+    EXPECT_EQ(rec.userParam(1002), bgEvt0 + 1);
 }
 
 // —— T19：PresetLadder 档位梯（G6 缺口·260927）——Brightness 调节上下文左右键＝

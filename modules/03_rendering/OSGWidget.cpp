@@ -124,6 +124,20 @@ void OSGWidget::setCameraManipulator(osgGA::CameraManipulator *manipulator)
         m_viewer->setCameraManipulator(manipulator);
 }
 
+// 视点缩放（260927 按键 View 上下文接线）：factor<1 拉近（R 键上调＝zoom in），
+// >1 拉远（L 键下调）——沿当前视线平移视点保持注视点不动；经 setByMatrix 通用
+// 于任意 manipulator（Trackball 无 distance API）
+void OSGWidget::zoomView(double factor)
+{
+    osgGA::CameraManipulator* manip =
+        m_viewer.valid() ? m_viewer->getCameraManipulator() : nullptr;
+    if (!manip || factor <= 0.0) return;
+    osg::Vec3d eye, center, up;
+    manip->getMatrix().getLookAt(eye, center, up);
+    const osg::Vec3d dir = center - eye;
+    manip->setByMatrix(osg::Matrixd::lookAt(center - dir * factor, center, up));
+}
+
 void OSGWidget::home()
 {
     if (m_viewer.valid() && m_viewer->getCameraManipulator())

@@ -58,6 +58,8 @@ public:
     Result setExposure(double ms) override;
     Result setGain(double dB) override;
     Result setResolution(int width, int height) override;
+    Result setContrast(int leftValue, int rightValue) override;  // 软件端对比度·左右分置
+                                                 //（0=直通；±逐帧 ImageImprovment）
 
     Result setCalibration(const hal::CameraIntrinsics& left,
                           const hal::CameraIntrinsics& right,
@@ -90,6 +92,9 @@ private:
         ICaptureEventHandler*     eventHandler = nullptr;
         bool                      isOpen = false;
         bool                      isCapturing = false;
+        cv::Mat                   contrastLut;     // 对比度 LUT（256×1·CV_8UC1——懒建/值变
+                                                  // 重建；仅本侧回调线程触碰）
+        int                       lutContrast = 0; // LUT 已烘焙值（变更检测）
     };
 
     // 侧缓冲
@@ -105,6 +110,8 @@ private:
     std::atomic<bool> m_isCapturing{false};
     std::atomic<double> m_currentExposureMs{3.0};  // 相机侧初始值；账本 spec=exposure{def 10, 1..100}（DeviceManager.cpp makeParamSpecs）
     std::atomic<double> m_currentGain{0.0};      // 按 GainRaw 原生单位传，dB 语义由上层换算
+    std::atomic<int> m_contrastL{0};             // 软件对比度·左（0=直通零开销；± [-100,100]）
+    std::atomic<int> m_contrastR{0};             // 软件对比度·右（左右分置——260927→1002）
 
     // 帧号稳定偏移配对（260911）：N10 重发/启停后某侧多吃漏吃一触发沿→L-R 恒差
     // ±1 永不收敛——连续 30 次同号失配即采纳，按时间对齐配对（严格等值期间=0）

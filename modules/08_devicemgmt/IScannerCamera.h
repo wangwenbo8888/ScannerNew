@@ -70,6 +70,11 @@ public:
     virtual Result setExposure(double ms) = 0;
     virtual Result setGain(double dB) = 0;
     virtual Result setResolution(int width, int height) = 0;
+    // 对比度（260927 增→1002 左右分置）：软件端图像增强（Galaxy ImageImprovment/
+    // SetContrastParam——设备端无此特性）。0=直通零开销（默认）；>0 增强/<0 减弱，
+    // 建议域 [-100,100]；左右各自独立值，逐帧生效。启动默认值自 config/camera.json
+    // "contrastLeft"/"contrastRight" 装载
+    virtual Result setContrast(int leftValue, int rightValue) = 0;
 
     // 标定参数（注入式，08 设计 B3 修正）：app 从 06 标定结果仓库取已解析内外参喂入——
     // 08 不带 json 解析器、不做第二真相源（标定数据归属 06）

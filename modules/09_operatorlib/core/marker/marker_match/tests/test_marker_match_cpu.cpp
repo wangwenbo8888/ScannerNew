@@ -224,6 +224,10 @@ TEST_F(MarkerMatchCPUFitTest, NoisyMatch) {
 }
 
 TEST_F(MarkerMatchCPUFitTest, AmbiguousPoints) {
+    // 260927 语义升级：同 y 行带多候选不再「整带弃配」——按 x 单调同序位配对
+    //（矫正立体标准行匹配；原行为成排标志点恒 0 匹配＝真机「标点扫描只出
+    // 1 点」根因）。本例：y=100 行带左右各 2 点，x 序 (200,210)↔(185,195)
+    // 同序配对视差均 +15 → 2 对命中；y=200 孤立点 1 对；共 3 对全配
     std::vector<cv::Point2f> left = {
         cv::Point2f(200.0f, 100.0f),
         cv::Point2f(210.0f, 100.0f),
@@ -239,7 +243,32 @@ TEST_F(MarkerMatchCPUFitTest, AmbiguousPoints) {
     auto result = op.Execute(left, right);
 
     EXPECT_TRUE(result.success);
-    EXPECT_GT(result.statistics.ambiguous_points, 0u);
+    EXPECT_EQ(result.statistics.matched_points, 3u);   // 行带消歧 2＋孤立 1
+    EXPECT_EQ(result.statistics.ambiguous_points, 0u);
+    EXPECT_NEAR(result.disparities[0], 15.0f, 0.01f);  // 200↔185
+    EXPECT_NEAR(result.disparities[1], 15.0f, 0.01f);  // 210↔195
+    EXPECT_NEAR(result.disparities[2], 15.0f, 0.01f);  // 220↔205
+}
+
+TEST_F(MarkerMatchCPUFitTest, AmbiguousBandNegativeDisparitySkipped) {
+    // 行带消歧的视差正性校验：x 序位配对若 xL≤xR（非正视差）→ 该序位跳过不配
+    std::vector<cv::Point2f> left = {
+        cv::Point2f(100.0f, 100.0f),
+        cv::Point2f(200.0f, 100.0f)
+    };
+    std::vector<cv::Point2f> right = {
+        cv::Point2f(150.0f, 100.0f),   // 序位 0：100↔150 视差 -50 → 跳
+        cv::Point2f(180.0f, 100.0f)    // 序位 1：200↔180 视差 +20 → 配
+    };
+
+    MarkerMatchCPU op(params_);
+    auto result = op.Execute(left, right);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.statistics.matched_points, 1u);
+    EXPECT_FALSE(result.valid_flags[0]);
+    EXPECT_TRUE(result.valid_flags[1]);
+    EXPECT_NEAR(result.disparities[1], 20.0f, 0.01f);
 }
 
 TEST_F(MarkerMatchCPUFitTest, SinglePointPair) {

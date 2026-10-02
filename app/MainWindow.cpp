@@ -381,6 +381,33 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         updateStateIndicator(static_cast<Scanner::service::SystemState>(newState));
                     }, Qt::QueuedConnection);
                 });
+            // —— 按键管理闭环（260927 按设计接线）：菜单③④/视点缩放的 UserDefined
+            //    消费（原零消费者＝事件石沉大海）。p1 约定：3=扫描完成 4=开始后处理
+            //    100=视点缩放（param2=+1 拉近/-1 拉远）；参数改账占位=1000+idx 不入此门。
+            //    总线锁纪律同上：锁内只拷贝，Queued 切 UI 线程再动手
+            m_userDefinedSubId_ = bus->subscribe(Scanner::EventType::UserDefined,
+                [this](const Scanner::Event& ev) {
+                    const int64_t p1 = ev.param1, p2 = ev.param2;
+                    QMetaObject::invokeMethod(this, [this, p1, p2]() {
+                        if (p1 == 3) {              // 菜单③「扫描完成」＝关闭会话＋GBA
+                            if (!m_appCtx || !m_appCtx->isScanSessionActive()) return;
+                            if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                            m_activeScanToolIdx = -1;
+                            auto r = m_appCtx->stopScanSession();
+                            statusBar()->showMessage(r.success
+                                ? QStringLiteral("按键完成扫描——全局优化后台执行中")
+                                : QString::fromStdString("完成被拒: " + r.message));
+                        } else if (p1 == 4) {       // 菜单④「开始后处理」＝STL 导出批算
+                            if (!m_appCtx) return;
+                            auto r = m_appCtx->startPostProcessSession("scan_output.stl", 0);
+                            statusBar()->showMessage(r.success
+                                ? QStringLiteral("按键启动后处理——STL 导出执行中")
+                                : QString::fromStdString("后处理被拒: " + r.message));
+                        } else if (p1 == 100) {     // View 上下文视点缩放
+                            if (m_3dView) m_3dView->zoomView(p2 > 0 ? 0.8 : 1.25);
+                        }
+                    }, Qt::QueuedConnection);
+                });
         }
     }
 
@@ -393,6 +420,11 @@ MainWindow::~MainWindow() {
         if (auto* bus = m_appCtx->eventBus())
             bus->unsubscribe(m_stateChangedSubId_);
         m_stateChangedSubId_ = 0;
+    }
+    if (m_userDefinedSubId_ && m_appCtx) {
+        if (auto* bus = m_appCtx->eventBus())
+            bus->unsubscribe(m_userDefinedSubId_);
+        m_userDefinedSubId_ = 0;
     }
 }
 
@@ -449,6 +481,7 @@ void MainWindow::onIntegrateTestClicked()
 void MainWindow::onReloadPointCloud()
 {
     m_3dView->clearScene();
+    m_importedCloudCount = 0;           // 3D 重载=回到仓库快照（导入云计数随之清）
     if (m_cloudItem001)
         m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (0)"));
     // 3000 万点截断（100M.ply 全量 ~2 亿？实为 2000 万；30M 上限=测试口径：真实
@@ -1580,6 +1613,13 @@ QWidget *MainWindow::createToolBar()
 
                     if (ok && !points.empty()) {
                         statusBar()->showMessage(QStringLiteral("Imported %1 points").arg(points.size()));
+                        // 260927 导入计数上树：导入云不入扫描仓库（pcb），树节点原只显
+                        // 仓库计数＝恒 0；cloudTimer 仅在仓库计数变化时改写——此处直接
+                        // 设文本可存活到下次扫描出点
+                        m_importedCloudCount = points.size();
+                        if (m_cloudItem001)
+                            m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
+                                                        .arg(points.size()));
                         if (m_3dView) {
                             m_3dView->setCenterOverlayVisible(false);
                             m_3dView->loadPointCloud(points);
@@ -2065,12 +2105,13 @@ QWidget *MainWindow::createInfoSection()
         {"infopanel-black-11",   QStringLiteral("帧率 (FPS)")},
         {"temprature-black-11",  QStringLiteral("MCU温度")},
         {"cloudlist-black-11",   QStringLiteral("CPU占用率")},
-        {"memory-black-11",      QStringLiteral("内存状态")}
+        {"memory-black-11",      QStringLiteral("内存状态")},
+        {"icon/left/marklist-black-11", QStringLiteral("键控状态")}
     };
 
     QLabel** labelPtrs[] = {
         &m_infoConnLabel, &m_infoPointCloudLabel, &m_infoFpsLabel,
-        &m_infoTempLabel, &m_infoCpuLabel, &m_infoMemLabel
+        &m_infoTempLabel, &m_infoCpuLabel, &m_infoMemLabel, &m_infoKeyLabel
     };
 
     for (int i = 0; i < infos.size(); ++i) {
@@ -2678,9 +2719,10 @@ void MainWindow::updateInfoSection()
         m_infoConnLabel->setStyleSheet(camConnected ? "color: #00AA00;" : "color: #CC0000;");
     }
 
-    // 2. 点云数量 — 从 PointCloudBuffer 读
+    // 2. 点云数量 — 从 PointCloudBuffer 读（260927：仓库空时回落显示导入云计数）
     if (m_infoPointCloudLabel) {
         int count = pcb ? pcb->getTotalPointCount() : 0;
+        if (count == 0) count = static_cast<int>(m_importedCloudCount);
         m_infoPointCloudLabel->setText(QString::number(count));
     }
 
@@ -2729,6 +2771,35 @@ void MainWindow::updateInfoSection()
                 .arg(updateCount));
         } else {
             m_infoMemLabel->setText("-- / -- GB");
+        }
+    }
+
+    // 7. 键控状态回显（260927 按设计实现·按键管理闭环）：设备 U/L/R/M 全链在
+    //    动，但菜单/调节多为「暗动作」——状态栏常驻指示当前键控层/调节上下文/
+    //    档位，用户按键后可见反馈（M 键动作本身可见不依赖此栏）
+    if (m_infoKeyLabel) {
+        auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+        if (dm) {
+            const auto ms = dm->menuState();
+            QString s;
+            if (ms.layer == 2) {
+                QString curs;
+                for (int i = 1; i <= 4; ++i)
+                    curs += (ms.cursor == i) ? QStringLiteral("◆") : QStringLiteral("·");
+                s = QStringLiteral("菜单 ") + curs + QStringLiteral("（M 选中/U 退）");
+            } else {
+                switch (ms.adjustCtx) {
+                case Scanner::device::MenuState::AdjustCtx::View:
+                    s = QStringLiteral("调节:视点（L 拉远/R 拉近）"); break;
+                case Scanner::device::MenuState::AdjustCtx::Brightness:
+                    s = QStringLiteral("调节:档位 %1/%2（L 降/R 升）")
+                        .arg(dm->presetLadderIndex())
+                        .arg(dm->presetLadderSize()); break;
+                default:
+                    s = QStringLiteral("键控:待命（U 双击进调节/M 启停）"); break;
+                }
+            }
+            m_infoKeyLabel->setText(s);
         }
     }
 }

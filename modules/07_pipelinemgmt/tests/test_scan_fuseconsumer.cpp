@@ -379,7 +379,9 @@ TEST(FuseConsumerTest, FrameExceptionDroppedAndContinue) {
     EXPECT_EQ(snap.obs[0].frameId, 1u);
     EXPECT_EQ(snap.obs[1].frameId, 3u);             // 第 3 帧续跑
     ASSERT_EQ(sk.qualities.size(), 1u);
-    EXPECT_EQ(sk.qualities[0], Scanner::QualityFlag::Fault);
+    // 260927 设计口径变更：丢帧续跑＝Warning 不停机（原 Fault→Error 曾致 S7
+    // 全局停机卡死会话——真机日志实证）；日志行仍 ERROR 留痕
+    EXPECT_EQ(sk.qualities[0], Scanner::QualityFlag::Warning);
     EXPECT_EQ(sk.codes[0], 1602);
 }
 

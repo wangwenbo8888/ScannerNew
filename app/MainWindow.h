@@ -158,12 +158,15 @@ protected:
     QLabel *m_infoTempLabel = nullptr;
     QLabel *m_infoCpuLabel = nullptr;
     QLabel *m_infoMemLabel = nullptr;
+    QLabel *m_infoKeyLabel = nullptr;   // 键控状态回显（260927：层/调节上下文/档位）
+    uint64_t m_importedCloudCount = 0; // 导入点云计数（260927 上树/信息卡——不入扫描仓库）
 
     // —— UI 状态图标（P1-2）：订阅 10 状态机 StateChanged（EventBus 主通道），
     //    主线程刷 7 态指示。EventBus 同步分发持总线锁——锁内只拷贝 param2 再
     //    QMetaObject::invokeMethod queued 投递主线程（对齐 P0-2 故障桥红线）。
     // ——
     Scanner::infra::SubscriberId m_stateChangedSubId_ = 0;
+    Scanner::infra::SubscriberId m_userDefinedSubId_ = 0;   // 按键③④/视点缩放消费（260927）
     QLabel *m_stateIndicator = nullptr;                 // 状态栏右下角常驻态指示（色点+文案）
     void updateStateIndicator(Scanner::service::SystemState s);   // UI 线程槽（仅设文案/配色）
     static QString stateText(Scanner::service::SystemState s);    // 7 态文案映射

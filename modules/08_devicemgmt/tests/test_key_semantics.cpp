@@ -202,8 +202,9 @@ TEST(KeySemantics, LeftRightNoCtxDropped) {
     EXPECT_EQ(c.drops[1], "无效");
 }
 
-// —— 14. GateBlocksMenuKeys：gate=false → M/S 主层启停与 M/D 切模式仍放行
-//      （260927 增补：采集中实时切模式），其余全 dropped("门禁") ——
+// —— 14. GateBlocksMenuKeys：gate=false（采集态）→ 启停（M/S 主层）、切模式
+//      （M/D）、调节（U/D 与 L/R/S，260927 采集态实时调档口径）放行；
+//      纯菜单键（menuSelect/enterMenu/exitMenu）dropped("门禁") ——
 TEST(KeySemantics, GateBlocksMenuKeys) {
     Counters c;
     auto k = referee(c, [] { return false; });           // 菜单类键全关
@@ -211,16 +212,19 @@ TEST(KeySemantics, GateBlocksMenuKeys) {
     EXPECT_EQ(c.captureToggle, 1);
     k.onGesture(kg(KeyId::Middle, Gest::Double), ms(1));          // cycleMode 不问门禁（260927）→ 放行
     EXPECT_EQ(c.cycleMode, 1);
-    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(2));           // menuSelect 菜单类
+    k.onGesture(kg(KeyId::Up, Gest::Double), ms(1));              // cycleAdjustCtx 调节键放行（260927）
+    EXPECT_EQ(c.cycleAdjustCtx, 1);
+    k.onGesture(kg(KeyId::Left, Gest::Short), ms(1, Ctx::View));  // adjustDown 放行（260927）
+    EXPECT_EQ(c.adjustDown, 1);
+    k.onGesture(kg(KeyId::Right, Gest::Short), ms(1, Ctx::View)); // adjustUp 放行（260927）
+    EXPECT_EQ(c.adjustUp, 1);
+    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(2));           // menuSelect 纯菜单键
     k.onGesture(kg(KeyId::Up, Gest::Short), ms(1));               // enterMenu
     k.onGesture(kg(KeyId::Up, Gest::Short), ms(2));               // exitMenu
-    k.onGesture(kg(KeyId::Up, Gest::Double), ms(1));              // cycleAdjustCtx
-    k.onGesture(kg(KeyId::Left, Gest::Short), ms(2));             // cursorLeft
-    k.onGesture(kg(KeyId::Right, Gest::Short), ms(2));            // cursorRight
-    k.onGesture(kg(KeyId::Left, Gest::Short), ms(1, Ctx::View));  // adjustDown
-    k.onGesture(kg(KeyId::Right, Gest::Short), ms(1, Ctx::View)); // adjustUp
-    EXPECT_EQ(c.fired(), 2);                             // 仅启停＋切模式放行
-    ASSERT_EQ(c.drops.size(), 8u);
+    // L/R 短按在采集态真实不可达 layer=2（进菜单被门禁挡）——此处只钉主层调节语义；
+    // 游标属菜单域不单测 gate 放行
+    EXPECT_EQ(c.fired(), 5);                             // 启停＋切模式＋切上下文＋升降档
+    ASSERT_EQ(c.drops.size(), 3u);
     for (const auto& d : c.drops) EXPECT_EQ(d, "门禁");
 }
 

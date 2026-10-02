@@ -229,12 +229,13 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
         ops->undistCpu = std::make_unique<calib::MarkerUndistortCPU>(mp);
 
         ops->ellipse     = std::make_unique<calib::EllipseFitCPU>();
-        // 扫描链极线 y 容差 0.15px→3.0px：亚像素中心误差 ±0.3~1px + 现场装配/
-    // 温漂，真机实测左右中心 y 差 1~3px（1.0px 下匹配 0~3 对不稳定）。算子
-    // validate 上限已同步放宽至 10（像素口径）——超限仍会令 lane 算子集构造
-    // 抛异常、整链瘫，勿超
+        // 扫描链极线 y 容差：亚像素中心误差 ±0.3~1px + 现场装配/温漂，真机实测左右
+        // 中心 y 差 1~3px（1.0px 下匹配 0~3 对不稳定）；260927 实证 3.0px 仍骑线
+        //（成功会话 y 偏差均值 3.04px、匹配率 ~10%；场景/温度稍变即全超差→0 对
+        // ＝「标点扫描只出 1 点」根因）→ 放宽 6.0px（validate 上限 10，勿超；
+        // 误配由下游极线/边缘匹配＋GBA 约束兜住）
     calib::MarkerMatchCPUParams mmp;
-    mmp.y_tolerance = 3.0f;
+    mmp.y_tolerance = 6.0f;
     mmp.max_points = 300;      // 100→300：亮灯场景 ROI 可达 137+，超上限算子
                                // 抛异常令 pChain 整帧报废（"无点"根因之一）
     ops->match       = std::make_unique<calib::MarkerMatchCPU>(mmp);
@@ -407,6 +408,15 @@ ScanChains::Hooks ScanChains::assemble() {
                                                 // 面积过滤归 ccl 算子参数——07 不持
                                                 // 尺寸先验，还账 2026-09-01）
         front.roisR = cclR.toRectList();
+        // 排障插桩（260927 标点扫描仅 1 点）：每帧 CCL 候选连通域数——1 若在此
+        // 已塌（=掩膜/阈值/图像问题）vs 候选多而 P 链丢（=拟合/匹配问题）分水岭
+        {
+            static std::atomic<uint64_t> s_roiLog{0};
+            if (s_roiLog.fetch_add(1, std::memory_order_relaxed) % 30 == 0)
+                JMW_LOG_INFO("07-ScanChains",
+                    "[标志点排障] ccl 候选 L={} R={}（帧 {}）",
+                    front.roisL.size(), front.roisR.size(), frame->frameId);
+        }
 
         // 中段模拟提取（调试件）：本帧设备系观测在此生成（frontReady 前——
         // pChain 标志点替换与激光段覆写经 front.simObs 只读；false=maxFrames
@@ -828,7 +838,26 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
     for (auto& e : ellL) cL.push_back(e.centerPoint2f());
     for (auto& e : ellR) cR.push_back(e.centerPoint2f());
 
-    if (verbose) JMW_LOG_INFO("07-ScanChains", "[ScanChains] P链观测#{}: →marker_match（L中心={} R中心={}）",
+    // 排障插桩（260927 匹配对=1 之谜）：喂入匹配器的原始中心坐标（每 30 帧一条）
+    {
+        static std::atomic<uint64_t> s_mmDump{0};
+        if (s_mmDump.fetch_add(1, std::memory_order_relaxed) % 30 == 0) {
+            char buf[640];
+            std::string ls, rs;
+            for (size_t i = 0; i < cL.size() && i < 15; ++i) {
+                std::snprintf(buf, sizeof buf, "(%.0f,%.0f)", cL[i].x, cL[i].y);
+                ls += buf;
+            }
+            for (size_t i = 0; i < cR.size() && i < 15; ++i) {
+                std::snprintf(buf, sizeof buf, "(%.0f,%.0f)", cR[i].x, cR[i].y);
+                rs += buf;
+            }
+            JMW_LOG_INFO("07-ScanChains",
+                "[标志点排障] 匹配输入 L: {} | R: {}", ls, rs);
+        }
+    }
+
+    if (verbose) JMW_LOG_INFO("07-ScanChains", "[ScanChains] P观测#{}: 进marker_match（L点数={} R点数={}）",
                               pchainSeq, cL.size(), cR.size());
     const auto tm0 = CLK::now();
     auto mm = ops.match->Execute(cL, cR);

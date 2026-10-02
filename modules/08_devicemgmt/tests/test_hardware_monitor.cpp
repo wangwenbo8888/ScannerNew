@@ -53,6 +53,7 @@ struct LocalFakeCam : Scanner::hal::IScannerCamera {
     Scanner::Result setExposure(double) override { return Scanner::Result::ok(); }
     Scanner::Result setGain(double) override { return Scanner::Result::ok(); }
     Scanner::Result setResolution(int, int) override { return Scanner::Result::ok(); }
+    Scanner::Result setContrast(int, int) override { return Scanner::Result::ok(); }   // 软件对比度口·左右分置（260927→1002）
     Scanner::Result setCalibration(const Scanner::hal::CameraIntrinsics&,
                                    const Scanner::hal::CameraIntrinsics&,
                                    const Scanner::hal::StereoExtrinsics&) override { return Scanner::Result::ok(); }
