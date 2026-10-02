@@ -87,11 +87,14 @@ constexpr Scanner::ScanMode scanModeFromMenuCursor(int modeCursor) {
 }
 
 // 用户标定五态灯序相位参数（261002 用户口径：补光无激光/左斜/右斜/精细/深孔，
-// 每态 1 帧循环；管语义 T=精细 V=左斜 C=右斜 D=深孔占位）。B/L 取账本值，
-// 补光态（phase 0）激光亮度压 0（灯全关只留补光）。调用点均在逻辑线程
+// 自动循环——一种状态拍一帧即换下一状态）。B/L 取账本值，补光态（phase 0）
+// 激光亮度压 0（灯全关只留补光）。H 自动钳低：切灯 N10 串口落线（~10ms）必须
+// 先于下一触发脉冲（50ms@20Hz），保证每态恰好一帧、帧-灯型不错位——全自动，
+// 无需用户调滑条。调用点均在逻辑线程
+constexpr int kCalibCycleMaxHz = 20;
 hal::CaptureParams calibPhaseParams(const ParamStore& params, int phase) {
     hal::CaptureParams p;
-    p.freqHz = static_cast<int>(params.get("freqHz").value);   // 灯序节奏＝触发频率
+    p.freqHz = std::min(static_cast<int>(params.get("freqHz").value), kCalibCycleMaxHz);
     p.bgLight = static_cast<int>(params.get("bgLight").value);
     p.laserLevel = (phase == 0) ? 0 : static_cast<int>(params.get("laserLevel").value);
     p.laserT = (phase == 3) ? 1 : 0;   // 精细
@@ -1063,9 +1066,9 @@ Result DeviceManager::startFrameStream(hal::FrameCallback cb) {
                 m_rxCnt_.store(0, std::memory_order_relaxed);
                 m_lastFpsTick_ = now;
             }
-            // 261002 用户标定五态灯序：帧打点当前相位＋切下一态（N10 经编队落
-            // 逻辑线程——串口落线节奏跟不上触发时相位边界可能偏 1 帧，标定建议
-            // 账本 H 调低（≤30Hz）保证切灯先于下一触发）
+            // 261002 用户标定五态灯序（全自动一态一帧）：帧打点当前相位＋切下一态
+            // （N10 经编队落逻辑线程）。节奏由 calibPhaseParams 自动钳 H≤20Hz：
+            // 切灯落线（~10ms）恒先于下一触发（50ms），帧-灯型不错位
             hal::StereoFrame out = f;
             const int phase = calibPhase_.load(std::memory_order_relaxed);
             if (phase >= 0) {

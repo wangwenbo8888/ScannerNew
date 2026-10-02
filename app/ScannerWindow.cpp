@@ -414,8 +414,8 @@ void ScannerWindow::onCalibrateClicked()
 
     // 启动采集供标定使用（经门面：帧出口接线 + 五态灯序启采 + 开流）——
     // 261002 用户口径：标定采集时序＝补光无激光→左斜→右斜→精细→深孔，
-    // 每态 1 帧软件逐态切灯循环（替代原固定面片灯型；帧逐帧带 lightPhase
-    // 相位标记，消费方按灯型分派）。建议标定前把频率滑条调低（≤30Hz）
+    // 全自动循环（一种状态拍一帧即换下一状态；H 自动钳 ≤20Hz 防帧-灯型错位，
+    // 替代原固定面片灯型；帧逐帧带 lightPhase 相位标记，消费方按灯型分派）
     if (!dm->isCapturing()) {
         dm->startFrameStream([this](const Scanner::hal::StereoFrame& frame) {
             pushFrameToBuffer(frame);
