@@ -6,6 +6,7 @@
 #include "sched/SchedulerRuntime.h"
 
 #include <spdlog/spdlog.h>
+#include "jmw_logging.h"   // 261002 lane 统计走 jmw 文件日志（原生 spdlog 不落档）
 
 #include <future>
 
@@ -83,10 +84,11 @@ void SchedulerRuntime::drainAndShutdown(std::chrono::milliseconds laneJoinTimeou
     if (!laneAcc_.empty()) {
         for (size_t i = 0; i < laneAcc_.size(); ++i) {
             const auto& a = laneAcc_[i];
-            spdlog::info("[SchedulerRuntime] lane[{}] 统计: frames={} idle={}次/{:.0f}ms "
-                         "grab={:.0f}ms gpu={:.0f}ms efin={:.0f}ms",
-                         i, a.frames, a.idleSpins, a.idleMs,
-                         a.grabMs, a.gpuMs, a.efinMs);
+            JMW_LOG_INFO("07-SchedRuntime",
+                "[SchedRuntime] lane[{}] 统计: frames={} idle={}次/{:.0f}ms "
+                "grab={:.0f}ms gpu={:.0f}ms efin={:.0f}ms",
+                i, a.frames, a.idleSpins, a.idleMs,
+                a.grabMs, a.gpuMs, a.efinMs);
         }
     }
     broker_.shutdown();                          // 排空任务队列后 join workers
