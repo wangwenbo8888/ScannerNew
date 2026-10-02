@@ -700,27 +700,26 @@ void DeviceManager::startCaptureOnLogic() {
 
 void DeviceManager::stopCaptureOnLogic() {
     if (!mode_->isCapturing()) return;
-    calibPhase_.store(-1, std::memory_order_relaxed);   // 标定灯序随停采退出
+    calibPhase_.store(-1, std::memory_order_relaxed);   // 标定灯序随停采退出（CAS 保证后续帧不再发 N10）
+    // 261002 熄灯定序（17:29 真机日志实证）：临时机固件任何 N10 都会重启触发
+    // （a9bfe53 单帧启采口径）——熄灯 N10 必须排在 N11 H0 **之前**（先灭灯→
+    // ~2ms 后停触发）；排在之后＝尾帧重启扫描。真机固件 N10 B0/L0 不关灯（无害）、
+    // N11 H0 关灯——两固件兼容。H 压 1 最小化重启窗内触发脉冲
+    {
+        hal::CaptureParams off{};
+        off.freqHz = 1;
+        off.bgLight = 0;
+        off.laserLevel = 0;
+        off.laserT = off.laserV = off.laserC = off.laserD = 0;
+        mcu_->setCaptureParams(off, nullptr);
+    }
     mcu_->stopScan([this](bool ok, const std::string& p) {
         if (!ok) {
             publishFault(code(DevFault::CmdNoAck), "N11H0 " + p);   // 3 败=无应答（#7≡#8）
             return;
         }
         mode_->setCapturing(false);
-        // 261002 临时测试机熄灯补帧：N11 H0 停触发但灯态保持（激光管/补光常亮
-        // ——真机固件 N11 关灯、临时 ESP32 不关，17:26 真机日志实证）。补发全零
-        // N10（B0/L0/四管全关）——真机实测此帧不关灯（无害），临时机关灯
-        {
-            hal::CaptureParams off{};
-            off.freqHz = static_cast<int>(params_->get("freqHz").value);
-            off.bgLight = 0;
-            off.laserLevel = 0;
-            off.laserT = off.laserV = off.laserC = off.laserD = 0;
-            mcu_->setCaptureParams(off, nullptr);
-        }
-        // 灯态收口：单帧 N11 H0 即灭灯（真机+工厂软件同款验证；原 lightsOff
-        // 补发属重复帧，2026-08-30 删）。停相机流前先冲队列——相机停流瞬间
-        // USB 风暴会堵串口写（flush 有界 300ms）
+        // 停相机流前先冲队列——相机停流瞬间 USB 风暴会堵串口写（flush 有界 300ms）
         mcu_->flushWrites(300);
         if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();
     });
