@@ -701,18 +701,8 @@ void DeviceManager::startCaptureOnLogic() {
 void DeviceManager::stopCaptureOnLogic() {
     if (!mode_->isCapturing()) return;
     calibPhase_.store(-1, std::memory_order_relaxed);   // 标定灯序随停采退出（CAS 保证后续帧不再发 N10）
-    // 261002 熄灯定序（17:29 真机日志实证）：临时机固件任何 N10 都会重启触发
-    // （a9bfe53 单帧启采口径）——熄灯 N10 必须排在 N11 H0 **之前**（先灭灯→
-    // ~2ms 后停触发）；排在之后＝尾帧重启扫描。真机固件 N10 B0/L0 不关灯（无害）、
-    // N11 H0 关灯——两固件兼容。H 压 1 最小化重启窗内触发脉冲
-    {
-        hal::CaptureParams off{};
-        off.freqHz = 1;
-        off.bgLight = 0;
-        off.laserLevel = 0;
-        off.laserT = off.laserV = off.laserC = off.laserD = 0;
-        mcu_->setCaptureParams(off, nullptr);
-    }
+    // 261002 用户定版：停采只发单帧 N11 H0——不补任何 N10（临时机固件任何 N10
+    // 都会重启触发＝尾帧复活扫描；灯态交由固件/N11 语义处理）
     mcu_->stopScan([this](bool ok, const std::string& p) {
         if (!ok) {
             publishFault(code(DevFault::CmdNoAck), "N11H0 " + p);   // 3 败=无应答（#7≡#8）
