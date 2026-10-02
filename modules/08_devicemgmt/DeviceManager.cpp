@@ -152,6 +152,11 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
         publishEvent(EventType::StateChanged, static_cast<int64_t>(newM),
                      static_cast<int64_t>(oldM));
     };
+    mode_->onCapturingChange = [this](bool on) {
+        // 261002 暂停编辑门禁：采集翻转沿广播（UserDefined p1=2000，p2=0停/1启
+        // ——与参数改账 1000+idx／菜单③④=3,4／视点 1-4,100 错峰不撞车）
+        publishEvent(EventType::UserDefined, 2000, on ? 1 : 0);
+    };
     warmup_->onStable = [this] {
         auto cb = std::move(warmupDone_);
         if (cb) cb(true);

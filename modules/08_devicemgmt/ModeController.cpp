@@ -23,6 +23,11 @@ void ModeController::commit(DeviceMode newMode) {
 
 DeviceMode ModeController::mode() const { return mode_.load(); }
 bool ModeController::isCapturing() const { return capturing_.load(); }
-void ModeController::setCapturing(bool on) { capturing_.store(on); }
+void ModeController::setCapturing(bool on) {
+    // 261002 暂停编辑门禁：翻转沿广播（同值幂等不广播）——app 层据此把扫描
+    // 工作流同步 Paused/Resume（M 停采即可编辑，无需点模式键二次关会话）
+    const bool was = capturing_.exchange(on);
+    if (was != on && onCapturingChange) onCapturingChange(on);
+}
 
 } // namespace Scanner::device

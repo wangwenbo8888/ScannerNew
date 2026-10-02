@@ -227,6 +227,7 @@ private:
     // —— 08 故障桥（P0-2）：EventBus FaultOccurred(Error+) → S7 安全停机链 ——
     Scanner::infra::SubscriberId faultBridgeSubId_ = 0;
     Scanner::infra::SubscriberId ledSubId_ = 0;      // G8 设备指示灯：StateChanged→N14 S 码
+    Scanner::infra::SubscriberId captureStateSubId_ = 0;   // 261002 采集翻转沿：M 停采→工作流暂停（可编辑）
     int cameraContrastL_ = 0;                         // camera.json "contrastLeft"（0=直通；open 后下发）
     int cameraContrastR_ = 0;                         // camera.json "contrastRight"（左右分置·260927→1002）
 };

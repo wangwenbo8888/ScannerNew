@@ -121,10 +121,32 @@ void AppContext::initialize() {
             using S = Scanner::service::SystemState;
             const auto s = static_cast<S>(evt.param2);   // param2=新态（◆图标同口径）
             const int led = s == S::Init              ? 1   // 黄（初始化）
-                          : s == S::FaultSelfCheck    ? 2   // 红（故障）
-                          : (s == S::Standby || s == S::PostProcessing) ? 3   // 绿
-                          : 4;                              // 蓝（标定/扫描两态）
+                           : s == S::FaultSelfCheck    ? 2   // 红（故障）
+                           : (s == S::Standby || s == S::PostProcessing) ? 3   // 绿
+                           : 4;                              // 蓝（标定/扫描两态）
             deviceManager_->setDeviceLed(led);
+        });
+
+    // 261002 M 停采→工作流同步暂停（暂停态可编辑）：原 M 停只停设备（N11 H0），
+    // 工作流仍 Running——isScanSessionPaused()=false，编辑门禁拒，须点模式键
+    // 二次关会话才能编辑。现订阅采集翻转沿（08 广播 UserDefined p1=2000）：
+    // 停→scanWf pause（就绪态，编辑门开）；M 再启→resume 续采。
+    // 标定五态等无扫描会话场景：isScanSessionActive=false 自动跳过
+    captureStateSubId_ = eventBus_->subscribe(Scanner::EventType::UserDefined,
+        [this](const Scanner::Event& evt) {
+            if (evt.param1 != 2000 || !scanWf_) return;
+            using WS = Scanner::workflow::WorkflowState;
+            const auto st = scanWf_->getState();
+            if (evt.param2 == 0) {
+                if (st == WS::Running) {
+                    scanWf_->pause();
+                    JMW_LOG_INFO("app-AppContext",
+                        "[AppContext] 采集停止→工作流暂停（就绪态，可编辑）");
+                }
+            } else if (st == WS::Paused) {
+                scanWf_->resume();
+                JMW_LOG_INFO("app-AppContext", "[AppContext] 采集重启→工作流恢复续采");
+            }
         });
 
     commandGate_ = std::make_unique<Scanner::service::CommandGate>(stateMachine_.get(), eventBus_.get());
@@ -797,6 +819,9 @@ void AppContext::shutdown() {
     if (ledSubId_ != 0 && eventBus_)
         eventBus_->unsubscribe(ledSubId_);     // G8 设备灯订阅
     ledSubId_ = 0;
+    if (captureStateSubId_ != 0 && eventBus_)
+        eventBus_->unsubscribe(captureStateSubId_);   // 261002 采集翻转沿订阅
+    captureStateSubId_ = 0;
     if (scanWf_)    scanWf_->stop();
     simSource_.reset();                                          // 模拟源随后者弃（lane 已 join）
     if (calibWf_)   calibWf_->stop();

@@ -35,6 +35,7 @@ public:
     void setCapturing(bool on);                 // N11 H1/H0 命令成功后置（幂等）
 
     std::function<void(DeviceMode, DeviceMode)> onChange;   // 落板广播（可空）
+    std::function<void(bool)> onCapturingChange;           // 采集翻转沿广播（可空；261002）
 
 private:
     GateQuery gate_;
