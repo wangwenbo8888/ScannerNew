@@ -727,6 +727,9 @@ void MainWindow::onCalibDeviceClicked()
 
         statusBar()->showMessage(QStringLiteral("标定显示模式"));
     }
+    // 261002 临时测试机：校准设备同样带出虚拟按键表盘（无实体键——标定过程中
+    // 菜单/调参等按键操作经表盘注入）
+    showVirtualKeypad();
 }
 
 // P0-3 编辑门禁唯一事实源：经 AppContext::canEnterEditSession()（SM==S2 或暂停
