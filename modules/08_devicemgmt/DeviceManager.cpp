@@ -293,7 +293,9 @@ Result DeviceManager::close() {
     // —— 全量清理：补光灯/激光器关 + 退自检 + 冲写队列 + 关串口 + 关相机 ——
     if (mcu_->isOpen()) {
         mcu_->stopScan(nullptr);                // N11 H0：全停（灯/电机/触发）
-        mcu_->exitSelfCheck(nullptr);           // N12 Z0：退自检模式
+        // 261002 临时测试机：N12 任何子命令都会令 ESP32 固件崩溃重启——close 停发
+        // N12 Z0（回正式机恢复）
+        // mcu_->exitSelfCheck(nullptr);       // N12 Z0：退自检模式
         mcu_->flushWrites(3000);                // 确保命令全部落线（3s 有界）
     }
     mcu_->close();                              // 关串口（停写线程+rx线程）
@@ -349,17 +351,19 @@ void DeviceManager::logicTick() {
     }
     // ⑧ 串口无声（#2≡#10 心跳丢失同源）：收到过帧（lastRx>0）后停更超
     //    heartbeatTimeoutMs → 边沿一次；再收到任何有效帧即恢复清锚
-    if (const int64_t lastRx = static_cast<int64_t>(mcu_->lastRxTime()); lastRx > 0) {
-        if (now - lastRx > static_cast<int64_t>(cfg_.heartbeatTimeoutMs)) {
-            if (!serialSilentLatched_) {
-                serialSilentLatched_ = true;
-                publishFault(code(DevFault::SerialSilent),
-                             "串口无声(心跳丢失) 距末帧 " + std::to_string(now - lastRx) + "ms");
-            }
-        } else {
-            serialSilentLatched_ = false;       // 心跳恢复清锚
-        }
-    }
+    // 261002 临时测试机：下位机无 G02/温度周期上行、仅回显命令——静默巡检必然
+    // 误报 0x0802（Error 级→故障桥 S7 全局停机）→ 整段停用；回正式机恢复
+    // if (const int64_t lastRx = static_cast<int64_t>(mcu_->lastRxTime()); lastRx > 0) {
+    //     if (now - lastRx > static_cast<int64_t>(cfg_.heartbeatTimeoutMs)) {
+    //         if (!serialSilentLatched_) {
+    //             serialSilentLatched_ = true;
+    //             publishFault(code(DevFault::SerialSilent),
+    //                          "串口无声(心跳丢失) 距末帧 " + std::to_string(now - lastRx) + "ms");
+    //         }
+    //     } else {
+    //         serialSilentLatched_ = false;       // 心跳恢复清锚
+    //     }
+    // }
     // ⑧ 按键队列挤爆（#6）：G01 手势环满丢新计数增长即报（事件型——增量即边沿，
     //    无需恢复语义；计数单调累计；260831 协议源改 G01 手势环）
     if (const uint64_t kd = mcu_->keyDropCount(); kd > lastKeyDrop_) {
@@ -725,11 +729,13 @@ void DeviceManager::selfCheckTick(int64_t nowMs_) {
         //（灯已灭——避开「伴随 N12 固件不点灯」干扰窗）后发一次 N12 T1000。
         // 真机实证（260927）：T1000 生效——G02 周期 100ms→1s；T5 曾无效疑被固件
         // 钳到 100ms 下限。收口后发送点灯不受影响。probe 兜底已发过则不重发
-        if (!mcu_->probeN12TSent()) {
-            mcu_->setTempReportInterval(1000);
-            JMW_LOG_INFO("08-DeviceManager",
-                "[DeviceManager] G02 回传周期定版 1s——自检收口后发 N12 T1000");
-        }
+        // 261002 临时测试机：下位机无温度/G02 周期上行，且 N12 令固件崩溃——停发
+        // N12 T1000（回正式机恢复此段：G02 回传周期定版 1s）
+        // if (!mcu_->probeN12TSent()) {
+        //     mcu_->setTempReportInterval(1000);
+        //     JMW_LOG_INFO("08-DeviceManager",
+        //         "[DeviceManager] G02 回传周期定版 1s——自检收口后发 N12 T1000");
+        // }
         selfCheck_.report("camera", camera_ && camera_->isOpen());
         JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 启动自检完成（相机 open={}）",
                      camera_ && camera_->isOpen());

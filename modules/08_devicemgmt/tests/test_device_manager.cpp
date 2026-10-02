@@ -722,37 +722,39 @@ TEST(DeviceManager, F1_CameraLostAnyTimeEdge) {
 }
 
 // —— F2（#2≡#10）：心跳超时 → 0x0802 边沿一次；恢复帧清锚后可再触发 ——
-TEST(DeviceManager, F2_HeartbeatTimeoutEdgeAndRecover) {
-    Scanner::infra::EventBus bus;
-    EventRecorder rec;
-    bus.subscribeAll([&](const Event& e) { rec.record(e); });
-    MockMcu mock;
-    Kit kit;
-    DeviceConfig cfg = makeCfg();
-    cfg.heartbeatTimeoutMs = 100;                              // 测试注入：100ms 判无声
-    DeviceManager dm(cfg, gateOk, &bus, nullptr,
-                     [&](const std::string& f) { return mock.write(f); });
-    mock.dm = &dm;
-    kit.dm = &dm;
-    ASSERT_TRUE(dm.open().success);                            // open 不再发 N12 Z1——注入 T 帧立心跳锚
-    kit.raw("T20.0");
-    dm.logicTick();
-
-    dm.logicTick();                                            // 距末帧 <100ms：无声警
-    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 0);
-    sleepMs(150);
-    dm.logicTick();                                            // 超时 → 边沿一次
-    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
-    dm.logicTick();                                            // 锁定不重复
-    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
-
-    kit.raw("T20.0");                                          // 恢复帧（任意有效帧清锚）
-    dm.logicTick();
-    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
-    sleepMs(150);
-    dm.logicTick();                                            // 再超时 → 证明锚已清
-    EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 2);
-}
+// 261002 临时测试机：下位机无温度/周期上行——0x0802 串口静默巡检已在
+// DeviceManager 中整段停用（误报→S7 停机），本用例随之注释；回正式机一并恢复
+// TEST(DeviceManager, F2_HeartbeatTimeoutEdgeAndRecover) {
+//     Scanner::infra::EventBus bus;
+//     EventRecorder rec;
+//     bus.subscribeAll([&](const Event& e) { rec.record(e); });
+//     MockMcu mock;
+//     Kit kit;
+//     DeviceConfig cfg = makeCfg();
+//     cfg.heartbeatTimeoutMs = 100;                              // 测试注入：100ms 判无声
+//     DeviceManager dm(cfg, gateOk, &bus, nullptr,
+//                      [&](const std::string& f) { return mock.write(f); });
+//     mock.dm = &dm;
+//     kit.dm = &dm;
+//     ASSERT_TRUE(dm.open().success);                            // open 不再发 N12 Z1——注入 T 帧立心跳锚
+//     kit.raw("T20.0");
+//     dm.logicTick();
+//
+//     dm.logicTick();                                            // 距末帧 <100ms：无声警
+//     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 0);
+//     sleepMs(150);
+//     dm.logicTick();                                            // 超时 → 边沿一次
+//     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
+//     dm.logicTick();                                            // 锁定不重复
+//     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
+//
+//     kit.raw("T20.0");                                          // 恢复帧（任意有效帧清锚）
+//     dm.logicTick();
+//     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 1);
+//     sleepMs(150);
+//     dm.logicTick();                                            // 再超时 → 证明锚已清
+//     EXPECT_EQ(rec.fault(FC(DevFault::SerialSilent)), 2);
+// }
 
 // —— F3（#3）：温度爆表 → 0x0803 边沿一次；持续超限不重复；回落清锚后再触发 ——
 TEST(DeviceManager, F3_TempOverMaxEdge) {
