@@ -2155,9 +2155,11 @@ void MainWindow::applyMeshPreset() {
     dm->setParam("exposure",   3.0, src);
     dm->setParam("bgLight",   10.0, src);
     dm->setParam("laserLevel", 40.0, src);
-    dm->setParam("freqHz",    120.0, src);
+    dm->setParam("freqHz",     60.0, src);   // 261002 带宽账定版：H120≈750MB/s 超
+                                             // USB3 单控→到达抖动配对错杀（18:16
+                                             // 日志实证仍 120）；H60≈375MB/s 稳定
     statusBar()->showMessage(
-        QStringLiteral("面片扫描推荐参数已套用（B=10/L=40/H=120/曝光3ms）"), 3000);
+        QStringLiteral("面片扫描推荐参数已套用（B=10/L=40/H=60/曝光3ms）"), 3000);
 }
 
 // 标点扫描推荐预设（260912 用户口径）：补光 B=40（2026-08 真机标点检测成功
