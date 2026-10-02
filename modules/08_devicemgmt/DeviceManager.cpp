@@ -1088,17 +1088,24 @@ Result DeviceManager::startFrameStream(hal::FrameCallback cb) {
             }
             // 261002 用户标定五态灯序（全自动一态一帧）：帧打点当前相位＋切下一态
             // （N10 经编队落逻辑线程）。节奏由 calibPhaseParams 自动钳 H≤20Hz：
-            // 切灯落线（~10ms）恒先于下一触发（50ms），帧-灯型不错位
+            // 切灯落线（~10ms）恒先于下一触发（50ms），帧-灯型不错位。
+            // 推进用 CAS（261002 修复"停不住"竞态）：M 键停采存 -1 与帧侧"读旧
+            // 相位→存下一相"交错时，帧侧会把 -1 覆写回有效相位→投递的 N10 排到
+            // N11 H0 之后＝N10 重新启采（用户实测偶发"再点 M 停不下"根因）。
+            // CAS 失败（相位已被停采置 -1）即放弃本帧推进，不再发 N10
             hal::StereoFrame out = f;
-            const int phase = calibPhase_.load(std::memory_order_relaxed);
+            int phase = calibPhase_.load(std::memory_order_relaxed);
             if (phase >= 0) {
                 out.lightPhase = phase;
                 const int next = (phase + 1) % 5;
-                calibPhase_.store(next, std::memory_order_relaxed);
-                post([this, next] {
-                    if (calibPhase_.load(std::memory_order_relaxed) >= 0 && mcu_->isOpen())
-                        mcu_->setCaptureParams(calibPhaseParams(*params_, next), nullptr);
-                });
+                if (calibPhase_.compare_exchange_strong(phase, next,
+                                                        std::memory_order_relaxed)) {
+                    post([this, next] {
+                        if (calibPhase_.load(std::memory_order_relaxed) >= 0 &&
+                            mcu_->isOpen())
+                            mcu_->setCaptureParams(calibPhaseParams(*params_, next), nullptr);
+                    });
+                }
             }
             userCb(out);      // 转发上层回调
         };
