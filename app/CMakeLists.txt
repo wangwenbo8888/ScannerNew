@@ -129,13 +129,17 @@ add_custom_command(TARGET scan_demo POST_BUILD
     COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/copy_dlls.bat" "$<TARGET_FILE_DIR:scan_demo>" "$<CONFIG>"
     # camera.json＝装机口径（每次覆盖同步）；标定两档＝出厂基线（仅缺失时播种
     # ——不覆盖：exe 侧重标定后的本地档优先于仓库基线）
+    # 顺序修正（261002）：make_directory 必须先于 copy_if_different——原顺序在
+    # 全新构建目录首编时 config/ 不存在，copy_if_different 退 1 → MSB3073
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:scan_demo>/config"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/config/camera.json"
             "$<TARGET_FILE_DIR:scan_demo>/config/camera.json"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_FILE_DIR:scan_demo>/config"
-    COMMAND cmd /c "if not exist \"$<TARGET_FILE_DIR:scan_demo>/config/calibration.json\" copy /Y \"${CMAKE_SOURCE_DIR}/config/calibration.json\" \"$<TARGET_FILE_DIR:scan_demo>/config/calibration.json\""
-    COMMAND cmd /c "if not exist \"$<TARGET_FILE_DIR:scan_demo>/config/laser_calib.json\" copy /Y \"${CMAKE_SOURCE_DIR}/config/laser_calib.json\" \"$<TARGET_FILE_DIR:scan_demo>/config/laser_calib.json\""
+    # 261002 修复：标定两档播种原用 cmd /c "if not exist ... copy ..."——正斜杠
+    # 路径 cmd copy 解析失败退 1（MSB3073）；改 CMake 脚本播种（路径无关）
+    COMMAND ${CMAKE_COMMAND} "-DSRC=${CMAKE_SOURCE_DIR}" "-DDEST=$<TARGET_FILE_DIR:scan_demo>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/seed_config.cmake"
     COMMENT "Copying DLLs + config to output directory..."
 )
 
