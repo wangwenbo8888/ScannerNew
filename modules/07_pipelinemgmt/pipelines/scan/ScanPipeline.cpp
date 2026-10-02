@@ -38,9 +38,10 @@ constexpr int32_t kEvtLaneHang = 1610;         // lane 心跳超时（看门狗�
 constexpr int32_t kEvtRecovered = 1611;        // Faulted 原地恢复成功（累积全保留）
 constexpr int32_t kEvtCheckpointFail = 1612;   // 检查点写/读失败（Fault，不中断扫描）
 constexpr size_t kQueueCapacity = 64;          // 输出队列容量（consumer 持续排空，宽裕）
-constexpr int kScanGpuSlots = 2;               // 扫描 GPU 槽（§4.3；2026-09-01…
-    // 261002 4→2：lane 统计实证 gpu 段=100% 瓶颈（4 流并发争一块卡，内核 2-5ms
-    // wall 却 40-145ms——排队+上下文切换放大）；减流降争抢
+constexpr int kScanGpuSlots = 4;               // 扫描 GPU 槽（§4.3；2026-09-01…
+    // 261002 复原 4：曾试 2（降流争抢）——去同步后单帧槽时 92→40ms，2 槽容量
+    // 50fps 且 7 lane 排队 ~180ms/帧反被拖垮（实测 30.8fps＋取槽超时×5）；
+    // 4 槽容量 100fps，60fps 进帧吃满
                                               // 2→4——120fps 目标下 GPU 段 20ms×
                                               // 帧并发需 ≥3 槽，2 槽上限 100fps）
 constexpr int kRenderThrottleFrames = 5;       // 渲染节流（首帧起每 N 帧）
