@@ -302,7 +302,7 @@ void ScannerWindow::onStartScanner()
                                                        dm->captureMode());
         }
     });
-    dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 面片默认（T1V1 激光，N10 七参组）
+    dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 面片默认（V1C1 激光，N10 七参组·261002 临时管语义）
 
     // P5-T15 ①：经统一命令通道点火扫描（门禁 S2→S4/S5；payload=ScanMode 四值
     // 喂状态机 S4/S5 判别——0=标点→S4，1-3=含激光形态→S5（⑨b 暂并入）；handler

@@ -254,7 +254,7 @@ std::string MCUDriver::probeAutoPort(int baud) {
         // 到→不发 N12（真机 A/B 实证：伴随 N12 固件不点灯、N10 单发即亮）；未到才
         // 补发 N12 T1000 启动回传（无自报固件〔91ed3ad 口径〕的温度源兜底；回传
         // 周期 1s＝260927 用户口径）
-        channel_.sendFireAndForget("N10 H50 B50 T1 V1 C0 D0 L50");
+        channel_.sendFireAndForget("N10 H50 B50 T0 V1 C1 D0 L50");
         probeN10Sent_.store(true, std::memory_order_release);   // 自检兜底省略凭据（该口已发同参帧）
         bool hit = false;
         bool n12Sent = false;

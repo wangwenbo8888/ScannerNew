@@ -45,10 +45,12 @@ std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红
 }
 
 // N10 生效参数（cpp 本地——不进头防 IMCU.h 类型泄漏）：账本值 ＋ ScanMode 四管
-// 掩码映射（协议 260831 七参定版，260919 恢复——五参帧固件不解析=面片扫描无激光线
-// 根因）：标志点 A（MarkerOnly）T0V0C0D0＋L=0＋B 抬 40（真标志点亮斑须超分离阈值
-// 80，高补光代偿激光缺失）；面片 B（MarkerPlusLaser）T1V1；精细 C（FineScan）D 管；
-// 深孔 D（DeepHoleScan）C 管（260910 用户口径对调定版）。调用点均在逻辑线程
+// 掩码映射（261002 临时测试机协议——扫描仪损坏临时环境，管语义改：T=精细线、
+// V=左斜线、C=右斜线、D=无对应线〔测试机未接，占位〕；原 260831/260910 口径
+// 「面片 T1V1／精细 D／深孔 C」作废，回正式机须回退）：标志点 A（MarkerOnly）
+// T0V0C0D0＋L=0；面片 B（MarkerPlusLaser）V1C1（左斜+右斜两管轮流）；精细 C
+// （FineScan）T 管；深孔 D（DeepHoleScan）D 管（无对应线，仅协议占位）。
+// 调用点均在逻辑线程
 constexpr int kMarkerOnlyBg = 10;   // A 模式补光基线（260927 真机回调：B40 过曝——标志点
                                     // 检测只剩 1 点/光流配准 0<3 全败；B10=面片模式同场景
                                     // 36 点实证基线。原 B40「高补光代偿」口径作废，待定表）
@@ -66,10 +68,10 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
     p.laserLevel = (mode == Scanner::ScanMode::MarkerOnly)
                        ? 0
                        : static_cast<int>(params.get("laserLevel").value);
-    p.laserT = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;
-    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;
-    p.laserC = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;
-    p.laserD = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;
+    p.laserT = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;          // T=精细线（261002 临时）
+    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // V=左斜线（面片交叉对）
+    p.laserC = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // C=右斜线（面片交叉对）
+    p.laserD = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;      // D=无对应线（占位）
     return p;
 }
 
@@ -559,7 +561,7 @@ void DeviceManager::setDeviceLed(int s1to4) {
 
 // —— 灯光直控（用户按钮直调；不启停采集——N10 灯字段即时生效，实测口径同
 //    自检闪灯：固件收到 N10 即按新参数调灯，无需 H1）——
-// 基线=面片灯型（T1V1C0D0＋账本 B/L）；bgOn/laserOn：false 压 0。标点扫描 A
+// 基线=面片灯型（V1C1＋账本 B/L，261002 临时测试机管语义）；bgOn/laserOn：false 压 0。标点扫描 A
 // 模式＝(true,false) 只开补光
 void DeviceManager::setLights(bool bgOn, bool laserOn) {
     post([this, bgOn, laserOn] {
@@ -581,9 +583,9 @@ void DeviceManager::lightsBgOnly() {
 }
 
 void DeviceManager::lightsBgAndCrossLaser() {
-    setLights(/*bgOn=*/true, /*laserOn=*/true);    // T1V1（面片交叉激光，交替归固件帧序）
+    setLights(/*bgOn=*/true, /*laserOn=*/true);    // V1C1（面片交叉激光，交替归固件帧序）
     JMW_LOG_INFO("08-DeviceManager",
-        "[DeviceManager] 打光场景: 补光＋左右斜激光（T1V1，交替归固件帧序）");
+        "[DeviceManager] 打光场景: 补光＋左右斜激光（V1C1，交替归固件帧序）");
 }
 
 void DeviceManager::lightsAllOff() {
@@ -653,7 +655,8 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
         // 不发——manual 口走 stage0 1s 活证观察，温度无源由固件方定位，不盲补
         //（260926 曾在此无条件发 N12 T5，260927 证伪撤销）
 
-        // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V1 C0 D0 L50（七参·协议 260831）。
+        // 自检亮灯（用户定版流程）：N10 H50 B50 T0 V1 C1 D0 L50（七参·261002
+        // 临时测试机口径：V/C=左右斜线交叉点灯，探测帧同参）。
         // 只发一个：auto 搜口已发同参 N10（兼探测+点灯，probeN10Sent 凭据）——此处
         // 省略；manual 口（无探测帧）且回显未达才补发兜底。亮灯总窗 ~3s（stage0
         // 1s 上行活证过关＋stage1 停留 2s，2026-09-27 用户口径「灯亮三秒」；
@@ -661,9 +664,9 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
         // → N11 H0 收口（停扫描，固件关灯）
         hal::CaptureParams on{};
         on.freqHz = 50; on.bgLight = 50;
-        on.laserT = 1; on.laserV = 1; on.laserC = 0; on.laserD = 0;
+        on.laserT = 0; on.laserV = 1; on.laserC = 1; on.laserD = 0;
         on.laserLevel = 50;
-        selfCheck_.expectEcho = "N10 H50 B50 T1 V1 C0 D0 L50";
+        selfCheck_.expectEcho = "N10 H50 B50 T0 V1 C1 D0 L50";
         if (mcu_->lastEchoPayload() != selfCheck_.expectEcho && !mcu_->probeN10Sent()) {
             mcu_->setCaptureParams(on, nullptr);   // 兜底补发（仅 manual 口）
         }

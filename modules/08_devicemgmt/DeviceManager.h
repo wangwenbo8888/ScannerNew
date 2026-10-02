@@ -207,14 +207,14 @@ public:
     int measuredCameraFps() const { return m_measuredFps.load(std::memory_order_relaxed); }
 
     // —— 灯光直控（用户按钮直调；编队逻辑线程执行，不启停采集）——
-    /// N10 灯字段即时生效：基线=面片灯型（T1V1+账本 B/L），bgOn/laserOn=false 置 0
+    /// N10 灯字段即时生效：基线=面片灯型（V1C1+账本 B/L，261002 临时测试机管语义），bgOn/laserOn=false 置 0
     void setLights(bool bgOn, bool laserOn);
 
     // —— 打光场景封装（灯型三态；N10 即时生效，组合语义见各自注释）——
     /// 只打补光灯（标志点扫描 A 模式）：B=账本值，激光管全关
     void lightsBgOnly();
-    /// 打补光灯＋左右斜激光线（面片扫描 B 模式）：B/L=账本值；T1V1 交叉激光
-    ///（交替打两族线归固件帧序）
+    /// 打补光灯＋左右斜激光线（面片扫描 B 模式）：B/L=账本值；V1C1 交叉激光
+    ///（交替打两族线归固件帧序，261002 临时测试机管语义）
     void lightsBgAndCrossLaser();
     /// 全灭（补光/激光全关；等价 close 前收口语义）
     void lightsAllOff();

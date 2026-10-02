@@ -595,8 +595,9 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
     });
     // 灯型归采集组 N10（effectiveN10 按模式组装四管掩码）——不预点亮：固件 H1
     // "按上次采集参数重启"会重置灯态（2026-08-22 实测），组序内 N10 灯型一次到位。
-    // 协议 260831 七参恢复（260919）：T/V/C/D=四管开关按 ScanMode 映射（A=纯补光；
-    // B=T1V1 交叉；精细=D 管；深孔=C 管）——五参帧固件不解析=面片无激光线根因
+    // 协议七参（261002 临时测试机管语义）：T/V/C/D=四管开关按 ScanMode 映射
+    // （A=纯补光；B=V1C1 交叉；精细=T 管；深孔=D 管无对应线占位）——回正式机须回退
+    // 260831 口径（面片 T1V1/精细 D/深孔 C）
     // 260927 就绪流程：只设模式不启采（原 dm->startCapture 挪至 M 键路径/
     // startScanSession 直启兼容口）——四管掩码 N10/N11H1 推迟到设备 M 键按下
     dm->setCaptureMode(mode);
