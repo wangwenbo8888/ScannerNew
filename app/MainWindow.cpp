@@ -382,15 +382,15 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         updateStateIndicator(static_cast<Scanner::service::SystemState>(newState));
                     }, Qt::QueuedConnection);
                 });
-            // —— 按键管理闭环（260927 按设计接线）：菜单③④/视点缩放的 UserDefined
-            //    消费（原零消费者＝事件石沉大海）。p1 约定：3=扫描完成 4=开始后处理
-            //    100=视点缩放（param2=+1 拉近/-1 拉远）；参数改账占位=1000+idx 不入此门。
+            // —— 按键管理闭环（260927 接线；261002 按键域定稿事件段迁移）：菜单
+            //    事件族 p1=101-105（=100+游标：102 就绪/103 扫描完成/104 后处理/
+            //    105 重置）、菜单变化=110、档位变化=111-114；参数改账=1000+idx。
             //    总线锁纪律同上：锁内只拷贝，Queued 切 UI 线程再动手
             m_userDefinedSubId_ = bus->subscribe(Scanner::EventType::UserDefined,
                 [this](const Scanner::Event& ev) {
                     const int64_t p1 = ev.param1, p2 = ev.param2;
                     QMetaObject::invokeMethod(this, [this, p1, p2]() {
-                        if (p1 == 3) {              // 菜单③「扫描完成」＝关闭会话＋GBA
+                        if (p1 == 103) {           // 菜单③「扫描完成」＝关闭会话＋GBA
                             if (!m_appCtx || !m_appCtx->isScanSessionActive()) return;
                             if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                             m_activeScanToolIdx = -1;
@@ -398,13 +398,36 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             statusBar()->showMessage(r.success
                                 ? QStringLiteral("按键完成扫描——全局优化后台执行中")
                                 : QString::fromStdString("完成被拒: " + r.message));
-                        } else if (p1 == 4) {       // 菜单④「开始后处理」＝STL 导出批算
+                        } else if (p1 == 104) {    // 菜单④「后处理」＝STL 导出批算
                             if (!m_appCtx) return;
                             auto r = m_appCtx->startPostProcessSession("scan_output.stl", 0);
                             statusBar()->showMessage(r.success
                                 ? QStringLiteral("按键启动后处理——STL 导出执行中")
                                 : QString::fromStdString("后处理被拒: " + r.message));
-                        } else if (p1 == 100) {     // View 上下文视点缩放
+                        } else if (p1 == 102) {    // 菜单②「进入就绪」（261002 新增消费：
+                            // 面片就绪流程——同屏幕模式键 armScanSession 路径）
+                            if (!m_appCtx) return;
+                            if (m_appCtx->deviceManager())
+                                m_appCtx->deviceManager()->setCalibCaptureArmed(false);
+                            auto r = m_appCtx->armScanSession(Scanner::ScanMode::MarkerPlusLaser);
+                            statusBar()->showMessage(r.success
+                                ? QStringLiteral("按键就绪——按设备 M 键开始扫描")
+                                : QString::fromStdString("就绪被拒: " + r.message));
+                        } else if (p1 == 105) {    // 菜单⑤「重置」（261002：停采＋撕会话
+                            // 不落库＋回 S2——毁灭性操作已二次确认过，此处直接执行）
+                            if (!m_appCtx) return;
+                            if (m_appCtx->deviceManager() &&
+                                m_appCtx->deviceManager()->isCapturing())
+                                m_appCtx->deviceManager()->stopCapture();
+                            if (m_appCtx->isScanSessionActive()) {
+                                auto r = m_appCtx->stopScanSession();
+                                statusBar()->showMessage(r.success
+                                    ? QStringLiteral("会话已重置（数据丢弃不落库）")
+                                    : QString::fromStdString("重置被拒: " + r.message));
+                            }
+                            if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                            m_activeScanToolIdx = -1;
+                        } else if (p1 == 100) {    // View 视点缩放（260927 旧口径保留）
                             if (m_3dView) m_3dView->zoomView(p2 > 0 ? 0.8 : 1.25);
                         }
                     }, Qt::QueuedConnection);
@@ -2892,29 +2915,35 @@ void MainWindow::updateInfoSection()
         }
     }
 
-    // 7. 键控状态回显（260927 按设计实现·按键管理闭环）：设备 U/L/R/M 全链在
-    //    动，但菜单/调节多为「暗动作」——状态栏常驻指示当前键控层/调节上下文/
-    //    档位，用户按键后可见反馈（M 键动作本身可见不依赖此栏）
+    // 7. 键控状态回显（260927 按设计实现；261002 按键域定稿刷新）：状态栏常驻
+    //    指示菜单/子态/调节对象/四梯档位（档位可见——解决「按了半天不知道调到哪」）
     if (m_infoKeyLabel) {
         auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
         if (dm) {
             const auto ms = dm->menuState();
             QString s;
             if (ms.layer == 2) {
-                QString curs;
-                for (int i = 1; i <= 4; ++i)
-                    curs += (ms.cursor == i) ? QStringLiteral("◆") : QStringLiteral("·");
-                s = QStringLiteral("菜单 ") + curs + QStringLiteral("（M 选中/U 退）");
+                using Sub = Scanner::device::MenuState::Substate;
+                if (ms.substate == Sub::AdjustVoxel) {
+                    s = QStringLiteral("①体素密度 第%1/%2档（L/R 切档 M 确认）")
+                        .arg(dm->voxelLadderIndex()).arg(dm->voxelLadderSize());
+                } else if (ms.substate == Sub::ConfirmReset) {
+                    s = QStringLiteral("⑤重置：再按 M 确认（其他键取消）");
+                } else {
+                    QString curs;
+                    for (int i = 1; i <= 5; ++i)
+                        curs += (ms.cursor == i) ? QStringLiteral("◆") : QStringLiteral("·");
+                    s = QStringLiteral("菜单 ") + curs + QStringLiteral("（M 选中/U 退）");
+                }
             } else {
-                switch (ms.adjustCtx) {
-                case Scanner::device::MenuState::AdjustCtx::View:
-                    s = QStringLiteral("调节:视点（L 拉远/R 拉近）"); break;
-                case Scanner::device::MenuState::AdjustCtx::Brightness:
-                    s = QStringLiteral("调节:档位 %1/%2（L 降/R 升）")
+                if (ms.adjustCtx == Scanner::device::MenuState::AdjustCtx::Brightness) {
+                    s = QStringLiteral("调节:亮度 第%1/%2档（L 降/R 升）·景深:%3")
                         .arg(dm->presetLadderIndex())
-                        .arg(dm->presetLadderSize()); break;
-                default:
-                    s = QStringLiteral("键控:待命（U 双击进调节/M 启停）"); break;
+                        .arg(dm->presetLadderSize())
+                        .arg(dm->depthOfField() == 0 ? QStringLiteral("近") : QStringLiteral("远"));
+                } else {
+                    s = QStringLiteral("调节:显示远近 第%1/%2档（L 近/R 远）")
+                        .arg(dm->distanceLadderIndex()).arg(dm->distanceLadderSize());
                 }
             }
             m_infoKeyLabel->setText(s);

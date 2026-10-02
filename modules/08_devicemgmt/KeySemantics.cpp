@@ -1,71 +1,105 @@
 // ============================================================================
-// KeySemantics.cpp — 按键裁判实现（K-T8；转移表=08 文档 §4.2.3 弃奇偶版，
-// 测试 test_key_semantics.cpp 逐条钉死）
+// KeySemantics.cpp — 按键裁判实现（261002 按键交互域定稿 §3.2.2 手势总表；
+// 12 槽逐格钉死见 test_key_semantics.cpp）
 // ============================================================================
 #include "KeySemantics.h"
 
 namespace Scanner::device {
 
-KeySemantics::KeySemantics(std::function<bool()> gate, KeySemActions actions)
+KeySemantics::KeySemantics(std::function<bool(KeyCategory)> gate, KeySemActions actions)
     : gate_(std::move(gate)), actions_(std::move(actions)) {}
 
 void KeySemantics::onGesture(const serial::GestureEvent& g, const MenuState& menu) {
     using K = serial::KeyId;
     using G = serial::GestureEvent::Gesture;
+    using Sub = MenuState::Substate;
 
-    // 一问门禁（M1 分类＋260927 两轮增补）：启停（M/S 主层）不问——采集门由
-    // capturing 状态自身表达；切模式（M/D）不问——采集中实时切模式（N10 四管
-    // 掩码重发）；调节键（U/D 切上下文＋L/R/S 步进）不问——采集态实时调档同
-    // UI 滑条口径（260927 用户口径；ParamStore→N10 全参重发/相机直设链路已在。
-    // 采集态 layer 恒=1——菜单键被门禁挡住进不去，L/R/S 无游标歧义）。
-    // 其余菜单键（含 M/S layer=2 的 menuSelect、U/S 进退菜单、游标）gate 关一律丢弃。
-    const bool startStop = g.key == K::Middle && g.gesture == G::Short && menu.layer == 1;
-    const bool modeSwitch = g.key == K::Middle && g.gesture == G::Double;
-    const bool adjustKey = (g.key == K::Up && g.gesture == G::Double) ||
-                           ((g.key == K::Left || g.key == K::Right) && g.gesture == G::Short);
-    if (!startStop && !modeSwitch && !adjustKey && !gate_()) {
-        actions_.dropped("门禁");
+    // ── 0. 逃生类优先（免门禁、全域一致、子态内照常执行）──
+    if (g.key == K::Middle && g.gesture == G::Hold) {
+        actions_.emergencyStop();                    // 急停：子态解散归 DeviceManager 收尾
+        return;
+    }
+    if (g.key == K::Up && g.gesture == G::Hold) {
+        actions_.backToMain();                       // 回主界面：含子态/调节全清
         return;
     }
 
-    // 二查状态源 → 转移表（弃奇偶版；左右键口径：菜单优先于调节）
+    const bool inMenu = (menu.layer == 2);
+    const bool inSubstate = inMenu && menu.substate != Sub::None;
+
+    // ── 1. 子态分流（①体素密度调节 / ⑤重置确认；§3.3.3 子态取消语义）──
+    if (inSubstate) {
+        if (menu.substate == Sub::AdjustVoxel) {
+            if (g.gesture == G::Short && g.key == K::Left)  { actions_.adjustDown(); return; }
+            if (g.gesture == G::Short && g.key == K::Right) { actions_.adjustUp();   return; }
+            if (g.gesture == G::Short && g.key == K::Middle) { actions_.menuSelect(); return; } // 确认退出
+            actions_.substateCancelled();            // 其余任意键＝取消子态回浏览态
+            return;
+        }
+        if (menu.substate == Sub::ConfirmReset) {
+            if (g.gesture == G::Short && g.key == K::Middle) { actions_.menuSelect(); return; } // 确认执行
+            actions_.substateCancelled();
+            return;
+        }
+    }
+
+    // ── 2. 类别定档（按手势＋界面）→ 门禁 → ──
+    const auto askGate = [this](KeyCategory c) { return gate_ ? gate_(c) : true; };
+
     switch (g.key) {
     case K::Middle:
         if (g.gesture == G::Short) {
-            if (menu.layer == 2) actions_.menuSelect();      // 菜单层选中当前项
-            else actions_.captureToggle();                   // 主层启停（同信号不分启/停）
+            if (inMenu) {
+                if (!askGate(KeyCategory::Menu)) { actions_.dropped("门禁"); return; }
+                actions_.menuSelect();               // 浏览态选中当前项
+            } else {
+                if (!askGate(KeyCategory::StartStop)) { actions_.dropped("门禁"); return; }
+                actions_.captureToggle();            // 主界面启停（同信号）
+            }
         } else if (g.gesture == G::Double) {
-            actions_.cycleMode();                            // 任意态切模式
+            if (inMenu) { actions_.dropped("菜单内双击"); return; }   // 双击收紧（规则2）
+            if (!askGate(KeyCategory::ModeSwitch)) { actions_.dropped("门禁"); return; }
+            actions_.cycleMode();
         } else {
-            actions_.dropped("预留");                        // M/H
+            actions_.dropped("预留");                // M/H 已被逃生类接管（不可达兜底）
         }
         break;
 
     case K::Up:
         if (g.gesture == G::Short) {
-            if (menu.layer == 1) actions_.enterMenu();
-            else actions_.exitMenu();
+            if (!askGate(KeyCategory::Menu)) { actions_.dropped("门禁"); return; }
+            if (inMenu) actions_.exitMenu();
+            else actions_.enterMenu();
         } else if (g.gesture == G::Double) {
-            actions_.cycleAdjustCtx();                       // 任意态换调节上下文
+            if (inMenu) { actions_.dropped("菜单内双击"); return; }   // 双击收紧
+            if (!askGate(KeyCategory::Adjust)) { actions_.dropped("门禁"); return; }
+            actions_.toggleDepthOfField();           // 景深 近↔远 直切
         } else {
-            actions_.dropped("预留");                        // U/H
+            actions_.dropped("预留");                // U/H 已被逃生类接管（不可达兜底）
         }
         break;
 
     case K::Left:
     case K::Right:
-        if (g.gesture != G::Short) {
-            actions_.dropped("预留");                        // L/D、R/D、L/H、R/H
-            break;
+        if (g.gesture == G::Double) {
+            if (g.key == K::Right) { actions_.dropped("预留"); return; }   // 右键双击预留
+            if (inMenu) { actions_.dropped("菜单内双击"); return; }        // 双击收紧
+            if (!askGate(KeyCategory::Adjust)) { actions_.dropped("门禁"); return; }
+            actions_.switchAdjustCtx();              // 调节对象 亮度↔显示远近
+            return;
         }
-        if (menu.layer == 2) {                               // 菜单优先于调节（口径钉死）
+        if (g.gesture != G::Short) {
+            actions_.dropped("预留");                // L/H、R/H 预留
+            return;
+        }
+        if (inMenu) {                                // 菜单浏览态：游标（菜单优先于调节）
+            if (!askGate(KeyCategory::Menu)) { actions_.dropped("门禁"); return; }
             if (g.key == K::Left) actions_.cursorLeft();
             else actions_.cursorRight();
-        } else if (menu.adjustCtx != MenuState::AdjustCtx::None) {
+        } else {                                     // 主界面：调当前对象（二选一恒有对象）
+            if (!askGate(KeyCategory::Adjust)) { actions_.dropped("门禁"); return; }
             if (g.key == K::Left) actions_.adjustDown();
             else actions_.adjustUp();
-        } else {
-            actions_.dropped("无效");                        // 主层无上下文：左右无义
         }
         break;
     }

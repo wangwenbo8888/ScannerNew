@@ -144,9 +144,9 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
         int64_t idx = -1;                       // 参数索引=specs 登记序号（Minor #9）
         for (size_t i = 0; i < paramKeys_.size(); ++i)
             if (paramKeys_[i] == key) idx = static_cast<int64_t>(i);
-        publishEvent(EventType::UserDefined, 1000 + idx, 0);   // base 暂无 ParamChanged——占位
-        //（260927 错峰：p1=1000+idx——原裸 idx(0..3) 与菜单③④/视点(1..4/100)在
-        // UserDefined 上撞车，laserLevel 改账(p1=3)会被误当「扫描完成」消费）
+        publishEvent(EventType::UserDefined, 1000 + idx, 0);   // 参数改账事件（261002
+        // 错峰定版：参数=1000+idx／菜单族=101-105／菜单变化=110／档位=111-114／
+        // 捕获翻转=2000／旧视点缩放=100——各段隔离防撞车）
         JMW_LOG_DEBUG("08-DeviceManager", "[DeviceManager] 参数改账 {}={:.3f} confirmed={}", key, e.value,
                       e.confirmed);
     };
@@ -414,9 +414,14 @@ void DeviceManager::logicTick() {
         std::lock_guard<std::mutex> lock(menuSnapMtx_);
         menuSnap_ = menu_->state();
     }
-    // 键控回显快照（260927）：档位梯状态随菜单快照同拍刷新（UI 状态栏常显）
+    // 键控回显快照（260927；261002 扩四梯一档）：档位状态随菜单快照同拍刷新
     ladderIndexSnap_.store(ladder_.index(), std::memory_order_relaxed);
     ladderSizeSnap_.store(static_cast<int>(ladder_.ladder().size()), std::memory_order_relaxed);
+    distanceIdxSnap_.store(displayLadder_.index(), std::memory_order_relaxed);
+    distanceSizeSnap_.store(static_cast<int>(displayLadder_.steps().size()), std::memory_order_relaxed);
+    voxelIdxSnap_.store(voxelLadder_.index(), std::memory_order_relaxed);
+    voxelSizeSnap_.store(static_cast<int>(voxelLadder_.steps().size()), std::memory_order_relaxed);
+    dofSnap_.store(static_cast<int>(dof_), std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(tempSnapMtx_);
         tempSnap_ = lastTemps_;
@@ -856,33 +861,59 @@ void DeviceManager::startWarmup(int targetC, std::function<void(bool stable)> do
 // ============================================================================
 
 void DeviceManager::buildKeyActions() {
+    // 261002 按键交互域定稿 §3.2/§3.3：16 出口接线（逃生类/档位四梯/菜单五项/
+    // 子态确认）。事件编号段（UserDefined p1）：菜单选中=101-105（=100+游标）、
+    // 菜单变化=110、档位变化=111 亮度/112 显示远近/113 体素密度/114 景深、
+    // 执行结果=120+（拒因码——待实施）；与参数改账 1000+idx 段隔离
     KeySemActions a;
     a.captureToggle = [this] {
         if (mode_->isCapturing()) stopCaptureOnLogic();
         else startCaptureOnLogic();              // 逻辑线程内直调本体（免编队绕行）
     };
-    a.menuSelect = [this] {                      // 按 cursor 分叉（裁判只给信号）
-        const int cur = menu_->state().cursor;
-        if (cur == 1 || cur == 2) {
-            // 标点会话隔离（260927 用户口径）：标点扫描中按键只做启停——①② 的
-            // 模式落地只对激光族（面片/精细/深孔）生效，标点会话不许经按键切走
-            if (lastCaptureMode_.load(std::memory_order_relaxed) ==
-                Scanner::ScanMode::MarkerOnly) {
-                JMW_LOG_INFO("08-DeviceManager",
-                    "[DeviceManager] 标点扫描会话中——菜单①②模式设定被拒（标点只启停）");
+    a.menuSelect = [this] {                      // 按层/子态/游标分叉（裁判只给信号）
+        const auto ms = menu_->state();
+        using Sub = MenuState::Substate;
+        // —— ①⑤子态：中键＝确认 ——
+        if (ms.substate == Sub::AdjustVoxel) {   // ①确认＝退出菜单（档位已在切档时生效）
+            menu_->apply(MenuOp::ExitMenu);
+            publishEvent(EventType::UserDefined, 110, 0);
+            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] ①体素密度子态确认退出");
+            return;
+        }
+        if (ms.substate == Sub::ConfirmReset) {  // ⑤确认＝执行重置（执行并自动退菜单）
+            menu_->apply(MenuOp::ExitMenu);
+            publishEvent(EventType::UserDefined, 105, 0);
+            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] ⑤重置确认执行——派发事件 p1=105（app 消费）");
+            publishEvent(EventType::UserDefined, 110, 0);
+            return;
+        }
+        // —— 菜单浏览态：按游标分叉 ——
+        switch (ms.cursor) {
+        case 1:                                  // ①分辨率设置→体素密度调节子态
+            if (mode_->isCapturing()) {          // 功能口拒·防呆（七态矩阵表注：S4/S5
+                JMW_LOG_WARN("08-DeviceManager", //  下改融合密度会打断累积——游标可停①选中拒）
+                    "[DeviceManager] 菜单①体素密度：采集中防呆拒（扫描中改密度打断累积）");
                 return;
             }
-            // 视野项①②：确认模式光标 → 采集模式落地（260927 完善——原仅日志，
-            // 按键切的模式从不生效；现同步 lastCaptureMode_，下次启采按此组帧）
-            lastCaptureMode_.store(scanModeFromMenuCursor(menu_->state().modeCursor), std::memory_order_relaxed);
+            menu_->apply(MenuOp::EnterAdjustSubstate);
+            publishEvent(EventType::UserDefined, 110, 0);
             JMW_LOG_INFO("08-DeviceManager",
-                "[DeviceManager] 菜单选中①/②：扫描模式落地 modeCursor={} → ScanMode={}",
-                menu_->state().modeCursor, static_cast<int>(lastCaptureMode_.load(std::memory_order_relaxed)));
-        } else {
-            // ③扫描完成/④开始后处理：派工作流归 app 订阅——门面只广播。
-            // UserDefined+param1=3/4（Important #4：待 base 增专用事件类型，人工过会后改）
-            publishEvent(EventType::UserDefined, cur, 0);
-            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 菜单选中③/④：派发工作流事件 cursor={}", cur);
+                "[DeviceManager] 菜单①进入体素密度调节子态（当前档 {}/{}/近远无关）",
+                voxelLadder_.index(), static_cast<int>(voxelLadder_.steps().size()));
+            break;
+        case 5:                                  // ⑤重置→二次确认子态（防误触）
+            menu_->apply(MenuOp::EnterConfirmSubstate);
+            publishEvent(EventType::UserDefined, 110, 0);
+            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 菜单⑤进入重置确认子态（再按中键执行）");
+            break;
+        default: {                               // ②就绪/③完成/④后处理：执行并自动退菜单
+            menu_->apply(MenuOp::ExitMenu);
+            publishEvent(EventType::UserDefined, 100 + ms.cursor, 0);
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] 菜单②/③/④选中：派发事件 p1={}（执行并退菜单）", 100 + ms.cursor);
+            publishEvent(EventType::UserDefined, 110, 0);
+            break;
+        }
         }
     };
     a.cycleMode = [this] {                       // 中键双击切模式：记账＋即时落地
@@ -915,56 +946,119 @@ void DeviceManager::buildKeyActions() {
                 static_cast<int>(lastCaptureMode_.load(std::memory_order_relaxed)));
         }
     };
-    a.enterMenu = [this] { menu_->apply(MenuOp::EnterMenu); };
-    a.exitMenu = [this] { menu_->apply(MenuOp::ExitMenu); };
-    a.cycleAdjustCtx = [this] { menu_->apply(MenuOp::CycleAdjustCtx); };
+    a.emergencyStop = [this] {                   // §3.3.1 中键长按＝急停（全域免门禁）
+        menu_->apply(MenuOp::CancelSubstate);    // 顺带解散子态（逃生优先于子态）
+        if (mode_->isCapturing()) stopCaptureOnLogic();   // N11 H0 停采（单帧收口——
+        // 261002 用户裁定停采不补任何 N10；真机固件 N11 关灯即全灭，临时机灯态
+        // 归固件——急停「全灭灯」语义真机天然满足）；重复按不出错（幂等）
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 急停（中键长按）：停采＋子态解散（不碰会话/全局态/参数盘）");
+    };
+    a.backToMain = [this] {                      // §3.3.1 上键长按＝一键回主界面
+        menu_->apply(MenuOp::BackToMain);        // 清层/游标/子态；调节对象回默认亮度
+        publishEvent(EventType::UserDefined, 110, 0);
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 回主界面（上键长按）：菜单/调节状态全退");
+    };
+    a.enterMenu = [this] {
+        menu_->apply(MenuOp::EnterMenu);
+        publishEvent(EventType::UserDefined, 110, 0);
+    };
+    a.exitMenu = [this] {
+        menu_->apply(MenuOp::ExitMenu);
+        publishEvent(EventType::UserDefined, 110, 0);
+    };
+    a.toggleDepthOfField = [this] {              // 上键双击·主界面：景深 近↔远 直切
+        dof_ = Scanner::device::toggleDepthOfField(dof_);
+        publishEvent(EventType::UserDefined, 114, static_cast<int64_t>(dof_));
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 景深切换 → {}（p1=114 事件；屏蔽区间 07/09 对接）",
+                     dof_ == DepthOfField::Near ? "近" : "远");
+    };
+    a.switchAdjustCtx = [this] {                 // 左键双击·主界面：调节对象 亮度↔显示远近
+        menu_->apply(MenuOp::SwitchAdjustCtx);
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 换调节对象 → {}",
+            menu_->state().adjustCtx == MenuState::AdjustCtx::Brightness ? "亮度" : "显示远近");
+    };
     a.cursorLeft = [this] {                      // 游标移动：步进余额清
         menu_->apply(MenuOp::CursorLeft);
         menu_->takeAdjustSteps();
+        publishEvent(EventType::UserDefined, 110, 0);
     };
     a.cursorRight = [this] {
         menu_->apply(MenuOp::CursorRight);
         menu_->takeAdjustSteps();
+        publishEvent(EventType::UserDefined, 110, 0);
+    };
+    a.substateCancelled = [this] {               // ①⑤子态任意键取消→回菜单浏览态
+        menu_->apply(MenuOp::CancelSubstate);
+        publishEvent(EventType::UserDefined, 110, 0);
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 子态取消→菜单浏览态");
     };
     a.adjustUp = [this] { applyAdjust(+1); };
     a.adjustDown = [this] { applyAdjust(-1); };
     a.dropped = [](const char* why) { JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 手势丢弃: {}", why); };
-    semantics_ = std::make_unique<KeySemantics>(                  // M1：采集态菜单键门禁
-        [this] { return !mode_->isCapturing(); }, std::move(a));
+    // 门禁闭包（§3.2.3 gate(类别)）：08 内部谓词＝自检期全拦；全局 10 态组合点
+    // 留 app 装配注入（P6 接线；注入前放行交功能口细分——S1/S3/S6/S7 全拦由
+    // app 侧状态机门控补齐）。类别参数当前统一口径，细分留 app 闭包
+    semantics_ = std::make_unique<KeySemantics>(
+        [this](KeyCategory) {
+            return selfCheck_.stage < 0;         // 自检中（S1 等价）全拦
+        },
+        std::move(a));
 }
 
 void DeviceManager::applyAdjust(int dir) {
     menu_->apply(dir > 0 ? MenuOp::AdjustUp : MenuOp::AdjustDown);
     const int steps = menu_->takeAdjustSteps();   // 净步数（本拍 ±1）
-    const auto ctx = menu_->state().adjustCtx;
-    if (ctx == MenuState::AdjustCtx::Brightness && steps != 0) {
-        // G6 档位梯（260927 补缺口）：Brightness 上下文左右键＝档位步进（曝光/
-        // 激光/补光三参组合，内置 3 档钳制不环绕）——经 ParamStore 记账，下发/
-        // 广播/落盘全走既有链（采集中自动 N10 全参重发 D1 口径）
+    if (steps == 0) return;
+    const auto st = menu_->state();
+    using Sub = MenuState::Substate;
+    // —— ①子态：体素密度档（p1=113 事件；07/09 融合密度消费点待对接）——
+    if (st.substate == Sub::AdjustVoxel) {
+        if (voxelLadder_.step(steps > 0 ? +1 : -1)) {
+            publishEvent(EventType::UserDefined, 113, voxelLadder_.index());
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] 体素密度档 {} → {}/{}（档值 {}mm，p1=113）",
+                steps > 0 ? "上调" : "下调", voxelLadder_.index(),
+                static_cast<int>(voxelLadder_.steps().size()), voxelLadder_.current());
+        } else {
+            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 体素密度档已到顶/底（{}）",
+                         voxelLadder_.index());
+        }
+        return;
+    }
+    // —— 主界面：按调节对象分叉（二选一恒有对象）——
+    if (st.adjustCtx == MenuState::AdjustCtx::Brightness) {
+        // G6 亮度梯（261002 扩 20 档）：三参组合步进经 ParamStore 记账（下发/
+        // 广播/落盘走既有链；采集中自动 N10 全参重发 D1 口径）
         if (ladder_.step(steps > 0 ? +1 : -1)) {
             const auto& s = ladder_.current();
             params_->setValue("exposure",   s.exposureMs,  ParamEntry::Source::Key);
             params_->setValue("laserLevel", s.laserLevel,  ParamEntry::Source::Key);
             params_->setValue("bgLight",    s.bgLight,     ParamEntry::Source::Key);
+            publishEvent(EventType::UserDefined, 111, ladder_.index());
             JMW_LOG_INFO("08-DeviceManager",
-                "[DeviceManager] 档位 {} → {}/{}（曝光{:.0f}ms 激光{:.0f} 补光{:.0f}）",
-                ladder_.index(), steps > 0 ? "上调" : "下调",
+                "[DeviceManager] 亮度档 {} → {}/{}（曝光{:.1f}ms 激光{:.0f} 补光{:.0f}，p1=111）",
+                steps > 0 ? "上调" : "下调",
+                ladder_.index(),
                 static_cast<int>(ladder_.ladder().size()),
                 s.exposureMs, s.laserLevel, s.bgLight);
         } else {
             JMW_LOG_INFO("08-DeviceManager",
-                "[DeviceManager] 档位已到顶/底（index={}）——步进无效", ladder_.index());
+                "[DeviceManager] 亮度档已到顶/底（index={}）——步进无效", ladder_.index());
         }
-    } else if (ctx == MenuState::AdjustCtx::View && steps != 0) {
-        // View 上下文＝视点缩放（260927 按设计接线：协作文档「档位与视点调节」
-        // ——事件口径 UserDefined p1=100，param2=+1 拉近/-1 拉远；app 订阅方驱动
-        // OSGWidget::zoomView）
-        publishEvent(EventType::UserDefined, 100, steps > 0 ? 1 : -1);
-        JMW_LOG_INFO("08-DeviceManager",
-            "[DeviceManager] 视点缩放：{}（View 上下文按键步进）", steps > 0 ? "拉近" : "拉远");
     } else {
-        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 调节步进 ctx={}（本上下文无动作）",
-                     static_cast<int>(ctx));
+        // 显示远近梯（261002 新增）：只改预览观看远近，不碰采集参数——p1=112
+        // 事件驱动 03 显示端（app 消费点待接线）
+        if (displayLadder_.step(steps > 0 ? +1 : -1)) {
+            publishEvent(EventType::UserDefined, 112, displayLadder_.index());
+            JMW_LOG_INFO("08-DeviceManager",
+                "[DeviceManager] 显示远近档 {} → {}/{}（p1=112）",
+                steps > 0 ? "拉远" : "拉近",
+                displayLadder_.index(),
+                static_cast<int>(displayLadder_.steps().size()));
+        } else {
+            JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 显示远近档已到顶/底（{}）",
+                         displayLadder_.index());
+        }
     }
 }
 

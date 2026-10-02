@@ -1,15 +1,16 @@
 // ============================================================================
-// test_key_semantics.cpp — KeySemantics 按键裁判单测（K-T8）
+// test_key_semantics.cpp — KeySemantics 按键裁判单测（261002 按键交互域定稿版）
 //
-// 转移表逐条钉死（08 文档 §4.2.3 弃奇偶版 + 实施计划 T8 表格）：
-//   - M/S：主层=启停同信号（capturing 真假不影响裁判——黑板态 DeviceManager
-//     在回调里查）；layer=2=选中当前项；
-//   - M/D 任意态切模式；U/S 按层开关菜单；U/D 任意态换调节上下文；
-//   - 菜单优先于调节（口径钉死）：L/S、R/S 在 layer=2 一律游标，即使 ctx≠None；
-//   - 门禁口径（M1 分类）：注入 gate=「菜单类键生效吗」——M/S 主层启停不问
-//     gate；其余（含 M/S layer=2 的 menuSelect）gate=false 全丢弃；
-//   - 预留手势（M/H、U/H、L/D、R/D、L/H、R/H）与主层无上下文左右短按 → 丢弃。
-// 全 Mock lambda 计数；capturing 不入裁判输入（测试 1/3 仅钉「启停同信号」）。
+// 手势总表 12 槽逐格钉死（设计 §3.2.2）＋三条规则＋子态分流＋类别门禁：
+//   - M/S：主界面=启停同信号；菜单层=选中（menuSelect）
+//   - M/D：仅主界面切模式（菜单内双击=丢弃收紧）；M/H=急停（全域免门禁）
+//   - U/S：按层进/退菜单；U/D：仅主界面景深直切；U/H=回主界面（全域免门禁）
+//   - L/D：仅主界面换调节对象；R/D 预留；L/R/S：菜单=游标（优先）/主界面=调档
+//     （调节对象二选一恒有——无「无上下文无效」路径）
+//   - 子态：①体素密度（L/R 步进、M 确认、其余取消）；⑤重置确认（M 执行、
+//     其余取消）——逃生类优先（子态内 M/H、U/H 照常执行）
+//   - 门禁 gate(类别)：四类各问；逃生类不问（gate=false 也执行）
+// 全 Mock lambda 计数；capturing 不入裁判输入（启停同信号）。
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -24,221 +25,249 @@ using namespace Scanner::device;
 using serial::KeyId;
 using Gest = serial::GestureEvent::Gesture;
 using Ctx = MenuState::AdjustCtx;
+using Sub = MenuState::Substate;
 
 namespace {
 
 // 动作出口计数账（全 Mock lambda）
 struct Counters {
     int captureToggle = 0, menuSelect = 0, cycleMode = 0;
-    int enterMenu = 0, exitMenu = 0, cycleAdjustCtx = 0;
+    int emergencyStop = 0, backToMain = 0;
+    int enterMenu = 0, exitMenu = 0, toggleDepthOfField = 0, switchAdjustCtx = 0;
     int adjustUp = 0, adjustDown = 0, cursorLeft = 0, cursorRight = 0;
+    int substateCancelled = 0;
     std::vector<std::string> drops;   // 丢弃原因序列
+    std::vector<KeyCategory> asked;   // gate 收到的类别序列
 
-    int fired() const {               // 有效动作总数（不含 drops）
-        return captureToggle + menuSelect + cycleMode + enterMenu + exitMenu
-             + cycleAdjustCtx + adjustUp + adjustDown + cursorLeft + cursorRight;
+    int fired() const {               // 有效动作总数（不含 drops/cancelled）
+        return captureToggle + menuSelect + cycleMode + emergencyStop + backToMain
+             + enterMenu + exitMenu + toggleDepthOfField + switchAdjustCtx
+             + adjustUp + adjustDown + cursorLeft + cursorRight;
     }
 };
 
-serial::GestureEvent kg(KeyId k, Gest g) { return serial::GestureEvent{k, g, 0}; }   // 手势直喂（MCU 已判）
+serial::GestureEvent kg(KeyId k, Gest g) { return serial::GestureEvent{k, g, 0}; }   // 手势直喂
 
-MenuState ms(int layer, Ctx ctx = Ctx::None) {
+MenuState ms(int layer, Ctx ctx = Ctx::Brightness) {
     MenuState m;
     m.layer = layer;
     m.adjustCtx = ctx;
     return m;
 }
 
-KeySemantics referee(Counters& c, std::function<bool()> gate = [] { return true; }) {
-    return KeySemantics(std::move(gate), KeySemActions{
-        [&] { ++c.captureToggle; },
-        [&] { ++c.menuSelect; },
-        [&] { ++c.cycleMode; },
-        [&] { ++c.enterMenu; },
-        [&] { ++c.exitMenu; },
-        [&] { ++c.cycleAdjustCtx; },
-        [&] { ++c.adjustUp; },
-        [&] { ++c.adjustDown; },
-        [&] { ++c.cursorLeft; },
-        [&] { ++c.cursorRight; },
-        [&](const char* why) { c.drops.emplace_back(why); },
-    });
+MenuState msSub(Sub s) {              // 菜单层子态（游标随子态：①=1 ⑤=5）
+    MenuState m;
+    m.layer = 2;
+    m.substate = s;
+    m.cursor = s == Sub::AdjustVoxel ? 1 : 5;
+    return m;
+}
+
+KeySemantics referee(Counters& c,
+                     std::function<bool(KeyCategory)> gate =
+                         [](KeyCategory) { return true; }) {
+    KeySemActions a;
+    a.captureToggle = [&] { ++c.captureToggle; };
+    a.menuSelect = [&] { ++c.menuSelect; };
+    a.cycleMode = [&] { ++c.cycleMode; };
+    a.emergencyStop = [&] { ++c.emergencyStop; };
+    a.backToMain = [&] { ++c.backToMain; };
+    a.enterMenu = [&] { ++c.enterMenu; };
+    a.exitMenu = [&] { ++c.exitMenu; };
+    a.toggleDepthOfField = [&] { ++c.toggleDepthOfField; };
+    a.switchAdjustCtx = [&] { ++c.switchAdjustCtx; };
+    a.adjustUp = [&] { ++c.adjustUp; };
+    a.adjustDown = [&] { ++c.adjustDown; };
+    a.cursorLeft = [&] { ++c.cursorLeft; };
+    a.cursorRight = [&] { ++c.cursorRight; };
+    a.substateCancelled = [&] { ++c.substateCancelled; };
+    a.dropped = [&](const char* why) { c.drops.emplace_back(why); };
+    return KeySemantics(
+        [&c, gate](KeyCategory cat) {
+            c.asked.push_back(cat);
+            return gate(cat);
+        },
+        std::move(a));
 }
 
 } // namespace
 
-// —— 1. MidShortCapturingToggle：采集中（capturing=true）主层启停 → captureToggle 恰 1 ——
-TEST(KeySemantics, MidShortCapturingToggle) {
+// —— 1. MidShortMainToggle：主界面中键短按 → captureToggle（启停同信号）——
+TEST(KeySemantics, MidShortMainToggle) {
     Counters c;
     auto k = referee(c);
-    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(1));   // capturing 在黑板，裁判同信号
+    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(1));
     EXPECT_EQ(c.captureToggle, 1);
     EXPECT_EQ(c.fired(), 1);
     EXPECT_TRUE(c.drops.empty());
+    ASSERT_EQ(c.asked.size(), 1u);
+    EXPECT_EQ(c.asked[0], KeyCategory::StartStop);        // 类别定档钉死
 }
 
-// —— 2. MidShortInMenuSelects：菜单层中键 → menuSelect（不 captureToggle）——
+// —— 2. MidShortInMenuSelects：菜单层中键短按 → menuSelect ——
 TEST(KeySemantics, MidShortInMenuSelects) {
     Counters c;
     auto k = referee(c);
     k.onGesture(kg(KeyId::Middle, Gest::Short), ms(2));
     EXPECT_EQ(c.menuSelect, 1);
     EXPECT_EQ(c.captureToggle, 0);
-    EXPECT_EQ(c.fired(), 1);
+    ASSERT_EQ(c.asked.size(), 1u);
+    EXPECT_EQ(c.asked[0], KeyCategory::Menu);
 }
 
-// —— 3. MidShortReadyLayer1：就绪（capturing=false）主层启停 → captureToggle（启停同信号）——
-TEST(KeySemantics, MidShortReadyLayer1) {
-    Counters c;
-    auto k = referee(c);
-    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(1));
-    EXPECT_EQ(c.captureToggle, 1);                        // 与测试 1 同一信号——黑白不分
-    EXPECT_EQ(c.fired(), 1);
-}
-
-// —— 4. MidDoubleCyclesMode：中键双击任意态 → cycleMode ——
-TEST(KeySemantics, MidDoubleCyclesMode) {
+// —— 3. MidDoubleMainCyclesMode：中键双击主界面 → cycleMode；菜单内 → 丢弃收紧 ——
+TEST(KeySemantics, MidDoubleMainCyclesMode) {
     Counters c;
     auto k = referee(c);
     k.onGesture(kg(KeyId::Middle, Gest::Double), ms(1));
-    k.onGesture(kg(KeyId::Middle, Gest::Double), ms(2, Ctx::View));
-    EXPECT_EQ(c.cycleMode, 2);
-    EXPECT_EQ(c.fired(), 2);
+    EXPECT_EQ(c.cycleMode, 1);
+    k.onGesture(kg(KeyId::Middle, Gest::Double), ms(2));  // 菜单内双击＝丢弃（规则2）
+    EXPECT_EQ(c.cycleMode, 1);
+    ASSERT_EQ(c.drops.size(), 1u);
+    EXPECT_EQ(c.drops[0], "菜单内双击");
+    ASSERT_EQ(c.asked.size(), 1u);                        // 收紧在手禁前＝菜单内不问门禁
+    EXPECT_EQ(c.asked[0], KeyCategory::ModeSwitch);
 }
 
-// —— 5. MidHoldDropped：中键长按 → dropped("预留")，无任何动作 ——
-TEST(KeySemantics, MidHoldDropped) {
+// —— 4. MidHoldEmergencyStop：中键长按 → 急停（全域免门禁——gate 全关也执行）——
+TEST(KeySemantics, MidHoldEmergencyStop) {
     Counters c;
-    auto k = referee(c);
+    auto k = referee(c, [](KeyCategory) { return false; });   // 门禁全关
     k.onGesture(kg(KeyId::Middle, Gest::Hold), ms(1));
     k.onGesture(kg(KeyId::Middle, Gest::Hold), ms(2));
-    EXPECT_EQ(c.fired(), 0);
-    ASSERT_EQ(c.drops.size(), 2u);
-    EXPECT_EQ(c.drops[0], "预留");
-    EXPECT_EQ(c.drops[1], "预留");
+    EXPECT_EQ(c.emergencyStop, 2);
+    EXPECT_TRUE(c.asked.empty());                         // 逃生类不问门禁
+    EXPECT_TRUE(c.drops.empty());
 }
 
-// —— 6. UpShortEnterMenu：上键短按 layer=1 → enterMenu ——
-TEST(KeySemantics, UpShortEnterMenu) {
+// —— 5. UpShortEnterExit：上键短按 按层进/退菜单 ——
+TEST(KeySemantics, UpShortEnterExit) {
     Counters c;
     auto k = referee(c);
     k.onGesture(kg(KeyId::Up, Gest::Short), ms(1));
-    EXPECT_EQ(c.enterMenu, 1);
-    EXPECT_EQ(c.exitMenu, 0);
-    EXPECT_EQ(c.fired(), 1);
-}
-
-// —— 7. UpShortExitMenu：上键短按 layer=2 → exitMenu ——
-TEST(KeySemantics, UpShortExitMenu) {
-    Counters c;
-    auto k = referee(c);
     k.onGesture(kg(KeyId::Up, Gest::Short), ms(2));
+    EXPECT_EQ(c.enterMenu, 1);
     EXPECT_EQ(c.exitMenu, 1);
-    EXPECT_EQ(c.enterMenu, 0);
-    EXPECT_EQ(c.fired(), 1);
+    EXPECT_EQ(c.fired(), 2);
 }
 
-// —— 8. UpDoubleCycleAdjust：上键双击任意态 → cycleAdjustCtx ——
-TEST(KeySemantics, UpDoubleCycleAdjust) {
+// —— 6. UpDoubleDepthToggle：上键双击主界面 → 景深直切；菜单内 → 收紧丢弃 ——
+TEST(KeySemantics, UpDoubleDepthToggle) {
     Counters c;
     auto k = referee(c);
     k.onGesture(kg(KeyId::Up, Gest::Double), ms(1));
+    EXPECT_EQ(c.toggleDepthOfField, 1);
+    ASSERT_EQ(c.asked.size(), 1u);
+    EXPECT_EQ(c.asked[0], KeyCategory::Adjust);           // 景深归调节全家
     k.onGesture(kg(KeyId::Up, Gest::Double), ms(2));
-    EXPECT_EQ(c.cycleAdjustCtx, 2);
-    EXPECT_EQ(c.fired(), 2);
+    EXPECT_EQ(c.toggleDepthOfField, 1);
+    ASSERT_EQ(c.drops.size(), 1u);
+    EXPECT_EQ(c.drops[0], "菜单内双击");
 }
 
-// —— 9. LeftShortCursor：左键短按 layer=2 → cursorLeft（ctx≠None 也游标——菜单优先）——
-TEST(KeySemantics, LeftShortCursor) {
+// —— 7. UpHoldBackToMain：上键长按 → 回主界面（全域免门禁）——
+TEST(KeySemantics, UpHoldBackToMain) {
+    Counters c;
+    auto k = referee(c, [](KeyCategory) { return false; });
+    k.onGesture(kg(KeyId::Up, Gest::Hold), ms(2, Ctx::DisplayDistance));
+    k.onGesture(kg(KeyId::Up, Gest::Hold), msSub(Sub::ConfirmReset));
+    EXPECT_EQ(c.backToMain, 2);                           // 子态内照常执行（逃生优先）
+    EXPECT_TRUE(c.asked.empty());
+}
+
+// —— 8. LeftDoubleSwitchCtx：左键双击主界面 → 换调节对象；菜单内收紧；右双击预留 ——
+TEST(KeySemantics, LeftDoubleSwitchCtx) {
     Counters c;
     auto k = referee(c);
-    k.onGesture(kg(KeyId::Left, Gest::Short), ms(2));
-    k.onGesture(kg(KeyId::Left, Gest::Short), ms(2, Ctx::Brightness));  // 优先级钉死
-    EXPECT_EQ(c.cursorLeft, 2);
-    EXPECT_EQ(c.adjustDown, 0);
-    EXPECT_EQ(c.fired(), 2);
+    k.onGesture(kg(KeyId::Left, Gest::Double), ms(1));
+    EXPECT_EQ(c.switchAdjustCtx, 1);
+    k.onGesture(kg(KeyId::Left, Gest::Double), ms(2));
+    EXPECT_EQ(c.switchAdjustCtx, 1);
+    k.onGesture(kg(KeyId::Right, Gest::Double), ms(1));
+    EXPECT_EQ(c.fired(), 1);
+    ASSERT_EQ(c.drops.size(), 2u);
+    EXPECT_EQ(c.drops[0], "菜单内双击");
+    EXPECT_EQ(c.drops[1], "预留");
 }
 
-// —— 10. RightShortCursor：右键短按 layer=2 → cursorRight（同上菜单优先）——
-TEST(KeySemantics, RightShortCursor) {
-    Counters c;
-    auto k = referee(c);
-    k.onGesture(kg(KeyId::Right, Gest::Short), ms(2));
-    k.onGesture(kg(KeyId::Right, Gest::Short), ms(2, Ctx::View));       // 优先级钉死
-    EXPECT_EQ(c.cursorRight, 2);
-    EXPECT_EQ(c.adjustUp, 0);
-    EXPECT_EQ(c.fired(), 2);
-}
-
-// —— 11. LeftShortAdjustDown：主层 ctx=Brightness 左短按 → adjustDown ——
-TEST(KeySemantics, LeftShortAdjustDown) {
+// —— 9. LeftRightShortMainAdjust：主界面左右短按 → 调档（对象二选一恒有——无 None 无效路径）——
+TEST(KeySemantics, LeftRightShortMainAdjust) {
     Counters c;
     auto k = referee(c);
     k.onGesture(kg(KeyId::Left, Gest::Short), ms(1, Ctx::Brightness));
+    k.onGesture(kg(KeyId::Right, Gest::Short), ms(1, Ctx::DisplayDistance));
     EXPECT_EQ(c.adjustDown, 1);
-    EXPECT_EQ(c.cursorLeft, 0);
-    EXPECT_EQ(c.fired(), 1);
-}
-
-// —— 12. RightShortAdjustUp：主层 ctx=View 右短按 → adjustUp ——
-TEST(KeySemantics, RightShortAdjustUp) {
-    Counters c;
-    auto k = referee(c);
-    k.onGesture(kg(KeyId::Right, Gest::Short), ms(1, Ctx::View));
     EXPECT_EQ(c.adjustUp, 1);
-    EXPECT_EQ(c.cursorRight, 0);
-    EXPECT_EQ(c.fired(), 1);
+    EXPECT_EQ(c.fired(), 2);
+    EXPECT_TRUE(c.drops.empty());
 }
 
-// —— 13. LeftRightNoCtxDropped：主层 ctx=None 左/右短按 → dropped("无效") ——
-TEST(KeySemantics, LeftRightNoCtxDropped) {
+// —— 10. LeftRightShortMenuCursor：菜单浏览态左右短按 → 游标（菜单优先于调节）——
+TEST(KeySemantics, LeftRightShortMenuCursor) {
     Counters c;
     auto k = referee(c);
-    k.onGesture(kg(KeyId::Left, Gest::Short), ms(1));
-    k.onGesture(kg(KeyId::Right, Gest::Short), ms(1));
-    EXPECT_EQ(c.fired(), 0);
-    ASSERT_EQ(c.drops.size(), 2u);
-    EXPECT_EQ(c.drops[0], "无效");
-    EXPECT_EQ(c.drops[1], "无效");
+    k.onGesture(kg(KeyId::Left, Gest::Short), ms(2));
+    k.onGesture(kg(KeyId::Right, Gest::Short), ms(2));
+    EXPECT_EQ(c.cursorLeft, 1);
+    EXPECT_EQ(c.cursorRight, 1);
+    EXPECT_EQ(c.adjustDown + c.adjustUp, 0);
 }
 
-// —— 14. GateBlocksMenuKeys：gate=false（采集态）→ 启停（M/S 主层）、切模式
-//      （M/D）、调节（U/D 与 L/R/S，260927 采集态实时调档口径）放行；
-//      纯菜单键（menuSelect/enterMenu/exitMenu）dropped("门禁") ——
-TEST(KeySemantics, GateBlocksMenuKeys) {
+// —— 11. AdjustSubstateVoxel：①子态——左右步进/中键确认/其余取消 ——
+TEST(KeySemantics, AdjustSubstateVoxel) {
     Counters c;
-    auto k = referee(c, [] { return false; });           // 菜单类键全关
-    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(1));  // 启停不问门禁 → 放行
+    auto k = referee(c);
+    k.onGesture(kg(KeyId::Left, Gest::Short), msSub(Sub::AdjustVoxel));
+    k.onGesture(kg(KeyId::Right, Gest::Short), msSub(Sub::AdjustVoxel));
+    EXPECT_EQ(c.adjustDown, 1);
+    EXPECT_EQ(c.adjustUp, 1);
+    k.onGesture(kg(KeyId::Middle, Gest::Short), msSub(Sub::AdjustVoxel));
+    EXPECT_EQ(c.menuSelect, 1);                           // 确认退出
+    k.onGesture(kg(KeyId::Up, Gest::Short), msSub(Sub::AdjustVoxel));
+    k.onGesture(kg(KeyId::Middle, Gest::Double), msSub(Sub::AdjustVoxel));
+    EXPECT_EQ(c.substateCancelled, 2);                    // 其余任意键＝取消
+    EXPECT_TRUE(c.drops.empty());                         // 取消不是丢弃
+}
+
+// —— 12. ConfirmSubstateReset：⑤子态——中键确认执行/其余取消 ——
+TEST(KeySemantics, ConfirmSubstateReset) {
+    Counters c;
+    auto k = referee(c);
+    k.onGesture(kg(KeyId::Middle, Gest::Short), msSub(Sub::ConfirmReset));
+    EXPECT_EQ(c.menuSelect, 1);
+    k.onGesture(kg(KeyId::Left, Gest::Short), msSub(Sub::ConfirmReset));
+    k.onGesture(kg(KeyId::Up, Gest::Short), msSub(Sub::ConfirmReset));
+    EXPECT_EQ(c.substateCancelled, 2);
+    EXPECT_EQ(c.adjustDown, 0);                           // ⑤子态左右＝取消非步进
+}
+
+// —— 13. GateCategoryBlocks：gate(类别)=false → 对应手势拦下；类别各归其位 ——
+TEST(KeySemantics, GateCategoryBlocks) {
+    Counters c;
+    auto k = referee(c, [](KeyCategory cat) { return cat != KeyCategory::Menu; });
+    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(1));   // StartStop 放行
     EXPECT_EQ(c.captureToggle, 1);
-    k.onGesture(kg(KeyId::Middle, Gest::Double), ms(1));          // cycleMode 不问门禁（260927）→ 放行
+    k.onGesture(kg(KeyId::Middle, Gest::Double), ms(1));  // ModeSwitch 放行
     EXPECT_EQ(c.cycleMode, 1);
-    k.onGesture(kg(KeyId::Up, Gest::Double), ms(1));              // cycleAdjustCtx 调节键放行（260927）
-    EXPECT_EQ(c.cycleAdjustCtx, 1);
-    k.onGesture(kg(KeyId::Left, Gest::Short), ms(1, Ctx::View));  // adjustDown 放行（260927）
+    k.onGesture(kg(KeyId::Up, Gest::Double), ms(1));      // Adjust 放行
+    EXPECT_EQ(c.toggleDepthOfField, 1);
+    k.onGesture(kg(KeyId::Left, Gest::Short), ms(1));     // Adjust 放行
     EXPECT_EQ(c.adjustDown, 1);
-    k.onGesture(kg(KeyId::Right, Gest::Short), ms(1, Ctx::View)); // adjustUp 放行（260927）
-    EXPECT_EQ(c.adjustUp, 1);
-    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(2));           // menuSelect 纯菜单键
-    k.onGesture(kg(KeyId::Up, Gest::Short), ms(1));               // enterMenu
-    k.onGesture(kg(KeyId::Up, Gest::Short), ms(2));               // exitMenu
-    // L/R 短按在采集态真实不可达 layer=2（进菜单被门禁挡）——此处只钉主层调节语义；
-    // 游标属菜单域不单测 gate 放行
-    EXPECT_EQ(c.fired(), 5);                             // 启停＋切模式＋切上下文＋升降档
+    k.onGesture(kg(KeyId::Middle, Gest::Short), ms(2));   // Menu 拦
+    k.onGesture(kg(KeyId::Up, Gest::Short), ms(1));       // Menu 拦
+    k.onGesture(kg(KeyId::Left, Gest::Short), ms(2));     // Menu 拦（游标）
+    EXPECT_EQ(c.fired(), 4);
     ASSERT_EQ(c.drops.size(), 3u);
     for (const auto& d : c.drops) EXPECT_EQ(d, "门禁");
 }
 
-// —— 15. ReservedGestures：全部 Hold + 左右双击 → dropped("预留")，无动作 ——
+// —— 14. ReservedGestures：左右长按 → dropped("预留")，无动作 ——
 TEST(KeySemantics, ReservedGestures) {
     Counters c;
     auto k = referee(c);
-    k.onGesture(kg(KeyId::Middle, Gest::Hold), ms(1));
-    k.onGesture(kg(KeyId::Up, Gest::Hold), ms(1));
     k.onGesture(kg(KeyId::Left, Gest::Hold), ms(1));
     k.onGesture(kg(KeyId::Right, Gest::Hold), ms(1));
-    k.onGesture(kg(KeyId::Left, Gest::Double), ms(1));
-    k.onGesture(kg(KeyId::Right, Gest::Double), ms(1));
     EXPECT_EQ(c.fired(), 0);
-    ASSERT_EQ(c.drops.size(), 6u);
+    ASSERT_EQ(c.drops.size(), 2u);
     for (const auto& d : c.drops) EXPECT_EQ(d, "预留");
 }

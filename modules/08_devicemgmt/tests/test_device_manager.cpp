@@ -374,50 +374,52 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     kit.shortPress('U');                                       // 上键短按 L1：进菜单（cursor 复位①）
     EXPECT_EQ(st().layer, 2);
     EXPECT_EQ(st().cursor, 1);
-    for (int i = 0; i < 4; ++i) kit.shortPress('R');           // 右键短按×4：1→2→3→4→1 环绕
+    for (int i = 0; i < 5; ++i) kit.shortPress('R');           // 右键短按×5：①→②…⑤→① 环绕
     EXPECT_EQ(st().cursor, 1);
-    kit.shortPress('L');                                       // 左键短按：1→4 环绕
-    EXPECT_EQ(st().cursor, 4);
-    kit.doublePress('M');                                      // 中键双击：模式光标 3→1→2→3
-    EXPECT_EQ(st().modeCursor, 1);
+    kit.shortPress('L');                                       // 左键短按：①→⑤ 环绕
+    EXPECT_EQ(st().cursor, 5);
+    kit.doublePress('M');                                      // 菜单内双击＝收紧丢弃（模式不动）
+    EXPECT_EQ(st().modeCursor, 3);                             // 仍是 3（未切）
     kit.doublePress('M');
-    EXPECT_EQ(st().modeCursor, 2);
-    kit.doublePress('M');
-    EXPECT_EQ(st().modeCursor, 3);
-    const int post0 = rec.userParam(4);
-    kit.shortPress('M');                                       // 中键短按 L2 选中④：派后处理工作流（UserDefined p1=4）
-    EXPECT_EQ(rec.userParam(4), post0 + 1);
-    kit.shortPress('U');                                       // 上键短按 L2：退菜单
-    EXPECT_EQ(st().layer, 1);
+    kit.doublePress('M');                                      // 3→1→2→3（丢弃不切——非路径验证）
+    const int64_t post0 = rec.userParam(104);
+    kit.shortPress('R');                                       // 游标⑤→①
+    for (int i = 0; i < 3; ++i) kit.shortPress('R');           // ①→②→③→④
+    kit.shortPress('M');                                       // 中键短按 L2 选中④：后处理事件 p1=104
+    EXPECT_EQ(st().layer, 1);                                  // 执行并自动退菜单（261002 定稿）
+    EXPECT_EQ(rec.userParam(104), post0 + 1);
 
-    kit.doublePress('U');                                      // 上键双击：None→View
-    EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::View);
-    kit.shortPress('R');                                       // View 上下文：暂仅日志（参数不动）
-    kit.doublePress('U');                                      // View→Brightness
+    // 主界面双击族（261002 定稿）：上双击＝景深直切（p1=114）；左双击＝换调节对象
+    const int64_t dof0 = rec.userParam(114);
+    kit.doublePress('U');                                      // 景深 近→远
+    EXPECT_EQ(rec.userParam(114), dof0 + 1);
+    kit.doublePress('U');                                      // 远→近
+    EXPECT_EQ(rec.userParam(114), dof0 + 2);
+    kit.doublePress('L');                                      // 换调节对象：亮度→显示远近
+    EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::DisplayDistance);
+    kit.shortPress('R');                                       // 显示远近档 1→2（p1=112；参数不动）
+    kit.doublePress('L');                                      // 对象回亮度
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::Brightness);
-    kit.shortPress('R');                                       // 右键短按：档位梯 档1→2（G6 三参组合）
-    EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, 3.0);
-    EXPECT_DOUBLE_EQ(dm.getParam("laserLevel").value, 70.0);
-    EXPECT_DOUBLE_EQ(dm.getParam("bgLight").value, 40.0);
-    kit.shortPress('L');                                       // 左键短按：档2→1（回落）
+    kit.shortPress('R');                                       // 亮度档 1→2：三参＝档2 组合（20 档插值）
+    EXPECT_NEAR(dm.getParam("exposure").value, 1.0 + 2.0 / 9.0, 1e-9);
+    EXPECT_NEAR(dm.getParam("laserLevel").value, 40.0 + 30.0 / 9.0, 1e-9);
+    EXPECT_NEAR(dm.getParam("bgLight").value, 10.0 + 30.0 / 9.0, 1e-9);
+    kit.shortPress('L');                                       // 档2→1（回落）
     EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, 1.0);
-    EXPECT_DOUBLE_EQ(dm.getParam("laserLevel").value, 40.0);
-    EXPECT_DOUBLE_EQ(dm.getParam("bgLight").value, 10.0);
-    kit.doublePress('U');                                      // Brightness→None
-    EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::None);
 
-    kit.shortPress('L');                                       // 主层无上下文左右：无效丢弃
+    // 长按新出口（261002 §3.3.1）：U/H＝回主界面（菜单态一键全退）；M/H＝急停
+    kit.shortPress('U');                                       // 进菜单（游标①）
+    EXPECT_EQ(st().layer, 2);
+    kit.holdPress('U');                                        // 回主界面：layer 清+对象回默认亮度
     EXPECT_EQ(st().layer, 1);
-    kit.doublePress('L');                                      // 双击/长按预留/无效手势全丢弃不崩
-    kit.doublePress('R');
-    kit.holdPress('U');
-    kit.holdPress('M');
-    kit.holdPress('L');
+    EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::Brightness);
+    kit.holdPress('M');                                        // 急停：不崩（未采集中＝无命令）
+    kit.holdPress('L');                                        // 左右长按预留
     kit.holdPress('R');
     EXPECT_EQ(st().layer, 1);
     // 快照一致性：末拍刷新后 menuState()（互斥快照口）= 逻辑线程账本状态
     EXPECT_EQ(dm.menuState().layer, 1);
-    EXPECT_EQ(dm.menuState().adjustCtx, MenuState::AdjustCtx::None);
+    EXPECT_EQ(dm.menuState().adjustCtx, MenuState::AdjustCtx::Brightness);
 }
 
 // —— T7：按键洪峰 100 帧 → 环有效容量 63（SpscRing<64> 满判 tail+1==head）收敛
@@ -981,14 +983,21 @@ TEST(DeviceManager, T17_KeyModeDispatchToN10) {
     dm.testInjectTextLine("G01 M1");             // 停采
     dm.logicTick(); dm.logicTick();
 
-    // 菜单路径：U1 进菜单（游标回①）→ M2 切 2→3 普通交叉 → M1 选中①确认 → 退菜单启采
-    dm.testInjectTextLine("G01 U1");             // layer 2
+    // 菜单段（261002 定稿）：菜单内 M2＝收紧丢弃（模式不动）；选中②派就绪事件
+    // p1=102 并自动退菜单；模式落地只在主层 M2
+    dm.testInjectTextLine("G01 U1");             // layer 2（游标①）
     dm.logicTick();
-    dm.testInjectTextLine("G01 M2");             // 2→3 普通交叉
+    dm.testInjectTextLine("G01 M2");             // 菜单内双击＝丢弃
     dm.logicTick();
-    dm.testInjectTextLine("G01 M1");             // layer2 M1＝menuSelect ① → 落地
+    EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::DeepHoleScan);   // 模式不变
+    dm.testInjectTextLine("G01 R1");             // 游标①→②
     dm.logicTick();
-    dm.testInjectTextLine("G01 U1");             // 退菜单（layer2 U1＝ExitMenu）
+    const int64_t ready0 = rec.userParam(102);
+    dm.testInjectTextLine("G01 M1");             // 选中②：就绪事件 p1=102＋自动退菜单
+    dm.logicTick();
+    EXPECT_EQ(rec.userParam(102), ready0 + 1);
+    EXPECT_EQ(dm.menuState().layer, 1);
+    dm.testInjectTextLine("G01 M2");             // 主层双击：2→3 普通交叉
     dm.logicTick();
     dm.testInjectTextLine("G01 M1");             // 启采
     dm.logicTick(); dm.logicTick();
@@ -1026,9 +1035,10 @@ TEST(DeviceManager, T18_MarkerSessionKeyIsolation) {
 
     dm.testInjectTextLine("G01 U1");                    // 进菜单（游标①）
     dm.logicTick();
-    dm.testInjectTextLine("G01 M1");                    // menuSelect①→模式设定被拒
-    dm.logicTick();
-    EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerOnly);   // 仍标点
+    dm.testInjectTextLine("G01 M1");                    // menuSelect①→采集中防呆拒（261002
+    dm.logicTick();                                     //  矩阵表注：扫描中改密度打断累积）
+    EXPECT_EQ(dm.menuState().substate, MenuState::Substate::None);   // 子态不进
+    EXPECT_EQ(dm.menuState().layer, 2);                 // 菜单不退（拒≠丢）
 
     dm.testInjectTextLine("G01 U1");                    // 退菜单回主层
     dm.logicTick();
@@ -1042,10 +1052,9 @@ TEST(DeviceManager, T18_MarkerSessionKeyIsolation) {
     EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerOnly);
 }
 
-// —— T22：View 上下文视点缩放事件＋参数占位错峰（260927 按设计接线）——View
-// 上下文左右键发 UserDefined p1=100（param2=±1）；参数改账占位 p1=1000+idx 与
-// 菜单③④(3/4)/视点(100) 不撞车 ——
-TEST(DeviceManager, T22_ViewZoomEventAndParamOffset) {
+// —— T22：事件族编号段隔离（261002 按键域定稿）——档位族 p1=111 亮度/112 显示
+// 远近/113 体素/114 景深 与菜单族 101-105/110、参数改账 1000+idx 互不撞车 ——
+TEST(DeviceManager, T22_EventFamilyIsolation) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
     bus.subscribeAll([&](const Event& e) { rec.record(e); });
@@ -1056,17 +1065,26 @@ TEST(DeviceManager, T22_ViewZoomEventAndParamOffset) {
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
 
-    dm.testInjectTextLine("G01 U2");   // None→View
+    const int64_t dof0 = rec.userParam(114);
+    dm.testInjectTextLine("G01 U2");   // 上双击＝景深 近→远（p1=114）
     dm.logicTick();
-    const int64_t zoomIn0 = rec.userParam(100);
-    dm.testInjectTextLine("G01 R1");   // 视点拉近
-    dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(rec.userParam(100), zoomIn0 + 1);
-    dm.testInjectTextLine("G01 L1");   // 视点拉远
-    dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(rec.userParam(100), zoomIn0 + 2);
+    EXPECT_EQ(rec.userParam(114), dof0 + 1);
 
-    // 参数改账占位错峰：bgLight(idx2) 改账广播 p1=1002——不落 3/4/100 门内
+    dm.testInjectTextLine("G01 L2");   // 左双击＝换对象：亮度→显示远近
+    dm.logicTick();
+    const int64_t dist0 = rec.userParam(112);
+    dm.testInjectTextLine("G01 R1");   // 显示远近档 1→2（p1=112）
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(rec.userParam(112), dist0 + 1);
+
+    dm.testInjectTextLine("G01 L2");   // 对象回亮度
+    dm.logicTick();
+    const int64_t bri0 = rec.userParam(111);
+    dm.testInjectTextLine("G01 R1");   // 亮度档 1→2（p1=111）
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(rec.userParam(111), bri0 + 1);
+
+    // 参数改账错峰：bgLight(idx2) 改账广播 p1=1002——不落菜单/档位/景深门内
     //（open 的 bootstrap 装载也广播一次——基线先记）
     const int64_t bgEvt0 = rec.userParam(1002);
     dm.setParam("bgLight", 55.0, Scanner::device::ParamEntry::Source::Ui);
@@ -1074,8 +1092,9 @@ TEST(DeviceManager, T22_ViewZoomEventAndParamOffset) {
     EXPECT_EQ(rec.userParam(1002), bgEvt0 + 1);
 }
 
-// —— T19：PresetLadder 档位梯（G6 缺口·260927）——Brightness 调节上下文左右键＝
-// 曝光/激光/补光三参组合档位步进（内置 3 档，钳制不环绕），经 ParamStore 记账 ——
+// —— T19：亮度档位梯（G6·261002 扩 20 档）——默认调节对象＝亮度（无需切上下文），
+// 左右键＝三参组合档位步进（20 档插值：档1 暗 … 档10 面片推荐 … 档20 强光），
+// 钳制不环绕，经 ParamStore 记账，档位事件 p1=111 ——
 TEST(DeviceManager, T19_PresetLadderAdjust) {
     Scanner::infra::EventBus bus;
     EventRecorder rec;
@@ -1088,31 +1107,42 @@ TEST(DeviceManager, T19_PresetLadderAdjust) {
     ASSERT_TRUE(dm.open().success);
 
     auto expectParams = [&](double exp, double laser, double bg) {
-        EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, exp);
-        EXPECT_DOUBLE_EQ(dm.getParam("laserLevel").value, laser);
-        EXPECT_DOUBLE_EQ(dm.getParam("bgLight").value, bg);
+        EXPECT_NEAR(dm.getParam("exposure").value, exp, 1e-9);
+        EXPECT_NEAR(dm.getParam("laserLevel").value, laser, 1e-9);
+        EXPECT_NEAR(dm.getParam("bgLight").value, bg, 1e-9);
     };
+    const int64_t briEvt0 = rec.userParam(111);
 
-    dm.testInjectTextLine("G01 U2");   // ctx None→View
-    dm.logicTick();
-    dm.testInjectTextLine("G01 U2");   // View→Brightness
-    dm.logicTick();
-
-    dm.testInjectTextLine("G01 R1");   // 档1→2（中）
-    dm.logicTick(); dm.logicTick();
+    // 档1→10：九步到面片推荐基线 {3, 70, 40}（插值精确点）
+    for (int i = 0; i < 9; ++i) {
+        dm.testInjectTextLine("G01 R1");
+        dm.logicTick(); dm.logicTick();
+    }
+    EXPECT_EQ(dm.presetLadderIndex(), 10);
     expectParams(3.0, 70.0, 40.0);
 
-    dm.testInjectTextLine("G01 R1");   // 档2→3（高）
+    dm.testInjectTextLine("G01 R1");   // 档10→11（mid→high 10 等分第一档）
     dm.logicTick(); dm.logicTick();
-    expectParams(5.0, 100.0, 80.0);
+    EXPECT_EQ(dm.presetLadderIndex(), 11);
+    expectParams(3.0 + 0.2, 73.0, 44.0);
 
+    // 到顶钳制：档11→20 九步，再按无效
+    for (int i = 0; i < 9; ++i) {
+        dm.testInjectTextLine("G01 R1");
+        dm.logicTick(); dm.logicTick();
+    }
+    EXPECT_EQ(dm.presetLadderIndex(), 20);
+    expectParams(5.0, 100.0, 80.0);
     dm.testInjectTextLine("G01 R1");   // 已到顶——无效（钳制不环绕）
     dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.presetLadderIndex(), 20);
     expectParams(5.0, 100.0, 80.0);
 
-    dm.testInjectTextLine("G01 L1");   // 档3→2（下调）
+    dm.testInjectTextLine("G01 L1");   // 档20→19（下调）
     dm.logicTick(); dm.logicTick();
-    expectParams(3.0, 70.0, 40.0);
+    EXPECT_EQ(dm.presetLadderIndex(), 19);
+    EXPECT_EQ(rec.userParam(111), briEvt0 + 20);           // 每次有效步进恰一条档位事件
+                                                                            // （9+1+9+1=20；到顶无效步不发）
 }
 
 // —— T20：设备指示灯（G8 缺口·260927）——N14 S1-S4 下发＋同码去重＋非法码拒绝 ——

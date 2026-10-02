@@ -179,6 +179,13 @@ public:
     MenuState menuState() const;                // 菜单账本快照（UI 常显）
     int presetLadderIndex() const { return ladderIndexSnap_.load(std::memory_order_relaxed); }
     int presetLadderSize() const { return ladderSizeSnap_.load(std::memory_order_relaxed); }
+    /// 261002 档位四快照（UI 档位面板读——显示远近/体素密度/景深；快照随
+    /// logicTick 同拍刷新，跨线程无锁读）
+    int distanceLadderIndex() const { return distanceIdxSnap_.load(std::memory_order_relaxed); }
+    int distanceLadderSize() const { return distanceSizeSnap_.load(std::memory_order_relaxed); }
+    int voxelLadderIndex() const { return voxelIdxSnap_.load(std::memory_order_relaxed); }
+    int voxelLadderSize() const { return voxelSizeSnap_.load(std::memory_order_relaxed); }
+    int depthOfField() const { return dofSnap_.load(std::memory_order_relaxed); }  // 0=近 1=远
     //（260927 键控回显：状态栏「调节 档2/3」——logicTick 末随菜单快照刷新）
 
     // —— 相机薄转发（统一编队：返回值=前置检查，实际动作逻辑线程异步执行）——
@@ -300,7 +307,12 @@ private:
     bool paramBootLoading_ = false;// bootstrap 装载期（抑制脏账标记）
     int lastDeviceLed_ = 0;        // G8：末次已发指示灯码（去重；逻辑线程属主）
     std::atomic<int> ladderIndexSnap_{1};   // 键控回显：档位快照（logicTick 末刷新）
-    std::atomic<int> ladderSizeSnap_{3};    // 键控回显：档数快照（setLadder 后刷新）
+    std::atomic<int> ladderSizeSnap_{20};   // 键控回显：档数快照（261002 亮度梯扩 20 档）
+    std::atomic<int> distanceIdxSnap_{1};   // 261002 显示远近档快照
+    std::atomic<int> distanceSizeSnap_{5};
+    std::atomic<int> voxelIdxSnap_{1};      // 261002 体素密度档快照（菜单①）
+    std::atomic<int> voxelSizeSnap_{4};
+    std::atomic<int> dofSnap_{0};           // 261002 景深档快照（0=近 1=远）
     infra::EventBus* bus_;
     CameraFactory camFactory_;
     SerialWriteOverride writeOverride_;
@@ -309,8 +321,12 @@ private:
     std::unique_ptr<hal::IScannerCamera> camera_;
     std::unique_ptr<MCUDriver> mcu_;
     std::unique_ptr<MenuLogic> menu_;
-    PresetLadder ladder_;           // G6 档位梯（Brightness 上下文：曝光/激光/补光
-                                    // 三参组合，内置 3 档钳制不环绕；逻辑线程属主）
+    PresetLadder ladder_;           // G6 亮度梯（261002 扩 20 档：曝光/激光/补光
+                                    // 三参组合——三参唯一合法写入口是换档）
+    DisplayDistanceLadder displayLadder_;   // 261002 显示远近梯（5 档——预览观看远近）
+    VoxelDensityLadder voxelLadder_;        // 261002 体素密度梯（菜单①子态——p1=113）
+    DepthOfField dof_ = DepthOfField::Near; // 261002 景深档（近默认；上键双击直切——
+                                            // 纯计算侧参数，屏蔽区间归 07/09 对接）
     std::unique_ptr<ModeController> mode_;
     std::unique_ptr<WarmupSequence> warmup_;
     std::unique_ptr<KeySemantics> semantics_;   // ctor 体内 buildKeyActions 接线
