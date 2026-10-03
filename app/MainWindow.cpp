@@ -2433,25 +2433,33 @@ QWidget *MainWindow::createParamSection()
                 "QSlider::handle:horizontal { background: #900021; width: 12px; height: 12px; margin: -5px 0px; border-radius: 6px; border: none; }"
             );
             voxCtl->addWidget(voxSlider, 1);
-            // 值标签显示实际 mm 值（非档号）——拖动中实时显示目标档的 mm
-            QLabel* voxVal = new QLabel(m_vkeyPad ? nullptr : nullptr);
-            voxVal = new QLabel();
+            // 值标签显示实际 mm 值——connect 到 this（MainWindow）非 voxVal，
+            // 排除 context 生命周期问题；每次 valueChanged 现取梯值
+            QLabel* voxVal = new QLabel(slidersWidget);
             voxVal->setObjectName("paramValue");
             voxVal->setFixedWidth(70);
             voxVal->setFixedHeight(20);
             voxVal->setAlignment(Qt::AlignCenter);
             voxVal->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000; font-weight: bold;");
-            // 无捕获 lambda：每次直接从 VoxelDensityLadder 取当前档值（彻底消除
-            // 捕获生命周期问题；构造梯仅建 27 元素 vector，代价可忽略）
-            auto voxMmAt = [](int idx) -> QString {
+            {
+                const auto s0 = Scanner::device::VoxelDensityLadder().steps();
+                const int i0 = voxSlider->value();
+                voxVal->setText(
+                    i0 >= 1 && i0 <= static_cast<int>(s0.size())
+                        ? QString::number(s0[static_cast<size_t>(i0 - 1)], 'f', 2) + "mm"
+                        : QStringLiteral("--"));
+            }
+            QObject::connect(voxSlider, &QSlider::valueChanged, this,
+                             [this, voxVal](int val) {
                 const auto s = Scanner::device::VoxelDensityLadder().steps();
-                if (idx >= 1 && idx <= static_cast<int>(s.size()))
-                    return QString::number(s[static_cast<size_t>(idx - 1)], 'f', 2) + "mm";
-                return QStringLiteral("--");
-            };
-            voxVal->setText(voxMmAt(voxSlider->value()));
-            QObject::connect(voxSlider, &QSlider::valueChanged, voxVal,
-                             [voxVal, voxMmAt](int val) { voxVal->setText(voxMmAt(val)); });
+                const QString txt =
+                    val >= 1 && val <= static_cast<int>(s.size())
+                        ? QString::number(s[static_cast<size_t>(val - 1)], 'f', 2) + "mm"
+                        : QStringLiteral("--");
+                voxVal->setText(txt);
+                statusBar()->showMessage(
+                    QStringLiteral("分辨率滑条→ %1（档 %2）").arg(txt).arg(val), 2000);
+            });
             voxCtl->addWidget(voxVal);
             m_voxelSlider = voxSlider;              // 成员存（113 事件回显＋扫描锁）
             QObject::connect(voxSlider, &QSlider::sliderReleased, this, [this]() {
