@@ -1175,18 +1175,21 @@ void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
 // 「拒＝可按但有反馈」与「拦＝无效直接灰」区分，设计 §3.2.5 定版口径）
 void MainWindow::showVirtualKeypad() {
     if (!m_vkeyPad) {
-        m_vkeyPad = new QDialog(this, Qt::Tool | Qt::WindowStaysOnTopHint);
-        // Tool＋StaysOnTop：小型浮窗不被主窗口盖住（校准/扫描切视图时可见）
-        m_vkeyPad->setWindowTitle(QStringLiteral("虚拟按键表盘（模拟扫描仪面板 G01）"));
+        m_vkeyPad = new QDialog(nullptr);   // 无父窗口（独立顶层——全屏主窗口不遮）
+        m_vkeyPad->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        m_vkeyPad->setWindowTitle(QStringLiteral("虚拟按键表盘"));
         m_vkeyPad->setModal(false);
-        m_vkeyPad->setFixedWidth(380);
+        m_vkeyPad->setMinimumSize(560, 520);
         auto* lay = new QGridLayout(m_vkeyPad);
+        lay->setContentsMargins(16, 12, 16, 12);
+        lay->setHorizontalSpacing(10);
+        lay->setVerticalSpacing(8);
         const QStringList gestures{
             QStringLiteral("单击"), QStringLiteral("双击"), QStringLiteral("长按")};
         for (int g = 0; g < 3; ++g) {
             auto* h = new QLabel(gestures[g], m_vkeyPad);
             h->setAlignment(Qt::AlignCenter);
-            h->setStyleSheet("font-weight: bold;");
+            h->setStyleSheet("font-weight: bold; font-size: 14px; padding: 4px;");
             lay->addWidget(h, 0, g + 1);
         }
         // 行序＝U/D/L/R/M；按钮文本＝功能名（非手势名——列头已有手势，按钮要
@@ -1224,11 +1227,14 @@ void MainWindow::showVirtualKeypad() {
         for (int r = 0; r < 5; ++r) {
             const auto& row = rows[r];
             auto* lbl = new QLabel(row.name, m_vkeyPad);
-            lbl->setStyleSheet(row.inProto ? QStringLiteral("font-weight: bold;")
-                                           : QStringLiteral("color:#999;"));
+            lbl->setStyleSheet(row.inProto
+                ? "font-weight: bold; font-size: 14px; padding: 4px;"
+                : "color:#999; font-size: 14px; padding: 4px;");
             lay->addWidget(lbl, r + 1, 0);
             for (int g = 0; g < 3; ++g) {
                 auto* btn = new QPushButton(row.btnText[g], m_vkeyPad);
+                btn->setMinimumHeight(44);           // 手指可点的高度
+                btn->setMinimumWidth(110);           // 文字不截断
                 m_vkeyBtns[r][g] = btn;               // 存指针（态同步用）
                 btn->setToolTip(row.tips[g]);
                 if (row.inProto) {
@@ -1248,13 +1254,22 @@ void MainWindow::showVirtualKeypad() {
             QStringLiteral("261002 临时测试机：经 G01 注入测试缝下发，与真机按键同链路\n"
                            "蓝框＝可按 · 灰框＝当前态不可用（拦）或协议预留"),
             m_vkeyPad);
-        note->setStyleSheet("color:#888; font-size:11px;");
+        note->setStyleSheet("color:#888; font-size: 12px; padding: 4px;");
         note->setAlignment(Qt::AlignCenter);
         lay->addWidget(note, 6, 0, 1, 4);
         // 当前全局态常驻标签（灰化/恢复是否与系统态同步——用户可验证）
         m_vkeyStateLbl = new QLabel(m_vkeyPad);
         m_vkeyStateLbl->setAlignment(Qt::AlignCenter);
+        m_vkeyStateLbl->setStyleSheet("font-size: 13px; padding: 6px;");
         lay->addWidget(m_vkeyStateLbl, 7, 0, 1, 4);
+
+        // 独立刷新定时器（500ms）——不依赖 info timer，排除连接问题
+        auto* padTimer = new QTimer(m_vkeyPad);
+        connect(padTimer, &QTimer::timeout, this, [this]() {
+            updateVirtualKeypadStates();
+        });
+        padTimer->start(500);
+
         updateVirtualKeypadStates();                  // 首建即对齐当前态
     }
     m_vkeyPad->show();
@@ -1336,22 +1351,22 @@ void MainWindow::updateVirtualKeypadStates() {
             // 不可用＝灰底半透明
             const bool isCalibMain = inCalib && (r == 4 && g == 0);
             btn->setStyleSheet(isCalibMain
-                ? QStringLiteral(                                  // 校准主操作＝绿色醒目
+                ? QStringLiteral(
                     "QPushButton { background-color: #27AE60; color: white;"
-                    " border: 2px solid #1E8449; border-radius: 4px;"
-                    " font-weight: bold; padding: 4px 6px; }"
+                    " border: 2px solid #1E8449; border-radius: 6px;"
+                    " font-size: 15px; font-weight: bold; padding: 8px 12px; }"
                     "QPushButton:hover { background-color: #2ECC71; }")
                 : enabled
                 ? QStringLiteral(
                     "QPushButton { background-color: #E8F0FE; color: #1A5276;"
-                    " border: 1px solid #2980B9; border-radius: 4px;"
-                    " font-weight: bold; padding: 4px 6px; }"
+                    " border: 1px solid #2980B9; border-radius: 6px;"
+                    " font-size: 14px; font-weight: bold; padding: 8px 12px; }"
                     "QPushButton:hover { background-color: #D4E6F1; }"
                     "QPushButton:pressed { background-color: #AED6F1; }")
                 : QStringLiteral(
                     "QPushButton { background-color: #E8E8E8; color: #B0B0B0;"
-                    " border: 1px solid #D0D0D0; border-radius: 4px;"
-                    " padding: 4px 6px; }"));
+                    " border: 1px solid #D0D0D0; border-radius: 6px;"
+                    " font-size: 14px; padding: 8px 12px; }"));
         }
     }
 }
