@@ -144,6 +144,35 @@ void OSGWidget::home()
         m_viewer->getCameraManipulator()->home(0);
 }
 
+// P-2 显示远近档（261002 §3.3.2）：档 i → 视点距注视点距离＝基准 × factor[i]。
+// 基准＝当前 manipulator 的 home 距离（placeOptimalCamera 每次流式/重置都会设，
+// 作为「档 1 最近」锚）；保持注视点与方向只沿视线伸缩距离。档值系数产线对账
+// 前占位（1.0/1.5/2.2/3.2/4.5）
+void OSGWidget::setViewDistanceLadder(int idx)
+{
+    static const double kFactors[] = {1.0, 1.5, 2.2, 3.2, 4.5};
+    if (idx < 1 || idx > 5) return;
+    osgGA::CameraManipulator* manip =
+        m_viewer.valid() ? m_viewer->getCameraManipulator() : nullptr;
+    if (!manip) return;
+    // 基准距离：home 矩阵的视距（与当前视点解耦——用户旋转/平移后换档仍回到
+    // 「本档远近」而非叠加当前状态）
+    osg::Vec3d hEye, hCtr, hUp;
+    manip->getHomePosition(hEye, hCtr, hUp);
+    if (hEye == osg::Vec3d(0, 0, 0) && hCtr == hEye) {
+        // 无 home（理论不达——初始化即设）：退回当前视距作基准
+        osg::Vec3d eye, center, up;
+        manip->getMatrix().getLookAt(eye, center, up);
+        hEye = eye; hCtr = center; hUp = up;
+    }
+    const osg::Vec3d dir = hCtr - hEye;
+    const double baseLen = dir.length();
+    if (baseLen <= 0.0) return;
+    const osg::Vec3d n = dir / baseLen;
+    const double target = baseLen * kFactors[idx - 1];
+    manip->setByMatrix(osg::Matrixd::lookAt(hCtr - n * target, hCtr, hUp));
+}
+
 void OSGWidget::createAxesIndicator()
 {
     m_axesCamera = new osg::Camera();

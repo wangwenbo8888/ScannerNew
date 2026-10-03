@@ -99,6 +99,10 @@ public:
 
     void setCameraManipulator(osgGA::CameraManipulator* manipulator);
     void zoomView(double factor);   // 视点缩放（按键 View 上下文：factor<1 拉近/>1 拉远）
+    /// P-2 显示远近档（261002 按键域 §3.3.2）：档 1-5 按档值系数相对基准视点
+    /// 拉远（基准＝placeOptimalCamera/home 所设距离；系数产线对账前占位）。
+    /// 只改预览观看远近，不碰采集参数
+    void setViewDistanceLadder(int idx);
     void home();
 
     // Lasso / polyline selection

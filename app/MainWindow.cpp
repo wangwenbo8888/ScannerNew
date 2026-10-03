@@ -429,6 +429,9 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             m_activeScanToolIdx = -1;
                         } else if (p1 == 100) {    // View 视点缩放（260927 旧口径保留）
                             if (m_3dView) m_3dView->zoomView(p2 > 0 ? 0.8 : 1.25);
+                        } else if (p1 == 112) {    // P-2 显示远近档（261002：5 档距离
+                            // 预设——只改预览观看远近；快照兜底见启动对齐）
+                            if (m_3dView) m_3dView->setViewDistanceLadder(static_cast<int>(p2));
                         }
                     }, Qt::QueuedConnection);
                 });
