@@ -1248,6 +1248,7 @@ void MainWindow::showVirtualKeypad() {
                     });
                 }
                 // 不在此设 enabled——updateVirtualKeypadStates 统一按当前态定
+                lay->addWidget(btn, r + 1, g + 1);  // ← 关键行：加入网格布局
             }
         }
         auto* note = new QLabel(
