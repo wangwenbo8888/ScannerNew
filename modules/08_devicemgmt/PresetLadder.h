@@ -126,6 +126,7 @@ public:
         for (double v = 0.2; v <= 1.0 + 1e-9; v += 0.1) steps.push_back(v);      // 0.2..1.0
         for (double v = 1.5; v <= 5.0 + 1e-9; v += 0.5) steps.push_back(v);     // 1.5..5.0
         setSteps(steps);
+        reset();   // index 设中位 14（1.0mm）——不加则 index=0（无效，UI 与梯不一致根因）
     }
 };
 

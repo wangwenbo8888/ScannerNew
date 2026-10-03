@@ -2995,6 +2995,12 @@ void MainWindow::startInfoTimer()
         updateInfoSection();
         updateVirtualKeypadStates();   // P-键盘：每秒刷新——响应 SystemState
                                         // ＋calibArmed/采集等非 StateChanged 驱动态
+        // P-分辨率：滑条与 DM 同步（非拖动时——初始时序偏差自动收敛）
+        if (m_voxelSlider && !m_voxelSlider->isSliderDown()) {
+            auto* dmVox = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+            if (dmVox && m_voxelSlider->value() != dmVox->voxelLadderIndex())
+                m_voxelSlider->setValue(dmVox->voxelLadderIndex());
+        }
     });
     m_infoTimer->start(1000);
 
