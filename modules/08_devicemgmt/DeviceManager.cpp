@@ -1124,20 +1124,29 @@ void DeviceManager::buildKeyActions() {
     };
     a.emergencyStop = [this] {                   // §3.3.1 中键长按＝急停（全域免门禁）
         menu_->apply(MenuOp::CancelSubstate);    // 顺带解散子态（逃生优先于子态）
-        // 急停「所有灯全灭」语义（§3.3.1）——先发全零 N10 灭灯再 N11 H0 停触发
-        // （261003 用户实测：临时机 N11 H0 不关灯；急停≠常规停采——常规停采
-        //  261002 用户裁定只发 N11 H0，急停是独立语义必须全灭）
+        // ── 急停全灭灯·确定性顺序（261003 间歇性不灭灯根因修复）──
+        // 根因：校准灯序每帧发新 N10，急停的灭灯 N10 排写队列时可能被尚未
+        // 排空的相位 N10 覆盖（MCU 收到的最后一条 N10 是带灯的相位帧）。
+        // 修复：①先原子掐死相位推进＋采集标记（帧回调 CAS 必败，不再排新
+        // N10）②灭灯 N10 入队 ③N11 H0 入队 ④flush 确保落线 ⑤补发一次
+        // 灭灯（belt-and-suspenders——固件处理竞争时最后一条恒为全零）
+        calibPhase_.store(-1, std::memory_order_relaxed);       // ① 掐死灯序推进
+        if (mode_->isCapturing()) mode_->setCapturing(false);   // ① 掐死采集（防 param 重发）
         if (mcu_->isOpen()) {
             hal::CaptureParams lightsOff{};
-            lightsOff.freqHz = 1;                // 最小频率（若触发被重启≈无感）
+            lightsOff.freqHz = 1;
             lightsOff.bgLight = 0;
             lightsOff.laserLevel = 0;
             lightsOff.laserT = lightsOff.laserV = lightsOff.laserC = lightsOff.laserD = 0;
-            mcu_->setCaptureParams(lightsOff, nullptr);   // 全零 N10 → 灭灯
+            mcu_->setCaptureParams(lightsOff, nullptr);          // ② 灭灯 N10
+            mcu_->stopScan(nullptr);                             // ③ N11 H0 停触发
+            mcu_->flushWrites(2000);                             // ④ 确保落线
+            mcu_->setCaptureParams(lightsOff, nullptr);          // ⑤ 补发灭灯
+            mcu_->flushWrites(1000);                             //   确保落线
         }
-        if (mode_->isCapturing()) stopCaptureOnLogic();   // N11 H0 → 停触发
+        if (camera_ && camera_->isOpen()) camera_->stopAsyncCapture();  // 停相机流
         publishEvent(EventType::UserDefined, 120, 1);     // P-3 横幅：已急停（红底）
-        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 急停（中键长按）：全零 N10 灭灯＋N11 H0 停采＋子态解散（不碰会话/全局态/参数盘）");
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 急停：掐相位→灭灯→停触发→flush→补灭灯→停流（确定性全灭）");
     };
     a.backToMain = [this] {                      // §3.3.1 上键长按＝一键回主界面
         menu_->apply(MenuOp::BackToMain);        // 清层/游标/子态；调节对象回默认亮度
