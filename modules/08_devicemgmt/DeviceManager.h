@@ -244,6 +244,8 @@ public:
     void setVoxelLadderIndex(int idx);
     /// 当前灯序相位（-1=未在跑；0=补光/1=左斜/2=右斜/3=精细/4=深孔）
     int calibLightPhase() const { return calibPhase_.load(std::memory_order_relaxed); }
+    /// P-键盘：标定采集布防快照（校准设备布防后 true——键盘态同步用）
+    bool isCalibCaptureArmed() const { return calibArmed_.load(std::memory_order_relaxed); }
 
     // —— 打光场景封装（灯型三态；N10 即时生效，组合语义见各自注释）——
     /// 只打补光灯（标志点扫描 A 模式）：B=账本值，激光管全关

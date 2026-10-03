@@ -1245,11 +1245,15 @@ void MainWindow::showVirtualKeypad() {
         }
         auto* note = new QLabel(
             QStringLiteral("261002 临时测试机：经 G01 注入测试缝下发，与真机按键同链路\n"
-                           "灰＝当前态不可用（拦）；亮＝可按（拒因经横幅反馈）"),
+                           "蓝框＝可按 · 灰框＝当前态不可用（拦）或协议预留"),
             m_vkeyPad);
         note->setStyleSheet("color:#888; font-size:11px;");
         note->setAlignment(Qt::AlignCenter);
         lay->addWidget(note, 6, 0, 1, 4);
+        // 当前全局态常驻标签（灰化/恢复是否与系统态同步——用户可验证）
+        m_vkeyStateLbl = new QLabel(m_vkeyPad);
+        m_vkeyStateLbl->setAlignment(Qt::AlignCenter);
+        lay->addWidget(m_vkeyStateLbl, 7, 0, 1, 4);
         updateVirtualKeypadStates();                  // 首建即对齐当前态
     }
     m_vkeyPad->show();
@@ -1272,13 +1276,43 @@ void MainWindow::showVirtualKeypad() {
 void MainWindow::updateVirtualKeypadStates() {
     if (!m_vkeyPad) return;
     using S = Scanner::service::SystemState;
+    auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     const auto s = (m_appCtx && m_appCtx->stateMachine())
                        ? m_appCtx->stateMachine()->getCurrentState() : S::Init;
     // S1/S3/S6/S7＝全拦（除逃生类）；S2/S4/S5＝放行
     const bool blocking = (s == S::Init || s == S::Calibrating ||
                            s == S::PostProcessing || s == S::FaultSelfCheck);
-    // 逃生类坐标：M 长按＝[4][2]，U 长按＝[0][2]——恒亮
-    // 预留/协议外坐标：D 全行 [1][*]，L 长按 [2][2]，R 双击 [3][1]，R 长按 [3][2]——恒灰
+    // 261002 校准布防子态：calibArmed 且未采集＝S2 的校准上下文——全局态仍
+    // S2 但按键语义变了（M＝开拍五态灯序，菜单/调节不适用）→ 键盘须反映
+    const bool inCalib = dm && dm->isCalibCaptureArmed();
+    const bool capturing = dm && dm->isCapturing();
+
+    // 状态标签：当前全局态＋校准布防上下文（用户验证灰化/恢复是否与系统态同步）
+    static const char* kStateNames[] = { "", "S1 初始化", "S2 待机", "S3 标定",
+                                         "S4 扫标点", "S5 标点+激光", "S6 后处理", "S7 故障" };
+    if (m_vkeyStateLbl) {
+        const int si = static_cast<int>(s);
+        QString stateText = si >= 1 && si <= 7
+            ? QString::fromUtf8(kStateNames[si]) : QStringLiteral("未知");
+        QString hintText;
+        if (inCalib && !capturing) {
+            stateText += QStringLiteral(" · 校准布防");
+            hintText = QStringLiteral("（按 M 开始五态循环采集）");
+        } else if (capturing && inCalib) {
+            stateText += QStringLiteral(" · 校准采集中");
+            hintText = QStringLiteral("（按 M 停止）");
+        } else if (blocking) {
+            hintText = QStringLiteral("（除急停/回主界面外全灰）");
+        } else {
+            hintText = QStringLiteral("（可用）");
+        }
+        m_vkeyStateLbl->setText(
+            QStringLiteral("当前状态：%1  %2").arg(stateText, hintText));
+        m_vkeyStateLbl->setStyleSheet(blocking || inCalib
+            ? "color: #C0392B; font-weight: bold; padding: 2px;"
+            : "color: #27AE60; font-weight: bold; padding: 2px;");
+    }
+
     for (int r = 0; r < 5; ++r) {
         for (int g = 0; g < 3; ++g) {
             auto* btn = m_vkeyBtns[r][g];
@@ -1286,7 +1320,37 @@ void MainWindow::updateVirtualKeypadStates() {
             const bool escape = (r == 4 && g == 2) || (r == 0 && g == 2);
             const bool reserved = (r == 1) || (r == 2 && g == 2) ||
                                   (r == 3 && g >= 1);
-            btn->setEnabled(escape || (!reserved && !blocking));
+            bool enabled;
+            if (inCalib && !capturing) {
+                // 校准布防态：M 短按（开拍）＋逃生类可用；菜单/调节/切模式灰
+                enabled = (r == 4 && g == 0) || escape;   // M单击 + 逃生
+            } else if (inCalib && capturing) {
+                // 校准采集中：M 短按（停）＋逃生类可用
+                enabled = (r == 4 && g == 0) || escape;
+            } else {
+                enabled = escape || (!reserved && !blocking);
+            }
+            btn->setEnabled(enabled);
+            // 显式样式：可用＝蓝底白字（校准主操作）或白底蓝框（常规）；
+            // 不可用＝灰底半透明
+            const bool isCalibMain = inCalib && (r == 4 && g == 0);
+            btn->setStyleSheet(isCalibMain
+                ? QStringLiteral(                                  // 校准主操作＝绿色醒目
+                    "QPushButton { background-color: #27AE60; color: white;"
+                    " border: 2px solid #1E8449; border-radius: 4px;"
+                    " font-weight: bold; padding: 4px 6px; }"
+                    "QPushButton:hover { background-color: #2ECC71; }")
+                : enabled
+                ? QStringLiteral(
+                    "QPushButton { background-color: #E8F0FE; color: #1A5276;"
+                    " border: 1px solid #2980B9; border-radius: 4px;"
+                    " font-weight: bold; padding: 4px 6px; }"
+                    "QPushButton:hover { background-color: #D4E6F1; }"
+                    "QPushButton:pressed { background-color: #AED6F1; }")
+                : QStringLiteral(
+                    "QPushButton { background-color: #E8E8E8; color: #B0B0B0;"
+                    " border: 1px solid #D0D0D0; border-radius: 4px;"
+                    " padding: 4px 6px; }"));
         }
     }
 }
@@ -2889,7 +2953,11 @@ void MainWindow::startInfoTimer()
     // CPU 采集走 PDH（updateInfoSection 头部双计数器）——GetSystemTimes 时间戳
     // 基线随旧差分块一并移除（2026-09-06）
     m_infoTimer = new QTimer(this);
-    connect(m_infoTimer, &QTimer::timeout, this, &MainWindow::updateInfoSection);
+    connect(m_infoTimer, &QTimer::timeout, this, [this]() {
+        updateInfoSection();
+        updateVirtualKeypadStates();   // P-键盘：每秒刷新——响应 SystemState
+                                        // ＋calibArmed/采集等非 StateChanged 驱动态
+    });
     m_infoTimer->start(1000);
 
     // 3D 视图定时刷新（从 PointCloudBuffer 拉快照→值传渲染——快照拉取归
