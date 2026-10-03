@@ -37,12 +37,11 @@ constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 
 std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
     return {
-        {"exposure", 10.0, 1.0, 100.0},        // 曝光 ms（相机直设）
+        {"exposure", 3.0, 1.0, 100.0},        // 曝光 ms（≈档10 中位均分值——boot 后由梯覆写）
         {"freqHz", 60.0, 1.0, 200.0},         // N10 H 拍照频率＝固定值（261002 按键域定稿：无任何调节入口，
-                                              // 仅 N10 组帧读取；60＝带宽账定版 750→375MB/s）。历程口径留痕：
-                                              // 60→120→30→120〔260927〕→60〔261002〕。协议 260831 域 1-200）
-        {"bgLight", 10.0, 0.0, 100.0},         // N10 B 补光（默认 10——B 模式成功配置基线；B30 过曝毁检测 ROI 跌至 4）
-        {"laserLevel", 40.0, 0.0, 100.0},      // N10 L 激光强度（默认 40；60 过亮→40 折中）
+                                              // 仅 N10 组帧读取；60＝带宽账定版 750→375MB/s）
+        {"bgLight", 47.0, 0.0, 100.0},        // N10 B 补光（≈档10 中位均分值——boot 后由梯覆写）
+        {"laserLevel", 47.0, 0.0, 100.0},     // N10 L 激光强度（≈档10 中位均分值——boot 后由梯覆写）
     };
 }
 
@@ -64,9 +63,11 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
     // 跳），标志点检测/立体匹配全线恶化。标点扫描静止对板无需高帧率；面片等
     // 激光模式维持账本值（用户 120 口径不变）
     if (mode == Scanner::ScanMode::MarkerOnly && p.freqHz > 30) p.freqHz = 30;
-    p.bgLight = (mode == Scanner::ScanMode::MarkerOnly)
-                    ? kMarkerOnlyBg
-                    : static_cast<int>(params.get("bgLight").value);
+    // 261003 标点模式补光改随梯值（原硬编码 kMarkerOnlyBg=10 换档无效——补光/
+    // 激光全被覆盖只剩曝光 1-5ms 变化，用户实测「换挡效果不明显」根因）。
+    // 梯＝三参唯一真相源（§3.3.2），标点模式只锁激光管关＋频率钳，B/E 随档走；
+    // 档10≈旧基线 B=40（B10 基线随档值表产线对账后定版）
+    p.bgLight = static_cast<int>(params.get("bgLight").value);
     p.laserLevel = (mode == Scanner::ScanMode::MarkerOnly)
                        ? 0
                        : static_cast<int>(params.get("laserLevel").value);

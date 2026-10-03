@@ -312,7 +312,7 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
 
     kit.shortPress('M');                                       // 主层中键短按 → 启采集（单帧 N10）
     EXPECT_EQ(mock.count("N11 H1"), 0);                         // 启动不发 N11 H1（a9bfe53 口径）
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);             // 每次启采集发 N10（账本默认全参）
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);             // 每次启采集发 N10（账本默认全参）
     EXPECT_TRUE(dm.isCapturing());
     kit.shortPress('M');                                       // 再按 → 停采集（单发 N11 H0）
     EXPECT_EQ(mock.count("N11 H0"), 1);
@@ -321,12 +321,12 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     dm.startCapture();                                         // 直调重复启：幂等无新帧
     dm.logicTick();
     EXPECT_EQ(mock.count("N11 H1"), 0);                         // 全程无 N11 H1
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 2);
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 2);
     EXPECT_TRUE(dm.isCapturing());
     dm.startCapture();                                         // 采集已开：幂等无新 N10/N11
     dm.logicTick();
     EXPECT_EQ(mock.count("N11 H1"), 0);
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 2);
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 2);
     dm.stopCapture();                                          // 直调重复停：幂等无新帧
     dm.logicTick();
     dm.stopCapture();
@@ -352,7 +352,7 @@ TEST(DeviceManager, T5b_StartCaptureN10FromParamAccount) {
     dm.logicTick();
     dm.startCapture();
     dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H90 B10 T0 V1 C1 D0 L40"), 1);              // N10 帧含 H90（账本值）
+    EXPECT_EQ(mock.count("N10 H90 B47 T0 V1 C1 D0 L47"), 1);              // N10 帧含 H90（账本值）
     EXPECT_EQ(mock.count("N11 H1"), 0);                         // 启动不发 N11 H1（a9bfe53 口径）
     EXPECT_TRUE(dm.isCapturing());
 }
@@ -403,12 +403,19 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     kit.shortPress('R');                                       // 显示远近档 1→2（p1=112；参数不动）
     kit.doublePress('L');                                      // 对象回亮度
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::Brightness);
-    kit.shortPress('R');                                       // 亮度档 1→2：三参＝档2 组合（20 档插值）
-    EXPECT_NEAR(dm.getParam("exposure").value, 1.0 + 2.0 / 9.0, 1e-9);
-    EXPECT_NEAR(dm.getParam("laserLevel").value, 40.0 + 30.0 / 9.0, 1e-9);
-    EXPECT_NEAR(dm.getParam("bgLight").value, 10.0 + 30.0 / 9.0, 1e-9);
+    // 均分梯默认档10起步——先回档1再测步进（261003 均分版）
+    dm.setBrightnessLadderIndex(1);
+    dm.logicTick(); dm.logicTick();
+    kit.shortPress('R');                                       // 亮度档 1→2：三参＝档2 均分值
+    {
+        const auto stepsT6 = PresetLadder::builtinLadder();
+        EXPECT_NEAR(dm.getParam("exposure").value, stepsT6[1].exposureMs, 1e-9);
+        EXPECT_NEAR(dm.getParam("laserLevel").value, stepsT6[1].laserLevel, 1e-9);
+        EXPECT_NEAR(dm.getParam("bgLight").value, stepsT6[1].bgLight, 1e-9);
+    }
     kit.shortPress('L');                                       // 档2→1（回落）
-    EXPECT_DOUBLE_EQ(dm.getParam("exposure").value, 1.0);
+    EXPECT_NEAR(dm.getParam("exposure").value,
+                PresetLadder::builtinLadder()[0].exposureMs, 1e-9);
 
     // 长按新出口（261002 §3.3.1）：U/H＝回主界面（菜单态一键全退）；M/H＝急停
     kit.shortPress('U');                                       // 进菜单（游标①）
@@ -475,7 +482,7 @@ TEST(DeviceManager, T8_CameraDisconnectDuringCaptureFaultNoAutoStop) {
     fake->openState = false;                                   // 相机掉线
     dm.logicTick();                                            // 下一拍巡检点
     EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);              // 启采集单帧 N10
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);              // 启采集单帧 N10
     EXPECT_EQ(mock.count("N11 H0"), 0);                         // 无自主停采
     EXPECT_FALSE(dm.isDeviceReady());
 }
@@ -506,7 +513,7 @@ TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
     kit.shortPress('M');                                       // v3 手势链正常
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);              // 启采集=单帧 N10（v2 会话 close 的 N11 H0/N12 Z0 不计入）
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);              // 启采集=单帧 N10（v2 会话 close 的 N11 H0/N12 Z0 不计入）
     EXPECT_TRUE(dm.isCapturing());
 }
 
@@ -526,20 +533,20 @@ TEST(DeviceManager, T10_AckLossRetransmitNonBlocking) {
 
     dm.startCapture();
     dm.logicTick();                                            // 编队任务落地（N10 首发）
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);
     const auto t0 = std::chrono::steady_clock::now();          // 非阻塞证明：连 10 拍立即返回
     for (int i = 0; i < 10; ++i) dm.logicTick();
     const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
     EXPECT_LT(dt, 500);
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);             // 无时间推进 → 无重传
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);             // 无时间推进 → 无重传
 
-    for (int i = 0; i < 50 && mock.count("N10 H60 B10 T0 V1 C1 D0 L40") < 4; ++i) {  // 重传×3 + 3 败收口
+    for (int i = 0; i < 50 && mock.count("N10 H60 B47 T0 V1 C1 D0 L47") < 4; ++i) {  // 重传×3 + 3 败收口
         sleepMs(5);
         dm.logicTick();
     }
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 4);
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 4);
     EXPECT_GE(rec.count(EventType::FaultOccurred), 1);
     EXPECT_FALSE(dm.isCapturing());
 }
@@ -559,12 +566,12 @@ TEST(DeviceManager, T11_V2DegradedFullChain) {
     dm.startCapture();                                         // v2：编队执行 send 内立即回调 ok「未确认」
     dm.logicTick();
     EXPECT_TRUE(dm.isCapturing());
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);
     for (int i = 0; i < 10; ++i) {
         sleepMs(10);
         dm.logicTick();
     }
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);             // 无 ACK 不重传不判败
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);             // 无 ACK 不重传不判败
     EXPECT_EQ(rec.count(EventType::FaultOccurred), 0);
 
     dm.testInjectRaw("T25.3;");                                // v2 被动收现状 T 帧（单路）
@@ -614,7 +621,7 @@ TEST(DeviceManager, T12_GroupMidFailVersusFullAckCommit) {
     mock.noAck.clear();                                        // 对照：全 ACK 路径
     dm.enterScan();
     for (int i = 0; i < 10; ++i) dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 5);             // N10 全参自账本（首段 3 败 4 帧 + 本段 1）
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 5);             // N10 全参自账本（首段 3 败 4 帧 + 本段 1）
     EXPECT_EQ(mock.count("N13 E0"), 1);                         // 待机已退：本段无 N13 E0
     EXPECT_EQ(dm.mode(), DeviceMode::Scanning);
     EXPECT_TRUE(dm.isCapturing());
@@ -965,13 +972,13 @@ TEST(DeviceManager, T17_KeyModeDispatchToN10) {
     // 默认 modeCursor=3（普通交叉）→ 首次启采＝面片掩码 V1C1
     dm.testInjectTextLine("G01 M1");             // 主层中键短按＝启采
     dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);
 
     // 采集中双击（260927 用户口径：实时切模式）——3→1 精细：N10 全参重发 T 管
     dm.testInjectTextLine("G01 M2");
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::FineScan);     // 模式随帧贯通读取口
-    EXPECT_EQ(mock.count("N10 H60 B10 T1 V0 C0 D0 L40"), 1);     // 采集态重发精细掩码
+    EXPECT_EQ(mock.count("N10 H60 B47 T1 V0 C0 D0 L47"), 1);     // 采集态重发精细掩码
     dm.testInjectTextLine("G01 M1");             // 停采
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(mock.count("N11 H0"), 1);
@@ -982,7 +989,7 @@ TEST(DeviceManager, T17_KeyModeDispatchToN10) {
     EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::DeepHoleScan);
     dm.testInjectTextLine("G01 M1");             // 再启采
     dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V0 C0 D1 L40"), 1);     // 深孔掩码
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V0 C0 D1 L47"), 1);     // 深孔掩码
     dm.testInjectTextLine("G01 M1");             // 停采
     dm.logicTick(); dm.logicTick();
 
@@ -1004,7 +1011,7 @@ TEST(DeviceManager, T17_KeyModeDispatchToN10) {
     dm.logicTick();
     dm.testInjectTextLine("G01 M1");             // 启采
     dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 2);     // 面片掩码（第二次）
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 2);     // 面片掩码（第二次）
     dm.testInjectTextLine("G01 M1");             // 停采收口
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(mock.count("N11 H0"), 3);          // 三轮启停各恰一次
@@ -1028,13 +1035,13 @@ TEST(DeviceManager, T18_MarkerSessionKeyIsolation) {
     dm.logicTick();
     dm.testInjectTextLine("G01 M1");                    // 启采（标点：B=kMarkerOnlyBg〔40→10〕＋H 钳 30〔120 带宽饱和链路重开，260927〕激光全关）
     dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H30 B10 T0 V0 C0 D0 L0"), 1);
+    EXPECT_EQ(mock.count("N10 H30 B47 T0 V0 C0 D0 L0"), 1);
 
     dm.testInjectTextLine("G01 M2");                    // 双击切模式→标点会话被拒
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerOnly);   // 模式不变
-    EXPECT_EQ(mock.count("N10 H60 B10 T1 V0 C0 D0 L40"), 0);     // 无精细掩码重发
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 0);     // 无面片掩码重发
+    EXPECT_EQ(mock.count("N10 H60 B47 T1 V0 C0 D0 L47"), 0);     // 无精细掩码重发
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 0);     // 无面片掩码重发
 
     dm.testInjectTextLine("G01 U1");                    // 进菜单（游标①）
     dm.logicTick();
@@ -1073,7 +1080,7 @@ TEST(DeviceManager, T23_KeyStateGateInjection) {
     // 四类键全拦：启停（M/S 主层）不启采
     dm.testInjectTextLine("G01 M1");
     dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 0);
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 0);
     EXPECT_FALSE(dm.isCapturing());
     // 切模式（M/D）/调节（U/D 景深、L/S 步进）/菜单（U/S 进菜单）全拦
     dm.testInjectTextLine("G01 M2");
@@ -1096,7 +1103,7 @@ TEST(DeviceManager, T23_KeyStateGateInjection) {
     dm.setKeyStateGate([] { return true; });
     dm.testInjectTextLine("G01 M1");
     dm.logicTick(); dm.logicTick();
-    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);
     EXPECT_TRUE(dm.isCapturing());
     dm.testInjectTextLine("G01 M1");                 // 停采收口
     dm.logicTick(); dm.logicTick();
@@ -1155,6 +1162,8 @@ TEST(DeviceManager, T19_PresetLadderAdjust) {
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setBrightnessLadderIndex(1);              // 均分梯默认档10——T19 从档1 测步进
+    dm.logicTick(); dm.logicTick();
 
     auto expectParams = [&](double exp, double laser, double bg) {
         EXPECT_NEAR(dm.getParam("exposure").value, exp, 1e-9);
@@ -1163,18 +1172,24 @@ TEST(DeviceManager, T19_PresetLadderAdjust) {
     };
     const int64_t briEvt0 = rec.userParam(111);
 
-    // 档1→10：九步到面片推荐基线 {3, 70, 40}（插值精确点）
+    // 档1→10：九步到中位（均分 20 档：档10 = t=9/19）
     for (int i = 0; i < 9; ++i) {
         dm.testInjectTextLine("G01 R1");
         dm.logicTick(); dm.logicTick();
     }
     EXPECT_EQ(dm.presetLadderIndex(), 10);
-    expectParams(3.0, 70.0, 40.0);
+    {   // 档10 均分值：曝光 1+9/19×4 ≈ 2.895ms、激光 9/19×100 ≈ 47.37、补光 同
+        const auto steps10 = PresetLadder::builtinLadder();
+        expectParams(steps10[9].exposureMs, steps10[9].laserLevel, steps10[9].bgLight);
+    }
 
-    dm.testInjectTextLine("G01 R1");   // 档10→11（mid→high 10 等分第一档）
+    dm.testInjectTextLine("G01 R1");   // 档10→11
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(dm.presetLadderIndex(), 11);
-    expectParams(3.0 + 0.2, 73.0, 44.0);
+    {
+        const auto steps11 = PresetLadder::builtinLadder();
+        expectParams(steps11[10].exposureMs, steps11[10].laserLevel, steps11[10].bgLight);
+    }
 
     // 到顶钳制：档11→20 九步，再按无效
     for (int i = 0; i < 9; ++i) {
@@ -1182,7 +1197,9 @@ TEST(DeviceManager, T19_PresetLadderAdjust) {
         dm.logicTick(); dm.logicTick();
     }
     EXPECT_EQ(dm.presetLadderIndex(), 20);
-    expectParams(5.0, 100.0, 80.0);
+    {   // 档20 均分终值：曝光 5ms、激光 100、补光 100
+        expectParams(5.0, 100.0, 100.0);
+    }
     dm.testInjectTextLine("G01 R1");   // 已到顶——无效（钳制不环绕）
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(dm.presetLadderIndex(), 20);
@@ -1273,7 +1290,8 @@ TEST(DeviceManager, T21_ParamPersistDebounceAndBoot) {
         dm2.logicTick();
         EXPECT_DOUBLE_EQ(dm2.getParam("freqHz").value, 90.0);
         EXPECT_EQ(dm2.presetLadderIndex(), 10);         // 档号回账
-        EXPECT_NEAR(dm2.getParam("exposure").value, 3.0, 1e-9);   // 档10=面片推荐精确点
+        EXPECT_NEAR(dm2.getParam("exposure").value,
+                    PresetLadder::builtinLadder()[9].exposureMs, 1e-9);   // 档10 均分值
         EXPECT_NEAR(dm2.getParam("laserLevel").value, 70.0, 1e-9);
         EXPECT_NEAR(dm2.getParam("bgLight").value, 40.0, 1e-9);
     }
@@ -1306,7 +1324,8 @@ TEST(DeviceManager, T24_LadderTxnCommitRollbackLastWins) {
         dm.logicTick(); dm.logicTick();
         EXPECT_EQ(dm.presetLadderIndex(), 5);           // 三段全成 → 档号已提交
         EXPECT_EQ(rec.userParam(111), evt111_0 + 1);    // 111 恰一条（提交时广播）
-        EXPECT_NEAR(dm.getParam("exposure").value, 1.0 + 2.0 * 4.0 / 9.0, 1e-9);  // 档5 投影
+        EXPECT_NEAR(dm.getParam("exposure").value,
+                    PresetLadder::builtinLadder()[4].exposureMs, 1e-9);  // 档5 均分投影
         EXPECT_EQ(camPtr->exposureCalls, 1);            // 相机直设确实发生
 
         // —— ③ 后值胜出：连按两次（每拍事务闭环）→ 终档=最后目标 ——
@@ -1316,7 +1335,8 @@ TEST(DeviceManager, T24_LadderTxnCommitRollbackLastWins) {
         dm.logicTick(); dm.logicTick();
         EXPECT_EQ(dm.presetLadderIndex(), 7);
         const auto steps7 = PresetLadder::builtinLadder();   // 拷贝（临时悬空防）
-        EXPECT_NEAR(dm.getParam("laserLevel").value, steps7[6].laserLevel, 1e-9);
+        EXPECT_NEAR(dm.getParam("laserLevel").value,
+                    PresetLadder::builtinLadder()[6].laserLevel, 1e-9);  // 档7 均分值
         EXPECT_EQ(rec.userParam(111), evt111_0 + 3);    // 三次换档各恰一条
     }
     // —— ② 回弹（相机段败：exposureFail 注入）——

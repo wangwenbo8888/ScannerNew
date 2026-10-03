@@ -27,9 +27,10 @@ template<typename TStep>
 class Ladder {
 public:
     Ladder() = default;
-    explicit Ladder(std::vector<TStep> steps, int index = 1)
+    explicit Ladder(std::vector<TStep> steps, int index = -1)
         : steps_(std::move(steps)) {
-        if (index < 1) index = 1;
+        const int mid = static_cast<int>(steps_.size()) / 2 + 1;   // 默认中位
+        if (index < 1) index = mid;
         if (index > static_cast<int>(steps_.size()))
             index = static_cast<int>(steps_.size());
         index_ = steps_.empty() ? 0 : index;
@@ -55,7 +56,8 @@ public:
         index_ = next;
         return true;
     }
-    void reset() { index_ = steps_.empty() ? 0 : 1; }  // 会话复位（口径同 MenuLogic.Reset）
+    void reset() { index_ = steps_.empty() ? 0 : (static_cast<int>(steps_.size()) + 1) / 2; }
+    // 默认中位档（261003 均分版：档10 ≈ 2.9ms / 47 / 47——启动不灭灯也不刺眼）
     const TStep& current() const { return steps_[static_cast<size_t>(index_ - 1)]; }
 
 private:
@@ -73,23 +75,21 @@ struct BrightnessStep {           // 一档＝三参组合（单位同 ParamStor
 };
 using LadderStep = BrightnessStep;    // 兼容旧名（260927 G6 期）
 
-// 20 档产线基线（占位——低段 1..10 由暗到面片推荐基线，高段 11..20 到强光；
-// 档10 ＝ 面片推荐 {3, 70, 40}。真机定表后 setSteps 整体替换）
+// 20 档产线基线（261003 用户口径：三参按各自取值范围均分 20 档，每档等差）：
+//   曝光 1~5ms → 步长 (5-1)/19 ≈ 0.2105ms
+//   补光 0~100 → 步长 100/19 ≈ 5.263
+//   激光 0~100 → 步长 100/19 ≈ 5.263
+// 真机定表后经 setSteps 整体替换
 inline std::vector<BrightnessStep> builtinBrightnessLadder20() {
     std::vector<BrightnessStep> steps;
     steps.reserve(20);
-    const BrightnessStep low{1.0, 40.0, 10.0};     // 档1 暗（短曝光）
-    const BrightnessStep mid{3.0, 70.0, 40.0};     // 档10 面片推荐基线
-    const BrightnessStep high{5.0, 100.0, 80.0};   // 档20 强光（标点/暗目标）
-    auto lerp = [](const BrightnessStep& a, const BrightnessStep& b, double t) {
-        return BrightnessStep{a.exposureMs + (b.exposureMs - a.exposureMs) * t,
-                              a.laserLevel + (b.laserLevel - a.laserLevel) * t,
-                              a.bgLight + (b.bgLight - a.bgLight) * t};
-    };
-    for (int i = 0; i < 10; ++i)                   // 档1..10：low→mid
-        steps.push_back(lerp(low, mid, i / 9.0));
-    for (int i = 1; i <= 10; ++i)                  // 档11..20：mid→high
-        steps.push_back(lerp(mid, high, i / 10.0));
+    for (int i = 0; i < 20; ++i) {
+        const double t = static_cast<double>(i) / 19.0;   // 0.0 ~ 1.0 均分
+        steps.push_back(BrightnessStep{
+            1.0 + t * 4.0,      // 曝光 1→5ms 线性均分
+            t * 100.0,           // 激光 0→100 线性均分
+            t * 100.0});         // 补光 0→100 线性均分
+    }
     return steps;
 }
 

@@ -2469,7 +2469,7 @@ QWidget *MainWindow::createParamSection()
 void MainWindow::applyMeshPreset() {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
-    dm->setBrightnessLadderIndex(10);          // 档10=面片推荐 {3ms, 40, 10}
+    dm->setBrightnessLadderIndex(10);          // 档10=中位（均分：≈2.9ms/47/47）
     statusBar()->showMessage(
         QStringLiteral("面片扫描推荐参数已套用（亮度档 10/20）"), 3000);
 }
@@ -2479,7 +2479,7 @@ void MainWindow::applyMeshPreset() {
 void MainWindow::applyMarkerPreset() {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
-    dm->setBrightnessLadderIndex(10);          // 档10 补光=40（标点检测成功基线）
+    dm->setBrightnessLadderIndex(10);          // 档10 中位（标点检测从此档起步调）
     statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（亮度档 10/20·B=40）"), 3000);
 }
 
