@@ -164,6 +164,15 @@ protected:
     QLabel *m_infoCpuLabel = nullptr;
     QLabel *m_infoMemLabel = nullptr;
     QLabel *m_infoKeyLabel = nullptr;   // 键控状态回显（260927：层/调节上下文/档位）
+
+    // —— P-3 顶部大字横幅（261002 按键域 §3.4：远距可读——操作者距屏数米）——
+    /// 瞬态提示（1.8s 自动消失、新顶旧；danger=红底）；菜单期常驻内容由
+    /// refreshBannerPersistent 依据 menuState 快照重建（瞬态结束自动恢复）
+    void showBanner(const QString& text, bool danger = false);
+    void refreshBannerPersistent();     // p1=110/113 菜单/子态/档位变化后刷新常驻行
+    QLabel *m_banner = nullptr;         // 横幅条（懒建，overlay 顶部不占布局）
+    class QTimer *m_bannerTimer = nullptr;   // 瞬态 1.8s 计时（到时恢复常驻/隐藏）
+    QString m_bannerPersist;            // 菜单期常驻文案（空=无常驻）
     uint64_t m_importedCloudCount = 0; // 导入点云计数（260927 上树/信息卡——不入扫描仓库）
 
     // —— UI 状态图标（P1-2）：订阅 10 状态机 StateChanged（EventBus 主通道），

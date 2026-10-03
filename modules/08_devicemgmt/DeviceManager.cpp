@@ -899,6 +899,7 @@ void DeviceManager::buildKeyActions() {
         switch (ms.cursor) {
         case 1:                                  // ①分辨率设置→体素密度调节子态
             if (mode_->isCapturing()) {          // 功能口拒·防呆（七态矩阵表注：S4/S5
+                publishEvent(EventType::UserDefined, 120, 3);   // P-3 横幅：扫描中·密度锁定
                 JMW_LOG_WARN("08-DeviceManager", //  下改融合密度会打断累积——游标可停①选中拒）
                     "[DeviceManager] 菜单①体素密度：采集中防呆拒（扫描中改密度打断累积）");
                 return;
@@ -929,6 +930,7 @@ void DeviceManager::buildKeyActions() {
         // 按键只启停标点；模式切换仅在激光族会话（面片/精细/深孔）中可用
         if (lastCaptureMode_.load(std::memory_order_relaxed) ==
             Scanner::ScanMode::MarkerOnly) {
+            publishEvent(EventType::UserDefined, 120, 2);   // P-3 横幅：标点会话·模式锁定
             JMW_LOG_INFO("08-DeviceManager",
                 "[DeviceManager] 标点扫描会话中——切模式手势丢弃（标点只启停）");
             return;
@@ -959,6 +961,7 @@ void DeviceManager::buildKeyActions() {
         if (mode_->isCapturing()) stopCaptureOnLogic();   // N11 H0 停采（单帧收口——
         // 261002 用户裁定停采不补任何 N10；真机固件 N11 关灯即全灭，临时机灯态
         // 归固件——急停「全灭灯」语义真机天然满足）；重复按不出错（幂等）
+        publishEvent(EventType::UserDefined, 120, 1);     // P-3 横幅：已急停（红底）
         JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 急停（中键长按）：停采＋子态解散（不碰会话/全局态/参数盘）");
     };
     a.backToMain = [this] {                      // §3.3.1 上键长按＝一键回主界面

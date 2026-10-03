@@ -432,6 +432,25 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         } else if (p1 == 112) {    // P-2 显示远近档（261002：5 档距离
                             // 预设——只改预览观看远近；快照兜底见启动对齐）
                             if (m_3dView) m_3dView->setViewDistanceLadder(static_cast<int>(p2));
+                        } else if (p1 == 111) {    // P-3 档位横幅（按键来源专属——UI 不来）
+                            showBanner(QStringLiteral("亮度 ▸ 第%1/%2档")
+                                       .arg(p2).arg(m_appCtx->deviceManager()
+                                                        ? m_appCtx->deviceManager()->presetLadderSize()
+                                                        : 20));
+                        } else if (p1 == 113) {    // 体素密度档（①子态常驻行内
+                            refreshBannerPersistent();  // 刷新——设计：不单独发横幅）
+                        } else if (p1 == 114) {     // 景深直切
+                            showBanner(p2 == 1 ? QStringLiteral("景深 ▸ 远")
+                                               : QStringLiteral("景深 ▸ 近"));
+                        } else if (p1 == 110) {     // 菜单变化（含子态进出）→ 常驻重建
+                            refreshBannerPersistent();
+                        } else if (p1 == 120) {     // 执行结果/拒因（P-3：红底横幅）
+                            // p2 拒因码：1=已急停 2=标点会话隔离 3=扫描中改密度防呆
+                            showBanner(p2 == 1 ? QStringLiteral("已急停")
+                                             : p2 == 2 ? QStringLiteral("标点会话·模式锁定")
+                                             : p2 == 3 ? QStringLiteral("扫描中·密度锁定")
+                                                       : QStringLiteral("操作被拒"),
+                                       true);
                         }
                     }, Qt::QueuedConnection);
                 });
@@ -1279,6 +1298,82 @@ void MainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
     QTimer::singleShot(0, this, [this]() { repositionFloatingToolbar(); });
+    if (m_banner) m_banner->setGeometry(0, 0, width(), 56);   // P-3 横幅全宽贴顶
+}
+
+// ============================================================================
+// P-3 顶部大字横幅（261002 按键域 §3.4 远距可读）：顶部全宽条带、半透明底、
+// 高对比大字（≤10 字短语）、1.8s 自动消失（新顶旧）；红＝失败/急停/确认，绿白
+// ＝中性。菜单期常驻（p1=110 驱动）：当前游标项/①⑤子态；瞬态插入显示、结束
+// 自动恢复常驻。P8 分源：本横幅只吃 08 事件（＝按键来源）；UI 控件操作走
+// statusBar 本地提示不来此
+// ============================================================================
+void MainWindow::showBanner(const QString& text, bool danger)
+{
+    if (!m_banner) {
+        m_banner = new QLabel(this);
+        m_banner->setAlignment(Qt::AlignCenter);
+        m_banner->setWordWrap(false);
+        m_bannerTimer = new QTimer(this);
+        m_bannerTimer->setSingleShot(true);
+        m_bannerTimer->setInterval(1800);
+        connect(m_bannerTimer, &QTimer::timeout, this, [this]() {
+            if (!m_bannerPersist.isEmpty()) {
+                // 恢复菜单期常驻（非红——常驻红只属⑤确认子态，由刷新器定色）
+                m_banner->setText(m_bannerPersist);
+                refreshBannerPersistent();
+            } else {
+                m_banner->hide();
+            }
+        });
+    }
+    m_banner->setStyleSheet(danger
+        ? QStringLiteral("QLabel { background-color: rgba(192,57,43,0.88); color: white;"
+                         " font-size: 26px; font-weight: bold; border: none; }")
+        : QStringLiteral("QLabel { background-color: rgba(39,174,96,0.85); color: white;"
+                         " font-size: 26px; font-weight: bold; border: none; }"));
+    m_banner->setText(text);
+    m_banner->setGeometry(0, 0, width(), 56);
+    m_banner->raise();
+    m_banner->show();
+    m_bannerTimer->start();
+}
+
+// 常驻行重建（菜单变化/子态/①档位变化后调）：菜单期显示游标项，①⑤子态显
+// 子态文案（⑤红底）；主界面＝无常驻（瞬态自然消失）
+void MainWindow::refreshBannerPersistent()
+{
+    auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+    if (!dm || !m_banner) return;
+    const auto ms = dm->menuState();
+    using Sub = Scanner::device::MenuState::Substate;
+    if (ms.layer != 2) {
+        m_bannerPersist.clear();                    // 主界面：无常驻
+        return;
+    }
+    static const char* kItems[5] = {"① 分辨率设置", "② 进入就绪", "③ 扫描完成",
+                                    "④ 后处理", "⑤ 重置"};
+    if (ms.substate == Sub::AdjustVoxel) {
+        m_bannerPersist = QStringLiteral("① 体素密度 第%1/%2档（L/R 切档 M 确认）")
+                              .arg(dm->voxelLadderIndex()).arg(dm->voxelLadderSize());
+    } else if (ms.substate == Sub::ConfirmReset) {
+        m_bannerPersist = QStringLiteral("再按 M 键确认重置（其他键取消）");
+    } else {
+        m_bannerPersist = QStringLiteral("菜单 ▸ %1")
+                              .arg(QString::fromUtf8(kItems[ms.cursor - 1]));
+    }
+    // 常驻即时上屏（菜单期游标动/切档常驻行内刷新，不发瞬态——设计 §3.4）
+    const bool danger = (ms.substate == Sub::ConfirmReset);
+    m_banner->setStyleSheet(danger
+        ? QStringLiteral("QLabel { background-color: rgba(192,57,43,0.88); color: white;"
+                         " font-size: 26px; font-weight: bold; border: none; }")
+        : QStringLiteral("QLabel { background-color: rgba(68,108,179,0.85); color: white;"
+                         " font-size: 26px; font-weight: bold; border: none; }"));
+    m_banner->setText(m_bannerPersist);
+    m_banner->setGeometry(0, 0, width(), 56);
+    m_banner->raise();
+    m_banner->show();
+    m_bannerTimer->stop();                          // 常驻不过期
 }
 
 QWidget *MainWindow::createTitleBar()
