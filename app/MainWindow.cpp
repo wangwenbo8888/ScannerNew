@@ -1351,7 +1351,8 @@ void MainWindow::updateVirtualKeypadStates() {
             btn->setEnabled(enabled);
             // 显式样式：可用＝蓝底白字（校准主操作）或白底蓝框（常规）；
             // 不可用＝灰底半透明
-            const bool isCalibMain = inCalib && (r == 4 && g == 0);
+            // isCalibMain 仅在 enabled 时才绿（采集中 M 灰——不可中断）
+            const bool isCalibMain = enabled && inCalib && !capturing && (r == 4 && g == 0);
             btn->setStyleSheet(isCalibMain
                 ? QStringLiteral(
                     "QPushButton { background-color: #27AE60; color: white;"

@@ -1124,11 +1124,20 @@ void DeviceManager::buildKeyActions() {
     };
     a.emergencyStop = [this] {                   // §3.3.1 中键长按＝急停（全域免门禁）
         menu_->apply(MenuOp::CancelSubstate);    // 顺带解散子态（逃生优先于子态）
-        if (mode_->isCapturing()) stopCaptureOnLogic();   // N11 H0 停采（单帧收口——
-        // 261002 用户裁定停采不补任何 N10；真机固件 N11 关灯即全灭，临时机灯态
-        // 归固件——急停「全灭灯」语义真机天然满足）；重复按不出错（幂等）
+        // 急停「所有灯全灭」语义（§3.3.1）——先发全零 N10 灭灯再 N11 H0 停触发
+        // （261003 用户实测：临时机 N11 H0 不关灯；急停≠常规停采——常规停采
+        //  261002 用户裁定只发 N11 H0，急停是独立语义必须全灭）
+        if (mcu_->isOpen()) {
+            hal::CaptureParams lightsOff{};
+            lightsOff.freqHz = 1;                // 最小频率（若触发被重启≈无感）
+            lightsOff.bgLight = 0;
+            lightsOff.laserLevel = 0;
+            lightsOff.laserT = lightsOff.laserV = lightsOff.laserC = lightsOff.laserD = 0;
+            mcu_->setCaptureParams(lightsOff, nullptr);   // 全零 N10 → 灭灯
+        }
+        if (mode_->isCapturing()) stopCaptureOnLogic();   // N11 H0 → 停触发
         publishEvent(EventType::UserDefined, 120, 1);     // P-3 横幅：已急停（红底）
-        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 急停（中键长按）：停采＋子态解散（不碰会话/全局态/参数盘）");
+        JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 急停（中键长按）：全零 N10 灭灯＋N11 H0 停采＋子态解散（不碰会话/全局态/参数盘）");
     };
     a.backToMain = [this] {                      // §3.3.1 上键长按＝一键回主界面
         menu_->apply(MenuOp::BackToMain);        // 清层/游标/子态；调节对象回默认亮度
