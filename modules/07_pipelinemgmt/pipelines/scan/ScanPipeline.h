@@ -128,6 +128,10 @@ public:
     void pause();                                  // lane 停+drain；consumer 保活，累积全保留
     Scanner::Result resume();                      // runtime 重启（restart 语义）
 
+    /// P-4 景深屏蔽（261002 §3.3.2）：0=近/1=远——转发 ScanChains 逐帧读原子，
+    /// 扫描中切换立即生效；未 configure 时静默忽略（会话启动时经快照口对齐）
+    void setDepthOfField(int mode) { if (chains_) chains_->setDepthOfField(mode); }
+
     // —— 会话自愈（三件套：看门狗在 runtime 内建；此处 recover＋检查点）——
     /// Faulted 原地恢复：限时 drain（2s；僵尸 lane detach 兜底）→ runtime 按水位
     /// 重启。**consumer/obs/融合累积/prevState 锚全保留**——秒级满血续算。

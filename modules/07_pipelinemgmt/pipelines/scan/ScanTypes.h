@@ -26,6 +26,8 @@ namespace Scanner::pipeline {
 // ============================================================================
 struct ScanConfig {
     bool enableLaser = true;                 // A 模式 false：激光链整段跳过
+    float voxelSizeMm = 0.0f;                // P-4 体素密度档值（mm；0=默认 0.25 硬
+                                             //  编码口径——菜单①待机改档下会话生效）
     bool enableFinalBA = true;               // 恒 true（A/B 均必跑 GBA），保留显式
     size_t laserCacheBudgetMB = 2048;        // D 重融合激光帧缓存预算（开放项 6 待实测）
     int hangTimeoutMs = 10000;               // 看门狗：lane 心跳静默阈值（0=关；传递 SchedConfig）

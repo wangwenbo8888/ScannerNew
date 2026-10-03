@@ -233,7 +233,11 @@ bool SimScanSource::next(SimFrameObs& out) {
     // 前移 advance（与上一步重合 W-advance 个）、窗口缓增（8→9→10…逐帧增加）。
     // 步内窗口不动（设备微动 ~0.2mm << 配准匹配阈 2mm → 重合标志点全匹配），
     // 跨步进新标志点——由生产链光流配准用重合子集估 R/T 链入全局锚。
-    std::normal_distribution<double> mNoise(0.0, params_.markerNoiseSigmaMm);
+    // σ=0 对照组（确定性断言用例）：MSVC Debug 的 normal_distribution 构造对
+    // σ=0 断言——σ≤0 时跳过噪声注入（精确 0，原 260919 只验过 Release 未暴露）
+    const bool mNoiseOn = params_.markerNoiseSigmaMm > 0.0;
+    std::normal_distribution<double> mNoise(
+        0.0, mNoiseOn ? params_.markerNoiseSigmaMm : 1e-12);
     const bool subsetMode = params_.markerStepFrames > 0 && !scene_.markers.empty();
     size_t winStart = 0, winSize = scene_.markers.size();
     uint64_t step = 0;
@@ -253,8 +257,9 @@ bool SimScanSource::next(SimFrameObs& out) {
         const cv::Vec3d d = RgT * (cv::Vec3d(m.x, m.y, m.z) - Tg);
         if (!subsetMode && !visible(d)) continue;       // FOV 窗口径（旧模式）
         const cv::Vec3d n = RgT * cv::Vec3d(m.nx, m.ny, m.nz);
-        out.markerPositions.emplace_back(d[0] + mNoise(rng_), d[1] + mNoise(rng_),
-                                         d[2] + mNoise(rng_));
+        out.markerPositions.emplace_back(d[0] + (mNoiseOn ? mNoise(rng_) : 0.0),
+                                         d[1] + (mNoiseOn ? mNoise(rng_) : 0.0),
+                                         d[2] + (mNoiseOn ? mNoise(rng_) : 0.0));
         out.markerNormals.push_back(n);
     }
 
@@ -264,7 +269,9 @@ bool SimScanSource::next(SimFrameObs& out) {
     // 真实手持扫描「扫到哪、哪块表面长出来」。无标志点帧不采激光（配准无凭据
     // ——与真机「配准失败帧不发点」语义一致）。真值变换＋逐点抖动：
     // p_dev = Rᵀ(p − T) + N(0,σ)
-    std::normal_distribution<double> gauss(0.0, params_.jitterSigmaMm);
+    const bool gNoiseOn = params_.jitterSigmaMm > 0.0;
+    std::normal_distribution<double> gauss(
+        0.0, gNoiseOn ? params_.jitterSigmaMm : 1e-12);
     if (!scene_.laser.empty() && !out.markerPositions.empty()) {
         // 可见标志点包围盒（设备系）±固定边距——**激光区域＝标志点区域**（260919
         // 用户口径：真实扫描中激光只打标志点锚定的区域，点云区域与标志点一致；
@@ -352,9 +359,9 @@ bool SimScanSource::next(SimFrameObs& out) {
                     if (params_.depthMinMm > 0.0 && depth < params_.depthMinMm) continue;
                     if (params_.depthMaxMm > 0.0 && depth > params_.depthMaxMm) continue;
                     out.laser.emplace_back(
-                        static_cast<float>(p.x + gauss(rng_)),
-                        static_cast<float>(p.y + gauss(rng_)),
-                        static_cast<float>(p.z + gauss(rng_)));
+                        static_cast<float>(p.x + (gNoiseOn ? gauss(rng_) : 0.0)),
+                        static_cast<float>(p.y + (gNoiseOn ? gauss(rng_) : 0.0)),
+                        static_cast<float>(p.z + (gNoiseOn ? gauss(rng_) : 0.0)));
                     ++got;
                 }
             }
@@ -380,9 +387,9 @@ bool SimScanSource::next(SimFrameObs& out) {
                 continue;                          // FOV+深度窗（旧口径）
             }
             out.laser.emplace_back(
-                static_cast<float>(d[0] + gauss(rng_)),
-                static_cast<float>(d[1] + gauss(rng_)),
-                static_cast<float>(d[2] + gauss(rng_)));
+                static_cast<float>(d[0] + (gNoiseOn ? gauss(rng_) : 0.0)),
+                static_cast<float>(d[1] + (gNoiseOn ? gauss(rng_) : 0.0)),
+                static_cast<float>(d[2] + (gNoiseOn ? gauss(rng_) : 0.0)));
             ++got;
         }
         laserCursor_ = (laserCursor_ + scanBudget) % M;

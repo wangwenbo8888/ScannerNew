@@ -132,8 +132,13 @@ void AppContext::initialize() {
     // 二次关会话才能编辑。现订阅采集翻转沿（08 广播 UserDefined p1=2000）：
     // 停→scanWf pause（就绪态，编辑门开）；M 再启→resume 续采。
     // 标定五态等无扫描会话场景：isScanSessionActive=false 自动跳过
+    // P-4 景深热更：p1=114（上键双击切档）→ 02→07 转发（扫描中立即生效）
     captureStateSubId_ = eventBus_->subscribe(Scanner::EventType::UserDefined,
         [this](const Scanner::Event& evt) {
+            if (evt.param1 == 114) {
+                if (scanWf_) scanWf_->setDepthOfField(static_cast<int>(evt.param2));
+                return;
+            }
             if (evt.param1 != 2000 || !scanWf_) return;
             using WS = Scanner::workflow::WorkflowState;
             const auto st = scanWf_->getState();
@@ -438,7 +443,23 @@ void AppContext::initialize() {
     perfMonitor_->setProvider(std::make_shared<HealthAdapter>(hwMonitor_.get()));
 
     // === WorkflowContext 装配 ===
-    wfCtx_ = std::make_unique<Scanner::workflow::WorkflowContext>();
+    // P-4 档位快照子类（261002）：重写 voxelDensityMm()/depthOfField()——02 会话
+    // 启动经 ctx 读 08 门面四梯快照（组合根组合：wfCtx 反持 AppContext*）
+    class AppWorkflowContext final : public Scanner::workflow::WorkflowContext {
+    public:
+        explicit AppWorkflowContext(AppContext* owner) : owner_(owner) {}
+        double voxelDensityMm() const override {
+            return owner_ && owner_->deviceManager()
+                       ? owner_->deviceManager()->voxelLadderValue() : 0.0;
+        }
+        int depthOfField() const override {
+            return owner_ && owner_->deviceManager()
+                       ? owner_->deviceManager()->depthOfField() : 0;
+        }
+    private:
+        AppContext* owner_;
+    };
+    wfCtx_ = std::make_unique<AppWorkflowContext>(this);
     wfCtx_->setFrameBuffer(frameBuffer_.get());
     wfCtx_->setPointCloudBuffer(pointCloudBuffer_.get());
     wfCtx_->setDeviceStateCache(deviceStateCache_.get());

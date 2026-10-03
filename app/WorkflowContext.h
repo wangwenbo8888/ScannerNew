@@ -51,6 +51,11 @@ public:
     void setSceneFeed(class Scanner::pipeline::ISceneFeed* feed) { sceneFeed_ = feed; }
     Scanner::pipeline::ISceneFeed* sceneFeed() { return sceneFeed_; }
 
+    // === P-4 按键域档位快照（261002：02 会话启动读——体素密度档值 mm〔0=默认
+    //     0.25 口径〕＋景深档〔0 近/1 远〕；app 组合根重写取 08 门面快照）===
+    virtual double voxelDensityMm() const { return 0.0; }
+    virtual int depthOfField() const { return 0; }
+
     // === EventBus 发布快捷方法 ===
     void publishProgress(int currentStage, int totalStages, const std::string& stageName, float progress);
     void publishEvent(EventType type, int64_t param1 = 0, int64_t param2 = 0);

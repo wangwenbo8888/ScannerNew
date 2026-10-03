@@ -185,6 +185,8 @@ public:
     int distanceLadderSize() const { return distanceSizeSnap_.load(std::memory_order_relaxed); }
     int voxelLadderIndex() const { return voxelIdxSnap_.load(std::memory_order_relaxed); }
     int voxelLadderSize() const { return voxelSizeSnap_.load(std::memory_order_relaxed); }
+    /// P-4 体素档值快照（mm 反比密度——档值即体素尺寸；02 会话启动消费）
+    double voxelLadderValue() const { return voxelValSnap_.load(std::memory_order_relaxed); }
     int depthOfField() const { return dofSnap_.load(std::memory_order_relaxed); }  // 0=近 1=远
     //（260927 键控回显：状态栏「调节 档2/3」——logicTick 末随菜单快照刷新）
 
@@ -316,6 +318,7 @@ private:
     std::atomic<int> distanceSizeSnap_{5};
     std::atomic<int> voxelIdxSnap_{1};      // 261002 体素密度档快照（菜单①）
     std::atomic<int> voxelSizeSnap_{4};
+    std::atomic<double> voxelValSnap_{4.0}; // P-4 体素档值快照（mm；档值表注入后随步进刷新）
     std::atomic<int> dofSnap_{0};           // 261002 景深档快照（0=近 1=远）
     infra::EventBus* bus_;
     CameraFactory camFactory_;

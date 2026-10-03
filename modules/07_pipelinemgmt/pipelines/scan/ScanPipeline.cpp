@@ -157,7 +157,9 @@ private:
 // ---------------------------------------------------------------------------
 class LaserFuseAdapter final : public ILaserFuse {
 public:
-    LaserFuseAdapter() = default;
+    // P-4 体素密度档（菜单①）：voxelMm 来自会话配置（ScanConfig.voxelSizeMm——
+    // 待机改档下会话生效）；0 = 260919 默认 0.25mm 口径
+    explicit LaserFuseAdapter(float voxelMm = 0.25f) : voxelMm_(voxelMm > 0 ? voxelMm : 0.25f) {}
 
     void fuse(const GpuPointCloudBlock& block, const double R[9], const double T[3]) override {
         try {
@@ -202,11 +204,12 @@ public:
     }
 
 private:
-    // 体素 0.5→0.25mm（260919 用户口径——唯一格 ×4：窄带数据 87 万→~350 万）；
-    // 槽 2M→8M（0.25mm 下 8.4M 槽覆盖 30M 点云主量级，显存数百 MB）
+    // 体素（P-4：体素密度档注入；0.25=260919 用户口径默认）；槽 2M→8M
+    // （0.25mm 下 8.4M 槽覆盖 30M 点云主量级，显存数百 MB）
+    float voxelMm_ = 0.25f;
     calib::LaserCloudFuseCUDAParams fuseParams() {
         calib::LaserCloudFuseCUDAParams p;
-        p.voxelSize = 0.25f;
+        p.voxelSize = voxelMm_;
         p.reserveVoxelCount = static_cast<size_t>(1) << 23;
         return p;
     }
@@ -371,7 +374,7 @@ Scanner::Result ScanPipeline::configure(const PipelineDeps& deps) {
         if (testLaserFuseSet_) {
             laserFuse_ = testLaserFuse_;
         } else {
-            ownedLaserFuse_ = std::make_unique<LaserFuseAdapter>();
+            ownedLaserFuse_ = std::make_unique<LaserFuseAdapter>(cfg_.voxelSizeMm);
             laserFuse_ = ownedLaserFuse_.get();
         }
     } else {

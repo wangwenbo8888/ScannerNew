@@ -421,6 +421,8 @@ void DeviceManager::logicTick() {
     distanceSizeSnap_.store(static_cast<int>(displayLadder_.steps().size()), std::memory_order_relaxed);
     voxelIdxSnap_.store(voxelLadder_.index(), std::memory_order_relaxed);
     voxelSizeSnap_.store(static_cast<int>(voxelLadder_.steps().size()), std::memory_order_relaxed);
+    voxelValSnap_.store(voxelLadder_.index() > 0 ? voxelLadder_.current() : 4.0,
+                        std::memory_order_relaxed);
     dofSnap_.store(static_cast<int>(dof_), std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(tempSnapMtx_);

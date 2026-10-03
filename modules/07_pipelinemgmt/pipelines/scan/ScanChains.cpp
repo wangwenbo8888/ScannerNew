@@ -573,26 +573,60 @@ ScanChains::Hooks ScanChains::assemble() {
                 }
                 if (rc.validCount == 0 || !hasPts(rc.d_points3d)) return 0;
 
-                // —— 调试导出（2026-09-06）：重建激光点写 PLY（exe 目录
-                //    laser_recon_debug.ply 覆盖写——用户导入软件人工核对）
+                // —— P-4 景深屏蔽（261002 §3.3.2）：仅当前景深区间内点入池——近/远
+                //    两档分辨率完全相同，区别只在计算侧屏蔽区间（§3.3.2）。滤波在
+                //    调试下载的同一份 h3d 上做（不额外 D2H）；扫描中切档逐帧生效。
+                //    区间〔产线对账占位〕：近 [200,800]mm / 远 [800,2000]mm（相机系 Z）
+                constexpr double kDofNearMin = 200.0, kDofNearMax = 800.0;
+                constexpr double kDofFarMin = 800.0, kDofFarMax = 2000.0;
+                const int dof = dofMode_.load(std::memory_order_relaxed);
+                const double zMin = (dof == 1) ? kDofFarMin : kDofNearMin;
+                const double zMax = (dof == 1) ? kDofFarMax : kDofNearMax;
+                cv::Mat h3d;
+                rc.d_points3d->download(h3d, stream);
+                stream.waitForCompletion();
+                cv::Mat filtered;                       // 1×n CV_32FC3（滤后列压缩）
+                if (!h3d.empty()) {
+                    const cv::Vec3f* src = h3d.ptr<cv::Vec3f>();
+                    const size_t total = h3d.total();
+                    std::vector<cv::Vec3f> keep;
+                    keep.reserve(total);
+                    for (size_t k = 0; k < total; ++k)
+                        if (src[k][2] >= zMin && src[k][2] <= zMax) keep.push_back(src[k]);
+                    if (keep.empty()) {
+                        JMW_LOG_INFO("07-ScanChains",
+                            "[ScanChains] 景深屏蔽（{}）：重建 {} 点全在区间 [{},{}]mm 外"
+                            "——本帧无激光（降级）",
+                            dof == 1 ? "远" : "近", total, zMin, zMax);
+                        return 0;
+                    }
+                    if (keep.size() != total)
+                        JMW_LOG_INFO("07-ScanChains",
+                            "[ScanChains] 景深屏蔽（{} [{}-{}mm]）：{} → {} 点",
+                            dof == 1 ? "远" : "近", zMin, zMax, total, keep.size());
+                    filtered = cv::Mat(1, static_cast<int>(keep.size()), CV_32FC3,
+                                       keep.data());
+                } else {
+                    return 0;
+                }
+
+                // —— 调试导出（2026-09-06）：滤后激光点写 PLY（exe 目录
+                //    laser_recon_debug.ply 覆盖写——入池内容的真值核对）
                 {
-                    cv::Mat h3d;
-                    rc.d_points3d->download(h3d, stream);
-                    stream.waitForCompletion();
-                    if (!h3d.empty()) {
+                    if (!filtered.empty()) {
                         std::ofstream f("laser_recon_debug.ply", std::ios::trunc);
                         if (f.is_open()) {
                             f << "ply\nformat ascii 1.0\n";
-                            f << "element vertex " << h3d.total() << "\n";
+                            f << "element vertex " << filtered.total() << "\n";
                             f << "property float x\nproperty float y\nproperty float z\n";
                             f << "end_header\n";
-                            const cv::Vec3f* p3 = h3d.ptr<cv::Vec3f>();
-                            for (size_t k = 0; k < h3d.total(); ++k)
+                            const cv::Vec3f* p3 = filtered.ptr<cv::Vec3f>();
+                            for (size_t k = 0; k < filtered.total(); ++k)
                                 f << std::fixed << std::setprecision(3)
                                   << p3[k][0] << " " << p3[k][1] << " " << p3[k][2] << "\n";
                             JMW_LOG_INFO("07-ScanChains",
                                          "[ScanChains] 激光重建导出 laser_recon_debug.ply（{} 点）",
-                                         h3d.total());
+                                         filtered.total());
                         }
                     }
                 }
@@ -601,18 +635,17 @@ ScanChains::Hooks ScanChains::assemble() {
                 if (deps_.laserPool) {
                     auto blk = deps_.laserPool->acquire(deps_.poolAcquireTimeout);
                     if (blk) {
-                        auto src = rc.d_points3d->reshape(3, 1);   // 统一 1×N CV_32FC3
-                        int n = std::min<int>(src.cols,
+                        int n = std::min<int>(filtered.cols,      // 滤后点数
                                               blk->get()->points.cols);  // 池容量裁剪
-                        if (n < src.cols) {
+                        if (n < filtered.cols) {
                             JMW_LOG_WARN("07-ScanChains", "[ScanChains] 激光点数 {} 超池块容量 {}，"
                                          "截断至 {}（降级）",
-                                         src.cols, blk->get()->points.cols, n);
+                                         filtered.cols, blk->get()->points.cols, n);
                             front.laserTruncated = true;
                         }
                         if (n > 0) {
                             cv::cuda::GpuMat dst = blk->get()->points.colRange(0, n);
-                            src.colRange(0, n).copyTo(dst, stream);
+                            dst.upload(filtered.colRange(0, n), stream);   // 滤后上传
                             blk->get()->count = n;
                             blk->get()->frameId = frame->frameId;
                             front.laserBlock = std::move(*blk);

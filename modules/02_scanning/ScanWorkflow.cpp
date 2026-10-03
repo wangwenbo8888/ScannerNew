@@ -59,6 +59,8 @@ Result ScanWorkflow::assemblePipeline() {
 
     sp::ScanConfig cfg;
     cfg.enableLaser = (scanMode_ == ScanMode::MarkerPlusLaser);
+    // P-4 体素密度档（261002 菜单①）：会话启动读档快照（待机改档下会话生效）
+    if (ctx_) cfg.voxelSizeMm = static_cast<float>(ctx_->voxelDensityMm());
 
     // —— #1 L4 读侧（260920 完善流程：装配时探查上次会话产物——GBA 标志点
     //    注入软先验＋existingMarkers seed，仓库快照为空时的兜底/增强）——
@@ -165,6 +167,9 @@ Result ScanWorkflow::assemblePipeline() {
         pipeline_.reset();
         return Result::fail("ScanPipeline 装配失败: " + cr.message);
     }
+    // P-4 景深基线对齐（261002）：会话启动读档快照（运行时切档经 setDepthOfField
+    // 热更——app 订阅 p1=114 事件转发）
+    if (ctx_) pipeline_->setDepthOfField(ctx_->depthOfField());
     return Result::ok();
 }
 
@@ -308,6 +313,11 @@ ScanWorkflow::buildLaserTableFromRepo() const {
 Scanner::pipeline::FrameObsAccumulator& ScanWorkflow::obs() {
     // pipeline_ 会话私有件——调方保证仅会话装配后访问（stop 后仍存活至析构）
     return pipeline_->obs();
+}
+
+// P-4 景深热更转发（261002 §3.3.2）：无会话静默忽略（启动经快照对齐兜底）
+void ScanWorkflow::setDepthOfField(int mode) {
+    if (pipeline_) pipeline_->setDepthOfField(mode);
 }
 
 Scanner::pipeline::sched::FrameResultQueue<Scanner::pipeline::FrameResult>*

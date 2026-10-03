@@ -84,6 +84,10 @@ public:
     /// 依赖方向 app→02/10，02 不 include 10 头（经回调反向解耦）。
     void setOnFinished(std::function<void(bool)> cb) { onFinished_ = std::move(cb); }
 
+    /// P-4 景深屏蔽（261002 §3.3.2）：转发 07 pipeline（无会话时静默忽略——
+    /// 会话启动经 WorkflowContext::depthOfField() 快照对齐基线）
+    void setDepthOfField(int mode);
+
     // P3 可观测（渲染加固计划）：app 装配喂 HardwareMonitor（会话外/未启动=0）
     uint64_t processedFrameCount() const;    // 已融合消费帧数（07 FuseConsumer）
     uint64_t droppedFrameCount() const;      // 输出队列覆盖丢帧累计（07 queue）
