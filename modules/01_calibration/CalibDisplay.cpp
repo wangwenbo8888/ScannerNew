@@ -7,6 +7,8 @@
 #endif
 #include "CalibDisplay.h"
 
+#include "jmw_logging.h"
+
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/Array>
@@ -20,6 +22,7 @@
 #include <osg/BoundingSphere>
 #include <osg/CopyOp>
 #include <osg/LightModel>
+#include <osg/BlendFunc>
 #include <osgText/Text>
 #include <osgDB/ReadFile>
 #include <osgDB/Registry>
@@ -249,11 +252,19 @@ static osg::Geode* loadStlManual(const std::string& path)
     lightModel->setTwoSided(true);  // 双面光照：翻转绕序后内表面法线朝里，需要twoSided才亮
     ss->setAttributeAndModes(lightModel.get());
     osg::ref_ptr<osg::Material> mat = new osg::Material;
-    mat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4(0.75f, 0.75f, 0.75f, 1.0f));
-    mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4(0.75f, 0.75f, 0.75f, 1.0f));
+    // alpha 0.15＝验证构建（260926：alpha 0.4 用户观感"没变"——0.75灰模型叠0.412灰
+    // 背景混合后≈0.55 灰肉眼难辨；0.15 若模型近乎消失=混合生效，仅缺可透物）
+    mat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4(0.75f, 0.75f, 0.75f, 0.15f));
+    mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4(0.75f, 0.75f, 0.75f, 0.15f));
     mat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4(0.3f, 0.3f, 0.3f, 1.0f));
     mat->setShininess(osg::Material::FRONT_AND_BACK, 100.0f);
     ss->setAttributeAndModes(mat.get(), osg::StateAttribute::ON);
+    // 透明双保险（260926 v3）：几何级也开混合＋透明桶——防父级 StateSet 模式被
+    // 意外覆盖（xform 级已设；两处同设幂等）
+    ss->setMode(GL_BLEND, osg::StateAttribute::ON);
+    ss->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
+    JMW_LOG_WARN("01-CalibDisplay",
+        "[calib] createPoseModel v3：STL 已加载，材质 diffuse alpha=0.15（几何级混合开）");
 
     osg::ref_ptr<osg::Geode> geode = new osg::Geode;
     geode->addDrawable(geom);
@@ -290,8 +301,14 @@ static osg::MatrixTransform* createPoseModel(const std::string& stlPath,
     osg::StateSet* ss = xform->getOrCreateStateSet();
     ss->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);     // 不剔除，靠深度缓冲遮挡
     ss->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON);     // 显式开启深度测试
-    ss->setMode(GL_BLEND, osg::StateAttribute::OFF);        // 不透明
-    ss->setRenderingHint(osg::StateSet::OPAQUE_BIN);
+    ss->setMode(GL_BLEND, osg::StateAttribute::ON);          // 半透明混合（配材质 alpha 0.4；
+                                                             // 深度写保持默认开——外观除透明外零变化）
+    // ⭐ 混合因子必须显式设（260926 真凶）：GL_BLEND ON 单开不透明——GL 默认因子
+    // (ONE, ZERO)＝源完全替换目标；必须 (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) 才按
+    // alpha 混合（OSGWidget.cpp 各透明处同款写法）
+    ss->setAttributeAndModes(new osg::BlendFunc(osg::BlendFunc::SRC_ALPHA,
+                                                osg::BlendFunc::ONE_MINUS_SRC_ALPHA));
+    ss->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);    // 透明桶：排序绘制
     return xform;
 }
 

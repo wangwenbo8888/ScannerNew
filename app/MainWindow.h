@@ -115,6 +115,7 @@ protected:
     QDialog *m_vkeyPad = nullptr;           // 虚拟按键表盘（261002 临时测试机，懒建）
     QPushButton *m_vkeyBtns[5][3] = {};     // P-键盘态同步：[行][手势] 按钮指针
                                             //   行序 U/D/L/R/M×单击/双击/长按（懒建后填）
+    class QLabel *m_vkeyStateLbl = nullptr; // P-键盘态同步：当前全局态常驻标签
     /// P-键盘态同步（§3.2.5 七态矩阵）：按当前全局态灰化/恢复表盘按钮——
     /// S1/S3/S6/S7 全拦态＝除逃生类（M 长按急停/U 长按回主界面）外全灰；
     /// S2/S4/S5＝恢复（功能口拒的键仍可按——拒因在横幅可见）
