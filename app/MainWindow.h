@@ -126,8 +126,11 @@ protected:
     QList<QPushButton*> m_selectionButtons;
     class QSlider *m_param1Slider = nullptr;  // P-5 收敛：亮度档滑条（1-20，与按键
                                               //   同梯同账——松手提交；三参唯一写入口）
-    class QSlider *m_voxelSlider = nullptr;   // P-分辨率：体素密度滑条（1-4，菜单①
+    class QSlider *m_voxelSlider = nullptr;   // P-分辨率：体素密度滑条（27 档，菜单①
                                               //   同梯同账；仅待机可调，扫描中锁住）
+    class QLabel *m_voxelValLbl = nullptr;    // P-分辨率：值标签（mm——113 事件回显
+                                              //   用 QSignalBlocker 屏蔽了 valueChanged，
+                                              //   标签须事件侧直更）
     class QLabel *m_paramROLabel = nullptr;   // P-5：三参只读行（随档显示，UI 无三参控件）
     // 激光点仓库跨会话累计（260912c）：融合云是会话私有的（新会话从零）——仓库
     // 直接整包替换会在新会话首推把累计清掉（真机「点云数据 001 清零」实证）。

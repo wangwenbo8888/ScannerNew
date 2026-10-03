@@ -456,9 +456,9 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             }
                         } else if (p1 == 113) {    // 体素密度档（①子态常驻行内刷新
                             refreshBannerPersistent();  // ——设计：不单独发横幅）
-                            // P-分辨率：UI 滑条回显（阻断防环路；事件来源含按键＋UI）
+                            // P-分辨率：滑条回显——不用 QSignalBlocker（valueChanged
+                            // 只刷标签不回调 setVoxelLadderIndex，无环路）
                             if (m_voxelSlider) {
-                                const QSignalBlocker blocker(m_voxelSlider);
                                 auto* dm113 = m_appCtx ? m_appCtx->deviceManager() : nullptr;
                                 if (dm113) m_voxelSlider->setValue(
                                     static_cast<int>(p2) > 0 ? static_cast<int>(p2)
@@ -2436,6 +2436,7 @@ QWidget *MainWindow::createParamSection()
             // 值标签显示实际 mm 值——connect 到 this（MainWindow）非 voxVal，
             // 排除 context 生命周期问题；每次 valueChanged 现取梯值
             QLabel* voxVal = new QLabel(slidersWidget);
+            m_voxelValLbl = voxVal;                 // 成员存（113 事件回显直更）
             voxVal->setObjectName("paramValue");
             voxVal->setFixedWidth(70);
             voxVal->setFixedHeight(20);
