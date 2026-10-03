@@ -82,6 +82,60 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
     connect(ui.horizontalSlider_Laser_Lighting, &QSlider::valueChanged, this, &ScannerWindow::onSliderLaserChanged);
     connect(ui.horizontalSlider_ExposeTime, &QSlider::valueChanged, this, &ScannerWindow::onSliderExposeChanged);
 
+    // P-5 亮度档滑条收敛（261002 §3.4）：三参滑条退役（.ui 遗件隐藏——UI 不提供
+    // 三参单独调节控件，禁绕梯直改）；换一根 20 档预设档滑条＋三参只读行，与
+    // 按键左右键/MainWindow 面板同一把梯同一本账（松手提交＝P6 离散）
+    ui.horizontalSlider_Background_Lighting->hide();
+    ui.label_Lighting_3->hide();                     // 补光灯亮度
+    ui.label_Background_Value->hide();
+    ui.horizontalSlider_Laser_Lighting->hide();
+    ui.label_Lighting->hide();                       // 激光亮度
+    ui.label_Laser_Lighting_Value->hide();
+    ui.horizontalSlider_ExposeTime->hide();
+    ui.label_Lighting_2->hide();                     // 曝光时间
+    ui.label_2->hide();                              // MS
+    ui.label_ExposeTime_Value->hide();
+    {
+        auto* row = new QWidget(ui.centralWidget);
+        row->setGeometry(80, 855, 320, 26);
+        auto* lay = new QHBoxLayout(row);
+        lay->setContentsMargins(0, 0, 0, 0);
+        lay->setSpacing(6);
+        auto* nameLbl = new QLabel(QStringLiteral("亮度档"), row);
+        m_ladderSlider = new QSlider(Qt::Horizontal, row);
+        m_ladderSlider->setRange(1, 20);
+        m_ladderSlider->setValue(
+            m_appCtx && m_appCtx->deviceManager()
+                ? m_appCtx->deviceManager()->presetLadderIndex() : 10);
+        m_ladderLbl = new QLabel(row);
+        lay->addWidget(nameLbl);
+        lay->addWidget(m_ladderSlider, 1);
+        lay->addWidget(m_ladderLbl);
+        auto refreshLadderUi = [this]() {
+            auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+            if (!dm) return;
+            const int idx = dm->presetLadderIndex();
+            const int size = dm->presetLadderSize();
+            if (m_ladderSlider) {
+                const QSignalBlocker blocker(m_ladderSlider);   // 回显阻断防环路
+                m_ladderSlider->setValue(idx);
+            }
+            if (m_ladderLbl)
+                m_ladderLbl->setText(QStringLiteral("%1/%2").arg(idx).arg(size));
+        };
+        refreshLadderUi();
+        connect(m_ladderSlider, &QSlider::sliderReleased, this, [this, refreshLadderUi]() {
+            auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+            if (dm && m_ladderSlider) dm->setBrightnessLadderIndex(m_ladderSlider->value());
+            refreshLadderUi();
+        });
+        m_ladderRO = new QLabel(ui.centralWidget);
+        m_ladderRO->setGeometry(80, 880, 320, 18);
+        m_ladderRO->setStyleSheet("color:#707070;");
+        m_ladderRO->setText(QStringLiteral("三参（随档只读）：见状态回显"));
+        // 键控回显行已显示亮度档/三参（MainWindow 7 号卡片）——此窗只读不重复
+    }
+
     // A-T17 修复（运行时钳，.ui 设计量程同步）：滑条范围对齐 ParamStore spec
     // （bg 0-100 默认 10 / laser 0-100 默认 40——灯控量程实测 0-100；
     // exposure 1-5ms 默认 3——260912 用户口径），初值自账本快照同步

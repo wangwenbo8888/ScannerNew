@@ -636,6 +636,24 @@ void DeviceManager::setKeyStateGate(std::function<bool()> ok) {
                  keyStateGate_ ? "set" : "clear");
 }
 
+// P-5 亮度档写入口（§3.4 UI 预设档滑条）：UI 换档＝按键同梯同账（逻辑线程
+// 执行：绝对设档→三参写账（Source::Ui）→档位事件 111 广播；同档不重发）
+void DeviceManager::setBrightnessLadderIndex(int idx) {
+    post([this, idx] {
+        const int size = static_cast<int>(ladder_.ladder().size());
+        if (idx < 1 || idx > size || idx == ladder_.index()) return;
+        ladder_.setIndex(idx);
+        const auto& s = ladder_.current();
+        params_->setValue("exposure",   s.exposureMs,  ParamEntry::Source::Ui);
+        params_->setValue("laserLevel", s.laserLevel,  ParamEntry::Source::Ui);
+        params_->setValue("bgLight",    s.bgLight,     ParamEntry::Source::Ui);
+        publishEvent(EventType::UserDefined, 111, ladder_.index());
+        JMW_LOG_INFO("08-DeviceManager",
+            "[DeviceManager] UI 换档：亮度第 {}/{} 档（曝光{:.1f}ms 激光{:.0f} 补光{:.0f}）",
+            ladder_.index(), size, s.exposureMs, s.laserLevel, s.bgLight);
+    });
+}
+
 // 只设模式不启采（260927 就绪流程）：UI 模式键→armScanSession→此口记账，
 // 正式开扫由设备 M 键（captureToggle→startCaptureOnLogic）触发——四管掩码
 // 组帧推迟到那一刻

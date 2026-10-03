@@ -433,10 +433,26 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             // 预设——只改预览观看远近；快照兜底见启动对齐）
                             if (m_3dView) m_3dView->setViewDistanceLadder(static_cast<int>(p2));
                         } else if (p1 == 111) {    // P-3 档位横幅（按键来源专属——UI 不来）
+                            // ＋P-5 回显：参数面板档位滑条同步（阻断防环路）＋三参只读行刷新
                             showBanner(QStringLiteral("亮度 ▸ 第%1/%2档")
                                        .arg(p2).arg(m_appCtx->deviceManager()
                                                         ? m_appCtx->deviceManager()->presetLadderSize()
                                                         : 20));
+                            if (m_param1Slider) {
+                                const QSignalBlocker blocker(m_param1Slider);
+                                m_param1Slider->setValue(static_cast<int>(p2));
+                            }
+                            if (m_paramROLabel) {
+                                auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+                                if (dm) {
+                                    const auto e = dm->getParam("exposure").value;
+                                    const auto l = dm->getParam("laserLevel").value;
+                                    const auto b = dm->getParam("bgLight").value;
+                                    m_paramROLabel->setText(QStringLiteral(
+                                        "三参（随档只读）：曝光 %1 ms · 激光 %2 · 补光 %3")
+                                        .arg(e, 0, 'f', 1).arg(l, 0, 'f', 0).arg(b, 0, 'f', 0));
+                                }
+                            }
                         } else if (p1 == 113) {    // 体素密度档（①子态常驻行内
                             refreshBannerPersistent();  // 刷新——设计：不单独发横幅）
                         } else if (p1 == 114) {     // 景深直切
@@ -873,16 +889,8 @@ QImage camMatToImage(const cv::Mat& m) {
                   QImage::Format_Grayscale8).copy();
 }
 
-// —— 参数1 三参比例映射（260912 用户口径 B''）：旋钮 1→各参最小、100→各参最大，
-//    线性比例。曝光域 1-5ms（用户口径 260912——60Hz 触发周期 16.7ms，>5ms 拖影）；
-//    补光/激光域 0-100（协议文档 N10 表 B/L——与 ParamStore specs 同源）——
-void pushParam1Scaled(Scanner::device::DeviceManager* dm, int val) {
-    const double t = static_cast<double>(std::clamp(val, 1, 100) - 1) / 99.0;
-    auto src = Scanner::device::ParamEntry::Source::Ui;
-    dm->setParam("exposure",   1.0 + t * 4.0, src);             // 1-5ms
-    dm->setParam("laserLevel", 0.0 + t * 100.0, src);           // 0-100
-    dm->setParam("bgLight",    0.0 + t * 100.0, src);           // 0-100
-}
+// pushParam1Scaled（260912 三参比例旋钮）随 P-5 收敛退役——三参唯一合法写入口
+// 是亮度梯换档（禁绕梯直改三参，设计 §3.3.2 一本账纪律）
 } // namespace
 
 void MainWindow::showCameraMonitor() {
@@ -1731,8 +1739,7 @@ QWidget *MainWindow::createToolBar()
                     applyMarkerPreset();       // 标点：推荐预设＋旋钮同步（260912）
                 else if (mode == Scanner::ScanMode::MarkerPlusLaser)
                     applyMeshPreset();         // 面片：推荐预设＋旋钮同步（260912）
-                else
-                    applyParam1ToLedger();     // 精细/深孔：三参压旋钮值（待真机标定预设）
+                // 精细/深孔：P-5 收敛后无独立预设（保持当前亮度档——待真机标定预设）
                 m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
                 // 260927 就绪流程（用户口径）：UI 模式键只备会话（模式/帧流/工作流），
                 // 不启采——正式开扫由设备 M 键触发（captureToggle→N10 四管掩码）
@@ -2176,138 +2183,96 @@ QWidget *MainWindow::createParamSection()
     QHBoxLayout *tabLayout = new QHBoxLayout(tabBar);
     tabLayout->setContentsMargins(0, 0, 0, 0);
     tabLayout->setSpacing(0);
-    QStringList tabs = {QStringLiteral("自由"), QStringLiteral("推荐"), QStringLiteral("自定义")};
-    for (int i = 0; i < tabs.size(); ++i) {
-        QPushButton *tab = new QPushButton(tabs[i]);
-        tab->setObjectName(i == 0 ? "paramTabActive" : "paramTab");
-        tab->setFixedHeight(28);
-        tab->setStyleSheet("background-color: #FFFFFF; color: #000000; border: none; border-radius: 0px;");
-        tabLayout->addWidget(tab);
+    // P-5 收敛（261002 按键域 §3.4/§6）：自由/推荐/自定义装饰页签退役——亮度在
+    // UI 只有一根 20 档预设档滑条（与按键左右键同一把梯同一本账），三参只读
+    {
+        QLabel *hint = new QLabel(QStringLiteral("亮度档（与设备按键同梯同账）"));
+        hint->setStyleSheet("background-color: #FFFFFF; color: #505050; border: none; padding-left: 8px;");
+        tabLayout->addWidget(hint);
     }
+    tabLayout->addStretch();
     layout->addWidget(tabBar);
 
     QWidget *slidersWidget = new QWidget();
     slidersWidget->setStyleSheet("background-color: #FFFFFF;");
-    slidersWidget->setMinimumHeight(200);
+    slidersWidget->setMinimumHeight(80);
     QVBoxLayout *slidersLayout = new QVBoxLayout(slidersWidget);
     slidersLayout->setContentsMargins(8, 4, 8, 4);
     slidersLayout->setSpacing(0);
 
-    struct SliderItem { QString name; int val; int min; int max; };
-    QList<SliderItem> sliders = {
-        {QStringLiteral("参数1：曝光/亮度"), 25, 0, 100},
-        {QStringLiteral("参数2：点云分辨率"), 50, 0, 100},
-        {QStringLiteral("参数3：滤波强度"), 30, 0, 100},
-        {QStringLiteral("参数4：拼接平滑度"), 50, 0, 100},
-        {QStringLiteral("参数5：纹理映射"), 20, 0, 100},
-        {QStringLiteral("参数6：细节保留"), 10, 0, 100}
-    };
-
-    for (int si = 0; si < sliders.size(); ++si) {
-        const auto &s = sliders[si];
+    // P-5：五条装饰参数滑条（点云分辨率等未接线占位）退役——面板只留档位滑条
+    // ＋三参只读行（换档提交走 sliderReleased 松手离散提交＝设计 P6）
+    {
         QWidget *row = new QWidget();
         row->setMinimumHeight(40);
         QVBoxLayout *rowLayout = new QVBoxLayout(row);
         rowLayout->setContentsMargins(0, 0, 0, 0);
         rowLayout->setSpacing(0);
-
-        QLabel *label = new QLabel(s.name);
+        QLabel *label = new QLabel(QStringLiteral("亮度档 1-20"));
         label->setObjectName("paramLabel");
         label->setMinimumHeight(12);
         label->setContentsMargins(0, 0, 0, 0);
         rowLayout->addWidget(label);
-
         QHBoxLayout *controlLayout = new QHBoxLayout();
         controlLayout->setSpacing(6);
         QSlider *slider = new QSlider(Qt::Horizontal);
         slider->setObjectName("paramSlider");
-        slider->setRange(s.min, s.max);
-        slider->setValue(s.val);
+        slider->setRange(1, 20);
+        slider->setValue(10);                     // 档10=面片推荐（档值表插值精确点）
         slider->setStyleSheet(
             "QSlider::groove:horizontal { height: 4px; background: #E1E1E1; border-radius: 2px; }"
             "QSlider::handle:horizontal { background: #900021; width: 12px; height: 12px; margin: -5px 0px; border-radius: 6px; border: none; }"
         );
         controlLayout->addWidget(slider, 1);
-
-        QLabel *valueLbl = new QLabel(QString::number(s.val));
+        QLabel *valueLbl = new QLabel(QStringLiteral("10/20"));
         valueLbl->setObjectName("paramValue");
         valueLbl->setFixedWidth(48);
         valueLbl->setFixedHeight(20);
         valueLbl->setAlignment(Qt::AlignCenter);
         valueLbl->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000;");
         QObject::connect(slider, &QSlider::valueChanged, valueLbl, [valueLbl](int val) {
-            valueLbl->setText(QString::number(val));
+            valueLbl->setText(QString::number(val) + QStringLiteral("/20"));
         });
         controlLayout->addWidget(valueLbl);
-
-        // 参数1（曝光/亮度）→ 三路比例联动（260912 用户口径 B'）：旋钮 1→各参
-        //   最小、100→各参最大，线性比例（各参域=ParamStore specs：曝光 1-100ms/
-        //   补光 0-100/激光 0-100——域值同源 08 makeParamSpecs，不引跨层符号）；
-        //   启动扫描前 applyParam1ToLedger 同映射压账本——初始与中途恒同效
-        if (si == 0) {
-            m_param1Slider = slider;
-            QObject::connect(slider, &QSlider::valueChanged, this, [this](int val) {
-                auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
-                if (!dm) return;
-                pushParam1Scaled(dm, val);
-            });
-        }
-
+        m_param1Slider = slider;                 // 复用成员（语义＝亮度档，P-5 收敛）
+        // 松手提交终值（P6 离散提交）：拖动中仅预览档号；按键侧改档经 111 事件
+        // 回显同步（QSignalBlocker 防环路）
+        QObject::connect(slider, &QSlider::sliderReleased, this, [this]() {
+            auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+            if (dm && m_param1Slider) dm->setBrightnessLadderIndex(m_param1Slider->value());
+        });
         rowLayout->addLayout(controlLayout);
         slidersLayout->addWidget(row);
+
+        m_paramROLabel = new QLabel(QStringLiteral("三参（随档只读）：曝光 -- ms · 激光 -- · 补光 --"));
+        m_paramROLabel->setObjectName("paramRO");
+        m_paramROLabel->setStyleSheet("color: #707070; padding: 2px;");
+        m_paramROLabel->setWordWrap(true);
+        slidersLayout->addWidget(m_paramROLabel);
     }
 
     layout->addWidget(slidersWidget, 1);
     return section;
 }
 
-// 面片扫描推荐预设（260912 用户口径）：B=10（「B 模式成功配置基线」——spec
-// 注释同源）＋L=40（「60 过亮→40 折中」——spec 注释同源）＋H=60＋曝光 3ms。
-// B≠L 不在旋钮比例曲线上——直写账本；旋钮同步至激光位 41（本模式主灯），
-// QSignalBlocker 防旋钮耦合反灌覆盖预设；仅新启会话套用，续采保留现值
+// 面片扫描推荐预设（P-5 收敛 261002）：B=10/L=40/曝光 3ms＝亮度梯档 10 精确点
+// （档值表插值锚——260912 口径随档入梯）。换档走 setBrightnessLadderIndex（与
+// 按键/UI 滑条同一把梯同一本账）；滑条回显经 111 事件回刷（此处只同步预置位）
 void MainWindow::applyMeshPreset() {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
-    if (m_param1Slider) {
-        const QSignalBlocker blocker(m_param1Slider);   // 阻断耦合——预设精确落账
-        m_param1Slider->setValue(41);                   // 激光位 L=40
-    }
-    auto src = Scanner::device::ParamEntry::Source::Ui;
-    dm->setParam("exposure",   3.0, src);
-    dm->setParam("bgLight",   10.0, src);
-    dm->setParam("laserLevel", 40.0, src);
-    dm->setParam("freqHz",     60.0, src);   // 261002 带宽账定版：H120≈750MB/s 超
-                                             // USB3 单控→到达抖动配对错杀（18:16
-                                             // 日志实证仍 120）；H60≈375MB/s 稳定
+    dm->setBrightnessLadderIndex(10);          // 档10=面片推荐 {3ms, 40, 10}
     statusBar()->showMessage(
-        QStringLiteral("面片扫描推荐参数已套用（B=10/L=40/H=60/曝光3ms）"), 3000);
+        QStringLiteral("面片扫描推荐参数已套用（亮度档 10/20）"), 3000);
 }
 
-// 标点扫描推荐预设（260912 用户口径）：补光 B=40（2026-08 真机标点检测成功
-// 配置——08 kMarkerOnlyBg 同源数值；实发另有模式强制 B=40/L=0/T0V0C0D0 兜底）
-// ＋频率 H=60（账本默认）。旋钮同步至比例曲线上 B=40 对应位置（t=0.4 → 旋钮
-// 41，曝光随之 ~2.6ms/激光 40——L 在标点模式实发恒 0，账本值仅占位）；仅新启
-// 会话套用，续采（resume）保留用户当前值
+// 标点扫描推荐预设（P-5 收敛 261002）：B=40＝亮度梯档 10 同档（L 在标点模式
+// 实发恒 0 由 effectiveN10 强制，账本值占位）；仅新启会话套用
 void MainWindow::applyMarkerPreset() {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
-    constexpr int kKnobBg40 = 41;              // 1 + round(0.4×99)（pushParam1Scaled 反算）
-    if (m_param1Slider)
-        m_param1Slider->setValue(kKnobBg40);   // 触发 valueChanged→pushParam1Scaled 记账
-    else
-        pushParam1Scaled(dm, kKnobBg40);
-    dm->setParam("freqHz", 120.0, Scanner::device::ParamEntry::Source::Ui);
-    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（B=40/H=120）"), 3000);
-}
-
-// 参数1 三参比例压账本（260912 用户口径 B'）：启动扫描前调用——按旋钮 1-100
-// 比例映射三参（1=各参最小/100=各参最大），与中途拖动完全同效；随后
-// startCapture 自账本组帧下发
-void MainWindow::applyParam1ToLedger()
-{
-    auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
-    if (!dm || !m_param1Slider) return;
-    pushParam1Scaled(dm, m_param1Slider->value());
+    dm->setBrightnessLadderIndex(10);          // 档10 补光=40（标点检测成功基线）
+    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（亮度档 10/20·B=40）"), 3000);
 }
 
 QWidget *MainWindow::createInfoSection()

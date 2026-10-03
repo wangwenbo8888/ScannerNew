@@ -236,6 +236,9 @@ public:
     /// 谓词（false＝四类键全拦丢弃，逃生类不受影响）。⚠ 装配期调用（open 前，
     /// 与 setProtocolVersion 同约定——逻辑线程并发调用闭包有数据竞争）
     void setKeyStateGate(std::function<bool()> ok);
+    /// P-5 亮度档写入口（261002 §3.4 UI 预设档滑条）：UI 换档请求＝与按键左右
+    /// 键同一把梯同一本账（post 编队逻辑线程执行；越界忽略；同档不重发）
+    void setBrightnessLadderIndex(int idx);
     /// 当前灯序相位（-1=未在跑；0=补光/1=左斜/2=右斜/3=精细/4=深孔）
     int calibLightPhase() const { return calibPhase_.load(std::memory_order_relaxed); }
 

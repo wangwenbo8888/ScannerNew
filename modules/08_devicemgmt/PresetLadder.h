@@ -44,6 +44,9 @@ public:
     }
     const std::vector<TStep>& steps() const { return steps_; }
     int index() const { return index_; }               // 当前档（1 起；0=空梯）
+    void setIndex(int i) {                             // P-5 绝对设档（UI 换档请求；
+        if (i >= 1 && i <= static_cast<int>(steps_.size())) index_ = i;   // 越界忽略）
+    }
 
     // 步进 ±1（钳制不环绕）：true=档位变化；false=已到顶/底（无效步，静默）
     bool step(int dir) {

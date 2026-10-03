@@ -8,6 +8,8 @@
 
 #include <QMainWindow>
 #include <QTimer>
+#include <QSlider>     // P-5 亮度档滑条
+#include <QLabel>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -55,6 +57,11 @@ private:
     QTimer* m_fpsTimer = nullptr;
     QTimer* m_consumerTimer = nullptr;
     QComboBox* m_resCombo = nullptr;
+
+    // —— P-5 亮度档滑条收敛（261002 §3.4）：三参滑条退役，换 20 档预设档滑条 ——
+    QSlider* m_ladderSlider = nullptr;   // 亮度档滑条（与按键同梯同账，松手提交）
+    QLabel*  m_ladderLbl = nullptr;      // 档号回显 "N/20"
+    QLabel*  m_ladderRO = nullptr;       // 三参只读提示行
 
     uint64_t m_frameCount = 0;
     uint64_t m_prevFrameCount = 0;
