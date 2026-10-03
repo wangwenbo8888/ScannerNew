@@ -1175,7 +1175,8 @@ void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
 // 「拒＝可按但有反馈」与「拦＝无效直接灰」区分，设计 §3.2.5 定版口径）
 void MainWindow::showVirtualKeypad() {
     if (!m_vkeyPad) {
-        m_vkeyPad = new QDialog(this);
+        m_vkeyPad = new QDialog(this, Qt::Tool | Qt::WindowStaysOnTopHint);
+        // Tool＋StaysOnTop：小型浮窗不被主窗口盖住（校准/扫描切视图时可见）
         m_vkeyPad->setWindowTitle(QStringLiteral("虚拟按键表盘（模拟扫描仪面板 G01）"));
         m_vkeyPad->setModal(false);
         m_vkeyPad->setFixedWidth(380);
