@@ -315,7 +315,7 @@ Result DeviceManager::open() {
     // 兼容（最近档吸附一版过渡）；freqHz 等其余段照旧入 ParamStore
     {
         std::string raw = paramIo_.load ? paramIo_.load() : std::string();
-        int bootLadder = 0;
+        int bootLadder = 0, bootDist = 0, bootVoxel = 0, bootDof = -1;
         bool hasLegacy3 = false;
         std::string filtered;
         size_t pos = 0;
@@ -330,7 +330,19 @@ Result DeviceManager::open() {
             const std::string v = token.substr(eq + 1);
             if (k == "brightLadder") {
                 try { bootLadder = std::stoi(v); } catch (...) {}
-                continue;                       // 档号段不入 ParamStore
+                continue;
+            }
+            if (k == "distanceLadder") {
+                try { bootDist = std::stoi(v); } catch (...) {}
+                continue;
+            }
+            if (k == "voxelLadder") {
+                try { bootVoxel = std::stoi(v); } catch (...) {}
+                continue;
+            }
+            if (k == "depthOfField") {
+                try { bootDof = std::stoi(v); } catch (...) {}
+                continue;
             }
             if (k == "exposure" || k == "laserLevel" || k == "bgLight") {
                 hasLegacy3 = true;              // 旧档三参段：入账供最近档吸附
@@ -363,6 +375,13 @@ Result DeviceManager::open() {
             params_->setEntryDirect("laserLevel", s.laserLevel,  false, ParamEntry::Source::Boot);
             params_->setEntryDirect("bgLight",    s.bgLight,     false, ParamEntry::Source::Boot);
         }
+        // P-6 四项档号全展开（§7 推荐：重启保工作档）
+        if (bootDist >= 1 && bootDist <= static_cast<int>(displayLadder_.steps().size()))
+            displayLadder_.setIndex(bootDist);
+        if (bootVoxel >= 1 && bootVoxel <= static_cast<int>(voxelLadder_.steps().size()))
+            voxelLadder_.setIndex(bootVoxel);
+        if (bootDof == 0 || bootDof == 1)
+            dof_ = static_cast<DepthOfField>(bootDof);
         paramBootLoading_ = false;
     }
     refreshParamSnapshot();
@@ -1226,11 +1245,14 @@ void DeviceManager::refreshParamSnapshot() {
     for (const auto& k : paramKeys_) paramSnapshot_[k] = params_->get(k);
 }
 
-// P-6 只落档号·落盘统一口：三参投影段剔除＋brightLadder 档号段追加（防抖
-// 冲刷与 close 兜底两路共用——过滤逻辑单一来源）
+// P-6 只落档号·落盘统一口：三参投影段剔除＋四项档号段追加（亮度/显示远近/
+// 体素密度/景深——设计 §7 推荐全落，重启保工作档；防抖冲刷与 close 兜底共用）
 bool DeviceManager::persistLadderLedger() {
     if (!paramIo_.persist) return false;
-    const int ladderIdx = ladder_.index();
+    const int briIdx = ladder_.index();
+    const int dstIdx = displayLadder_.index();
+    const int voxIdx = voxelLadder_.index();
+    const int dof = static_cast<int>(dof_);
     return params_->persist([&](const std::string& text) {
         std::string out;
         size_t pos = 0;
@@ -1243,11 +1265,15 @@ bool DeviceManager::persistLadderLedger() {
             if (eq == std::string::npos || eq == 0) continue;
             const std::string& k = token.substr(0, eq);
             if (k == "exposure" || k == "laserLevel" || k == "bgLight" ||
-                k == "brightLadder")
+                k == "brightLadder" || k == "distanceLadder" ||
+                k == "voxelLadder" || k == "depthOfField")
                 continue;                     // 三参投影/旧档号段（防重）剔除
             out += token + ";";
         }
-        out += "brightLadder=" + std::to_string(ladderIdx) + ";";
+        out += "brightLadder=" + std::to_string(briIdx) + ";";
+        out += "distanceLadder=" + std::to_string(dstIdx) + ";";
+        out += "voxelLadder=" + std::to_string(voxIdx) + ";";
+        out += "depthOfField=" + std::to_string(dof) + ";";
         return paramIo_.persist(out);
     });
 }
