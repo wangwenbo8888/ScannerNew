@@ -333,6 +333,9 @@ void AppContext::initialize() {
         bool timestampPairing = true;    // 方案B：帧号不等时时间戳判组兜底（260927 实验）
         int contrastLeft = 95;         // 对比度·左默认（软件端增强；0=直通。260927→1002）
         int contrastRight = 100;       // 对比度·右默认
+        // 261003 景深屏蔽区间（mm；产线可调——camera.json depthOfField 节覆盖）
+        double dofNearMin = 150.0, dofNearMax = 500.0;
+        double dofFarMin = 400.0, dofFarMax = 700.0;
     };
     CameraSetupCfg camCfg;
     {
@@ -356,12 +359,28 @@ void AppContext::initialize() {
                 camCfg.contrastRight = c.value("contrastRight", camCfg.contrastRight);
                 cameraContrastL_ = camCfg.contrastLeft;   // open 成功后经门面下发
                 cameraContrastR_ = camCfg.contrastRight;
+                // 261003 景深屏蔽区间（camera.json depthOfField 节；缺节用内置默认）
+                if (j.contains("depthOfField") && j["depthOfField"].is_object()) {
+                    const auto& dof = j["depthOfField"];
+                    camCfg.dofNearMin = dof.value("nearMin", camCfg.dofNearMin);
+                    camCfg.dofNearMax = dof.value("nearMax", camCfg.dofNearMax);
+                    camCfg.dofFarMin = dof.value("farMin", camCfg.dofFarMin);
+                    camCfg.dofFarMax = dof.value("farMax", camCfg.dofFarMax);
+                }
+                dofNearMin_ = camCfg.dofNearMin;   // 成员存（WorkflowContext 子类读）
+                dofNearMax_ = camCfg.dofNearMax;
+                dofFarMin_ = camCfg.dofFarMin;
+                dofFarMax_ = camCfg.dofFarMax;
                 JMW_LOG_INFO("app-AppContext",
-                             "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} pairStrict={} tsPair={} contrastL={} contrastR={}",
-                             camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
-                             camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps,
-                             camCfg.pairStrictFrameId, camCfg.timestampPairing,
-                             camCfg.contrastLeft, camCfg.contrastRight);
+                    "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} "
+                    "pairStrict={} tsPair={} contrastL={} contrastR={} "
+                    "dofNear=[{},{}] dofFar=[{},{}]",
+                    camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
+                    camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps,
+                    camCfg.pairStrictFrameId, camCfg.timestampPairing,
+                    camCfg.contrastLeft, camCfg.contrastRight,
+                    camCfg.dofNearMin, camCfg.dofNearMax,
+                    camCfg.dofFarMin, camCfg.dofFarMax);
             } catch (const std::exception& e) {
                 JMW_LOG_WARN("app-AppContext",
                              "[AppContext] camera.json 解析失败（{}）——用内置默认", e.what());
@@ -455,6 +474,13 @@ void AppContext::initialize() {
         int depthOfField() const override {
             return owner_ && owner_->deviceManager()
                        ? owner_->deviceManager()->depthOfField() : 0;
+        }
+        void dofRange(double& nearMin, double& nearMax,
+                      double& farMin, double& farMax) const override {
+            nearMin = owner_->dofNearMin_;
+            nearMax = owner_->dofNearMax_;
+            farMin = owner_->dofFarMin_;
+            farMax = owner_->dofFarMax_;
         }
     private:
         AppContext* owner_;

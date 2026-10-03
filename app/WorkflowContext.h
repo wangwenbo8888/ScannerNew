@@ -55,6 +55,11 @@ public:
     //     0.25 口径〕＋景深档〔0 近/1 远〕；app 组合根重写取 08 门面快照）===
     virtual double voxelDensityMm() const { return 0.0; }
     virtual int depthOfField() const { return 0; }
+    // P-4 景深区间（camera.json depthOfField 节；02 会话启动注入 07 ScanChains）
+    virtual void dofRange(double& nearMin, double& nearMax,
+                          double& farMin, double& farMax) const {
+        nearMin = 150.0; nearMax = 500.0; farMin = 400.0; farMax = 700.0;
+    }
 
     // === EventBus 发布快捷方法 ===
     void publishProgress(int currentStage, int totalStages, const std::string& stageName, float progress);

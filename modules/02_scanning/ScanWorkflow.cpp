@@ -168,8 +168,13 @@ Result ScanWorkflow::assemblePipeline() {
         return Result::fail("ScanPipeline 装配失败: " + cr.message);
     }
     // P-4 景深基线对齐（261002）：会话启动读档快照（运行时切档经 setDepthOfField
-    // 热更——app 订阅 p1=114 事件转发）
-    if (ctx_) pipeline_->setDepthOfField(ctx_->depthOfField());
+    // 热更——app 订阅 p1=114 事件转发）；261003 区间注入（camera.json 可调）
+    if (ctx_) {
+        pipeline_->setDepthOfField(ctx_->depthOfField());
+        double nMin, nMax, fMin, fMax;
+        ctx_->dofRange(nMin, nMax, fMin, fMax);
+        pipeline_->setDofRange(nMin, nMax, fMin, fMax);
+    }
     return Result::ok();
 }
 

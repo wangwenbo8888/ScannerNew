@@ -122,9 +122,16 @@ public:
 
     /// P-4 景深屏蔽（261002 按键域 §3.3.2）：0=近（默认）/1=远——激光链按区间
     /// 过滤 3D 点后入池（扫描中切换立即生效，逐帧读原子）。区间常量见 .cpp
-    /// （〔产线对账占位〕近 [200,800]mm / 远 [800,2000]mm——相机系 Z）
+    /// （261003 产线定版 近 [150,500]mm / 远 [400,700]mm——可经 setDofRange 配置
+    /// 覆盖，来源 camera.json depthOfField 节，AppContext 装配期注入）
     void setDepthOfField(int mode) { dofMode_.store(mode, std::memory_order_relaxed); }
     int depthOfField() const { return dofMode_.load(std::memory_order_relaxed); }
+    void setDofRange(double nearMin, double nearMax, double farMin, double farMax) {
+        dofNearMin_.store(nearMin, std::memory_order_relaxed);
+        dofNearMax_.store(nearMax, std::memory_order_relaxed);
+        dofFarMin_.store(farMin, std::memory_order_relaxed);
+        dofFarMax_.store(farMax, std::memory_order_relaxed);
+    }
 
 private:
     std::shared_ptr<ScanLaneOps> makeOps() const;
@@ -141,6 +148,10 @@ private:
     ScanChainDeps deps_;
     std::string initError_;                     // 装配期依赖校验错误（非空=钩子恒 fail）
     std::atomic<int> dofMode_{0};               // P-4 景深档（0 近/1 远；lane 线程逐帧读）
+    std::atomic<double> dofNearMin_{150.0};     // 261003 景深区间（camera.json 可覆盖）
+    std::atomic<double> dofNearMax_{500.0};
+    std::atomic<double> dofFarMin_{400.0};
+    std::atomic<double> dofFarMax_{700.0};
 };
 
 } // namespace Scanner::pipeline

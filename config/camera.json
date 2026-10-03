@@ -1,5 +1,5 @@
 {
-    "_说明": "相机装机口径配置（AppContext 启动读取；文件缺失用内置默认并 WARN）。曝光/频率/补光/激光等运行时参数归 08 ParamStore 账本，不放本文件。contrastLeft/contrastRight=对比度·左右分置（自建 cv::LUT 逐帧真实变换；0=直通零开销；正增强/负减弱，域 [-100,100]——自检时读入下发。SDK ImageImprovment 对 Mono8 实测 no-op 已弃用）。",
+    "_说明": "相机装机口径配置（AppContext 启动读取；文件缺失用内置默认并 WARN）。曝光/频率/补光/激光等运行时参数归 08 ParamStore 账本，不放本文件。contrastLeft/contrastRight=对比度·左右分置（自建 cv::LUT 逐帧真实变换；0=直通零开销；正增强/负减弱，域 [-100,100]——自检时读入下发。SDK ImageImprovment 对 Mono8 实测 no-op 已弃用）。depthOfField.nearMin/nearMax/farMin/farMax=景深屏蔽区间（mm，07 激光链 Z 过滤；近/远两档可有重叠过渡区）。",
     "camera": {
         "contrastLeft": 90,
         "contrastRight": 80,
@@ -9,5 +9,11 @@
         "previewFps": 10,
         "rotateRight180": true,
         "triggerSource": "Line2"
+    },
+    "depthOfField": {
+        "nearMin": 150.0,
+        "nearMax": 500.0,
+        "farMin": 400.0,
+        "farMax": 700.0
     }
 }

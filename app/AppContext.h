@@ -229,5 +229,9 @@ private:
     Scanner::infra::SubscriberId ledSubId_ = 0;      // G8 设备指示灯：StateChanged→N14 S 码
     Scanner::infra::SubscriberId captureStateSubId_ = 0;   // 261002 采集翻转沿：M 停采→工作流暂停（可编辑）
     int cameraContrastL_ = 0;                         // camera.json "contrastLeft"（0=直通；open 后下发）
-    int cameraContrastR_ = 0;                         // camera.json "contrastRight"（左右分置·260927→1002）
+    int cameraContrastR_ = 0;                         // camera.json "contrastRight"
+    // 261003 景深屏蔽区间（camera.json depthOfField 节；AppContext 装配读→
+    // WorkflowContext::dofRange() 虚口→02 会话启动注入 07 ScanChains）
+    double dofNearMin_ = 150.0, dofNearMax_ = 500.0;
+    double dofFarMin_ = 400.0, dofFarMax_ = 700.0;
 };
