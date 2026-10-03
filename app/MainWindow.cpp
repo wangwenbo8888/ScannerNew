@@ -380,6 +380,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                     const int64_t newState = ev.param2;
                     QMetaObject::invokeMethod(this, [this, newState]() {
                         updateStateIndicator(static_cast<Scanner::service::SystemState>(newState));
+                        updateVirtualKeypadStates();      // P-键盘态同步：灰化/恢复表盘
                     }, Qt::QueuedConnection);
                 });
             // —— 按键管理闭环（260927 接线；261002 按键域定稿事件段迁移）：菜单
@@ -1147,7 +1148,11 @@ void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
 // U/L/R/M 四键经 DeviceManager::testInjectTextLine 注入 G01 手势帧，与真机 rx
 // 路径完全同链（文本行→手势环→KeySemantics→动作）——表盘点按即等价真机按键；
 // 下键（第五键）260831 协议 G01 键位白名单无此键（McuFrame.cpp parseG01Payload
-// 仅 U/L/M/R）——置灰标注，待协议方补充后启用
+// 仅 U/L/M/R）——置灰标注，待协议方补充后启用。
+// P-键盘态同步（§3.2.5 七态矩阵）：StateChanged 事件驱动灰化/恢复——
+// S1/S3/S6/S7 全拦态＝除逃生类（M 长按/U 长按）外全灰；S2/S4/S5＝恢复可用
+// （功能口拒〔未就绪/标点隔离/防呆〕的键仍可按——拒因经横幅 p1=120 可见，
+// 「拒＝可按但有反馈」与「拦＝无效直接灰」区分，设计 §3.2.5 定版口径）
 void MainWindow::showVirtualKeypad() {
     if (!m_vkeyPad) {
         m_vkeyPad = new QDialog(this);
@@ -1163,55 +1168,99 @@ void MainWindow::showVirtualKeypad() {
             h->setStyleSheet("font-weight: bold;");
             lay->addWidget(h, 0, g + 1);
         }
-        struct RowDef { QString name; QChar key; bool enabled; QString tip; };
+        // 行序＝U/D/L/R/M；tooltip 对齐 261002 定稿手势总表（§3.2.2）
+        struct RowDef {
+            QString name; QChar key; bool inProto; QString tips[3];
+        };
         const RowDef rows[] = {
             { QStringLiteral("上键 U"), QChar('U'), true,
-              QStringLiteral("单击＝进/退菜单；双击＝切换调节上下文") },
+              { QStringLiteral("单击＝进/退菜单"),
+                QStringLiteral("双击＝景深直切 近↔远"),
+                QStringLiteral("长按＝回主界面（全域免门禁）") } },
             { QStringLiteral("下键 D"), QChar('D'), false,
-              QStringLiteral("260831 协议 G01 无此键（键位仅 U/L/M/R）——扫描仪第五键"
-                             "未进协议，置灰待补") },
+              { QStringLiteral("协议 G01 无此键"), QStringLiteral("—"), QStringLiteral("—") } },
             { QStringLiteral("左键 L"), QChar('L'), true,
-              QStringLiteral("单击＝调参 −（菜单态＝游标左移）") },
+              { QStringLiteral("单击＝调档 ↓（菜单态＝游标左移）"),
+                QStringLiteral("双击＝换调节对象 亮度↔显示远近"),
+                QStringLiteral("长按＝预留") } },
             { QStringLiteral("右键 R"), QChar('R'), true,
-              QStringLiteral("单击＝调参 ＋（菜单态＝游标右移）") },
+              { QStringLiteral("单击＝调档 ↑（菜单态＝游标右移）"),
+                QStringLiteral("双击＝预留"),
+                QStringLiteral("长按＝预留") } },
             { QStringLiteral("中键 M"), QChar('M'), true,
-              QStringLiteral("单击＝启动/停止扫描（菜单态＝确认）；双击＝切换扫描模式") },
+              { QStringLiteral("单击＝启/停扫描（菜单态＝选中）"),
+                QStringLiteral("双击＝切换扫描模式"),
+                QStringLiteral("长按＝急停（全域免门禁）") } },
         };
         for (int r = 0; r < 5; ++r) {
             const auto& row = rows[r];
             auto* lbl = new QLabel(row.name, m_vkeyPad);
-            lbl->setStyleSheet(row.enabled ? QStringLiteral("font-weight: bold;")
+            lbl->setStyleSheet(row.inProto ? QStringLiteral("font-weight: bold;")
                                            : QStringLiteral("color:#999;"));
             lay->addWidget(lbl, r + 1, 0);
             for (int g = 0; g < 3; ++g) {
                 auto* btn = new QPushButton(gestures[g], m_vkeyPad);
-                const QString line = QStringLiteral("G01 %1%2").arg(row.key).arg(g + 1);
-                if (row.enabled) {
-                    btn->setToolTip(row.tip);
-                    connect(btn, &QPushButton::clicked, this, [this, line, row]() {
+                m_vkeyBtns[r][g] = btn;               // 存指针（态同步用）
+                btn->setToolTip(row.tips[g]);
+                if (row.inProto) {
+                    const QString line = QStringLiteral("G01 %1%2").arg(row.key).arg(g + 1);
+                    const QString tip = row.tips[g];
+                    connect(btn, &QPushButton::clicked, this, [this, line, tip]() {
                         if (m_appCtx && m_appCtx->deviceManager())
                             m_appCtx->deviceManager()->testInjectTextLine(line.toStdString());
                         statusBar()->showMessage(
-                            QStringLiteral("虚拟按键注入: %1（%2）")
-                                .arg(line, row.tip), 3000);
+                            QStringLiteral("虚拟按键注入: %1（%2）").arg(line, tip), 3000);
                     });
-                } else {
-                    btn->setEnabled(false);
-                    btn->setToolTip(row.tip);
                 }
-                lay->addWidget(btn, r + 1, g + 1);
+                // 不在此设 enabled——updateVirtualKeypadStates 统一按当前态定
             }
         }
         auto* note = new QLabel(
-            QStringLiteral("261002 临时测试机：经 G01 注入测试缝下发，与真机按键同链路"),
+            QStringLiteral("261002 临时测试机：经 G01 注入测试缝下发，与真机按键同链路\n"
+                           "灰＝当前态不可用（拦）；亮＝可按（拒因经横幅反馈）"),
             m_vkeyPad);
         note->setStyleSheet("color:#888; font-size:11px;");
         note->setAlignment(Qt::AlignCenter);
         lay->addWidget(note, 6, 0, 1, 4);
+        updateVirtualKeypadStates();                  // 首建即对齐当前态
     }
     m_vkeyPad->show();
     m_vkeyPad->raise();
     m_vkeyPad->activateWindow();
+}
+
+// ============================================================================
+// P-键盘态同步（§3.2.5 七态矩阵 → 表盘按钮灰化/恢复）
+//
+// 规则（设计定版）：
+//   拦（S1/S3/S6/S7 四个全拦态）＝按钮灰（用户不可按——按了也没意义）
+//   拒（功能口拒：未就绪/标点隔离/防呆…）＝按钮亮（可按——拒因经横幅 p1=120
+//       可见，「按了被拒」是有效反馈，P3 红底横幅「未就绪」等即此物）
+//   逃生类（M 长按急停＋U 长按回主界面）＝任何态恒亮（§3.2.3 真免门禁）
+//   预留（L 长按＋R 双击＋R 长按＋D 全行）＝恒灰（协议无/未分配）
+//
+// 行序＝[0]=U [1]=D [2]=L [3]=R [4]=M；列序＝[0]=单击 [1]=双击 [2]=长按
+// ============================================================================
+void MainWindow::updateVirtualKeypadStates() {
+    if (!m_vkeyPad) return;
+    using S = Scanner::service::SystemState;
+    const auto s = (m_appCtx && m_appCtx->stateMachine())
+                       ? m_appCtx->stateMachine()->getCurrentState() : S::Init;
+    // S1/S3/S6/S7＝全拦（除逃生类）；S2/S4/S5＝放行
+    const bool blocking = (s == S::Init || s == S::Calibrating ||
+                           s == S::PostProcessing || s == S::FaultSelfCheck);
+    // 逃生类坐标：M 长按＝[4][2]，U 长按＝[0][2]——恒亮
+    // 预留/协议外坐标：D 全行 [1][*]，L 长按 [2][2]，R 双击 [3][1]，R 长按 [3][2]——恒灰
+    for (int r = 0; r < 5; ++r) {
+        for (int g = 0; g < 3; ++g) {
+            auto* btn = m_vkeyBtns[r][g];
+            if (!btn) continue;
+            const bool escape = (r == 4 && g == 2) || (r == 0 && g == 2);
+            const bool reserved = (r == 1) || (r == 2 && g == 2) ||
+                                  (r == 3 && g >= 1);
+            btn->setEnabled(escape || (!reserved && !blocking));
+        }
+    }
 }
 
 // 单键扫描按钮态视觉：idx=2 标点/3 面片/4 精细/5 深孔——活跃＝红框＋红字"停止扫描"，
