@@ -407,6 +407,15 @@ void AppContext::initialize() {
                 camCfg.timestampPairing);
         },
         nullptr, std::move(paramIo));
+    // P-1 全局态门禁注入（261002 按键域 §3.2.3）：四类键（启停/切模式/调节/菜单）
+    // 白名单＝S2 待机/S4 扫标点/S5 标点+激光——S1/S3/S6/S7 全拦（逃生类不问）。
+    // 装配期注入（open 前——与 setProtocolVersion 同约定）；08 不认识 10 态
+    deviceManager_->setKeyStateGate([this]() {
+        if (!stateMachine_) return true;
+        using S = Scanner::service::SystemState;
+        const auto s = stateMachine_->getCurrentState();
+        return s == S::Standby || s == S::ScanMarker || s == S::ScanMarkerLaser;
+    });
     // 设备启动（open+自检）后台化：此处不再阻塞主窗口——main 在 window.show() 后
     // 调 startDevicesAsync()（相机枚举+自动搜口实测 ~5s，同步跑=白屏等）
     JMW_LOG_INFO("app-AppContext", "[AppContext] 组件装配完成（设备启动转后台 startDevicesAsync）");

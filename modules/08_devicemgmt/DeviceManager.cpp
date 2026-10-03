@@ -626,6 +626,14 @@ void DeviceManager::setCalibCaptureArmed(bool on) {
         "[DeviceManager] 标定采集布防={}（M 键启采将走五态灯序自动循环）", on);
 }
 
+// P-1 全局态门禁注入（§3.2.3）：app 装配期组合注入（08 不认识 10 态——白名单
+// 判定归 app；未注入＝放行，兼容单测/单机）
+void DeviceManager::setKeyStateGate(std::function<bool()> ok) {
+    keyStateGate_ = std::move(ok);
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 全局态门禁谓词注入={}（四类键问话）",
+                 keyStateGate_ ? "set" : "clear");
+}
+
 // 只设模式不启采（260927 就绪流程）：UI 模式键→armScanSession→此口记账，
 // 正式开扫由设备 M 键（captureToggle→startCaptureOnLogic）触发——四管掩码
 // 组帧推迟到那一刻
@@ -995,12 +1003,15 @@ void DeviceManager::buildKeyActions() {
     a.adjustUp = [this] { applyAdjust(+1); };
     a.adjustDown = [this] { applyAdjust(-1); };
     a.dropped = [](const char* why) { JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 手势丢弃: {}", why); };
-    // 门禁闭包（§3.2.3 gate(类别)）：08 内部谓词＝自检期全拦；全局 10 态组合点
-    // 留 app 装配注入（P6 接线；注入前放行交功能口细分——S1/S3/S6/S7 全拦由
-    // app 侧状态机门控补齐）。类别参数当前统一口径，细分留 app 闭包
+    // 门禁闭包（§3.2.3 gate(类别)·P-1 定版）：08 内部谓词＝自检期全拦；app 装配
+    // 注入的全局态白名单谓词（S2/S4/S5 放行——S1/S3/S6/S7 全拦；08 不认识 10，
+    // 判定归 AppContext）；未注入＝放行（单测/单机兼容）。类别维度四类同判
+    // （矩阵门禁层无差异，细分归功能口），逃生类不进本闭包（KeySemantics 免问）
     semantics_ = std::make_unique<KeySemantics>(
         [this](KeyCategory) {
-            return selfCheck_.stage < 0;         // 自检中（S1 等价）全拦
+            if (selfCheck_.stage >= 0) return false;        // 自检中（S1 等价）全拦
+            if (keyStateGate_) return keyStateGate_();       // app 注入全局态白名单
+            return true;
         },
         std::move(a));
 }

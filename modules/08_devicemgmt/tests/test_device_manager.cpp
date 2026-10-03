@@ -1052,6 +1052,53 @@ TEST(DeviceManager, T18_MarkerSessionKeyIsolation) {
     EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerOnly);
 }
 
+// —— T23：P-1 全局态门禁注入（261002 按键域 §3.2.3）——注入谓词 false（S1/S3/
+//      S6/S7 等价全拦态）→ 四类键全丢弃；逃生类（M/H 急停、U/H 回主界面）不问
+//      门禁照常执行；注入 true（S2/S4/S5）→ 行为不变 ——
+TEST(DeviceManager, T23_KeyStateGateInjection) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    dm.setKeyStateGate([] { return false; });      // 模拟全局全拦态（S6/S7 等价）
+    ASSERT_TRUE(dm.open().success);
+
+    // 四类键全拦：启停（M/S 主层）不启采
+    dm.testInjectTextLine("G01 M1");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 0);
+    EXPECT_FALSE(dm.isCapturing());
+    // 切模式（M/D）/调节（U/D 景深、L/S 步进）/菜单（U/S 进菜单）全拦
+    dm.testInjectTextLine("G01 M2");
+    dm.testInjectTextLine("G01 U2");
+    dm.testInjectTextLine("G01 R1");
+    dm.testInjectTextLine("G01 U1");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerPlusLaser);   // 模式未切
+    EXPECT_EQ(dm.menuState().layer, 1);                               // 未进菜单
+    EXPECT_EQ(dm.presetLadderIndex(), 1);                             // 档位未动
+    EXPECT_EQ(rec.userParam(114), 0);                                 // 景深事件未发
+
+    // 逃生类豁免：M/H 急停（未采集中＝纯子态解散不崩）＋ U/H 回主界面照常
+    dm.testInjectTextLine("G01 M3");
+    dm.testInjectTextLine("G01 U3");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.menuState().layer, 1);
+
+    // 换白名单（S2/S4/S5 等价放行）→ 启停恢复
+    dm.setKeyStateGate([] { return true; });
+    dm.testInjectTextLine("G01 M1");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(mock.count("N10 H60 B10 T0 V1 C1 D0 L40"), 1);
+    EXPECT_TRUE(dm.isCapturing());
+    dm.testInjectTextLine("G01 M1");                 // 停采收口
+    dm.logicTick(); dm.logicTick();
+}
+
 // —— T22：事件族编号段隔离（261002 按键域定稿）——档位族 p1=111 亮度/112 显示
 // 远近/113 体素/114 景深 与菜单族 101-105/110、参数改账 1000+idx 互不撞车 ——
 TEST(DeviceManager, T22_EventFamilyIsolation) {

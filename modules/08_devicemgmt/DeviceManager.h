@@ -230,6 +230,10 @@ public:
     /// 自动循环；再按 M 停）。armed 时 M 键启采分流进灯序而非常规模式掩码；
     /// startCapture(mode) 显式启采/扫描会话布防自动撤防
     void setCalibCaptureArmed(bool on);
+    /// P-1 全局态门禁注入（261002 按键域 §3.2.3）：注入「当前全局态允许按键吗」
+    /// 谓词（false＝四类键全拦丢弃，逃生类不受影响）。⚠ 装配期调用（open 前，
+    /// 与 setProtocolVersion 同约定——逻辑线程并发调用闭包有数据竞争）
+    void setKeyStateGate(std::function<bool()> ok);
     /// 当前灯序相位（-1=未在跑；0=补光/1=左斜/2=右斜/3=精细/4=深孔）
     int calibLightPhase() const { return calibPhase_.load(std::memory_order_relaxed); }
 
@@ -366,6 +370,8 @@ private:
                                         // 写=相机帧回调推进/逻辑线程启停；帧打点用）
     std::atomic<bool> calibArmed_{false};   // 标定采集布防（校准设备入口置位；
                                             // M 键启采分流进灯序；扫描流程撤防）
+    std::function<bool()> keyStateGate_;    // P-1 全局态门禁谓词（装配期注入；
+                                            // 逻辑线程 gate 闭包内只读调用）
     // —— D-T13 故障边沿锚（逻辑线程属主；恢复清锚防复报）——
     bool camFaultLatched_ = false;              // 0x0801 掉线锁（相机重开清锚）
     bool camWasOpen_ = false;                   // 0x0801 前置锚：相机曾开（open 成功即置）
