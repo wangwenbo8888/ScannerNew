@@ -2441,14 +2441,17 @@ QWidget *MainWindow::createParamSection()
             voxVal->setFixedHeight(20);
             voxVal->setAlignment(Qt::AlignCenter);
             voxVal->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000; font-weight: bold;");
-            auto fmtVoxMm = [voxSteps](int idx) {
-                if (idx >= 1 && idx <= static_cast<int>(voxSteps.size()))
-                    return QString::number(voxSteps[static_cast<size_t>(idx - 1)], 'f', 2) + "mm";
+            // 无捕获 lambda：每次直接从 VoxelDensityLadder 取当前档值（彻底消除
+            // 捕获生命周期问题；构造梯仅建 27 元素 vector，代价可忽略）
+            auto voxMmAt = [](int idx) -> QString {
+                const auto s = Scanner::device::VoxelDensityLadder().steps();
+                if (idx >= 1 && idx <= static_cast<int>(s.size()))
+                    return QString::number(s[static_cast<size_t>(idx - 1)], 'f', 2) + "mm";
                 return QStringLiteral("--");
             };
-            voxVal->setText(fmtVoxMm(voxSlider->value()));
+            voxVal->setText(voxMmAt(voxSlider->value()));
             QObject::connect(voxSlider, &QSlider::valueChanged, voxVal,
-                             [voxVal, fmtVoxMm](int val) { voxVal->setText(fmtVoxMm(val)); });
+                             [voxVal, voxMmAt](int val) { voxVal->setText(voxMmAt(val)); });
             voxCtl->addWidget(voxVal);
             m_voxelSlider = voxSlider;              // 成员存（113 事件回显＋扫描锁）
             QObject::connect(voxSlider, &QSlider::sliderReleased, this, [this]() {
