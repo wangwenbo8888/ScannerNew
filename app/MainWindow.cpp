@@ -1188,26 +1188,34 @@ void MainWindow::showVirtualKeypad() {
             h->setStyleSheet("font-weight: bold;");
             lay->addWidget(h, 0, g + 1);
         }
-        // 行序＝U/D/L/R/M；tooltip 对齐 261002 定稿手势总表（§3.2.2）
+        // 行序＝U/D/L/R/M；按钮文本＝功能名（非手势名——列头已有手势，按钮要
+        // 一眼看懂「按了干什么」）；tooltip＝完整描述（§3.2.2 手势总表对齐）
         struct RowDef {
-            QString name; QChar key; bool inProto; QString tips[3];
+            QString name; QChar key; bool inProto;
+            QString btnText[3];    // 按钮文本（功能简称）
+            QString tips[3];       // tooltip（完整描述）
         };
         const RowDef rows[] = {
             { QStringLiteral("上键 U"), QChar('U'), true,
+              { QStringLiteral("菜单"), QStringLiteral("景深"), QStringLiteral("回主界面") },
               { QStringLiteral("单击＝进/退菜单"),
                 QStringLiteral("双击＝景深直切 近↔远"),
                 QStringLiteral("长按＝回主界面（全域免门禁）") } },
             { QStringLiteral("下键 D"), QChar('D'), false,
+              { QStringLiteral("—"), QStringLiteral("—"), QStringLiteral("—") },
               { QStringLiteral("协议 G01 无此键"), QStringLiteral("—"), QStringLiteral("—") } },
             { QStringLiteral("左键 L"), QChar('L'), true,
+              { QStringLiteral("调档↓"), QStringLiteral("换对象"), QStringLiteral("预留") },
               { QStringLiteral("单击＝调档 ↓（菜单态＝游标左移）"),
                 QStringLiteral("双击＝换调节对象 亮度↔显示远近"),
                 QStringLiteral("长按＝预留") } },
             { QStringLiteral("右键 R"), QChar('R'), true,
+              { QStringLiteral("调档↑"), QStringLiteral("预留"), QStringLiteral("预留") },
               { QStringLiteral("单击＝调档 ↑（菜单态＝游标右移）"),
                 QStringLiteral("双击＝预留"),
                 QStringLiteral("长按＝预留") } },
             { QStringLiteral("中键 M"), QChar('M'), true,
+              { QStringLiteral("启停"), QStringLiteral("切模式"), QStringLiteral("急停") },
               { QStringLiteral("单击＝启/停扫描（菜单态＝选中）"),
                 QStringLiteral("双击＝切换扫描模式"),
                 QStringLiteral("长按＝急停（全域免门禁）") } },
@@ -1219,7 +1227,7 @@ void MainWindow::showVirtualKeypad() {
                                            : QStringLiteral("color:#999;"));
             lay->addWidget(lbl, r + 1, 0);
             for (int g = 0; g < 3; ++g) {
-                auto* btn = new QPushButton(gestures[g], m_vkeyPad);
+                auto* btn = new QPushButton(row.btnText[g], m_vkeyPad);
                 m_vkeyBtns[r][g] = btn;               // 存指针（态同步用）
                 btn->setToolTip(row.tips[g]);
                 if (row.inProto) {
