@@ -746,6 +746,26 @@ void DeviceManager::setBrightnessLadderIndex(int idx) {
     post([this, idx] { requestLadderChange(idx); });
 }
 
+// P-分辨率 体素密度档写入口（UI 滑条＝菜单①同梯同账）：仅待机可调——扫描中
+// 防呆拒（同按键侧功能口径：改密度打断累积）；档号即时生效＋p1=113 广播
+void DeviceManager::setVoxelLadderIndex(int idx) {
+    post([this, idx] {
+        const int size = static_cast<int>(voxelLadder_.steps().size());
+        if (idx < 1 || idx > size || idx == voxelLadder_.index()) return;
+        if (mode_->isCapturing()) {                 // 功能口拒·防呆（同菜单①口径）
+            publishEvent(EventType::UserDefined, 120, 3);
+            JMW_LOG_WARN("08-DeviceManager",
+                "[DeviceManager] UI 体素密度换档：采集中防呆拒（扫描中改密度打断累积）");
+            return;
+        }
+        voxelLadder_.setIndex(idx);
+        publishEvent(EventType::UserDefined, 113, voxelLadder_.index());
+        JMW_LOG_INFO("08-DeviceManager",
+            "[DeviceManager] UI 体素密度换档 → {}/{}（档值 {}mm，p1=113）",
+            voxelLadder_.index(), size, voxelLadder_.current());
+    });
+}
+
 // P-6 换档事务开表（逻辑线程）：写三参账→聚合确认→commit；在途新请求覆盖
 // 目标（后值胜出）；同档且无在途不重开
 void DeviceManager::requestLadderChange(int targetIdx) {

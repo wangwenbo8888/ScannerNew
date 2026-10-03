@@ -239,6 +239,9 @@ public:
     /// P-5 亮度档写入口（261002 §3.4 UI 预设档滑条）：UI 换档请求＝与按键左右
     /// 键同一把梯同一本账（post 编队逻辑线程执行；越界忽略；同档不重发）
     void setBrightnessLadderIndex(int idx);
+    /// P-分辨率 体素密度档写入口（UI 滑条＝与菜单①同梯同账；仅待机可调——
+    /// 扫描中调用＝防呆拒同按键侧；post 编队逻辑线程执行）
+    void setVoxelLadderIndex(int idx);
     /// 当前灯序相位（-1=未在跑；0=补光/1=左斜/2=右斜/3=精细/4=深孔）
     int calibLightPhase() const { return calibPhase_.load(std::memory_order_relaxed); }
 

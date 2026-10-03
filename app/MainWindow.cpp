@@ -454,8 +454,16 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                         .arg(e, 0, 'f', 1).arg(l, 0, 'f', 0).arg(b, 0, 'f', 0));
                                 }
                             }
-                        } else if (p1 == 113) {    // 体素密度档（①子态常驻行内
-                            refreshBannerPersistent();  // 刷新——设计：不单独发横幅）
+                        } else if (p1 == 113) {    // 体素密度档（①子态常驻行内刷新
+                            refreshBannerPersistent();  // ——设计：不单独发横幅）
+                            // P-分辨率：UI 滑条回显（阻断防环路；事件来源含按键＋UI）
+                            if (m_voxelSlider) {
+                                const QSignalBlocker blocker(m_voxelSlider);
+                                auto* dm113 = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+                                if (dm113) m_voxelSlider->setValue(
+                                    static_cast<int>(p2) > 0 ? static_cast<int>(p2)
+                                                             : dm113->voxelLadderIndex());
+                            }
                         } else if (p1 == 114) {     // 景深直切
                             showBanner(p2 == 1 ? QStringLiteral("景深 ▸ 远")
                                                : QStringLiteral("景深 ▸ 近"));
@@ -484,6 +492,9 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
     }
 
     startInfoTimer();
+    // 261002 临时测试机：无实体按键——软件启动即弹虚拟键盘（自检期灰化，
+    // 自检完自动恢复 S2 可用态；StateChanged 事件驱动灰化/恢复已接线）
+    QTimer::singleShot(100, this, [this]() { showVirtualKeypad(); });
 }
 
 MainWindow::~MainWindow() {
@@ -2301,6 +2312,54 @@ QWidget *MainWindow::createParamSection()
         });
         rowLayout->addLayout(controlLayout);
         slidersLayout->addWidget(row);
+
+        // P-分辨率滑条（261002：体素密度 4 档——菜单①同梯同账；仅待机可调，
+        // 扫描中防呆锁住＝与按键侧同一功能口拒口径）
+        {
+            auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+            QWidget* voxRow = new QWidget();
+            voxRow->setMinimumHeight(40);
+            QVBoxLayout* voxRowLay = new QVBoxLayout(voxRow);
+            voxRowLay->setContentsMargins(0, 0, 0, 0);
+            voxRowLay->setSpacing(0);
+            QLabel* voxLabel = new QLabel(QStringLiteral("分辨率（体素密度）"));
+            voxLabel->setObjectName("paramLabel");
+            voxLabel->setMinimumHeight(12);
+            voxLabel->setContentsMargins(0, 0, 0, 0);
+            voxRowLay->addWidget(voxLabel);
+            QHBoxLayout* voxCtl = new QHBoxLayout();
+            voxCtl->setSpacing(6);
+            QSlider* voxSlider = new QSlider(Qt::Horizontal);
+            voxSlider->setObjectName("paramSlider");
+            const int voxSize = dm ? dm->voxelLadderSize() : 4;
+            voxSlider->setRange(1, voxSize);
+            voxSlider->setValue(dm ? dm->voxelLadderIndex() : 1);
+            voxSlider->setStyleSheet(
+                "QSlider::groove:horizontal { height: 4px; background: #E1E1E1; border-radius: 2px; }"
+                "QSlider::handle:horizontal { background: #900021; width: 12px; height: 12px; margin: -5px 0px; border-radius: 6px; border: none; }"
+            );
+            voxCtl->addWidget(voxSlider, 1);
+            QLabel* voxVal = new QLabel(
+                QStringLiteral("%1/%2").arg(voxSlider->value()).arg(voxSize));
+            voxVal->setObjectName("paramValue");
+            voxVal->setFixedWidth(48);
+            voxVal->setFixedHeight(20);
+            voxVal->setAlignment(Qt::AlignCenter);
+            voxVal->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000;");
+            QObject::connect(voxSlider, &QSlider::valueChanged, voxVal,
+                             [voxVal, voxSize](int val) {
+                voxVal->setText(QString::number(val) + QStringLiteral("/") +
+                                QString::number(voxSize));
+            });
+            voxCtl->addWidget(voxVal);
+            m_voxelSlider = voxSlider;              // 成员存（113 事件回显＋扫描锁）
+            QObject::connect(voxSlider, &QSlider::sliderReleased, this, [this]() {
+                auto* d = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+                if (d && m_voxelSlider) d->setVoxelLadderIndex(m_voxelSlider->value());
+            });
+            voxRowLay->addLayout(voxCtl);
+            slidersLayout->addWidget(voxRow);
+        }
 
         m_paramROLabel = new QLabel(QStringLiteral("三参（随档只读）：曝光 -- ms · 激光 -- · 补光 --"));
         m_paramROLabel->setObjectName("paramRO");
