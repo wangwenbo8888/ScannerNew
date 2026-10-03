@@ -1317,7 +1317,7 @@ void MainWindow::updateVirtualKeypadStates() {
             hintText = QStringLiteral("（按 M 开始五态循环采集）");
         } else if (capturing && inCalib) {
             stateText += QStringLiteral(" · 校准采集中");
-            hintText = QStringLiteral("（按 M 停止）");
+            hintText = QStringLiteral("（采集不可中断——急停退出 或 跑完自动停）");
         } else if (blocking) {
             hintText = QStringLiteral("（除急停/回主界面外全灰）");
         } else {
@@ -1342,8 +1342,9 @@ void MainWindow::updateVirtualKeypadStates() {
                 // 校准布防态：M 短按（开拍）＋逃生类可用；菜单/调节/切模式灰
                 enabled = (r == 4 && g == 0) || escape;   // M单击 + 逃生
             } else if (inCalib && capturing) {
-                // 校准采集中：M 短按（停）＋逃生类可用
-                enabled = (r == 4 && g == 0) || escape;
+                // 校准采集中：M 短按**失效**（校准不可中断——要么跑完要么急停
+                // 退出，用户口径 261003）；仅逃生类可用
+                enabled = escape;
             } else {
                 enabled = escape || (!reserved && !blocking);
             }
