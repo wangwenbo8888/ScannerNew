@@ -2413,7 +2413,7 @@ QWidget *MainWindow::createParamSection()
             QVBoxLayout* voxRowLay = new QVBoxLayout(voxRow);
             voxRowLay->setContentsMargins(0, 0, 0, 0);
             voxRowLay->setSpacing(0);
-            QLabel* voxLabel = new QLabel(QStringLiteral("分辨率（体素密度）"));
+            QLabel* voxLabel = new QLabel(QStringLiteral("分辨率"));
             voxLabel->setObjectName("paramLabel");
             voxLabel->setMinimumHeight(12);
             voxLabel->setContentsMargins(0, 0, 0, 0);
@@ -2422,26 +2422,33 @@ QWidget *MainWindow::createParamSection()
             voxCtl->setSpacing(6);
             QSlider* voxSlider = new QSlider(Qt::Horizontal);
             voxSlider->setObjectName("paramSlider");
-            const int voxSize = dm ? dm->voxelLadderSize() : 4;
+            // 27 档三段步长（0.01~5mm）——从梯取实际步值表，不依赖 DM 快照
+            const auto voxSteps = Scanner::device::VoxelDensityLadder().steps();
+            const int voxSize = static_cast<int>(voxSteps.size());
             voxSlider->setRange(1, voxSize);
-            voxSlider->setValue(dm ? dm->voxelLadderIndex() : 1);
+            const int voxInit = dm ? dm->voxelLadderIndex() : 1;
+            voxSlider->setValue(std::clamp(voxInit, 1, voxSize));
             voxSlider->setStyleSheet(
                 "QSlider::groove:horizontal { height: 4px; background: #E1E1E1; border-radius: 2px; }"
                 "QSlider::handle:horizontal { background: #900021; width: 12px; height: 12px; margin: -5px 0px; border-radius: 6px; border: none; }"
             );
             voxCtl->addWidget(voxSlider, 1);
-            QLabel* voxVal = new QLabel(
-                QStringLiteral("%1/%2").arg(voxSlider->value()).arg(voxSize));
+            // 值标签显示实际 mm 值（非档号）——拖动中实时显示目标档的 mm
+            QLabel* voxVal = new QLabel(m_vkeyPad ? nullptr : nullptr);
+            voxVal = new QLabel();
             voxVal->setObjectName("paramValue");
-            voxVal->setFixedWidth(48);
+            voxVal->setFixedWidth(70);
             voxVal->setFixedHeight(20);
             voxVal->setAlignment(Qt::AlignCenter);
-            voxVal->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000;");
+            voxVal->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000; font-weight: bold;");
+            auto fmtVoxMm = [&voxSteps](int idx) {
+                if (idx >= 1 && idx <= static_cast<int>(voxSteps.size()))
+                    return QString::number(voxSteps[static_cast<size_t>(idx - 1)], 'f', 2) + "mm";
+                return QStringLiteral("--");
+            };
+            voxVal->setText(fmtVoxMm(voxSlider->value()));
             QObject::connect(voxSlider, &QSlider::valueChanged, voxVal,
-                             [voxVal, voxSize](int val) {
-                voxVal->setText(QString::number(val) + QStringLiteral("/") +
-                                QString::number(voxSize));
-            });
+                             [voxVal, fmtVoxMm](int val) { voxVal->setText(fmtVoxMm(val)); });
             voxCtl->addWidget(voxVal);
             m_voxelSlider = voxSlider;              // 成员存（113 事件回显＋扫描锁）
             QObject::connect(voxSlider, &QSlider::sliderReleased, this, [this]() {

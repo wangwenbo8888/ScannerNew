@@ -328,8 +328,8 @@ private:
     std::atomic<int> ladderSizeSnap_{20};   // 键控回显：档数快照（261002 亮度梯扩 20 档）
     std::atomic<int> distanceIdxSnap_{1};   // 261002 显示远近档快照
     std::atomic<int> distanceSizeSnap_{5};
-    std::atomic<int> voxelIdxSnap_{1};      // 261002 体素密度档快照（菜单①）
-    std::atomic<int> voxelSizeSnap_{4};
+    std::atomic<int> voxelIdxSnap_{14};    // 261002 体素密度档快照（菜单①；261003 27 档默认中位=1.0mm）
+    std::atomic<int> voxelSizeSnap_{27};
     std::atomic<double> voxelValSnap_{4.0}; // P-4 体素档值快照（mm；档值表注入后随步进刷新）
     std::atomic<int> dofSnap_{0};           // 261002 景深档快照（0=近 1=远）
     infra::EventBus* bus_;
