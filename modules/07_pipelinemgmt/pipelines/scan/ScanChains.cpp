@@ -577,8 +577,8 @@ ScanChains::Hooks ScanChains::assemble() {
                 //    两档分辨率完全相同，区别只在计算侧屏蔽区间（§3.3.2）。滤波在
                 //    调试下载的同一份 h3d 上做（不额外 D2H）；扫描中切档逐帧生效。
                 //    区间〔产线对账占位〕：近 [200,800]mm / 远 [800,2000]mm（相机系 Z）
-                constexpr double kDofNearMin = 200.0, kDofNearMax = 800.0;
-                constexpr double kDofFarMin = 800.0, kDofFarMax = 2000.0;
+                constexpr double kDofNearMin = 150.0, kDofNearMax = 500.0;   // 近景深〔产线定版 261003〕
+                constexpr double kDofFarMin = 400.0, kDofFarMax = 700.0;     // 远景深（与近景有重叠区 400-500）
                 const int dof = dofMode_.load(std::memory_order_relaxed);
                 const double zMin = (dof == 1) ? kDofFarMin : kDofNearMin;
                 const double zMax = (dof == 1) ? kDofFarMax : kDofNearMax;
