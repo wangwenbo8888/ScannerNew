@@ -1522,8 +1522,8 @@ void MainWindow::refreshBannerPersistent()
     static const char* kItems[5] = {"① 分辨率设置", "② 进入就绪", "③ 扫描完成",
                                     "④ 后处理", "⑤ 重置"};
     if (ms.substate == Sub::AdjustVoxel) {
-        m_bannerPersist = QStringLiteral("① 体素密度 第%1/%2档（L/R 切档 M 确认）")
-                              .arg(dm->voxelLadderIndex()).arg(dm->voxelLadderSize());
+        m_bannerPersist = QStringLiteral("分辨率 %1mm（L/R 调 M 确认）")
+                              .arg(dm->voxelLadderValue(), 0, 'f', 2);
     } else if (ms.substate == Sub::ConfirmReset) {
         m_bannerPersist = QStringLiteral("再按 M 键确认重置（其他键取消）");
     } else {
@@ -3200,8 +3200,8 @@ void MainWindow::updateInfoSection()
             if (ms.layer == 2) {
                 using Sub = Scanner::device::MenuState::Substate;
                 if (ms.substate == Sub::AdjustVoxel) {
-                    s = QStringLiteral("①体素密度 第%1/%2档（L/R 切档 M 确认）")
-                        .arg(dm->voxelLadderIndex()).arg(dm->voxelLadderSize());
+                    s = QStringLiteral("分辨率 %1mm")
+                        .arg(dm->voxelLadderValue(), 0, 'f', 2);
                 } else if (ms.substate == Sub::ConfirmReset) {
                     s = QStringLiteral("⑤重置：再按 M 确认（其他键取消）");
                 } else {
