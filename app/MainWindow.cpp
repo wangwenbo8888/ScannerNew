@@ -2441,7 +2441,7 @@ QWidget *MainWindow::createParamSection()
             voxVal->setFixedHeight(20);
             voxVal->setAlignment(Qt::AlignCenter);
             voxVal->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000; font-weight: bold;");
-            auto fmtVoxMm = [&voxSteps](int idx) {
+            auto fmtVoxMm = [voxSteps](int idx) {
                 if (idx >= 1 && idx <= static_cast<int>(voxSteps.size()))
                     return QString::number(voxSteps[static_cast<size_t>(idx - 1)], 'f', 2) + "mm";
                 return QStringLiteral("--");
