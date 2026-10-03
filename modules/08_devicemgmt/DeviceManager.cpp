@@ -1008,7 +1008,7 @@ void DeviceManager::startWarmup(int targetC, std::function<void(bool stable)> do
 }
 
 // ============================================================================
-// 按键链接线（KeySemantics 11 出口）
+// 按键链接线（KeySemantics 16 出口·261002 按键域定稿）
 // ============================================================================
 
 void DeviceManager::buildKeyActions() {
@@ -1079,8 +1079,11 @@ void DeviceManager::buildKeyActions() {
             return;
         }
         menu_->apply(MenuOp::CycleMode);
-        lastCaptureMode_.store(scanModeFromMenuCursor(menu_->state().modeCursor),
-                               std::memory_order_relaxed);
+        const auto newMode = scanModeFromMenuCursor(menu_->state().modeCursor);
+        lastCaptureMode_.store(newMode, std::memory_order_relaxed);
+        // P-键盘补：切模式横幅反馈（p1=117，param2=modeCursor 1/2/3）
+        publishEvent(EventType::UserDefined, 117,
+                     static_cast<int64_t>(menu_->state().modeCursor));
         if (mode_->isCapturing()) {
             // 采集中切模式（260927 用户口径）：N10 全参实时重发——四管掩码即时
             // 换灯（D1 口径同滑条改参）；帧级激光种类由 scanMode 随帧分派接管
@@ -1128,8 +1131,13 @@ void DeviceManager::buildKeyActions() {
     };
     a.switchAdjustCtx = [this] {                 // 左键双击·主界面：调节对象 亮度↔显示远近
         menu_->apply(MenuOp::SwitchAdjustCtx);
+        const bool isBrightness =
+            menu_->state().adjustCtx == MenuState::AdjustCtx::Brightness;
+        publishEvent(EventType::UserDefined, 110, 0);   // 菜单变化（调节对象属界面态）
+        publishEvent(EventType::UserDefined,
+                     isBrightness ? 115 : 116, 0);      // P-键盘补：换对象横幅反馈
         JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 换调节对象 → {}",
-            menu_->state().adjustCtx == MenuState::AdjustCtx::Brightness ? "亮度" : "显示远近");
+                     isBrightness ? "亮度" : "显示远近");
     };
     a.cursorLeft = [this] {                      // 游标移动：步进余额清
         menu_->apply(MenuOp::CursorLeft);

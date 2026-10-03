@@ -461,6 +461,15 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                                : QStringLiteral("景深 ▸ 近"));
                         } else if (p1 == 110) {     // 菜单变化（含子态进出）→ 常驻重建
                             refreshBannerPersistent();
+                        } else if (p1 == 115) {     // 换调节对象 → 亮度（P-键盘补）
+                            showBanner(QStringLiteral("调节 ▸ 亮度"));
+                        } else if (p1 == 116) {     // 换调节对象 → 显示远近（P-键盘补）
+                            showBanner(QStringLiteral("调节 ▸ 显示远近"));
+                        } else if (p1 == 117) {     // 切扫描模式（P-键盘补：param2=modeCursor）
+                            showBanner(QStringLiteral("模式 ▸ %1").arg(
+                                p2 == 1 ? QStringLiteral("精细扫描")
+                              : p2 == 2 ? QStringLiteral("深孔扫描")
+                                        : QStringLiteral("面片扫描")));
                         } else if (p1 == 120) {     // 执行结果/拒因（P-3：红底横幅）
                             // p2 拒因码：1=已急停 2=标点会话隔离 3=扫描中改密度防呆
                             showBanner(p2 == 1 ? QStringLiteral("已急停")
