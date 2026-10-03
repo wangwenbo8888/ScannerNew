@@ -75,10 +75,12 @@ struct EventRecorder {
 // DevFault 码 → int64（断言简写）
 constexpr int64_t FC(DevFault f) { return static_cast<int64_t>(f); }
 
-// —— 假相机：全接口空壳 + isOpen 可控（T8 掉线模拟）——
+// —— 假相机：全接口空壳 + isOpen 可控（T8 掉线模拟）＋exposureFail（T24 换档
+//    事务回弹注入：setExposure 失败＝相机段下发败）——
 struct FakeCamera : Scanner::hal::IScannerCamera {
     bool openOk = true;
     bool openState = false;
+    bool exposureFail = false;             // T24：setExposure 恒败（事务回弹源）
     double exposureMs = 0.0;
     int exposureCalls = 0;
 
@@ -93,6 +95,7 @@ struct FakeCamera : Scanner::hal::IScannerCamera {
     bool isOpen() const override { return openState; }
     Result setExposure(double ms) override {
         ++exposureCalls;
+        if (exposureFail) return Result::fail("曝光设置失败(测试注入)");
         exposureMs = ms;
         return Result::ok();
     }
@@ -1240,21 +1243,27 @@ TEST(DeviceManager, T21_ParamPersistDebounceAndBoot) {
         mock.dm = &dm;
         ASSERT_TRUE(dm.open().success);
 
-        dm.setParam("bgLight", 55.0, Scanner::device::ParamEntry::Source::Ui);
+        dm.setParam("freqHz", 90.0, Scanner::device::ParamEntry::Source::Ui);
         dm.logicTick(); dm.logicTick();
         EXPECT_EQ(saveCalls, 0);                        // 防抖窗内不落盘
         sleepMs(2100);                                  // 过防抖窗
         dm.logicTick(); dm.logicTick();
         EXPECT_EQ(saveCalls, 1);                        // 拍尾冲刷恰一次
-        EXPECT_NE(saved.find("bgLight=55"), std::string::npos);
+        // P-6 只落档号：freqHz 等非投影参入档；三参段剔除＋brightLadder 段追加
+        EXPECT_NE(saved.find("freqHz=90"), std::string::npos);
+        EXPECT_EQ(saved.find("exposure="), std::string::npos);
+        EXPECT_EQ(saved.find("laserLevel="), std::string::npos);
+        EXPECT_EQ(saved.find("bgLight="), std::string::npos);
+        EXPECT_NE(saved.find("brightLadder=1"), std::string::npos);
 
-        dm.setParam("laserLevel", 66.0, Scanner::device::ParamEntry::Source::Ui);
-        dm.logicTick();                                 // 防抖窗内 close
+        dm.setBrightnessLadderIndex(10);                // 换档（事务提交后档号入档）
+        dm.logicTick(); dm.logicTick();
+        sleepMs(2100);
         dm.close();                                     // close 兜底（无条件冲）
         EXPECT_EQ(saveCalls, 2);
-        EXPECT_NE(saved.find("laserLevel=66"), std::string::npos);
+        EXPECT_NE(saved.find("brightLadder=10"), std::string::npos);
     }
-    {   // 二代实例：读档回账（bgLight=55/laserLevel=66 复现）
+    {   // 二代实例：档号制读档——档号展开三参（freqHz=90 复现＋档10 投影复现）
         DeviceConfig cfg = makeCfg();
         DeviceManager::ParamIo pio;
         pio.load = [&saved] { return saved; };
@@ -1262,7 +1271,79 @@ TEST(DeviceManager, T21_ParamPersistDebounceAndBoot) {
                           [&](const std::string& f) { return mock.write(f); }, std::move(pio));
         ASSERT_TRUE(dm2.open().success);
         dm2.logicTick();
-        EXPECT_DOUBLE_EQ(dm2.getParam("bgLight").value, 55.0);
-        EXPECT_DOUBLE_EQ(dm2.getParam("laserLevel").value, 66.0);
+        EXPECT_DOUBLE_EQ(dm2.getParam("freqHz").value, 90.0);
+        EXPECT_EQ(dm2.presetLadderIndex(), 10);         // 档号回账
+        EXPECT_NEAR(dm2.getParam("exposure").value, 3.0, 1e-9);   // 档10=面片推荐精确点
+        EXPECT_NEAR(dm2.getParam("laserLevel").value, 70.0, 1e-9);
+        EXPECT_NEAR(dm2.getParam("bgLight").value, 40.0, 1e-9);
+    }
+}
+
+// —— T24：P-6 换档事务（深方案 §3.3 换档事务性）——两段全成才提交档号：
+//      ①提交：三段（相机曝光+N10 两参）全成 → 档号+参数账同拍落定＋111 恰一条；
+//      ②回弹：相机段败（exposureFail 注入）→ 档号从未移动（天然回弹）＋120 拒因
+//       p2=4＋参数账保旧值；
+//      ③后值胜出：连按两档 → 终档=最后目标、三参=最后档值 ——
+TEST(DeviceManager, T24_LadderTxnCommitRollbackLastWins) {
+    // —— ① 提交（正常链：mock 相机 OK + 空闲 N10 参数纯记账）——
+    {
+        Scanner::infra::EventBus bus;
+        EventRecorder rec;
+        bus.subscribeAll([&](const Event& e) { rec.record(e); });
+        MockMcu mock;
+        DeviceConfig cfg = makeCfg();
+        auto* camPtr = new FakeCamera();                 // 裸指针工厂（mutable 移动
+        DeviceManager dm(cfg, gateOk, &bus,               // lambda 不可拷贝进 std::function）
+                         [camPtr]() -> std::unique_ptr<Scanner::hal::IScannerCamera> {
+                             return std::unique_ptr<FakeCamera>(camPtr);
+                         },
+                         [&](const std::string& f) { return mock.write(f); });
+        mock.dm = &dm;
+        ASSERT_TRUE(dm.open().success);
+
+        const int64_t evt111_0 = rec.userParam(111);
+        dm.setBrightnessLadderIndex(5);                 // UI 换档请求（事务开表）
+        dm.logicTick(); dm.logicTick();
+        EXPECT_EQ(dm.presetLadderIndex(), 5);           // 三段全成 → 档号已提交
+        EXPECT_EQ(rec.userParam(111), evt111_0 + 1);    // 111 恰一条（提交时广播）
+        EXPECT_NEAR(dm.getParam("exposure").value, 1.0 + 2.0 * 4.0 / 9.0, 1e-9);  // 档5 投影
+        EXPECT_EQ(camPtr->exposureCalls, 1);            // 相机直设确实发生
+
+        // —— ③ 后值胜出：连按两次（每拍事务闭环）→ 终档=最后目标 ——
+        dm.testInjectTextLine("G01 R1");                // 档5→6
+        dm.logicTick(); dm.logicTick();
+        dm.testInjectTextLine("G01 R1");                // 档6→7
+        dm.logicTick(); dm.logicTick();
+        EXPECT_EQ(dm.presetLadderIndex(), 7);
+        const auto steps7 = PresetLadder::builtinLadder();   // 拷贝（临时悬空防）
+        EXPECT_NEAR(dm.getParam("laserLevel").value, steps7[6].laserLevel, 1e-9);
+        EXPECT_EQ(rec.userParam(111), evt111_0 + 3);    // 三次换档各恰一条
+    }
+    // —— ② 回弹（相机段败：exposureFail 注入）——
+    {
+        Scanner::infra::EventBus bus;
+        EventRecorder rec;
+        bus.subscribeAll([&](const Event& e) { rec.record(e); });
+        MockMcu mock;
+        DeviceConfig cfg = makeCfg();
+        auto* camFail = new FakeCamera();
+        camFail->exposureFail = true;                   // 相机段恒败
+        DeviceManager dm(cfg, gateOk, &bus,
+                         [camFail]() -> std::unique_ptr<Scanner::hal::IScannerCamera> {
+                             return std::unique_ptr<FakeCamera>(camFail);
+                         },
+                         [&](const std::string& f) { return mock.write(f); });
+        mock.dm = &dm;
+        ASSERT_TRUE(dm.open().success);
+        dm.logicTick();
+
+        const int64_t evt111_0 = rec.userParam(111);
+        const int64_t evt120_0 = rec.userParam(120);
+        dm.setBrightnessLadderIndex(15);                // 事务开表 → 曝光段即败
+        dm.logicTick(); dm.logicTick();
+        EXPECT_EQ(dm.presetLadderIndex(), 1);           // 档号从未移动＝天然回弹
+        EXPECT_EQ(rec.userParam(111), evt111_0);        // 无 111（未提交）
+        EXPECT_EQ(rec.userParam(120), evt120_0 + 1);    // 120 拒因恰一条
+        EXPECT_NEAR(dm.getParam("exposure").value, 1.0, 1e-9);   // 参数账保旧值（档1）
     }
 }

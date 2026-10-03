@@ -141,6 +141,23 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
             paramDirty_ = true;
             paramLastChangeMs_ = nowMs();
         }
+        // P-6 换档事务聚合（§3.3 换档事务性）：改账值=在途期望档值 → 记段；
+        // 三段全到 commit（档号+111 才在此刻落——账/档永不分家）。后值胜出：
+        // 新事务覆盖 expect，旧段按值匹配归属新事务（值不同=已被覆盖，不记）
+        if (txn_.active) {
+            const double expect =
+                key == "exposure"   ? txn_.expect.exposureMs
+              : key == "laserLevel" ? txn_.expect.laserLevel
+              : key == "bgLight"    ? txn_.expect.bgLight : -1e18;
+            const uint32_t bit =
+                key == "exposure"   ? 1u
+              : key == "laserLevel" ? 2u
+              : key == "bgLight"    ? 4u : 0u;
+            if (bit && std::abs(e.value - expect) < 1e-6) {
+                txn_.doneMask |= bit;
+                if (txn_.doneMask == 7u) commitLadderTxn();
+            }
+        }
         int64_t idx = -1;                       // 参数索引=specs 登记序号（Minor #9）
         for (size_t i = 0; i < paramKeys_.size(); ++i)
             if (paramKeys_[i] == key) idx = static_cast<int64_t>(i);
@@ -149,6 +166,21 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
         // 捕获翻转=2000／旧视点缩放=100——各段隔离防撞车）
         JMW_LOG_DEBUG("08-DeviceManager", "[DeviceManager] 参数改账 {}={:.3f} confirmed={}", key, e.value,
                       e.confirmed);
+    };
+    // P-6 换档事务失败口（§3.3）：下发败段 onReject——事务废＝档号从未移动
+    // （天然回弹）＋120 拒因 p2=4；非事务参数照旧只走故障通道语义
+    params_->onReject = [this](const std::string& key, double oldValue) {
+        const bool txnKey = key == "exposure" || key == "laserLevel" || key == "bgLight";
+        if (txn_.active && txnKey) {
+            const int target = txn_.targetIdx;
+            txn_.active = false;
+            publishEvent(EventType::UserDefined, 120, 4);   // 横幅：换档失败已回弹
+            JMW_LOG_WARN("08-DeviceManager",
+                "[DeviceManager] 换档事务失败：{} 段下发败（目标档 {} 未提交——档号保持 {}）",
+                key, target, ladder_.index());
+        }
+        JMW_LOG_WARN("08-DeviceManager",
+            "[DeviceManager] 参数下发失败弹回 {}（账保旧值 {}）", key, oldValue);
     };
     mode_->onChange = [this](DeviceMode oldM, DeviceMode newM) {
         publishEvent(EventType::StateChanged, static_cast<int64_t>(newM),
@@ -278,9 +310,61 @@ Result DeviceManager::open() {
     mcu_->setUplink(up);
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: uplink 接线 {}ms", el());
     // ⑤ 参数装载（Load 空档=全默认值；逐参数广播）+ 快照立即可读（单线程时刻）
-    paramBootLoading_ = true;       // 装载期改账不算脏（档值回写档=无意义写）
-    params_->bootstrap([&] { return paramIo_.load ? paramIo_.load() : std::string(); });
-    paramBootLoading_ = false;
+    // P-6 只落档号（§3.3 一本账纪律：三参=档的投影不入档）：装载拦截——档内
+    // brightLadder=N 段剥出（档号展开三参静默回账）；无档号有旧三参段＝旧档
+    // 兼容（最近档吸附一版过渡）；freqHz 等其余段照旧入 ParamStore
+    {
+        std::string raw = paramIo_.load ? paramIo_.load() : std::string();
+        int bootLadder = 0;
+        bool hasLegacy3 = false;
+        std::string filtered;
+        size_t pos = 0;
+        while (pos < raw.size()) {
+            const size_t semi = raw.find(';', pos);
+            const std::string token = raw.substr(
+                pos, (semi == std::string::npos ? raw.size() : semi) - pos);
+            pos = (semi == std::string::npos) ? raw.size() : semi + 1;
+            const size_t eq = token.find('=');
+            if (eq == std::string::npos || eq == 0) continue;
+            const std::string k = token.substr(0, eq);
+            const std::string v = token.substr(eq + 1);
+            if (k == "brightLadder") {
+                try { bootLadder = std::stoi(v); } catch (...) {}
+                continue;                       // 档号段不入 ParamStore
+            }
+            if (k == "exposure" || k == "laserLevel" || k == "bgLight") {
+                hasLegacy3 = true;              // 旧档三参段：入账供最近档吸附
+            }
+            filtered += token + ";";
+        }
+        paramBootLoading_ = true;   // 装载期改账不算脏（档值回写档=无意义写）
+        params_->bootstrap([&] { return filtered; });
+        const int size = static_cast<int>(ladder_.ladder().size());
+        if (bootLadder >= 1 && bootLadder <= size) {
+            ladder_.setIndex(bootLadder);       // 档号展开：三参=投影静默回账
+        } else if (hasLegacy3) {
+            // 旧档兼容（过渡一版）：按归一化距离吸附最近档，吸附档值覆写旧三参
+            double best = 1e18; int bestIdx = 1;
+            for (int i = 1; i <= size; ++i) {
+                const auto& s = ladder_.ladder()[static_cast<size_t>(i - 1)];
+                const double d = std::abs(params_->get("exposure").value - s.exposureMs) / 4.0
+                               + std::abs(params_->get("laserLevel").value - s.laserLevel) / 100.0
+                               + std::abs(params_->get("bgLight").value - s.bgLight) / 100.0;
+                if (d < best) { best = d; bestIdx = i; }
+            }
+            ladder_.setIndex(bestIdx);
+            JMW_LOG_WARN("08-DeviceManager",
+                "[DeviceManager] 旧参数档（三参直存）→ 最近档吸附 档{}/{}（下轮落盘转档号制）",
+                bestIdx, size);
+        }
+        if (ladder_.index() >= 1) {
+            const auto& s = ladder_.current();
+            params_->setEntryDirect("exposure",   s.exposureMs,  false, ParamEntry::Source::Boot);
+            params_->setEntryDirect("laserLevel", s.laserLevel,  false, ParamEntry::Source::Boot);
+            params_->setEntryDirect("bgLight",    s.bgLight,     false, ParamEntry::Source::Boot);
+        }
+        paramBootLoading_ = false;
+    }
     refreshParamSnapshot();
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] open 计时: bootstrap+快照 {}ms", el());
     // ⑦ （2026-08-30 去自检模式：不再发 N12 Z1——固件进自检态会强制亮灯且
@@ -309,9 +393,10 @@ Result DeviceManager::close() {
         running_.store(false);
         logicThread_.join();
     }
-    // G7 落盘 close 兜底：脏账无条件冲一次（防抖窗内退出的最后改动作不丢）
+    // G7 落盘 close 兜底：脏账无条件冲一次（防抖窗内退出的最后改动作不丢；
+    // P-6 统一走 persistLadderLedger 档号制过滤）
     if (paramIo_.persist && paramDirty_) {
-        if (params_->persist(paramIo_.persist)) paramDirty_ = false;
+        if (persistLadderLedger()) paramDirty_ = false;
     }
     {
         std::lock_guard<std::mutex> lock(postMutex_);
@@ -636,22 +721,41 @@ void DeviceManager::setKeyStateGate(std::function<bool()> ok) {
                  keyStateGate_ ? "set" : "clear");
 }
 
-// P-5 亮度档写入口（§3.4 UI 预设档滑条）：UI 换档＝按键同梯同账（逻辑线程
-// 执行：绝对设档→三参写账（Source::Ui）→档位事件 111 广播；同档不重发）
+// P-5 亮度档写入口（§3.4 UI 预设档滑条）→ P-6 改走事务：UI 换档＝按键左右键
+// 同一事务链（两段全成才提交档号；失败回弹＋120 拒因 p2=4）
 void DeviceManager::setBrightnessLadderIndex(int idx) {
-    post([this, idx] {
-        const int size = static_cast<int>(ladder_.ladder().size());
-        if (idx < 1 || idx > size || idx == ladder_.index()) return;
-        ladder_.setIndex(idx);
-        const auto& s = ladder_.current();
-        params_->setValue("exposure",   s.exposureMs,  ParamEntry::Source::Ui);
-        params_->setValue("laserLevel", s.laserLevel,  ParamEntry::Source::Ui);
-        params_->setValue("bgLight",    s.bgLight,     ParamEntry::Source::Ui);
-        publishEvent(EventType::UserDefined, 111, ladder_.index());
-        JMW_LOG_INFO("08-DeviceManager",
-            "[DeviceManager] UI 换档：亮度第 {}/{} 档（曝光{:.1f}ms 激光{:.0f} 补光{:.0f}）",
-            ladder_.index(), size, s.exposureMs, s.laserLevel, s.bgLight);
-    });
+    post([this, idx] { requestLadderChange(idx); });
+}
+
+// P-6 换档事务开表（逻辑线程）：写三参账→聚合确认→commit；在途新请求覆盖
+// 目标（后值胜出）；同档且无在途不重开
+void DeviceManager::requestLadderChange(int targetIdx) {
+    const int size = static_cast<int>(ladder_.ladder().size());
+    if (targetIdx < 1 || targetIdx > size) return;
+    if (targetIdx == ladder_.index() && !txn_.active) return;
+    txn_.active = true;
+    txn_.targetIdx = targetIdx;
+    txn_.expect = ladder_.ladder()[static_cast<size_t>(targetIdx - 1)];
+    txn_.doneMask = 0;
+    params_->setValue("exposure",   txn_.expect.exposureMs,  ParamEntry::Source::Key);
+    params_->setValue("laserLevel", txn_.expect.laserLevel,  ParamEntry::Source::Key);
+    params_->setValue("bgLight",    txn_.expect.bgLight,     ParamEntry::Source::Key);
+    JMW_LOG_INFO("08-DeviceManager",
+        "[DeviceManager] 换档事务开表：{0} → 档 {1}/{2}（曝光{3:.1f}ms 激光{4:.0f} 补光{5:.0f}"
+        "——两段全成才提交档号）",
+        ladder_.index(), targetIdx, size,
+        txn_.expect.exposureMs, txn_.expect.laserLevel, txn_.expect.bgLight);
+}
+
+// P-6 事务提交收口：三段全到——档号与参数账同拍落定＋111 广播（档位可见）
+void DeviceManager::commitLadderTxn() {
+    const int committed = txn_.targetIdx;
+    txn_.active = false;
+    ladder_.setIndex(committed);
+    publishEvent(EventType::UserDefined, 111, ladder_.index());
+    JMW_LOG_INFO("08-DeviceManager",
+        "[DeviceManager] 换档事务提交：档 {0}/{1}（三段全成——档号+参数账同拍落定）",
+        ladder_.index(), static_cast<int>(ladder_.ladder().size()));
 }
 
 // 只设模式不启采（260927 就绪流程）：UI 模式键→armScanSession→此口记账，
@@ -1061,20 +1165,12 @@ void DeviceManager::applyAdjust(int dir) {
     }
     // —— 主界面：按调节对象分叉（二选一恒有对象）——
     if (st.adjustCtx == MenuState::AdjustCtx::Brightness) {
-        // G6 亮度梯（261002 扩 20 档）：三参组合步进经 ParamStore 记账（下发/
-        // 广播/落盘走既有链；采集中自动 N10 全参重发 D1 口径）
-        if (ladder_.step(steps > 0 ? +1 : -1)) {
-            const auto& s = ladder_.current();
-            params_->setValue("exposure",   s.exposureMs,  ParamEntry::Source::Key);
-            params_->setValue("laserLevel", s.laserLevel,  ParamEntry::Source::Key);
-            params_->setValue("bgLight",    s.bgLight,     ParamEntry::Source::Key);
-            publishEvent(EventType::UserDefined, 111, ladder_.index());
-            JMW_LOG_INFO("08-DeviceManager",
-                "[DeviceManager] 亮度档 {} → {}/{}（曝光{:.1f}ms 激光{:.0f} 补光{:.0f}，p1=111）",
-                steps > 0 ? "上调" : "下调",
-                ladder_.index(),
-                static_cast<int>(ladder_.ladder().size()),
-                s.exposureMs, s.laserLevel, s.bgLight);
+        // G6 亮度梯（261002 扩 20 档）·P-6 事务化：按键步进＝requestLadderChange
+        // （peek 目标档开表，两段全成才提交；到顶/底=越界静默）
+        const int target = ladder_.index() + (steps > 0 ? 1 : -1);
+        const int size = static_cast<int>(ladder_.ladder().size());
+        if (target >= 1 && target <= size) {
+            requestLadderChange(target);
         } else {
             JMW_LOG_INFO("08-DeviceManager",
                 "[DeviceManager] 亮度档已到顶/底（index={}）——步进无效", ladder_.index());
@@ -1130,14 +1226,40 @@ void DeviceManager::refreshParamSnapshot() {
     for (const auto& k : paramKeys_) paramSnapshot_[k] = params_->get(k);
 }
 
+// P-6 只落档号·落盘统一口：三参投影段剔除＋brightLadder 档号段追加（防抖
+// 冲刷与 close 兜底两路共用——过滤逻辑单一来源）
+bool DeviceManager::persistLadderLedger() {
+    if (!paramIo_.persist) return false;
+    const int ladderIdx = ladder_.index();
+    return params_->persist([&](const std::string& text) {
+        std::string out;
+        size_t pos = 0;
+        while (pos < text.size()) {
+            const size_t semi = text.find(';', pos);
+            const std::string token = text.substr(
+                pos, (semi == std::string::npos ? text.size() : semi) - pos);
+            pos = (semi == std::string::npos) ? text.size() : semi + 1;
+            const size_t eq = token.find('=');
+            if (eq == std::string::npos || eq == 0) continue;
+            const std::string& k = token.substr(0, eq);
+            if (k == "exposure" || k == "laserLevel" || k == "bgLight" ||
+                k == "brightLadder")
+                continue;                     // 三参投影/旧档号段（防重）剔除
+            out += token + ";";
+        }
+        out += "brightLadder=" + std::to_string(ladderIdx) + ";";
+        return paramIo_.persist(out);
+    });
+}
+
 // G7 落盘拍尾冲刷（260927 补缺口）：脏账静默 ≥2s → persist；成功清脏，失败保脏
 // 下拍重试（I/O 毛刺自愈）。无注入（测试）＝恒直返
 void DeviceManager::persistParamsIfDue(int64_t nowMs_) {
     if (!paramIo_.persist || !paramDirty_) return;
     if (nowMs_ - paramLastChangeMs_ < 2000) return;   // 防抖窗内（连调不逐拍写盘）
-    if (params_->persist(paramIo_.persist)) {
+    if (persistLadderLedger()) {
         paramDirty_ = false;
-        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 参数档已落盘（防抖 2s 冲刷）");
+        JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 参数档已落盘（防抖 2s 冲刷·档号制）");
     } else {
         JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] 参数档落盘失败——保脏下拍重试");
     }

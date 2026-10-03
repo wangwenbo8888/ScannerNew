@@ -293,6 +293,10 @@ private:
     void dispatchGesture(const serial::GestureEvent&);
     void buildKeyActions();                     // KeySemActions 11 出口的接线
     void applyAdjust(int dir);                  // 调节步进 → MenuLogic+ParamStore
+    // P-6 换档事务（逻辑线程）：开表（写三参→聚合确认→commit/回弹）与提交收口
+    void requestLadderChange(int targetIdx);
+    void commitLadderTxn();
+    bool persistLadderLedger();               // 档号制落盘统一口（防抖/close 共用）
     void sendSeq(std::vector<SeqStep> steps, std::function<void(bool)> onDone);
     void onParamDispatch(const std::string& key, double v, ParamStore::Done done);
     void startStreamIfReady();
@@ -378,6 +382,18 @@ private:
                                             // M 键启采分流进灯序；扫描流程撤防）
     std::function<bool()> keyStateGate_;    // P-1 全局态门禁谓词（装配期注入；
                                             // 逻辑线程 gate 闭包内只读调用）
+
+    // —— P-6 换档事务（§3.3 换档事务性·深方案）：两段全成才提交档号 ——
+    // 逻辑线程属主：写三参账（相机直设＋N10 组参）→ onParamChanged 按「值=
+    // 期望档值」聚合三段 → 全到 commit（setIndex＋111 广播）；任一 onReject
+    // → 事务废（档号从未动＝天然回弹＋120 拒因 p2=4）；在途新请求覆盖目标
+    // （后值胜出——gen 递增，旧段到达按值匹配归属新事务）
+    struct LadderTxn {
+        bool active = false;
+        int targetIdx = 0;
+        BrightnessStep expect;              // 期望三参（目标档快照）
+        uint32_t doneMask = 0;              // bit0=exposure bit1=laserLevel bit2=bgLight
+    } txn_;
     // —— D-T13 故障边沿锚（逻辑线程属主；恢复清锚防复报）——
     bool camFaultLatched_ = false;              // 0x0801 掉线锁（相机重开清锚）
     bool camWasOpen_ = false;                   // 0x0801 前置锚：相机曾开（open 成功即置）
