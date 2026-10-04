@@ -1360,7 +1360,7 @@ void MainWindow::updateVirtualKeypadStates() {
             hintText = QStringLiteral("（按 M 开始五态循环采集）");
         } else if (capturing && inCalib) {
             stateText += QStringLiteral(" · 校准采集中");
-            hintText = QStringLiteral("（采集不可中断——跑完自动停；急停已停用）");
+            hintText = QStringLiteral("（M 短按停止标定 或 跑完自动停）");
         } else if (blocking) {
             hintText = QStringLiteral("（全灰——急停/回主界面已停用 261004）");
         } else {
@@ -1388,19 +1388,20 @@ void MainWindow::updateVirtualKeypadStates() {
                                   (r == 3 && g >= 1) || (isEscapeBtn && !escapeEnabled);
             bool enabled;
             if (inCalib && !capturing) {
-                // 校准布防态：M 短按（开拍）＋逃生类可用；菜单/调节/切模式灰
-                enabled = (r == 4 && g == 0) || escape;   // M单击 + 逃生
+                // 校准布防态：M 短按（开拍）可用；菜单/调节/切模式灰
+                enabled = (r == 4 && g == 0) || escape;
             } else if (inCalib && capturing) {
-                // 校准采集中：M 短按**失效**（校准不可中断——要么跑完要么急停
-                // 退出，用户口径 261003）；仅逃生类可用
-                enabled = escape;
+                // 261004 用户口径（急停停用后修订）：校准采集中 M 短按＝停止标定
+                // （captureToggle→stopCaptureOnLogic：N11 H0 收口＋灯序退出）。
+                // 原 261003「采集中 M 灰不可中断」口径作废——急停已停用，无停法不行
+                enabled = (r == 4 && g == 0);
             } else {
                 enabled = escape || (!reserved && !blocking);
             }
             btn->setEnabled(enabled);
             // 显式样式：可用＝蓝底白字（校准主操作）或白底蓝框（常规）；
-            // 不可用＝灰底半透明
-            // isCalibMain 仅在 enabled 时才绿（采集中 M 灰——不可中断）
+            // 不可用＝灰底半透明。isCalibMain 绿高亮＝布防待开拍（采集开始后
+            // M 转蓝＝可停，绿留给「开始」语义）
             const bool isCalibMain = enabled && inCalib && !capturing && (r == 4 && g == 0);
             btn->setStyleSheet(isCalibMain
                 ? QStringLiteral(
