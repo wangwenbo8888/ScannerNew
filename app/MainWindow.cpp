@@ -391,6 +391,15 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                             m_activeScanToolIdx = -1;
                             auto r = m_appCtx->stopScanSession();
+                            if (r.success && !m_finalBADlg) {   // 统一弹「全局优化中」
+                                m_finalBADlg = new QProgressDialog(
+                                    QStringLiteral("全局优化中，请稍候……"), QString(), 0, 100, this);
+                                m_finalBADlg->setWindowTitle(QStringLiteral("全局优化"));
+                                m_finalBADlg->setWindowModality(Qt::ApplicationModal);
+                                m_finalBADlg->setMinimumDuration(0);
+                                m_finalBADlg->setAutoClose(false);
+                                m_finalBADlg->show();
+                            }
                             statusBar()->showMessage(r.success
                                 ? QStringLiteral("按键完成扫描——全局优化后台执行中")
                                 : QString::fromStdString("完成被拒: " + r.message));

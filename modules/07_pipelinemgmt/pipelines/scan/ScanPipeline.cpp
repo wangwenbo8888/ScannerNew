@@ -204,13 +204,15 @@ public:
     }
 
 private:
-    // 体素（P-4：体素密度档注入；0.25=260919 用户口径默认）；槽 2M→8M
-    // （0.25mm 下 8.4M 槽覆盖 30M 点云主量级，显存数百 MB）
+    // 体素（P-4：体素密度档注入；0.25=260919 用户口径默认）
+    // 槽位（261003 扩容 2^23→2^25：用户实测 0.2mm 下 8.4M 槽不够——点数恒
+    // 封在 838万＝容量上限非分辨率未生效；0.2mm 需 ~2× 槽位；2^25=33.5M 槽
+    // ≈1GB 显存，RTX 4070 12GB 充裕；覆盖 0.1mm 级分辨率）
     float voxelMm_ = 0.25f;
     calib::LaserCloudFuseCUDAParams fuseParams() {
         calib::LaserCloudFuseCUDAParams p;
         p.voxelSize = voxelMm_;
-        p.reserveVoxelCount = static_cast<size_t>(1) << 23;
+        p.reserveVoxelCount = static_cast<size_t>(1) << 25;
         return p;
     }
     calib::LaserCloudFuseCuda fuse_{fuseParams()};
