@@ -100,6 +100,9 @@ public:
     Scanner::Result discardScanSession();
     /// ⑤ S2 分支：无会话清残留工作集（点云仓库全清）
     Scanner::Result clearResidualWorkingSet();
+    /// ⑤ 重置联动：清 artifacts 会话产物（markers_gba/位姿/元信息/终版 PLY/
+    /// obs 检查点——防下次 arm 经 L4 读侧装回旧 seed/软先验；261004）
+    void clearScanArtifacts();
     /// 扫描会话是否活跃（Running/Paused——按钮启停切换判据）
     bool isScanSessionActive() const;
 

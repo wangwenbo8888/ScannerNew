@@ -69,6 +69,10 @@ struct ScanLaneOps {
 std::unique_ptr<calib::EpipolarPairCPU> epipolarPair;   // 同行配对（无表模式，还账收编）
     std::unique_ptr<calib::LaserReconstructCuda> recon;
     cv::cuda::GpuMat d_grayL, d_grayR;          // 灰度 device 副本（steger 输入）
+    // 261004 固定视差 GPU 化：ids＝0..n−1 位置配对递增缓冲（懒建持久复用——
+    // 逐帧 colRange 视图零传输，替代原每帧 H2D 上传）
+    cv::cuda::GpuMat d_ids;
+    std::vector<int> h_ids;
 #endif
     // P 核链（P worker 独占）
     std::unique_ptr<calib::ImageSplitCPU> split;
@@ -467,22 +471,16 @@ ScanChains::Hooks ScanChains::assemble() {
                     JMW_LOG_INFO("07-ScanChains", "[ScanChains] steger L 无激光点，本帧无激光（降级）");
                     return 0;
                 }
-                auto stR = ops.steger->Execute(ops.d_grayR, *sepR.d_laserMask, stream,
-                                               calib::GroupMode::Flat);
-                if (!stR.success) {
-                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] steger R 失败: {}", stR.message);
-                    return -1;
-                }
-                if (stR.totalPointCount == 0 || !hasPts(stR.d_centerPoints)) {
-                    JMW_LOG_INFO("07-ScanChains", "[ScanChains] steger R 无激光点，本帧无激光（降级）");
-                    return 0;
-                }
+                // 261004 R 链整段停算（固定视差时代）：下方视差匹配只用 unL——
+                // steger R/undistort R/epipolar L/R 的结果本路径一律不消费（R＝
+                // L 平移合成），白耗约一半激光段 wall time。真匹配（查表）接入
+                // 时连本注释块带下方视差块整体退役、恢复双目链。恢复清单：
+                //   steger R（含空门）→ upR/SetParams/undistort R（含空门）→
+                //   epipolar L/R（含 interpCount 门）——见 git 历史 261004 前
 
-                calib::UndistortPointsParams upL, upR;
+                calib::UndistortPointsParams upL;
                 upL.cameraMatrix = deps_.K1; upL.distCoeffs = deps_.D1;
                 upL.R = cv::Mat(frame->snapshot.R1); upL.P = cv::Mat(frame->snapshot.P1);
-                upR.cameraMatrix = deps_.K2; upR.distCoeffs = deps_.D2;
-                upR.R = cv::Mat(frame->snapshot.R2); upR.P = cv::Mat(frame->snapshot.P2);
                 ops.undistG->SetParams(upL);
                 auto unL = ops.undistG->Execute(*stL.d_centerPoints, *stL.d_line_ids,
                                                  stream);
@@ -491,29 +489,6 @@ ScanChains::Hooks ScanChains::assemble() {
                     return -1;
                 }
                 if (!hasPts(unL.d_rectifiedPoints)) return 0;
-                ops.undistG->SetParams(upR);
-                auto unR = ops.undistG->Execute(*stR.d_centerPoints, *stR.d_line_ids,
-                                                 stream);
-                if (!unR.success) {
-                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] undistort_cuda R 失败: {}", unR.message);
-                    return -1;
-                }
-                if (!hasPts(unR.d_rectifiedPoints)) return 0;
-
-                auto eiL = ops.epipolar->Execute(*unL.d_rectifiedPoints,
-                                                 *unL.d_line_ids, stream);
-                if (!eiL.success) {
-                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] epipolar_interp L 失败: {}", eiL.message);
-                    return -1;
-                }
-                if (eiL.interpCount == 0 || !hasPts(eiL.d_interpPoints)) return 0;
-                auto eiR = ops.epipolar->Execute(*unR.d_rectifiedPoints,
-                                                 *unR.d_line_ids, stream);
-                if (!eiR.success) {
-                    JMW_LOG_WARN("07-ScanChains", "[ScanChains] epipolar_interp R 失败: {}", eiR.message);
-                    return -1;
-                }
-                if (eiR.interpCount == 0 || !hasPts(eiR.d_interpPoints)) return 0;
 
                 // —— 激光线种类判定（架构口径 2026-09-05，260927 模式贯通收口）——
                 // 激光线共四组：左斜 25 条/右斜 25 条/精细 7 条/深孔 1 条。判定链＝
@@ -543,11 +518,13 @@ ScanChains::Hooks ScanChains::assemble() {
                 // 匹配（后续接查表匹配后替换回正规链路）
                 cv::cuda::GpuMat d_mL, d_mR, d_mId;
                 {
-                    cv::Mat hL;
-                    unL.d_rectifiedPoints->download(hL, stream);
-                    const std::vector<cv::Point2f> vL(hL.ptr<cv::Point2f>(),
-                                                      hL.ptr<cv::Point2f>() + hL.total());
-                    if (vL.empty()) return 0;
+                    // 261004 GPU 直通（原 CPU 路径根除）：split→compare 掩码→
+                    // copyTo(mask) 压缩→convertTo 仿射平移→merge，全在 device 流
+                    // 上完成——steger→recon 零落 CPU。原路径 D2H 下载 hL→CPU 建
+                    // matchedL/R＋ids 两循环→H2D×3 回传＋同步＝GPU 饿等主因之一
+                    const cv::cuda::GpuMat dL = *unL.d_rectifiedPoints;   // 1×N CV_32FC2
+                    const int nTot = dL.rows * dL.cols;
+                    if (nTot <= 0) return 0;
                     // —— 261004 修正：固定视差按标定 Q 反算（原硬编码 30px 配当前
                     //    Q 得 Z≈5703mm 常数——任何物理距离区间必滤空，10/3 景深
                     //    特性上线后零点云根因，真机实测 Z min=中位=max=5702.9）。
@@ -559,33 +536,35 @@ ScanChains::Hooks ScanChains::assemble() {
                     const float kDisparity = (std::abs(q32) > 1e-12)
                         ? static_cast<float>(q43 / (q32 * kTargetDepthMm))
                         : 30.0f;                       // Q 异常兜底（旧值）
-                    std::vector<cv::Point2f> matchedL;
-                    std::vector<cv::Point2f> matchedR;
-                    matchedL.reserve(vL.size());
-                    matchedR.reserve(vL.size());
-                    for (const auto& p : vL) {
-                        // 左缘带（x<视差）右匹配点为负坐标＝无效，跳过
-                        if (p.x < kDisparity) continue;
-                        matchedL.push_back(p);
-                        matchedR.emplace_back(p.x - kDisparity, p.y);
+                    // 左缘带（x<d 的右匹配点为负坐标＝无效）掩码压缩：L/R 同掩码
+                    // 逐元素对齐，配对语义与原 CPU 循环一致（keep x≥d）
+                    cv::cuda::GpuMat ch[2], msk, xF, yF, xR;
+                    cv::cuda::split(dL, ch, stream);
+                    cv::cuda::compare(ch[0], kDisparity, msk, cv::CMP_GE, stream);
+                    ch[0].copyTo(xF, msk, stream);              // 压缩拷贝（1×n'）
+                    if (xF.empty() || xF.cols * xF.rows <= 0) return 0;   // 全落左缘带
+                                                                //（shape 调用内即定——无同步）
+                    ch[1].copyTo(yF, msk, stream);
+                    xF.convertTo(xR, CV_32F, 1.0, -kDisparity, stream);   // R.x = L.x − d
+                    const int n = xF.rows * xF.cols;
+                    cv::cuda::merge(std::vector<cv::cuda::GpuMat>{xF, yF}, d_mL, stream);
+                    cv::cuda::merge(std::vector<cv::cuda::GpuMat>{xR, yF}, d_mR, stream);
+                    // ids＝0..n−1（位置配对）：持久递增缓冲懒建＋colRange 视图
+                    if (ops.d_ids.empty() || ops.d_ids.cols < n) {
+                        ops.h_ids.resize(n);
+                        for (int i = 0; i < n; ++i) ops.h_ids[i] = i;
+                        ops.d_ids.upload(cv::Mat(1, n, CV_32SC1, ops.h_ids.data()), stream);
                     }
-                    if (matchedL.empty()) return 0;
-                    std::vector<int> matchedIds(matchedL.size());
-                    for (size_t i = 0; i < matchedL.size(); ++i) matchedIds[i] = static_cast<int>(i);
-                    const int n = static_cast<int>(matchedL.size());
+                    d_mId = ops.d_ids.colRange(0, n);
+                    // 形状对齐 recon 契约（原上传路径恒 n×1——kernel 网格按行取）
+                    d_mL = d_mL.reshape(2, n);
+                    d_mR = d_mR.reshape(2, n);
+                    d_mId = d_mId.reshape(1, n);
                     JMW_LOG_INFO("07-ScanChains",
                                  "[ScanChains] 激光帧#{}（{}斜）固定视差重建 {} 点"
-                                 "（d={:.0f}px→Z≈{}mm）",
+                                 "（d={:.0f}px→Z≈{}mm，GPU 直通）",
                                  frame->frameId, leftSkewFrame ? "左" : "右", n,
                                  kDisparity, kTargetDepthMm);
-                    d_mL.upload(cv::Mat(n, 1, CV_32FC2, matchedL.data()), stream);
-                    d_mR.upload(cv::Mat(n, 1, CV_32FC2, matchedR.data()), stream);
-                    d_mId.upload(cv::Mat(n, 1, CV_32SC1, matchedIds.data()), stream);
-                    // 261004 崩溃修复：三向量是块内局部——upload 异步入流而宿主
-                    // 缓冲随块结束析构＝UAF（堆损坏随机崩真机实证；10/3 起激光全
-                    // 被景深滤空此路径从未跑过，视差修正放通数据后首次显形）。
-                    // 上传量 ≤300KB，同步等待微秒级——40fps 无感
-                    stream.waitForCompletion();
                 }
 
                 auto rc = ops.recon->Execute(d_mL, d_mR, d_mId,

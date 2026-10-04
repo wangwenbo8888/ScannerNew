@@ -20,6 +20,7 @@
 #include "pipelines/scan/SimScanSource.h"   // 中段模拟提取源（UI 开关组装）
 #include "file_io.h"             // fileio::importPLY（激光数据集文件装载）
 #include "CalibrationRepository.h"
+#include "WorkflowArtifactStore.h"   // ⑤重置 artifacts 清理（261004）
 #include "StateMachine.h"
 #include "ParameterManager.h"
 #include "FaultHandler.h"
@@ -885,6 +886,8 @@ Scanner::Result AppContext::discardScanSession() {
     }
     if (sceneFeed_) sceneFeed_->clearCache();                   //   ④ 显示链缓存同清
                                                                 //   （latestMarkers——防编辑门禁读残留）
+    clearScanArtifacts();                                       //   ⑤ 磁盘产物同清（seed/先验/
+                                                                //   检查点——防下次 arm 装回旧数据）
     const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0).count();
     JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤重置 discard 链完成 t+{}ms（不落库·全清·回 S2）", el);
@@ -901,9 +904,29 @@ Scanner::Result AppContext::clearResidualWorkingSet() {
     }
     const auto r = pointCloudBuffer_->clear();
     if (sceneFeed_) sceneFeed_->clearCache();   // latestMarkers 残留同清（261004）
+    clearScanArtifacts();                       // 磁盘产物同清（与 discard 分支同口径）
     JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤ S2 残留工作集清理: {}（{}）",
                   r.success ? "完成" : "失败", r.message);
     return r;
+}
+
+// ⑤ 重置联动：清 artifacts 会话产物（261004 用户实证「重置后旧标志点回来」）——
+// markers_gba 在下次 arm 经 L4 读侧装回软先验＋seed＝「扫废重来」不全新；
+// obs 检查点 104MB 级占盘。L4 产物仅在 ③（finalBAEnabled）落盘——本清理只删
+// 历史残留，不与写侧竞争
+void AppContext::clearScanArtifacts() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path artDir = fs::current_path() / "artifacts";
+    if (!fs::exists(artDir, ec)) return;
+    Scanner::data::FileArtifactStore store(artDir.string());
+    int removed = 0;
+    for (const char* key : {"scan/markers_gba", "scan/poses_optimized", "scan/session_meta"})
+        if (store.remove(key)) ++removed;
+    for (const char* f : {"scan_laser_final.ply", "scan_obs_checkpoint.dat"})
+        if (fs::remove(artDir / f, ec)) ++removed;
+    JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤重置 artifacts 清理: {} 项（软先验/seed/位姿/检查点）",
+                  removed);
 }
 
 bool AppContext::isScanSessionActive() const {
