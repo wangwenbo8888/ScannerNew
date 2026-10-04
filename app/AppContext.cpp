@@ -360,13 +360,26 @@ void AppContext::initialize() {
                 camCfg.contrastRight = c.value("contrastRight", camCfg.contrastRight);
                 cameraContrastL_ = camCfg.contrastLeft;   // open 成功后经门面下发
                 cameraContrastR_ = camCfg.contrastRight;
-                // 261003 景深屏蔽区间（camera.json depthOfField 节；缺节用内置默认）
+                // 261003 景深屏蔽区间（camera.json depthOfField 节；缺节用内置默认）。
+                // 261004 补 enabled 开关（默认 true）：临时测试机匹配走固定视差
+                // （30px），重建 Z 为常数 ≈5703mm（Q 实测 261004）——任何物理
+                // 距离区间必滤空（10/3 特性上线后一帧未过，零点云根因）。
+                // enabled=false → 区间改全域直通（真机真匹配 Z 随距离变化时开启）
+                bool dofEnabled = true;
                 if (j.contains("depthOfField") && j["depthOfField"].is_object()) {
                     const auto& dof = j["depthOfField"];
+                    dofEnabled = dof.value("enabled", true);
                     camCfg.dofNearMin = dof.value("nearMin", camCfg.dofNearMin);
                     camCfg.dofNearMax = dof.value("nearMax", camCfg.dofNearMax);
                     camCfg.dofFarMin = dof.value("farMin", camCfg.dofFarMin);
                     camCfg.dofFarMax = dof.value("farMax", camCfg.dofFarMax);
+                }
+                if (!dofEnabled) {
+                    JMW_LOG_WARN("app-AppContext",
+                        "[AppContext] 景深屏蔽已停用（camera.json enabled=false——临时机"
+                        "固定视差 Z 常数≈5703mm 物理区间必滤空；真机恢复产线定版并开启）");
+                    camCfg.dofNearMin = 0.0;   camCfg.dofNearMax = 1e9;
+                    camCfg.dofFarMin = 0.0;    camCfg.dofFarMax = 1e9;
                 }
                 dofNearMin_ = camCfg.dofNearMin;   // 成员存（WorkflowContext 子类读）
                 dofNearMax_ = camCfg.dofNearMax;
@@ -374,12 +387,13 @@ void AppContext::initialize() {
                 dofFarMax_ = camCfg.dofFarMax;
                 JMW_LOG_INFO("app-AppContext",
                     "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} "
-                    "pairStrict={} tsPair={} contrastL={} contrastR={} "
+                    "pairStrict={} tsPair={} contrastL={} contrastR={} dof{} "
                     "dofNear=[{},{}] dofFar=[{},{}]",
                     camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
                     camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps,
                     camCfg.pairStrictFrameId, camCfg.timestampPairing,
                     camCfg.contrastLeft, camCfg.contrastRight,
+                    dofEnabled ? "(开)" : "(停用·全域直通)",
                     camCfg.dofNearMin, camCfg.dofNearMax,
                     camCfg.dofFarMin, camCfg.dofFarMax);
             } catch (const std::exception& e) {

@@ -594,10 +594,21 @@ ScanChains::Hooks ScanChains::assemble() {
                     for (size_t k = 0; k < total; ++k)
                         if (src[k][2] >= zMin && src[k][2] <= zMax) keep.push_back(src[k]);
                     if (keep.empty()) {
+                        // 261004 排障：滤空帧打 Z 实测统计（min/中位/max）——
+                        // 固定视差路径 Z 常数理论值与实测对账（区间配置依据）
+                        double zMinV = 1e30, zMaxV = -1e30, zMedV = 0;
+                        {
+                            std::vector<float> zs;
+                            zs.reserve(total);
+                            for (size_t k = 0; k < total; ++k) zs.push_back(src[k][2]);
+                            std::sort(zs.begin(), zs.end());
+                            zMinV = zs.front(); zMaxV = zs.back();
+                            zMedV = zs[zs.size() / 2];
+                        }
                         JMW_LOG_INFO("07-ScanChains",
                             "[ScanChains] 景深屏蔽（{}）：重建 {} 点全在区间 [{},{}]mm 外"
-                            "——本帧无激光（降级）",
-                            dof == 1 ? "远" : "近", total, zMin, zMax);
+                            "——本帧无激光（降级）〔Z 实测 min={:.1f} 中位={:.1f} max={:.1f}〕",
+                            dof == 1 ? "远" : "近", total, zMin, zMax, zMinV, zMedV, zMaxV);
                         return 0;
                     }
                     if (keep.size() != total)
