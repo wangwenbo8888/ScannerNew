@@ -733,6 +733,14 @@ void DeviceManager::setCalibCaptureArmed(bool on) {
         "[DeviceManager] 标定采集布防={}（M 键启采将走五态灯序自动循环）", on);
 }
 
+// 261004 矩阵对齐·就绪凭据（设计 §3.2.5 规则 9）：app arm 成功置位、收尾/重置/
+// 装配失败清位。atomic 直写——app 线程置位、逻辑线程按键路径只读，无锁安全
+void DeviceManager::setScanReady(bool ready) {
+    scanReady_.store(ready, std::memory_order_relaxed);
+    JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 就绪凭据={}（S2 按键调节/启停/切模式{}）",
+                 ready, ready ? "放行" : "拒·未就绪");
+}
+
 // P-1 全局态门禁注入（§3.2.3）：app 装配期组合注入（08 不认识 10 态——白名单
 // 判定归 app；未注入＝放行，兼容单测/单机）
 void DeviceManager::setKeyStateGate(std::function<bool()> ok) {
@@ -1038,9 +1046,28 @@ void DeviceManager::buildKeyActions() {
     // 菜单变化=110、档位变化=111 亮度/112 显示远近/113 体素密度/114 景深、
     // 执行结果=120+（拒因码——待实施）；与参数改账 1000+idx 段隔离
     KeySemActions a;
-    a.captureToggle = [this] {
+    // 261004 矩阵对齐·S2 未就绪拒（设计 §3.2.5 规则 9 功能口）：凭据 scanReady_
+    // ＝会话活（arm～终止，含停采保活）。四个按键功能口在凭据缺位时拒并留痕
+    // （p1=120,5 未就绪——120,4 已被换档回弹占用）；UI 三参写口不经此拒
+    // （261004 用户裁定：待机 UI 可调三参、按键不可调）。①子态（菜单内体素
+    // 密度）不查凭据——矩阵 ①行 S2＝放行。
+    auto rejectNotReady = [this](const char* what) {
+        publishEvent(EventType::UserDefined, 120, 5);   // P-3 横幅：待机不可调
+        JMW_LOG_INFO("08-DeviceManager",
+            "[DeviceManager] {} 被拒：未就绪（先菜单②/模式键就绪；261004 矩阵 S2 口径）", what);
+    };
+    a.captureToggle = [this, rejectNotReady] {
         if (mode_->isCapturing()) stopCaptureOnLogic();
-        else startCaptureOnLogic();              // 逻辑线程内直调本体（免编队绕行）
+        else {
+            // S2 裸启采堵死（261004 矩阵审计 #1：无凭据 M 键直启设备级采集，
+            // 帧流未挂全丢、状态仍 S2）——标定布防或就绪凭据二择一才放行
+            if (!calibArmed_.load(std::memory_order_relaxed) &&
+                !scanReady_.load(std::memory_order_relaxed)) {
+                rejectNotReady("启停");
+                return;
+            }
+            startCaptureOnLogic();          // 逻辑线程内直调本体（免编队绕行）
+        }
     };
     a.menuSelect = [this] {                      // 按层/子态/游标分叉（裁判只给信号）
         const auto ms = menu_->state();
@@ -1062,10 +1089,13 @@ void DeviceManager::buildKeyActions() {
         // —— 菜单浏览态：按游标分叉 ——
         switch (ms.cursor) {
         case 1:                                  // ①分辨率设置→体素密度调节子态
-            if (mode_->isCapturing()) {          // 功能口拒·防呆（七态矩阵表注：S4/S5
-                publishEvent(EventType::UserDefined, 120, 3);   // P-3 横幅：扫描中·密度锁定
-                JMW_LOG_WARN("08-DeviceManager", //  下改融合密度会打断累积——游标可停①选中拒）
-                    "[DeviceManager] 菜单①体素密度：采集中防呆拒（扫描中改密度打断累积）");
+            // 功能口拒·防呆（七态矩阵表注）：会话活即拒（261004 审计 #6 修正——
+            // 原判据只看 isCapturing，停采保活〔会话活采集停〕时可进①改密度同
+            // 样打断累积；就绪凭据＝会话活判据，含停采保活）
+            if (mode_->isCapturing() || scanReady_.load(std::memory_order_relaxed)) {
+                publishEvent(EventType::UserDefined, 120, 3);   // P-3 横幅：会话中·密度锁定
+                JMW_LOG_WARN("08-DeviceManager",
+                    "[DeviceManager] 菜单①体素密度：会话中防呆拒（含停采保活——改密度打断累积）");
                 return;
             }
             menu_->apply(MenuOp::EnterAdjustSubstate);
@@ -1089,9 +1119,16 @@ void DeviceManager::buildKeyActions() {
         }
         }
     };
-    a.cycleMode = [this] {                       // 中键双击切模式：记账＋即时落地
+    a.cycleMode = [this, rejectNotReady] {       // 中键双击切模式：记账＋即时落地
+        // 261004 矩阵 S2 拒·未就绪（此前无此拒——S2 照常记账偏离定稿矩阵）
+        if (!scanReady_.load(std::memory_order_relaxed)) {
+            rejectNotReady("切模式");
+            return;
+        }
         // 标点会话隔离（260927 用户口径）：标点扫描中双击不切面片/精细/深孔——
-        // 按键只启停标点；模式切换仅在激光族会话（面片/精细/深孔）中可用
+        // 按键只启停标点；模式切换仅在激光族会话（面片/精细/深孔）中可用。
+        // （凭据就位后此处只在会话内可达——261004 审计 #8 拒因错位随之修正：
+        // S2 报未就绪、标点隔离只在会话中报）
         if (lastCaptureMode_.load(std::memory_order_relaxed) ==
             Scanner::ScanMode::MarkerOnly) {
             publishEvent(EventType::UserDefined, 120, 2);   // P-3 横幅：标点会话·模式锁定
@@ -1162,13 +1199,23 @@ void DeviceManager::buildKeyActions() {
         menu_->apply(MenuOp::ExitMenu);
         publishEvent(EventType::UserDefined, 110, 0);
     };
-    a.toggleDepthOfField = [this] {              // 上键双击·主界面：景深 近↔远 直切
+    a.toggleDepthOfField = [this, rejectNotReady] {  // 上键双击·主界面：景深 近↔远 直切
+        // 261004 矩阵 S2 拒·未就绪（景深属调节族——规则 4「调节全家只在扫描态」）
+        if (!scanReady_.load(std::memory_order_relaxed)) {
+            rejectNotReady("景深切换");
+            return;
+        }
         dof_ = Scanner::device::toggleDepthOfField(dof_);
         publishEvent(EventType::UserDefined, 114, static_cast<int64_t>(dof_));
         JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 景深切换 → {}（p1=114 事件；屏蔽区间 07/09 对接）",
                      dof_ == DepthOfField::Near ? "近" : "远");
     };
-    a.switchAdjustCtx = [this] {                 // 左键双击·主界面：调节对象 亮度↔显示远近
+    a.switchAdjustCtx = [this, rejectNotReady] { // 左键双击·主界面：调节对象 亮度↔显示远近
+        // 261004 矩阵 S2 拒·未就绪（换调节对象属调节族）
+        if (!scanReady_.load(std::memory_order_relaxed)) {
+            rejectNotReady("换调节对象");
+            return;
+        }
         menu_->apply(MenuOp::SwitchAdjustCtx);
         const bool isBrightness =
             menu_->state().adjustCtx == MenuState::AdjustCtx::Brightness;
@@ -1193,8 +1240,23 @@ void DeviceManager::buildKeyActions() {
         publishEvent(EventType::UserDefined, 110, 0);
         JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 子态取消→菜单浏览态");
     };
-    a.adjustUp = [this] { applyAdjust(+1); };
-    a.adjustDown = [this] { applyAdjust(-1); };
+    a.adjustUp = [this, rejectNotReady] {
+        // 261004 矩阵 S2 拒·未就绪：仅主界面分支查凭据（①子态＝矩阵 S2 放行不查）
+        if (menu_->state().substate != MenuState::Substate::AdjustVoxel &&
+            !scanReady_.load(std::memory_order_relaxed)) {
+            rejectNotReady("档位步进");
+            return;
+        }
+        applyAdjust(+1);
+    };
+    a.adjustDown = [this, rejectNotReady] {
+        if (menu_->state().substate != MenuState::Substate::AdjustVoxel &&
+            !scanReady_.load(std::memory_order_relaxed)) {
+            rejectNotReady("档位步进");
+            return;
+        }
+        applyAdjust(-1);
+    };
     a.dropped = [](const char* why) { JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 手势丢弃: {}", why); };
     // 门禁闭包（§3.2.3 gate(类别)·P-1 定版）：08 内部谓词＝自检期全拦；app 装配
     // 注入的全局态白名单谓词（S2/S4/S5 放行——S1/S3/S6/S7 全拦；08 不认识 10，

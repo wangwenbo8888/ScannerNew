@@ -236,6 +236,15 @@ public:
     /// 谓词（false＝四类键全拦丢弃，逃生类不受影响）。⚠ 装配期调用（open 前，
     /// 与 setProtocolVersion 同约定——逻辑线程并发调用闭包有数据竞争）
     void setKeyStateGate(std::function<bool()> ok);
+    /// 261004 矩阵对齐·就绪凭据（设计 §3.2.5 规则 9：app 调就绪置位、收尾/重置/
+    /// 装配失败清位）。凭据＝「扫描会话已就绪（arm 成功后～会话终止前）」——
+    /// 08 不认识 10 态，凭据即 S4/S5（会话活，含停采保活）与 S2（待机）的判别。
+    /// 按键侧四个功能口以它拒 S2（启停/切模式/调节族/景深——p1=120,4 未就绪）；
+    /// ①防呆以它扩到停采保活；UI 三参写口（setBrightnessLadderIndex 等）不查
+    /// 凭据——261004 用户裁定：待机 UI 可调三参、按键不可调
+    void setScanReady(bool ready);
+    /// 就绪凭据快照（键盘态同步/测试用）
+    bool isScanReady() const { return scanReady_.load(std::memory_order_relaxed); }
     /// P-5 亮度档写入口（261002 §3.4 UI 预设档滑条）：UI 换档请求＝与按键左右
     /// 键同一把梯同一本账（post 编队逻辑线程执行；越界忽略；同档不重发）
     void setBrightnessLadderIndex(int idx);
@@ -385,6 +394,8 @@ private:
                                         // 写=相机帧回调推进/逻辑线程启停；帧打点用）
     std::atomic<bool> calibArmed_{false};   // 标定采集布防（校准设备入口置位；
                                             // M 键启采分流进灯序；扫描流程撤防）
+    std::atomic<bool> scanReady_{false};    // 261004 就绪凭据（app arm 置位/收尾·重置·
+                                            // 装配失败清位；按键四功能口＋①防呆判据用）
     std::function<bool()> keyStateGate_;    // P-1 全局态门禁谓词（装配期注入；
                                             // 逻辑线程 gate 闭包内只读调用）
 

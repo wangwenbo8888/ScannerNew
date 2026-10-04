@@ -391,7 +391,11 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                     const int64_t p1 = ev.param1, p2 = ev.param2;
                     QMetaObject::invokeMethod(this, [this, p1, p2]() {
                         if (p1 == 103) {           // 菜单③「扫描完成」＝关闭会话＋GBA
-                            if (!m_appCtx || !m_appCtx->isScanSessionActive()) return;
+                            if (!m_appCtx || !m_appCtx->isScanSessionActive()) {
+                                // 261004 矩阵审计 #7：S2 无会话拒要留痕（原静默 return）
+                                showBanner(QStringLiteral("无扫描会话——无需完成"), true);
+                                return;
+                            }
                             if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                             m_activeScanToolIdx = -1;
                             auto r = m_appCtx->stopScanSession();
@@ -422,17 +426,28 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             statusBar()->showMessage(r.success
                                 ? QStringLiteral("按键就绪——按设备 M 键开始扫描")
                                 : QString::fromStdString("就绪被拒: " + r.message));
-                        } else if (p1 == 105) {    // 菜单⑤「重置」（261002：停采＋撕会话
-                            // 不落库＋回 S2——毁灭性操作已二次确认过，此处直接执行）
+                        } else if (p1 == 105) {    // 菜单⑤「重置」（261004 矩阵规则 8：
+                            // 停采＋撕会话「不落库」＋清全部数据回 S2）。设备侧已二次
+                            // 确认（⑤子态）——毁灭性操作 UI 再弹确认框，用户确认才执行
                             if (!m_appCtx) return;
-                            if (m_appCtx->deviceManager() &&
-                                m_appCtx->deviceManager()->isCapturing())
-                                m_appCtx->deviceManager()->stopCapture();
+                            const auto ans = QMessageBox::question(this,
+                                QStringLiteral("重置确认"),
+                                QStringLiteral("将停止采集、撕毁会话（数据不落库），\n并清空全部点云数据（不可恢复）。\n\n确定重置？"),
+                                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                            if (ans != QMessageBox::Yes) {
+                                showBanner(QStringLiteral("已取消重置"), true);
+                                return;
+                            }
                             if (m_appCtx->isScanSessionActive()) {
-                                auto r = m_appCtx->stopScanSession();
+                                auto r = m_appCtx->discardScanSession();   // 不落库＋全清
                                 statusBar()->showMessage(r.success
-                                    ? QStringLiteral("会话已重置（数据丢弃不落库）")
+                                    ? QStringLiteral("会话已重置（数据丢弃不落库·全清）")
                                     : QString::fromStdString("重置被拒: " + r.message));
+                            } else {
+                                auto r = m_appCtx->clearResidualWorkingSet();   // S2 清残留
+                                statusBar()->showMessage(r.success
+                                    ? QStringLiteral("残留工作集已清空")
+                                    : QString::fromStdString("清理被拒: " + r.message));
                             }
                             if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                             m_activeScanToolIdx = -1;
@@ -490,13 +505,16 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                               : p2 == 2 ? QStringLiteral("深孔扫描")
                                         : QStringLiteral("面片扫描")));
                         } else if (p1 == 120) {     // 执行结果/拒因（P-3：红底横幅）
-                            // p2 拒因码：1=已急停 2=标点会话隔离 3=扫描中改密度防呆
+                            // p2 拒因码：1=已急停 2=标点会话隔离 3=会话中改密度防呆
+                            // 4=换档失败已回弹 5=未就绪（261004 S2 按键族拒）
                             if (m_menuDlg) m_menuDlg->hide();   // 急停/拒因关菜单弹窗
                             showBanner(p2 == 1 ? QStringLiteral("已急停")
                                              : p2 == 2 ? QStringLiteral("标点会话·模式锁定")
-                                             : p2 == 3 ? QStringLiteral("扫描中·密度锁定")
+                                             : p2 == 3 ? QStringLiteral("会话中·密度锁定")
+                                             : p2 == 4 ? QStringLiteral("换档失败已回弹")
+                                             : p2 == 5 ? QStringLiteral("待机不可调——先就绪（菜单②或模式键）")
                                                        : QStringLiteral("操作被拒"),
-                                       true);
+                                        true);
                         }
                     }, Qt::QueuedConnection);
                 });

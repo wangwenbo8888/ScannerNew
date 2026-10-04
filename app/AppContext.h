@@ -95,6 +95,11 @@ public:
     Scanner::Result armCalibCapture();
     /// finish_scan 点火（工作流合账）＋采集停止（08 stopCapture）
     Scanner::Result stopScanSession();
+    /// 261004 矩阵规则 8·⑤重置 discard 链：停采＋撕会话「不落库」（跳终局遍）
+    /// ＋点云仓库全清（会话云＋标志点）回 S2——UI 三次确认后调用
+    Scanner::Result discardScanSession();
+    /// ⑤ S2 分支：无会话清残留工作集（点云仓库全清）
+    Scanner::Result clearResidualWorkingSet();
     /// 扫描会话是否活跃（Running/Paused——按钮启停切换判据）
     bool isScanSessionActive() const;
 

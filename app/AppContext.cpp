@@ -244,6 +244,7 @@ void AppContext::initialize() {
                             if (deviceManager_) {      // 设备收口（灯/采集已点，须收回）
                                 deviceManager_->lightsAllOff();
                                 deviceManager_->stopCapture();
+                                deviceManager_->setScanReady(false);   // 261004 凭据清位（回 S2）
                             }
                             commandGate_->notifyCompleted("start_scan", false);
                             if (scanSessionEndedHandler_) scanSessionEndedHandler_(false);
@@ -727,6 +728,9 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
         JMW_LOG_WARN("app-AppContext", "[AppContext] {} 点火被拒: {}", modeName, gr.message);
         return gr;
     }
+    // 261004 就绪凭据置位（规则 9）：arm 成功～会话终止前＝S4/S5（含停采保活），
+    // 按键启停/切模式/调节族/景深凭此放行；收尾/重置/装配失败清位
+    if (auto* dm2 = deviceManager_.get()) dm2->setScanReady(true);
     {
         const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - t0).count();
@@ -778,6 +782,7 @@ Scanner::Result AppContext::stopScanSession() {
     }
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
     auto r = commandGate_->submit("finish_scan");          // 工作流合账（handler=stop）
+    if (deviceManager_) deviceManager_->setScanReady(false);   // 261004 凭据清位（会话终止回 S2）
     if (simSource_) {           // 中段模拟提取源随会话终了弃（下会话按开关重组）
         simSource_.reset();
         scanWf_->setSimSource(nullptr);
@@ -788,6 +793,40 @@ Scanner::Result AppContext::stopScanSession() {
         JMW_LOG_INFO("app-AppContext", "[AppContext] ■停止同步段完成 t+{}ms（合账={}）", el,
                      r.success ? "ok" : r.message);
     }
+    return r;
+}
+
+// ============================================================================
+// 261004 矩阵规则 8·⑤重置 discard 链——停采＋撕会话「不落库」＋清全部数据回 S2。
+// 与③（合账落库保数据）互补成对；由 UI ⑤处理器在用户三次确认（设备子态二次＋
+// UI 弹窗一次）后调用。数据清理范围＝06 点云仓库全清（会话云＋标志点——
+// 261004 用户裁定「把所有数据都清理掉」）。
+// ============================================================================
+Scanner::Result AppContext::discardScanSession() {
+    const auto t0 = std::chrono::steady_clock::now();
+    if (scanStartThread_.joinable()) scanStartThread_.join();   // 防与装配并发
+    if (deviceManager_ && deviceManager_->isCapturing())
+        deviceManager_->stopCapture();                          // ① 停采
+    if (scanWf_) scanWf_->setFinalBAEnabled(false);             // ② 撕会话不走终局遍
+    const auto r = stopScanSession();                           //   （GBA/L4/入仓全跳）
+    if (scanWf_) scanWf_->setFinalBAEnabled(true);              //   恢复默认（下会话全链）
+    if (pointCloudBuffer_) {                                    // ③ 清全部数据
+        const auto cr = pointCloudBuffer_->clear();             //   （会话云＋标志点）
+        JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤重置数据清理: {}（{}）",
+                     cr.success ? "全清完成" : "清理失败", cr.message);
+    }
+    const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+    JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤重置 discard 链完成 t+{}ms（不落库·全清·回 S2）", el);
+    return r;
+}
+
+// ⑤ S2 分支：无会话清残留工作集（同样全清——06 点云仓库）
+Scanner::Result AppContext::clearResidualWorkingSet() {
+    if (!pointCloudBuffer_) return Scanner::Result::fail("点云仓库未装配");
+    const auto r = pointCloudBuffer_->clear();
+    JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤ S2 残留工作集清理: {}（{}）",
+                 r.success ? "完成" : "失败", r.message);
     return r;
 }
 

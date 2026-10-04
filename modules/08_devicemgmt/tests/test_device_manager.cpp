@@ -309,6 +309,7 @@ TEST(DeviceManager, T5_CaptureToggleByIdempotent) {
     mock.dm = &dm;
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
 
     kit.shortPress('M');                                       // 主层中键短按 → 启采集（单帧 N10）
     EXPECT_EQ(mock.count("N11 H1"), 0);                         // 启动不发 N11 H1（a9bfe53 口径）
@@ -371,6 +372,7 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     mock.dm = &dm;
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
     auto st = [&] { return dm.menuState(); };
 
     EXPECT_EQ(st().layer, 1);
@@ -447,6 +449,7 @@ TEST(DeviceManager, T7_KeyFlood100NoCrash) {
     kit.dm = &dm;
     mock.noAck = {"N11"};                                      // 关 ACK：每次启采集都发 H1（计消化数）
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
 
     for (int i = 0; i < 50; ++i) {                             // 50 次 M 短按 = 50 个 G01 手势
         kit.shortPress('M');
@@ -501,6 +504,7 @@ TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
         DeviceManager dm(v2, gateOk, &bus, nullptr, write);
         mock.dm = &dm;
         ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
         dm.testInjectRaw("K1;");                               // v2 匿名按键：K 原始链停用 → 落 onParseFail 丢
         dm.logicTick();
         EXPECT_EQ(dm.menuState().layer, 1);                    // 无任何手势副作用
@@ -512,6 +516,7 @@ TEST(DeviceManager, T9_V2V3ProtocolSwitchReopen) {
     mock.dm = &dm;
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
     kit.shortPress('M');                                       // v3 手势链正常
     EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 1);              // 启采集=单帧 N10（v2 会话 close 的 N11 H0/N12 Z0 不计入）
     EXPECT_TRUE(dm.isCapturing());
@@ -852,6 +857,7 @@ TEST(DeviceManager, F6_KeyRingOverflowFault) {
     mock.dm = &dm;
     kit.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
 
     for (int i = 0; i < 100; ++i) {                            // 100 个 G01 L1（主层左键短=无效，
         dm.testInjectTextLine("G01 L1");                       // 无副作用）> 环容 63 → 丢新 ~37
@@ -968,6 +974,7 @@ TEST(DeviceManager, T17_KeyModeDispatchToN10) {
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
 
     // 默认 modeCursor=3（普通交叉）→ 首次启采＝面片掩码 V1C1
     dm.testInjectTextLine("G01 M1");             // 主层中键短按＝启采
@@ -1030,6 +1037,7 @@ TEST(DeviceManager, T18_MarkerSessionKeyIsolation) {
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
 
     dm.setCaptureMode(Scanner::ScanMode::MarkerOnly);   // 就绪流程：标点会话
     dm.logicTick();
@@ -1076,6 +1084,7 @@ TEST(DeviceManager, T23_KeyStateGateInjection) {
     mock.dm = &dm;
     dm.setKeyStateGate([] { return false; });      // 模拟全局全拦态（S6/S7 等价）
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
 
     // 四类键全拦：启停（M/S 主层）不启采
     dm.testInjectTextLine("G01 M1");
@@ -1121,6 +1130,7 @@ TEST(DeviceManager, T22_EventFamilyIsolation) {
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
 
     const int64_t dof0 = rec.userParam(114);
     dm.testInjectTextLine("G01 U2");   // 上双击＝景深 近→远（p1=114）
@@ -1162,6 +1172,7 @@ TEST(DeviceManager, T19_PresetLadderAdjust) {
                      [&](const std::string& f) { return mock.write(f); });
     mock.dm = &dm;
     ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
     dm.setBrightnessLadderIndex(1);              // 均分梯默认档10——T19 从档1 测步进
     dm.logicTick(); dm.logicTick();
 
@@ -1320,6 +1331,7 @@ TEST(DeviceManager, T24_LadderTxnCommitRollbackLastWins) {
                          [&](const std::string& f) { return mock.write(f); });
         mock.dm = &dm;
         ASSERT_TRUE(dm.open().success);
+    dm.setScanReady(true);   // 261004 矩阵对齐：主层按键（启停/调节/切模式）测试布防就绪凭据
 
         const int64_t evt111_0 = rec.userParam(111);
         dm.setBrightnessLadderIndex(5);                 // UI 换档请求（事务开表）
@@ -1370,4 +1382,95 @@ TEST(DeviceManager, T24_LadderTxnCommitRollbackLastWins) {
         EXPECT_NEAR(dm.getParam("exposure").value,      // 参数账保旧值（默认档 10 投影，旧 1.0 为残留）
                     PresetLadder::builtinLadder()[9].exposureMs, 1e-9);
     }
+}
+
+// —— T25：261004 矩阵 S2 对齐·就绪凭据——待机（凭据缺位）按键四功能口拒
+//      （p1=120,5 未就绪），UI 三参 API 口不查凭据；凭据置位后放行；
+//      ①子态 S2 放行不查凭据；①防呆扩到停采保活（会话活＝拒）——
+TEST(DeviceManager, T25_StandbyKeyRejectAndReadyCredential) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);
+    // —— 起步＝S2 待机（凭据缺位）——
+    EXPECT_FALSE(dm.isScanReady());
+
+    // ① 启停拒：M1 不启采（无 N10/N11，不置 capturing）＋120 拒因留痕
+    const int64_t rej0 = rec.userParam(120);
+    dm.testInjectTextLine("G01 M1");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_FALSE(dm.isCapturing());
+    EXPECT_EQ(mock.count("N10 H60 B47 T0 V1 C1 D0 L47"), 0);
+    EXPECT_EQ(rec.userParam(120), rej0 + 1);       // 拒因事件恰一条（p2=5 未就绪）
+    dm.testInjectTextLine("G01 M1");               // 再按仍拒且不启采
+    dm.logicTick(); dm.logicTick();
+    EXPECT_FALSE(dm.isCapturing());
+    EXPECT_EQ(rec.userParam(120), rej0 + 2);
+
+    // ② 调节族拒：主界面 R1 步进被拒（档位不动、参数账不动）
+    dm.setBrightnessLadderIndex(10);
+    dm.logicTick(); dm.logicTick();
+    dm.testInjectTextLine("G01 R1");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.presetLadderIndex(), 10);
+    EXPECT_NEAR(dm.getParam("exposure").value,
+                PresetLadder::builtinLadder()[9].exposureMs, 1e-9);
+
+    // ③ 切模式拒：M2 记账不动（modeCursor 不变）
+    const auto modeCur0 = dm.menuState().modeCursor;
+    dm.testInjectTextLine("G01 M2");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.menuState().modeCursor, modeCur0);
+
+    // ④ 景深拒：U2 不切（p1=114 事件不发）
+    const int64_t dof0 = rec.userParam(114);
+    dm.testInjectTextLine("G01 U2");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(rec.userParam(114), dof0);
+
+    // ⑤ UI 三参 API 口不查凭据（261004 用户裁定：待机 UI 可调三参）
+    dm.setBrightnessLadderIndex(5);
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.presetLadderIndex(), 5);
+
+    // ⑥ ①子态 S2 放行（矩阵 ①行 S2=✓——不查凭据）：进菜单①调体素密度
+    dm.testInjectTextLine("G01 U1");
+    dm.logicTick(); dm.logicTick();
+    dm.testInjectTextLine("G01 M1");               // 选中①（凭据缺位不拒——仅会话活才拒）
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.menuState().substate, MenuState::Substate::AdjustVoxel);
+    dm.testInjectTextLine("G01 R1");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(rec.userParam(113), 1);              // 体素档步进成功
+    dm.testInjectTextLine("G01 M1");               // 确认退出
+    dm.logicTick(); dm.logicTick();
+
+    // ⑦ 凭据置位（app arm 成功等价）→ 启停/调节放行
+    dm.setScanReady(true);
+    const int64_t bri0 = rec.userParam(111);
+    dm.testInjectTextLine("G01 R1");               // 主界面步进：凭据在→放行
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.presetLadderIndex(), 6);
+    EXPECT_EQ(rec.userParam(111), bri0 + 1);
+
+    // ⑧ ①防呆扩判据：凭据在（会话活·停采保活＝isCapturing false）→ 选中①拒
+    dm.testInjectTextLine("G01 U1");
+    dm.logicTick(); dm.logicTick();
+    dm.testInjectTextLine("G01 M1");               // ①选中——会话活（凭据）即拒
+    dm.logicTick(); dm.logicTick();
+    EXPECT_NE(dm.menuState().substate, MenuState::Substate::AdjustVoxel);
+    EXPECT_EQ(dm.menuState().layer, 2);            // 仍菜单浏览态（未进子态）
+
+    // ⑨ 凭据清位（收尾/重置等价）→ 复拒
+    dm.testInjectTextLine("G01 U1");               // 退菜单
+    dm.logicTick(); dm.logicTick();
+    dm.setScanReady(false);
+    dm.testInjectTextLine("G01 M1");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_FALSE(dm.isCapturing());
 }

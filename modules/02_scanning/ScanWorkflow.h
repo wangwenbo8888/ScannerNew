@@ -147,6 +147,10 @@ public:
     WorkflowState getState() const override { return state_.load(); }
     Result setProgressCallback(WorkflowCallback cb) override;
 
+    /// 261004：⑤重置 discard 链置 false → stop() 跳过 runFinalBA（GBA/L4/入仓
+    /// 全跳＝「不落库」语义）；armScanSession 时恢复 true（下次会话默认走全链）
+    void setFinalBAEnabled(bool on) { finalBAEnabled_ = on; }
+
 private:
     /// 激光温度表装载：06 仓库档表 JSON → 09 LaserPlaneMapTempTable（mapData 格式，
     /// 与 laser_match_scan::LoadTempTable 同源）。全档无 mapData → nullptr（降级 A）
@@ -166,7 +170,7 @@ private:
     WorkflowCallback callback_;
     std::function<void(bool)> onFinished_;         // 完成回报（app 注入；可空）
 
-    // —— 终局遍（Q5）——
+    /// —— 终局遍（Q5）——
     bool finalBAEnabled_ = true;                   // 尾批 GBA＋重融合开关
     std::vector<int>    priorIds_;                 // 续扫基准软先验（装配期自仓库快照）
     std::vector<double> priorXyz_;                 // 3n 展开x,y,z
