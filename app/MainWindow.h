@@ -123,6 +123,10 @@ protected:
     /// S1/S3/S6/S7 全拦态＝除逃生类（M 长按急停/U 长按回主界面）外全灰；
     /// S2/S4/S5＝恢复（功能口拒的键仍可按——拒因在横幅可见）
     void updateVirtualKeypadStates();
+    // 261004 P3 一门禁补全：参数面板滑条按七态置灰——S1/S3/S6/S7 全拦态灰
+    // （亮度梯＋分辨率）；分辨率另在 S4/S5（会话活）灰（矩阵①行仅 S2 放行）；
+    // 亮度梯 S2 放行＝261004 用户裁定（待机 UI 可调三参）
+    void updateParamPanelStates();
     void refreshMenuDialog();              // P-菜单弹窗：进菜单弹出/退菜单关闭/游标高亮/子态
     QList<QPushButton*> m_navLeftButtons;
     QList<QPushButton*> m_navRightButtons;

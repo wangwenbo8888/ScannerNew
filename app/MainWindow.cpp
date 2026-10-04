@@ -380,6 +380,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                     QMetaObject::invokeMethod(this, [this, newState]() {
                         updateStateIndicator(static_cast<Scanner::service::SystemState>(newState));
                         updateVirtualKeypadStates();      // P-键盘态同步：灰化/恢复表盘
+                        updateParamPanelStates();         // 261004 P3：参数面板滑条置灰同步
                     }, Qt::QueuedConnection);
                 });
             // —— 按键管理闭环（260927 接线；261002 按键域定稿事件段迁移）：菜单
@@ -524,7 +525,10 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
     startInfoTimer();
     // 261002 临时测试机：无实体按键——软件启动即弹虚拟键盘（自检期灰化，
     // 自检完自动恢复 S2 可用态；StateChanged 事件驱动灰化/恢复已接线）
-    QTimer::singleShot(100, this, [this]() { showVirtualKeypad(); });
+    QTimer::singleShot(100, this, [this]() {
+        showVirtualKeypad();
+        updateParamPanelStates();     // 261004 P3：面板建成即套用当前态（不等首发事件）
+    });
 }
 
 MainWindow::~MainWindow() {
@@ -1320,6 +1324,23 @@ void MainWindow::showVirtualKeypad() {
 //
 // 行序＝[0]=U [1]=D [2]=L [3]=R [4]=M；列序＝[0]=单击 [1]=双击 [2]=长按
 // ============================================================================
+// 261004 P3 一门禁补全：参数面板滑条按七态置灰（与按键同约束——置灰只是体验
+// 优化，真把关在 08 功能口）。口径：
+//   亮度梯滑条（三参组合）：S1/S3/S6/S7 全拦态灰；S2/S4/S5 可用（S2 放行＝
+//     261004 用户裁定「待机 UI 可调三参、按键不可调」——按键侧已由就绪凭据拒）
+//   分辨率滑条（体素密度）：仅 S2 可用——全拦态灰＋S4/S5 会话活灰（矩阵①行
+//     「仅 S2 放行、S4/S5 拒*防呆」；08 侧 setVoxelLadderIndex 另有防呆拒兜底）
+void MainWindow::updateParamPanelStates() {
+    using S = Scanner::service::SystemState;
+    const auto s = (m_appCtx && m_appCtx->stateMachine())
+                       ? m_appCtx->stateMachine()->getCurrentState() : S::Init;
+    const bool blocking = (s == S::Init || s == S::Calibrating ||
+                           s == S::PostProcessing || s == S::FaultSelfCheck);
+    const bool inSession = (s == S::ScanMarker || s == S::ScanMarkerLaser);
+    if (m_param1Slider) m_param1Slider->setEnabled(!blocking);
+    if (m_voxelSlider) m_voxelSlider->setEnabled(!blocking && !inSession);
+}
+
 void MainWindow::updateVirtualKeypadStates() {
     if (!m_vkeyPad) return;
     using S = Scanner::service::SystemState;
