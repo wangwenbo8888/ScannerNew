@@ -928,7 +928,12 @@ void MainWindow::onScanClicked()
                                            : QString::fromStdString("停止被拒: " + r.message));
         return;
     }
-    applyMeshPreset();       // 导航"扫描"＝面片：推荐预设＋旋钮同步（260912）
+    // 261004 撤推荐预设套用（用户口径：应从前面设置的档位开始非默认档 10）
+    // ——档位走账本持久化沿用；保留提示告知当前档
+    if (m_appCtx->deviceManager())
+        statusBar()->showMessage(
+            QStringLiteral("扫描就绪（亮度沿用当前档 %1/20）")
+                .arg(m_appCtx->deviceManager()->presetLadderIndex()), 3000);
     m_laserSessionLatched = false;   // 新会话：激光仓库基线待重锁（260912c）
     if (m_appCtx->deviceManager())
         m_appCtx->deviceManager()->setCalibCaptureArmed(false);   // 扫描会话撤标定布防
@@ -2062,9 +2067,19 @@ QWidget *MainWindow::createToolBar()
                     if (wasSelf || !sr.success) return;   // 本键＝纯关闭；他键落下启新
                 }
                 if (mode == Scanner::ScanMode::MarkerOnly)
-                    applyMarkerPreset();       // 标点：推荐预设＋旋钮同步（260912）
+                    // 261004 撤推荐预设套用（用户口径：应从前面设置的档位开始，
+                    // 非默认档 10）——档位走账本持久化，用户设过即沿用
+                    statusBar()->showMessage(
+                        QStringLiteral("标点扫描就绪（亮度沿用当前档 %1/20）")
+                            .arg(m_appCtx->deviceManager()
+                                     ? m_appCtx->deviceManager()->presetLadderIndex()
+                                     : 0), 3000);
                 else if (mode == Scanner::ScanMode::MarkerPlusLaser)
-                    applyMeshPreset();         // 面片：推荐预设＋旋钮同步（260912）
+                    statusBar()->showMessage(
+                        QStringLiteral("面片扫描就绪（亮度沿用当前档 %1/20）")
+                            .arg(m_appCtx->deviceManager()
+                                     ? m_appCtx->deviceManager()->presetLadderIndex()
+                                     : 0), 3000);
                 // 精细/深孔：P-5 收敛后无独立预设（保持当前亮度档——待真机标定预设）
                 m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
                 // 260927 就绪流程（用户口径）：UI 模式键只备会话（模式/帧流/工作流），
