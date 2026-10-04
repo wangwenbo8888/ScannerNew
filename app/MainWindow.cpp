@@ -1414,6 +1414,10 @@ void MainWindow::setScanButtonVisual(int idx, bool active){
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    // 261003：独立顶层弹窗（nullptr 父——主窗口关闭时不会自动关，须显式收）
+    if (m_vkeyPad) { m_vkeyPad->close(); delete m_vkeyPad; m_vkeyPad = nullptr; }
+    if (m_menuDlg) { m_menuDlg->close(); delete m_menuDlg; m_menuDlg = nullptr; }
+    if (m_banner) { delete m_banner; m_banner = nullptr; }
     if (m_floatingToolbar) {
         m_floatingToolbar->close();
         delete m_floatingToolbar;
