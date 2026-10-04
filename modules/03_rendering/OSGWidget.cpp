@@ -144,33 +144,27 @@ void OSGWidget::home()
         m_viewer->getCameraManipulator()->home(0);
 }
 
-// P-2 显示远近档（261002 §3.3.2）：档 i → 视点距注视点距离＝基准 × factor[i]。
-// 基准＝当前 manipulator 的 home 距离（placeOptimalCamera 每次流式/重置都会设，
-// 作为「档 1 最近」锚）；保持注视点与方向只沿视线伸缩距离。档值系数产线对账
-// 前占位（1.0/1.5/2.2/3.2/4.5）
+// P-2 显示远近档（261002 §3.3.2；261004 三修定版）：**合成滚轮事件**缩放——
+// 与鼠标滑轮完全同一代码路径（TrackballManipulator 内部处理，语义绝对一致：
+// 保留旋转/平移，只沿视轴缩放）。方向：R（升档）＝SCROLL_UP 拉近变大、L（降档）
+// ＝SCROLL_DOWN 拉远变小。历史教训（261004 真机三轮实证）：
+//   ① home 绝对锚版——用户转视角后首换档相机跳回 home 朝向＝画面整体平移；
+//   ② setByMatrix 版——对 Orbit 系 manipulator 距离语义不完整采纳：无响应
+//     （getMatrix 世界系分解失败）或注视点被改写＝点云左右移动；全部废除
 void OSGWidget::setViewDistanceLadder(int idx)
 {
-    static const double kFactors[] = {1.0, 1.5, 2.2, 3.2, 4.5};
     if (idx < 1 || idx > 5) return;
-    osgGA::CameraManipulator* manip =
-        m_viewer.valid() ? m_viewer->getCameraManipulator() : nullptr;
-    if (!manip) return;
-    // 基准距离：home 矩阵的视距（与当前视点解耦——用户旋转/平移后换档仍回到
-    // 「本档远近」而非叠加当前状态）
-    osg::Vec3d hEye, hCtr, hUp;
-    manip->getHomePosition(hEye, hCtr, hUp);
-    if (hEye == osg::Vec3d(0, 0, 0) && hCtr == hEye) {
-        // 无 home（理论不达——初始化即设）：退回当前视距作基准
-        osg::Vec3d eye, center, up;
-        manip->getMatrix().getLookAt(eye, center, up);
-        hEye = eye; hCtr = center; hUp = up;
-    }
-    const osg::Vec3d dir = hCtr - hEye;
-    const double baseLen = dir.length();
-    if (baseLen <= 0.0) return;
-    const osg::Vec3d n = dir / baseLen;
-    const double target = baseLen * kFactors[idx - 1];
-    manip->setByMatrix(osg::Matrixd::lookAt(hCtr - n * target, hCtr, hUp));
+    if (idx == m_distLadderIdx) return;             // 同档 no-op
+    if (!m_gw || !m_gw->getEventQueue()) return;
+    const int steps = idx - m_distLadderIdx;        // + = 升档（拉近距离）
+    const osgGA::GUIEventAdapter::ScrollingMotion dir =
+        steps > 0 ? osgGA::GUIEventAdapter::SCROLL_UP
+                  : osgGA::GUIEventAdapter::SCROLL_DOWN;
+    constexpr int kNotchesPerGear = 3;              // 每档 ≈ 3 滚轮刻度（×1.1³≈1.33）
+    const int notches = (steps > 0 ? steps : -steps) * kNotchesPerGear;
+    for (int i = 0; i < notches; ++i)
+        m_gw->getEventQueue()->mouseScroll(dir);
+    m_distLadderIdx = idx;
 }
 
 void OSGWidget::createAxesIndicator()

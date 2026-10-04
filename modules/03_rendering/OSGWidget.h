@@ -231,6 +231,9 @@ private:
     float m_lastMouseY;
     bool m_firstMouse;
 
+    int m_distLadderIdx = 3;   // 显示远近档当前档（1-5；默认中位 3）——261004
+                               // 档间比值伸缩基准（与滚轮同语义），同档 no-op
+
     std::ifstream m_streamFile;
     std::vector<char> m_streamFileBuf;   // 流文件 1MB 缓冲（pubsetbuf——须存活于读全程）
     std::string m_streamPath;
