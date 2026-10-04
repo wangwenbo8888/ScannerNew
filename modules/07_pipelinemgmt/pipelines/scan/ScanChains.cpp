@@ -548,18 +548,36 @@ ScanChains::Hooks ScanChains::assemble() {
                     const std::vector<cv::Point2f> vL(hL.ptr<cv::Point2f>(),
                                                       hL.ptr<cv::Point2f>() + hL.total());
                     if (vL.empty()) return 0;
-                    constexpr float kDisparity = 30.0f;
-                    std::vector<cv::Point2f> matchedL(vL);
+                    // —— 261004 修正：固定视差按标定 Q 反算（原硬编码 30px 配当前
+                    //    Q 得 Z≈5703mm 常数——任何物理距离区间必滤空，10/3 景深
+                    //    特性上线后零点云根因，真机实测 Z min=中位=max=5702.9）。
+                    //    d = Q43/(Q32·Z_target)；目标 350mm＝工作距离 30-40cm 中位
+                    //    （261004 用户口径）。真匹配（查表）接入后本块整体退役。
+                    const double q43 = frame->snapshot.Q(2, 3);   // Matx44d（f）
+                    const double q32 = frame->snapshot.Q(3, 2);   // 1/B
+                    constexpr double kTargetDepthMm = 350.0;
+                    const float kDisparity = (std::abs(q32) > 1e-12)
+                        ? static_cast<float>(q43 / (q32 * kTargetDepthMm))
+                        : 30.0f;                       // Q 异常兜底（旧值）
+                    std::vector<cv::Point2f> matchedL;
                     std::vector<cv::Point2f> matchedR;
+                    matchedL.reserve(vL.size());
                     matchedR.reserve(vL.size());
-                    for (const auto& p : vL)
+                    for (const auto& p : vL) {
+                        // 左缘带（x<视差）右匹配点为负坐标＝无效，跳过
+                        if (p.x < kDisparity) continue;
+                        matchedL.push_back(p);
                         matchedR.emplace_back(p.x - kDisparity, p.y);
-                    std::vector<int> matchedIds(vL.size());
-                    for (size_t i = 0; i < vL.size(); ++i) matchedIds[i] = static_cast<int>(i);
-                    const int n = static_cast<int>(vL.size());
+                    }
+                    if (matchedL.empty()) return 0;
+                    std::vector<int> matchedIds(matchedL.size());
+                    for (size_t i = 0; i < matchedL.size(); ++i) matchedIds[i] = static_cast<int>(i);
+                    const int n = static_cast<int>(matchedL.size());
                     JMW_LOG_INFO("07-ScanChains",
-                                 "[ScanChains] 激光帧#{}（{}斜）固定视差重建 {} 点",
-                                 frame->frameId, leftSkewFrame ? "左" : "右", n);
+                                 "[ScanChains] 激光帧#{}（{}斜）固定视差重建 {} 点"
+                                 "（d={:.0f}px→Z≈{}mm）",
+                                 frame->frameId, leftSkewFrame ? "左" : "右", n,
+                                 kDisparity, kTargetDepthMm);
                     d_mL.upload(cv::Mat(n, 1, CV_32FC2, matchedL.data()), stream);
                     d_mR.upload(cv::Mat(n, 1, CV_32FC2, matchedR.data()), stream);
                     d_mId.upload(cv::Mat(n, 1, CV_32SC1, matchedIds.data()), stream);
