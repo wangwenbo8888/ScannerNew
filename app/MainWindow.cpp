@@ -455,7 +455,8 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                 }
                             }
                         } else if (p1 == 113) {    // 体素密度档（①子态常驻行内刷新
-                            refreshBannerPersistent();  // ——设计：不单独发横幅）
+                            refreshBannerPersistent();
+                            refreshMenuDialog();       // P-菜单弹窗①子态值更新
                             // P-分辨率：滑条回显——不用 QSignalBlocker（valueChanged
                             // 只刷标签不回调 setVoxelLadderIndex，无环路）
                             if (m_voxelSlider) {
@@ -467,8 +468,9 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         } else if (p1 == 114) {     // 景深直切
                             showBanner(p2 == 1 ? QStringLiteral("景深 ▸ 远")
                                                : QStringLiteral("景深 ▸ 近"));
-                        } else if (p1 == 110) {     // 菜单变化（含子态进出）→ 常驻重建
+                        } else if (p1 == 110) {     // 菜单变化（含子态进出）
                             refreshBannerPersistent();
+                            refreshMenuDialog();       // P-菜单弹窗
                         } else if (p1 == 115) {     // 换调节对象 → 亮度（P-键盘补）
                             showBanner(QStringLiteral("调节 ▸ 亮度"));
                         } else if (p1 == 116) {     // 换调节对象 → 显示远近（P-键盘补）
@@ -480,6 +482,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                         : QStringLiteral("面片扫描")));
                         } else if (p1 == 120) {     // 执行结果/拒因（P-3：红底横幅）
                             // p2 拒因码：1=已急停 2=标点会话隔离 3=扫描中改密度防呆
+                            if (m_menuDlg) m_menuDlg->hide();   // 急停/拒因关菜单弹窗
                             showBanner(p2 == 1 ? QStringLiteral("已急停")
                                              : p2 == 2 ? QStringLiteral("标点会话·模式锁定")
                                              : p2 == 3 ? QStringLiteral("扫描中·密度锁定")
@@ -1505,6 +1508,83 @@ void MainWindow::showBanner(const QString& text, bool danger)
     m_banner->raise();
     m_banner->show();
     m_bannerTimer->start();
+}
+
+// ============================================================================
+// P-菜单弹窗（独立置顶窗口）：进菜单弹出、退菜单关闭、游标实时高亮＋子态提示
+// 随 p1=110 事件（菜单变化）驱动刷新
+// ============================================================================
+void MainWindow::refreshMenuDialog() {
+    auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+    if (!dm) return;
+    const auto ms = dm->menuState();
+    using Sub = Scanner::device::MenuState::Substate;
+
+    // 主界面＝关闭弹窗
+    if (ms.layer != 2) {
+        if (m_menuDlg) m_menuDlg->hide();
+        return;
+    }
+
+    // 懒建弹窗（首次进菜单时创建独立置顶窗）
+    if (!m_menuDlg) {
+        m_menuDlg = new QDialog(nullptr);
+        m_menuDlg->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        m_menuDlg->setWindowTitle(QStringLiteral("菜单"));
+        m_menuDlg->setModal(false);
+        m_menuDlg->setMinimumSize(320, 300);
+        auto* lay = new QVBoxLayout(m_menuDlg);
+        lay->setContentsMargins(20, 16, 20, 12);
+        lay->setSpacing(4);
+        static const char* kNames[5] = {
+            "① 分辨率设置", "② 进入就绪", "③ 扫描完成", "④ 后处理", "⑤ 重置"
+        };
+        for (int i = 0; i < 5; ++i) {
+            m_menuItems[i] = new QLabel(QString::fromUtf8(kNames[i]), m_menuDlg);
+            m_menuItems[i]->setMinimumHeight(36);
+            m_menuItems[i]->setAlignment(Qt::AlignCenter);
+            lay->addWidget(m_menuItems[i]);
+        }
+        m_menuSubLbl = new QLabel(m_menuDlg);
+        m_menuSubLbl->setAlignment(Qt::AlignCenter);
+        m_menuSubLbl->setStyleSheet("font-size: 16px; font-weight: bold; padding: 8px;");
+        lay->addWidget(m_menuSubLbl);
+        auto* hint = new QLabel(
+            QStringLiteral("L/R 移动游标 · M 选中 · U 退出"), m_menuDlg);
+        hint->setAlignment(Qt::AlignCenter);
+        hint->setStyleSheet("color: #888; font-size: 12px;");
+        lay->addWidget(hint);
+    }
+
+    // 五项样式：当前游标高亮蓝底白字，其余白底黑字
+    for (int i = 0; i < 5; ++i) {
+        const bool cur = (ms.cursor == i + 1);
+        m_menuItems[i]->setStyleSheet(cur
+            ? QStringLiteral(
+                "background-color: #2980B9; color: white; font-size: 18px;"
+                " font-weight: bold; border-radius: 6px;")
+            : QStringLiteral(
+                "background-color: #F5F5F5; color: #333; font-size: 16px;"
+                " border-radius: 6px;"));
+    }
+
+    // 子态提示
+    if (ms.substate == Sub::AdjustVoxel) {
+        m_menuSubLbl->setText(QStringLiteral("分辨率 %1mm（L/R 调 · M 确认）")
+            .arg(dm->voxelLadderValue(), 0, 'f', 2));
+        m_menuSubLbl->setStyleSheet(
+            "font-size: 18px; font-weight: bold; color: #27AE60; padding: 8px;");
+    } else if (ms.substate == Sub::ConfirmReset) {
+        m_menuSubLbl->setText(QStringLiteral("再按 M 确认重置（其他键取消）"));
+        m_menuSubLbl->setStyleSheet(
+            "font-size: 18px; font-weight: bold; color: #C0392B; padding: 8px;");
+    } else {
+        m_menuSubLbl->setText(QString());
+    }
+
+    m_menuDlg->show();
+    m_menuDlg->raise();
+    m_menuDlg->activateWindow();
 }
 
 // 常驻行重建（菜单变化/子态/①档位变化后调）：菜单期显示游标项，①⑤子态显

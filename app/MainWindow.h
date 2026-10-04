@@ -116,10 +116,14 @@ protected:
     QPushButton *m_vkeyBtns[5][3] = {};     // P-键盘态同步：[行][手势] 按钮指针
                                             //   行序 U/D/L/R/M×单击/双击/长按（懒建后填）
     class QLabel *m_vkeyStateLbl = nullptr; // P-键盘态同步：当前全局态常驻标签
+    QDialog *m_menuDlg = nullptr;           // P-菜单弹窗（独立窗口，懒建）
+    class QLabel *m_menuItems[5] = {};      // 菜单五项标签（①~⑤，高亮当前游标）
+    class QLabel *m_menuSubLbl = nullptr;   // 子态提示标签（①调节值/⑤确认）
     /// P-键盘态同步（§3.2.5 七态矩阵）：按当前全局态灰化/恢复表盘按钮——
     /// S1/S3/S6/S7 全拦态＝除逃生类（M 长按急停/U 长按回主界面）外全灰；
     /// S2/S4/S5＝恢复（功能口拒的键仍可按——拒因在横幅可见）
     void updateVirtualKeypadStates();
+    void refreshMenuDialog();              // P-菜单弹窗：进菜单弹出/退菜单关闭/游标高亮/子态
     QList<QPushButton*> m_navLeftButtons;
     QList<QPushButton*> m_navRightButtons;
     QList<QPushButton*> m_toolButtons;
