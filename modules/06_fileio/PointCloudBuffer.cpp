@@ -4,6 +4,8 @@
 
 #include <algorithm>   // replacePointCloud: min
 
+#include "jmw_logging.h"   // 261004 排障插桩（pushSessionCloud 记数）
+
 namespace Scanner::data {
 
 PointCloudBuffer::PointCloudBuffer() {}
@@ -62,7 +64,13 @@ Result PointCloudBuffer::clear() {
         allColors_.clear();
         cloudBaseCount_ = 0;
     }
+    {   // 261004 补：标志点段同清——原 clear 只清点云段，⑤重置后 markers 残留
+        // （arm 时 02 续扫基准读到旧会话 3 点＝实证）
+        std::unique_lock lock(markerRwlock_);
+        markers_.clear();
+    }
     version_.fetch_add(1, std::memory_order_release);
+    markerVersion_.fetch_add(1, std::memory_order_release);
     totalPoints_.store(0, std::memory_order_release);
     return Result::ok();
 }
@@ -79,6 +87,9 @@ void PointCloudBuffer::beginCloudSession() {
 
 void PointCloudBuffer::pushSessionCloud(const std::vector<float>& xyzInterleaved) {
     const size_t n = xyzInterleaved.size() / 3;
+    JMW_LOG_INFO("06-PointCloudBuffer",
+        "[仓库] pushSessionCloud: {} 点（基线 {}→合计 {}）——261004 排障插桩",
+        n, cloudBaseCount_, cloudBaseCount_ + n);
     {
         std::unique_lock lock(rwlock_);
         // 会话层替换（累计快照语义）：截回基线前缀再重建会话段——跨会话只增

@@ -696,11 +696,24 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
             frameBuffer_->pushFrame(fd);
         }
         // ② 扫描链：02 会话环（enrich 出口查表→SlotRing；非扫描期该口自弃）
-        if (scanWf_) {
+        // 261004 门控修正：设备未开采集（M 键未按＝N11H0 无激光/补光投影）不喂
+        // 会话环——相机流常开（stopCapture 不停流），就绪态（arm 后 M 前）帧为
+        // 无光场暗图，标志点链吃垃圾帧→伪点无限累积（真机实证：仅点面片扫描
+        // 按钮未点启停即冒 3000+ 点）。isCapturing＝设备采集记账（M 开 M 关），
+        // 停采保活期同弃（与 fusion 暂停语义一致）；预览①/调试③不受影响
+        if (scanWf_ && dm->isCapturing()) {
             const auto t = dm->getLastTemperatures();
             const double tempC = (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
             scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId,
                                       frame.tvKnown, frame.tvLeftSkew, dm->captureMode());
+        } else if (scanWf_) {
+            // 261004 排障插桩：帧到达但被门控丢弃（就绪态相机流仍来帧＝正常，
+            // 管线不应收到——若「arm 后冒点」必看此计数 vs 激光帧日志）
+            static std::atomic<uint64_t> s_gateDrop{0};
+            if (s_gateDrop.fetch_add(1, std::memory_order_relaxed) % 30 == 0)
+                JMW_LOG_INFO("app-AppContext",
+                    "[帧门控] 累计丢弃 {} 帧（会话环未采集态）——261004 排障插桩",
+                    s_gateDrop.load(std::memory_order_relaxed));
         }
         // ③ 调试分路：相机预览监视弹窗（相机 SDK 线程直调；订阅方切线程+节流自理）
         // 260912 终审证据：tap 空（监视窗未挂/已关）vs tap 心跳（活着）双路日志
@@ -837,9 +850,14 @@ Scanner::Result AppContext::discardScanSession() {
     return r;
 }
 
-// ⑤ S2 分支：无会话清残留工作集（同样全清——06 点云仓库＋显示链缓存）
+// ⑤ S2 分支：无会话清残留工作集（同样全清——06 点云仓库＋显示链缓存）；
+// 261004 补防御：设备若仍在采集（残留态）一并停采——⑤口径＝回干净待机
 Scanner::Result AppContext::clearResidualWorkingSet() {
     if (!pointCloudBuffer_) return Scanner::Result::fail("点云仓库未装配");
+    if (deviceManager_ && deviceManager_->isCapturing()) {
+        deviceManager_->stopCapture();          // 残留采集停（N11 H0＋相机停流）
+        JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤ S2 分支检出残留采集——已补停采");
+    }
     const auto r = pointCloudBuffer_->clear();
     if (sceneFeed_) sceneFeed_->clearCache();   // latestMarkers 残留同清（261004）
     JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤ S2 残留工作集清理: {}（{}）",

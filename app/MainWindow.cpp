@@ -300,6 +300,8 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
             // 激光点云（host 块直推——FuseConsumer 下载的当帧激光块）
             connect(feed, &SceneFeedAdapter::laserCloudUpdated, this,
                     [this](const std::vector<cv::Point3f>& pts) {
+                JMW_LOG_INFO("app-MainWindow",
+                    "[3D激光渲染] laserCloudUpdated 推送 {} 点——261004 排障插桩", pts.size());
                 // 显示/导出减负（260919：全域扫描后融合云至数百万点——全量 VBO
                 // 重传＋数千万字节文本 PLY 每 30 拍写盘拖死 UI；>150 万点按步长
                 // 抽样至 ~150 万（仓库/日志计数仍为全量真值）
@@ -1960,6 +1962,18 @@ QWidget *MainWindow::createToolBar()
                           : (i == 4) ? Scanner::ScanMode::FineScan
                                      : Scanner::ScanMode::DeepHoleScan;
             connect(btn, &QPushButton::clicked, this, [this, myIdx, title, mode]() {
+                // 261004 排障插桩：模式键入口全状态快照（重置后 arm 冒点定位）
+                {
+                    auto* dmI = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+                    auto* pcbI = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;
+                    JMW_LOG_WARN("app-MainWindow",
+                        "[模式键] 点击「{}」：会话活={} 采集活={} 就绪凭据={} 仓库={} 点",
+                        title.toStdString(),
+                        m_appCtx ? m_appCtx->isScanSessionActive() : false,
+                        dmI ? dmI->isCapturing() : false,
+                        dmI ? dmI->isScanReady() : false,
+                        pcbI ? pcbI->getTotalPointCount() : -1);
+                }
                 if (!m_appCtx) return;
                 // —— 编辑成果物理化（P4b 2026-09-06）：就绪态续采/完成前，把悬浮
                 //    工具栏的显示级删除（alpha=0）路由到真账本——融合云移除＋obs
@@ -2052,6 +2066,12 @@ QWidget *MainWindow::createToolBar()
                 if (m_appCtx->deviceManager())
                     m_appCtx->deviceManager()->setCalibCaptureArmed(false);   // 扫描会话撤标定布防
                 const auto r = m_appCtx->armScanSession(mode);
+                {
+                    auto* pcbI = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;
+                    JMW_LOG_WARN("app-MainWindow",
+                        "[模式键] arm 结果 ok={} msg={} 仓库={} 点——261004 排障插桩",
+                        r.success, r.message, pcbI ? pcbI->getTotalPointCount() : -1);
+                }
                 if (!r.success) {
                     QMessageBox::warning(this, title,
                         QString::fromStdString("扫描就绪被拒:\n" + r.message));
@@ -3177,6 +3197,9 @@ void MainWindow::startInfoTimer()
         std::vector<cv::Point3f> points;
         std::vector<cv::Vec3b> colors;
         pcb->getSnapshot(version, points, colors);
+        JMW_LOG_INFO("app-MainWindow",
+            "[cloudTimer] 3D 重载 {} 点（仓库计数 {}）——261004 排障插桩",
+            points.size(), curCount);
         m_3dView->loadCloudSnapshot(version, points, colors);
         lastCount = curCount;
     });
