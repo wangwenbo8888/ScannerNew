@@ -154,15 +154,32 @@ void OSGWidget::home()
 // 本 manipulator SCROLL_UP＝拉远（真机实证）——拉近须发 DOWN
 void OSGWidget::setViewDistanceLadder(int idx) { (void)idx; /* 兼容壳：档号语义已废 */ }
 
-// 显示远近按键缩放（261004 定版）：见头注。方向：gears>0 拉近＝SCROLL_DOWN
-// （本 manipulator SCROLL_UP＝拉远——真机实证）
+// 显示远近按键缩放（261004 终版）：**TrackballManipulator::setDistance 直控**——
+// 每档距离 ×/÷ 常数（精确互逆，来回零漂移）。历史教训（真机五轮实证，全废）：
+//   ① home 绝对锚——换档跳回 home 朝向＝画面平移；② setByMatrix——Orbit 系距离
+//   语义不完整＝无响应/点云横移；③滚轮合成——每刻度进出系数 0.9/1.1 非互逆
+//   （0.9×1.1=0.99），一来回净漂 9%＝反复缩放点云持续向镜头移动根因；④控件内
+//   档号锚——跨重启失步＝首按反向。setDistance 与 fitCloudOptimal 同款成熟路径
 void OSGWidget::zoomGears(int gears) {
     if (gears == 0) return;
+    osgGA::CameraManipulator* manip =
+        m_viewer.valid() ? m_viewer->getCameraManipulator() : nullptr;
+    if (!manip) return;
+    constexpr double kPerGear = 2.36;      // 每档缩放系数（261004 定版：×4.72 步子
+                                            // 过大一按即过头真机实证；范围由档位数
+                                            // 承担——梯扩 9 档后最大≈中位×31）
+    if (auto* tb = dynamic_cast<osgGA::TrackballManipulator*>(manip)) {
+        const double d = tb->getDistance();
+        if (d <= 0.0) return;
+        tb->setDistance(gears > 0 ? d / kPerGear : d * kPerGear);
+        return;
+    }
+    // 非 Trackball 兜底：滚轮合成（本工程两处创建均 Trackball，理论不达）
     if (!m_gw || !m_gw->getEventQueue()) return;
     const osgGA::GUIEventAdapter::ScrollingMotion dir =
         gears > 0 ? osgGA::GUIEventAdapter::SCROLL_DOWN
                   : osgGA::GUIEventAdapter::SCROLL_UP;
-    constexpr int kNotchesPerGear = 3;              // 每档 ≈ 3 滚轮刻度（×1.1³≈1.33）
+    constexpr int kNotchesPerGear = 9;
     const int notches = (gears > 0 ? gears : -gears) * kNotchesPerGear;
     for (int i = 0; i < notches; ++i)
         m_gw->getEventQueue()->mouseScroll(dir);

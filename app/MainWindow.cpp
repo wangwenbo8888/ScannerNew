@@ -245,17 +245,17 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                 f.write(out);
                             }
                         }
-                        // 工程树实时计数（节流 1/30 信号）：当前扫描会话节点
-                        // 「标记点 00N (M)」＝重建标志点个数（融合云瞬时点数）；
-                        // 历史会话节点保留各自最终值；点云数据由落库后 cloudTimer 更新
-                        static std::atomic<uint64_t> s_treeTicks{0};
-                        if (s_treeTicks.fetch_add(1) % 30 == 0) {
-                            if (m_markerCurrentItem)
-                                m_markerCurrentItem->setText(
-                                    0, QStringLiteral("标记点 %1 (%2)")
-                                              .arg(m_markerScanSeq, 3, 10, QChar('0'))
-                                              .arg(pts.size()));
-                        }
+                        // 工程树实时计数（261004 修：原节流 1/30 信号＝约 10s 才刷
+                        // 一次，首信号常为空把计数钉在 (0)——3D 已见标志点而数字
+                        // 滞后真机实证；setText 极廉价且信号源已 300ms 节流，
+                        // 改每信号直更）：当前扫描会话节点「标记点 00N (M)」＝
+                        // 重建标志点个数（融合云瞬时点数）；历史会话节点保留
+                        // 各自最终值；点云数据由落库后 cloudTimer 更新
+                        if (m_markerCurrentItem)
+                            m_markerCurrentItem->setText(
+                                0, QStringLiteral("标记点 %1 (%2)")
+                                          .arg(m_markerScanSeq, 3, 10, QChar('0'))
+                                          .arg(pts.size()));
                         if (!m_3dView || pts.empty()) return;
                         // 排障插桩（260927 标志点不显示）：信号到达＋首点坐标量级留痕
                         {
@@ -3179,10 +3179,12 @@ void MainWindow::startInfoTimer()
         // 显示远近档差锚自愈同步（261004 首按反向二修）：面板构建时快照可能
         // 尚未刷新（成员初值 1≠持久化真档）→ 锚错首按方向反。每秒跟随 DM
         // 快照收敛——112 事件到来时锚必等于 DM 当前真档（跨事件无其他写者，
-        // 事件后 DM 档＝事件档，下拍同步等价于"记上次事件档"）
+        // 事件后 DM 档＝事件档，下拍同步等价于"记上次事件档"）。上限取 DM
+        // 动态档数（261004 梯扩 9 档——原硬编码 5 会错钳锚）
         if (auto* dmDist = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
             const int dg = dmDist->distanceLadderIndex();
-            if (dg >= 1 && dg <= 5) m_lastDistGear = dg;
+            const int ds = dmDist->distanceLadderSize();
+            if (ds > 0 && dg >= 1 && dg <= ds) m_lastDistGear = dg;
         }
     });
     m_infoTimer->start(1000);
