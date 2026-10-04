@@ -1378,12 +1378,14 @@ void MainWindow::updateVirtualKeypadStates() {
             auto* btn = m_vkeyBtns[r][g];
             if (!btn) continue;
             // 261004 用户指令：急停（M长按）/回主界面（U长按）暂时停用——按钮
-            // 永久置灰（08 侧手势同弃，见 KeySemantics 逃生类停用注释）
-            const bool escape = (r == 4 && g == 2) || (r == 0 && g == 2);
+            // 永久置灰（08 侧手势同弃，见 KeySemantics 逃生类停用注释）。
+            // ⚠ 两处配合缺一不可：①escape 并入 enabled 短路式须为 false（否则
+            // 常规分支 escape||… 恒真）；②停用按钮并入 reserved（否则非全拦态可用）
+            const bool isEscapeBtn = (r == 4 && g == 2) || (r == 0 && g == 2);
             const bool escapeEnabled = false;
-            // 停用的逃生按钮并入 reserved——否则落回常规分支（非全拦态仍可用）
+            const bool escape = isEscapeBtn && escapeEnabled;
             const bool reserved = (r == 1) || (r == 2 && g == 2) ||
-                                  (r == 3 && g >= 1) || (escape && !escapeEnabled);
+                                  (r == 3 && g >= 1) || (isEscapeBtn && !escapeEnabled);
             bool enabled;
             if (inCalib && !capturing) {
                 // 校准布防态：M 短按（开拍）＋逃生类可用；菜单/调节/切模式灰
