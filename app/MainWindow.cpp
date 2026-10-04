@@ -190,7 +190,11 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                     statusBar()->showMessage(QStringLiteral("扫描启动失败（后台装配）——详见日志"), 5000);
                 }
                 // 终局遍弹窗兜底关闭（正常完成路径由 100% 关；此为安全网）
-                if (m_finalBADlg) { m_finalBADlg->close(); m_finalBADlg = nullptr; }
+                // 261003 延迟 1s：GBA 瞬时降级时关闭事件与 show 同一事件循环→弹窗
+                // 还没画出来就被关（用户「没弹出」根因）；延迟保证至少可见 1 秒
+                QTimer::singleShot(1000, this, [this]() {
+                    if (m_finalBADlg) { m_finalBADlg->close(); m_finalBADlg = nullptr; }
+                });
             }, Qt::QueuedConnection);
         });
         // 终局遍进度弹窗（260920：finish 后台 GBA 分钟级——用户须见"优化中"；
