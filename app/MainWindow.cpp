@@ -1492,7 +1492,7 @@ void MainWindow::showBanner(const QString& text, bool danger)
         m_banner->setWordWrap(false);
         m_bannerTimer = new QTimer(this);
         m_bannerTimer->setSingleShot(true);
-        m_bannerTimer->setInterval(1800);
+        m_bannerTimer->setInterval(10000);   // 261003 用户口径：停留 10 秒
         connect(m_bannerTimer, &QTimer::timeout, this, [this]() {
             if (!m_bannerPersist.isEmpty()) {
                 // 恢复菜单期常驻（非红——常驻红只属⑤确认子态，由刷新器定色）
