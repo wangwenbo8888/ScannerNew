@@ -94,8 +94,13 @@ void KeySemantics::onGesture(const serial::GestureEvent& g, const MenuState& men
         }
         if (inMenu) {                                // 菜单浏览态：游标（菜单优先于调节）
             if (!askGate(KeyCategory::Menu)) { actions_.dropped("门禁"); return; }
-            if (g.key == K::Left) actions_.cursorLeft();
-            else actions_.cursorRight();
+            // 261004 竖排方向对齐：菜单 UI 五项竖排（①顶→⑤底），而 L/R 键在主
+            // 界面的语义是「调档↓/↑」——原映射 L＝cursorLeft（向①＝视觉上）致
+            // 「按↓游标往上走」方向拧了（261004 用户实测报）。对齐为：L(↓)＝向⑤
+            // （视觉下），R(↑)＝向①（视觉上）。MenuLogic 算子名 Left/Right 为
+            // 历史命名（Left=-1 向① / Right=+1 向⑤），此处按视觉方向接线。
+            if (g.key == K::Left) actions_.cursorRight();   // L(调档↓)＝游标向⑤（下）
+            else actions_.cursorLeft();                     // R(调档↑)＝游标向①（上）
         } else {                                     // 主界面：调当前对象（二选一恒有对象）
             if (!askGate(KeyCategory::Adjust)) { actions_.dropped("门禁"); return; }
             if (g.key == K::Left) actions_.adjustDown();

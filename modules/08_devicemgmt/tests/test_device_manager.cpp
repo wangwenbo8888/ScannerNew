@@ -377,17 +377,17 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     kit.shortPress('U');                                       // 上键短按 L1：进菜单（cursor 复位①）
     EXPECT_EQ(st().layer, 2);
     EXPECT_EQ(st().cursor, 1);
-    for (int i = 0; i < 5; ++i) kit.shortPress('R');           // 右键短按×5：①→②…⑤→① 环绕
+    // 261004 竖排方向对齐后：R(↑)＝-1 向①、L(↓)＝+1 向⑤（见 KeySemantics 注释）
+    for (int i = 0; i < 5; ++i) kit.shortPress('R');           // 右(上)×5：①→⑤→④…②→① 环绕
     EXPECT_EQ(st().cursor, 1);
-    kit.shortPress('L');                                       // 左键短按：①→⑤ 环绕
-    EXPECT_EQ(st().cursor, 5);
+    kit.shortPress('L');                                       // 左(下)：①→②（视觉下移）
+    EXPECT_EQ(st().cursor, 2);
     kit.doublePress('M');                                      // 菜单内双击＝收紧丢弃（模式不动）
     EXPECT_EQ(st().modeCursor, 3);                             // 仍是 3（未切）
     kit.doublePress('M');
     kit.doublePress('M');                                      // 3→1→2→3（丢弃不切——非路径验证）
     const int64_t post0 = rec.userParam(104);
-    kit.shortPress('R');                                       // 游标⑤→①
-    for (int i = 0; i < 3; ++i) kit.shortPress('R');           // ①→②→③→④
+    for (int i = 0; i < 2; ++i) kit.shortPress('L');           // 左(下)×2：②→③→④
     kit.shortPress('M');                                       // 中键短按 L2 选中④：后处理事件 p1=104
     EXPECT_EQ(st().layer, 1);                                  // 执行并自动退菜单（261002 定稿）
     EXPECT_EQ(rec.userParam(104), post0 + 1);
@@ -1000,7 +1000,7 @@ TEST(DeviceManager, T17_KeyModeDispatchToN10) {
     dm.testInjectTextLine("G01 M2");             // 菜单内双击＝丢弃
     dm.logicTick();
     EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::DeepHoleScan);   // 模式不变
-    dm.testInjectTextLine("G01 R1");             // 游标①→②
+    dm.testInjectTextLine("G01 L1");             // 游标①→②（261004 竖排：L(↓)＝向⑤方向）
     dm.logicTick();
     const int64_t ready0 = rec.userParam(102);
     dm.testInjectTextLine("G01 M1");             // 选中②：就绪事件 p1=102＋自动退菜单

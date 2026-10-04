@@ -1222,12 +1222,12 @@ void MainWindow::showVirtualKeypad() {
               { QStringLiteral("协议 G01 无此键"), QStringLiteral("—"), QStringLiteral("—") } },
             { QStringLiteral("左键 L"), QChar('L'), true,
               { QStringLiteral("调档↓"), QStringLiteral("换对象"), QStringLiteral("预留") },
-              { QStringLiteral("单击＝调档 ↓（菜单态＝游标左移）"),
+              { QStringLiteral("单击＝调档 ↓（菜单态＝游标下移）"),
                 QStringLiteral("双击＝换调节对象 亮度↔显示远近"),
                 QStringLiteral("长按＝预留") } },
             { QStringLiteral("右键 R"), QChar('R'), true,
               { QStringLiteral("调档↑"), QStringLiteral("预留"), QStringLiteral("预留") },
-              { QStringLiteral("单击＝调档 ↑（菜单态＝游标右移）"),
+              { QStringLiteral("单击＝调档 ↑（菜单态＝游标上移）"),
                 QStringLiteral("双击＝预留"),
                 QStringLiteral("长按＝预留") } },
             { QStringLiteral("中键 M"), QChar('M'), true,
@@ -1558,7 +1558,7 @@ void MainWindow::refreshMenuDialog() {
         m_menuSubLbl->setStyleSheet("font-size: 16px; font-weight: bold; padding: 8px;");
         lay->addWidget(m_menuSubLbl);
         auto* hint = new QLabel(
-            QStringLiteral("L/R 移动游标 · M 选中 · U 退出"), m_menuDlg);
+            QStringLiteral("L↓/R↑ 移动游标 · M 选中 · U 退出"), m_menuDlg);
         hint->setAlignment(Qt::AlignCenter);
         hint->setStyleSheet("color: #888; font-size: 12px;");
         lay->addWidget(hint);
