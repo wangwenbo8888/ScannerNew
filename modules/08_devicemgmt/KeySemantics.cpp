@@ -14,13 +14,13 @@ void KeySemantics::onGesture(const serial::GestureEvent& g, const MenuState& men
     using G = serial::GestureEvent::Gesture;
     using Sub = MenuState::Substate;
 
-    // ── 0. 逃生类优先（免门禁、全域一致、子态内照常执行）──
-    if (g.key == K::Middle && g.gesture == G::Hold) {
-        actions_.emergencyStop();                    // 急停：子态解散归 DeviceManager 收尾
-        return;
-    }
-    if (g.key == K::Up && g.gesture == G::Hold) {
-        actions_.backToMain();                       // 回主界面：含子态/调节全清
+    // ── 0. 逃生类（急停 M/H·回主界面 U/H）——261004 用户指令暂时停用 ──
+    // 【停用原因】临时测试机阶段手势长按误触发（扫描中 M 长按易混入连按），急停
+    // 灭灯序与采集链路收口改由软件停采/关会话路径承担。两手势现按「预留」丢弃
+    // 留痕；恢复＝去掉本注释块下方 return 前的丢弃分支（逃生类逻辑本体不动）。
+    if ((g.key == K::Middle && g.gesture == G::Hold) ||
+        (g.key == K::Up && g.gesture == G::Hold)) {
+        actions_.dropped("逃生类已停用（261004 暂时取消急停/回主界面）");
         return;
     }
 

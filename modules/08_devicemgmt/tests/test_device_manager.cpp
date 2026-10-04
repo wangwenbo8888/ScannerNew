@@ -419,13 +419,15 @@ TEST(DeviceManager, T6_MenuTraversalFourKeysThreeGestures) {
     EXPECT_NEAR(dm.getParam("exposure").value,
                 PresetLadder::builtinLadder()[0].exposureMs, 1e-9);
 
-    // 长按新出口（261002 §3.3.1）：U/H＝回主界面（菜单态一键全退）；M/H＝急停
+    // 长按出口（261004 用户指令：U/H 回主界面与 M/H 急停暂时停用——丢弃留痕）
     kit.shortPress('U');                                       // 进菜单（游标①）
     EXPECT_EQ(st().layer, 2);
-    kit.holdPress('U');                                        // 回主界面：layer 清+对象回默认亮度
+    kit.holdPress('U');                                        // 停用：菜单不退（丢弃）
+    EXPECT_EQ(st().layer, 2);
+    kit.shortPress('U');                                       // 上短按退菜单
     EXPECT_EQ(st().layer, 1);
     EXPECT_EQ(st().adjustCtx, MenuState::AdjustCtx::Brightness);
-    kit.holdPress('M');                                        // 急停：不崩（未采集中＝无命令）
+    kit.holdPress('M');                                        // 急停停用：不崩不执行
     kit.holdPress('L');                                        // 左右长按预留
     kit.holdPress('R');
     EXPECT_EQ(st().layer, 1);
@@ -1102,11 +1104,12 @@ TEST(DeviceManager, T23_KeyStateGateInjection) {
     EXPECT_EQ(dm.presetLadderIndex(), 10);                            // 档位未动（261003 定版默认中位档 10）
     EXPECT_EQ(rec.userParam(114), 0);                                 // 景深事件未发
 
-    // 逃生类豁免：M/H 急停（未采集中＝纯子态解散不崩）＋ U/H 回主界面照常
+    // 逃生类（261004 暂时停用）：M/H、U/H 手势丢弃留痕——无动作无崩溃
     dm.testInjectTextLine("G01 M3");
     dm.testInjectTextLine("G01 U3");
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(dm.menuState().layer, 1);
+    EXPECT_FALSE(dm.isCapturing());                           // 急停停用：无任何设备动作
 
     // 换白名单（S2/S4/S5 等价放行）→ 启停恢复
     dm.setKeyStateGate([] { return true; });

@@ -129,15 +129,17 @@ TEST(KeySemantics, MidDoubleMainCyclesMode) {
     EXPECT_EQ(c.asked[0], KeyCategory::ModeSwitch);
 }
 
-// —— 4. MidHoldEmergencyStop：中键长按 → 急停（全域免门禁——gate 全关也执行）——
-TEST(KeySemantics, MidHoldEmergencyStop) {
+// —— 4. MidHoldEmergencyStop：中键长按＝急停——261004 用户指令暂时停用：
+//      两长按手势按「预留」丢弃留痕（不执行、不问门禁）；恢复见 KeySemantics 注释 ——
+TEST(KeySemantics, MidHoldEmergencyStopDisabled) {
     Counters c;
     auto k = referee(c, [](KeyCategory) { return false; });   // 门禁全关
     k.onGesture(kg(KeyId::Middle, Gest::Hold), ms(1));
     k.onGesture(kg(KeyId::Middle, Gest::Hold), ms(2));
-    EXPECT_EQ(c.emergencyStop, 2);
-    EXPECT_TRUE(c.asked.empty());                         // 逃生类不问门禁
-    EXPECT_TRUE(c.drops.empty());
+    EXPECT_EQ(c.emergencyStop, 0);                          // 停用：不执行
+    EXPECT_TRUE(c.asked.empty());                           // 仍不问门禁（丢弃在门禁前）
+    ASSERT_EQ(c.drops.size(), 2u);                          // 丢弃留痕恰两条
+    EXPECT_NE(c.drops[0].find("逃生类已停用"), std::string::npos);
 }
 
 // —— 5. UpShortEnterExit：上键短按 按层进/退菜单 ——
@@ -165,14 +167,16 @@ TEST(KeySemantics, UpDoubleDepthToggle) {
     EXPECT_EQ(c.drops[0], "菜单内双击");
 }
 
-// —— 7. UpHoldBackToMain：上键长按 → 回主界面（全域免门禁）——
-TEST(KeySemantics, UpHoldBackToMain) {
+// —— 7. UpHoldBackToMain：上键长按＝回主界面——261004 暂时停用（丢弃留痕）——
+TEST(KeySemantics, UpHoldBackToMainDisabled) {
     Counters c;
     auto k = referee(c, [](KeyCategory) { return false; });
     k.onGesture(kg(KeyId::Up, Gest::Hold), ms(2, Ctx::DisplayDistance));
     k.onGesture(kg(KeyId::Up, Gest::Hold), msSub(Sub::ConfirmReset));
-    EXPECT_EQ(c.backToMain, 2);                           // 子态内照常执行（逃生优先）
+    EXPECT_EQ(c.backToMain, 0);                            // 停用：不执行
     EXPECT_TRUE(c.asked.empty());
+    ASSERT_EQ(c.drops.size(), 2u);
+    EXPECT_NE(c.drops[1].find("逃生类已停用"), std::string::npos);
 }
 
 // —— 8. LeftDoubleSwitchCtx：左键双击主界面 → 换调节对象；菜单内收紧；右双击预留 ——

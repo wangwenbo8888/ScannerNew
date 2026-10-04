@@ -1230,7 +1230,7 @@ void MainWindow::showVirtualKeypad() {
               { QStringLiteral("菜单"), QStringLiteral("景深"), QStringLiteral("回主界面") },
               { QStringLiteral("单击＝进/退菜单"),
                 QStringLiteral("双击＝景深直切 近↔远"),
-                QStringLiteral("长按＝回主界面（全域免门禁）") } },
+                QStringLiteral("长按＝回主界面（261004 暂时停用）") } },
             { QStringLiteral("下键 D"), QChar('D'), false,
               { QStringLiteral("—"), QStringLiteral("—"), QStringLiteral("—") },
               { QStringLiteral("协议 G01 无此键"), QStringLiteral("—"), QStringLiteral("—") } },
@@ -1248,7 +1248,7 @@ void MainWindow::showVirtualKeypad() {
               { QStringLiteral("启停"), QStringLiteral("切模式"), QStringLiteral("急停") },
               { QStringLiteral("单击＝启/停扫描（菜单态＝选中）"),
                 QStringLiteral("双击＝切换扫描模式"),
-                QStringLiteral("长按＝急停（全域免门禁）") } },
+                QStringLiteral("长按＝急停（261004 暂时停用）") } },
         };
         for (int r = 0; r < 5; ++r) {
             const auto& row = rows[r];
@@ -1360,9 +1360,9 @@ void MainWindow::updateVirtualKeypadStates() {
             hintText = QStringLiteral("（按 M 开始五态循环采集）");
         } else if (capturing && inCalib) {
             stateText += QStringLiteral(" · 校准采集中");
-            hintText = QStringLiteral("（采集不可中断——急停退出 或 跑完自动停）");
+            hintText = QStringLiteral("（采集不可中断——跑完自动停；急停已停用）");
         } else if (blocking) {
-            hintText = QStringLiteral("（除急停/回主界面外全灰）");
+            hintText = QStringLiteral("（全灰——急停/回主界面已停用 261004）");
         } else {
             hintText = QStringLiteral("（可用）");
         }
@@ -1377,7 +1377,11 @@ void MainWindow::updateVirtualKeypadStates() {
         for (int g = 0; g < 3; ++g) {
             auto* btn = m_vkeyBtns[r][g];
             if (!btn) continue;
-            const bool escape = (r == 4 && g == 2) || (r == 0 && g == 2);
+            // 261004 用户指令：急停（M长按）/回主界面（U长按）暂时停用——按钮
+            // 永久置灰（08 侧手势同弃，见 KeySemantics 逃生类停用注释）
+            const bool escapeEnabled = false;
+            const bool escape = escapeEnabled &&
+                                ((r == 4 && g == 2) || (r == 0 && g == 2));
             const bool reserved = (r == 1) || (r == 2 && g == 2) ||
                                   (r == 3 && g >= 1);
             bool enabled;
