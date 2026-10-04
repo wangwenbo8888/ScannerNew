@@ -23,8 +23,13 @@
 int main(int argc, char *argv[])
 {
     Scanner::service::obsLoggerInit({});
-    Scanner::service::crash::install("dumps");
-    if (std::string residual; Scanner::service::crash::detectResidualDump(residual)) {
+    // 261004 排障开关：JMW_NO_CRASH_HANDLER=1 时跳过内置崩溃转储——堆损坏场景
+    // 内置 MiniDumpWriteDump 亦崩（0 字节 dump）且吞掉 WER；跳过后由 Windows
+    // LocalDumps（已配）写完整转储供离线符号化
+    if (!std::getenv("JMW_NO_CRASH_HANDLER"))
+        Scanner::service::crash::install("dumps");
+    if (std::string residual; !std::getenv("JMW_NO_CRASH_HANDLER") &&
+                              Scanner::service::crash::detectResidualDump(residual)) {
         JMW_LOG_WARN("10-Crash", "检测到崩溃残留: {}", residual);
         Scanner::service::obsExportDiagnosticsPackage(residual);
     }

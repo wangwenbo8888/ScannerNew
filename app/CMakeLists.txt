@@ -81,6 +81,10 @@ add_executable(scan_demo
     ${GENERATED_QRC_CPP}
 )
 
+# 261004 排障：Release 链接带 /DEBUG 出 PDB（仅加调试目录不改代码布局；
+# 性能不受影响——此后崩溃转储可直接符号化）
+target_link_options(scan_demo PRIVATE $<$<CONFIG:Release>:/DEBUG>)
+
 target_include_directories(scan_demo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}

@@ -581,6 +581,11 @@ ScanChains::Hooks ScanChains::assemble() {
                     d_mL.upload(cv::Mat(n, 1, CV_32FC2, matchedL.data()), stream);
                     d_mR.upload(cv::Mat(n, 1, CV_32FC2, matchedR.data()), stream);
                     d_mId.upload(cv::Mat(n, 1, CV_32SC1, matchedIds.data()), stream);
+                    // 261004 崩溃修复：三向量是块内局部——upload 异步入流而宿主
+                    // 缓冲随块结束析构＝UAF（堆损坏随机崩真机实证；10/3 起激光全
+                    // 被景深滤空此路径从未跑过，视差修正放通数据后首次显形）。
+                    // 上传量 ≤300KB，同步等待微秒级——40fps 无感
+                    stream.waitForCompletion();
                 }
 
                 auto rc = ops.recon->Execute(d_mL, d_mR, d_mId,
@@ -604,10 +609,16 @@ ScanChains::Hooks ScanChains::assemble() {
                 rc.d_points3d->download(h3d, stream);
                 stream.waitForCompletion();
                 cv::Mat filtered;                       // 1×n CV_32FC3（滤后列压缩）
+                // 261004 UAF 根因修复：keep 原声明在下方 if 块内——filtered 以
+                // 零拷贝包装 keep.data()（cv::Mat 外部数据不持所有权），块结束
+                // keep 即析构，其后 PLY 导出/入池上传全在读已亡缓冲。视差修正
+                // 放通数据前 keep 恒空提前 return 未达此处——路径首次激活即崩
+                // （15:01 转储实证：movss float 循环读已解提交堆块＝AV READ）。
+                // 提升作用域至 lambda 末尾，覆盖全部消费点
+                std::vector<cv::Vec3f> keep;
                 if (!h3d.empty()) {
                     const cv::Vec3f* src = h3d.ptr<cv::Vec3f>();
                     const size_t total = h3d.total();
-                    std::vector<cv::Vec3f> keep;
                     keep.reserve(total);
                     for (size_t k = 0; k < total; ++k)
                         if (src[k][2] >= zMin && src[k][2] <= zMax) keep.push_back(src[k]);
@@ -675,6 +686,9 @@ ScanChains::Hooks ScanChains::assemble() {
                         if (n > 0) {
                             cv::cuda::GpuMat dst = blk->get()->points.colRange(0, n);
                             dst.upload(filtered.colRange(0, n), stream);   // 滤后上传
+                            // 261004：filtered 包装的 keep 已提升作用域至此仍存活，
+                            // 数据源有效；同步等拷贝落定防块回池后 DMA 尚在读
+                            stream.waitForCompletion();
                             blk->get()->count = n;
                             blk->get()->frameId = frame->frameId;
                             front.laserBlock = std::move(*blk);
