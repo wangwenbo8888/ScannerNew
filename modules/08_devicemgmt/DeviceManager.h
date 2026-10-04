@@ -396,6 +396,10 @@ private:
                                             // M 键启采分流进灯序；扫描流程撤防）
     std::atomic<bool> scanReady_{false};    // 261004 就绪凭据（app arm 置位/收尾·重置·
                                             // 装配失败清位；按键四功能口＋①防呆判据用）
+    std::atomic<bool> voxelLockByScan_{false}; // 261004 分辨率锁定（设计 §3.3.3 ①补充）：
+                                               // 会话曾建立（就绪置位）即锁——菜单①/UI 体素
+                                               // 换档全拒（仅开扫前可设分辨率，③完成回 S2
+                                               // 仍拒）；仅⑤重置解锁（清零回开扫前）
     std::function<bool()> keyStateGate_;    // P-1 全局态门禁谓词（装配期注入；
                                             // 逻辑线程 gate 闭包内只读调用）
 

@@ -737,6 +737,8 @@ void DeviceManager::setCalibCaptureArmed(bool on) {
 // 装配失败清位。atomic 直写——app 线程置位、逻辑线程按键路径只读，无锁安全
 void DeviceManager::setScanReady(bool ready) {
     scanReady_.store(ready, std::memory_order_relaxed);
+    if (ready)                                        // 261004 分辨率锁定：会话建立即锁——
+        voxelLockByScan_.store(true, std::memory_order_relaxed); // 收尾清凭据后仍保持，仅⑤重置解锁
     JMW_LOG_INFO("08-DeviceManager", "[DeviceManager] 就绪凭据={}（S2 按键调节/启停/切模式{}）",
                  ready, ready ? "放行" : "拒·未就绪");
 }
@@ -765,6 +767,12 @@ void DeviceManager::setVoxelLadderIndex(int idx) {
             publishEvent(EventType::UserDefined, 120, 3);
             JMW_LOG_WARN("08-DeviceManager",
                 "[DeviceManager] UI 体素密度换档：采集中防呆拒（扫描中改密度打断累积）");
+            return;
+        }
+        if (voxelLockByScan_.load(std::memory_order_relaxed)) {   // 同菜单①锁定口径
+            publishEvent(EventType::UserDefined, 120, 6);
+            JMW_LOG_WARN("08-DeviceManager",
+                "[DeviceManager] UI 体素密度换档：已扫描锁定拒（开扫前才可设分辨率；⑤重置后恢复）");
             return;
         }
         voxelLadder_.setIndex(idx);
@@ -1081,8 +1089,9 @@ void DeviceManager::buildKeyActions() {
         }
         if (ms.substate == Sub::ConfirmReset) {  // ⑤确认＝执行重置（执行并自动退菜单）
             menu_->apply(MenuOp::ExitMenu);
+            voxelLockByScan_.store(false, std::memory_order_relaxed);   // ⑤重置＝清零回开扫前——分辨率解锁（261004 §3.3.3 ①补充）
             publishEvent(EventType::UserDefined, 105, 0);
-            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] ⑤重置确认执行——派发事件 p1=105（app 消费）");
+            JMW_LOG_WARN("08-DeviceManager", "[DeviceManager] ⑤重置确认执行——派发事件 p1=105（app 消费）＋分辨率锁定解除");
             publishEvent(EventType::UserDefined, 110, 0);
             return;
         }
@@ -1096,6 +1105,14 @@ void DeviceManager::buildKeyActions() {
                 publishEvent(EventType::UserDefined, 120, 3);   // P-3 横幅：会话中·密度锁定
                 JMW_LOG_WARN("08-DeviceManager",
                     "[DeviceManager] 菜单①体素密度：会话中防呆拒（含停采保活——改密度打断累积）");
+                return;
+            }
+            // 261004 分辨率锁定（§3.3.3 ①补充说明）：会话曾建立（就绪过）即锁——
+            // ③完成/收尾回 S2 后仍拒；仅⑤重置解锁。开扫前（未就绪过的 S2）才可设
+            if (voxelLockByScan_.load(std::memory_order_relaxed)) {
+                publishEvent(EventType::UserDefined, 120, 6);   // P-3 横幅：已扫描·分辨率锁定
+                JMW_LOG_WARN("08-DeviceManager",
+                    "[DeviceManager] 菜单①体素密度：已扫描锁定拒（开扫前才可设分辨率；⑤重置后恢复）");
                 return;
             }
             menu_->apply(MenuOp::EnterAdjustSubstate);

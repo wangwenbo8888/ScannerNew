@@ -442,6 +442,16 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                     ? QStringLiteral("残留工作集已清空")
                                     : QString::fromStdString("清理被拒: " + r.message));
                             }
+                            // UI 全清联动（261004 用户报：重置后 3D 点云/标志点不消失、
+                            // 列表计数不清零）——06 仓库与 sceneFeed 已在 AppContext 链清，
+                            // 此处清显示面：3D 场景（含标志点节点）＋左侧标志点会话节点。
+                            // 点云 001 标签由 cloudTimer 按 06 仓库计数自动归零
+                            if (m_3dView) m_3dView->clearScene();
+                            if (m_markerRootItem) {
+                                while (m_markerRootItem->childCount() > 0)
+                                    m_markerRootItem->removeChild(m_markerRootItem->child(0));
+                            }
+                            m_markerCurrentItem = nullptr;
                             if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                             m_activeScanToolIdx = -1;
                         } else if (p1 == 100) {    // View 视点缩放（260927 旧口径保留）
@@ -500,14 +510,16 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         } else if (p1 == 120) {     // 执行结果/拒因（P-3：红底横幅）
                             // p2 拒因码：1=已急停 2=标点会话隔离 3=会话中改密度防呆
                             // 4=换档失败已回弹 5=未就绪（261004 S2 按键族拒）
+                            // 6=已扫描·分辨率锁定（261004 §3.3.3 ①补充——开扫前才可设）
                             if (m_menuDlg) m_menuDlg->hide();   // 急停/拒因关菜单弹窗
                             showBanner(p2 == 1 ? QStringLiteral("已急停")
                                              : p2 == 2 ? QStringLiteral("标点会话·模式锁定")
                                              : p2 == 3 ? QStringLiteral("会话中·密度锁定")
                                              : p2 == 4 ? QStringLiteral("换档失败已回弹")
                                              : p2 == 5 ? QStringLiteral("待机不可调——先就绪（菜单②或模式键）")
+                                             : p2 == 6 ? QStringLiteral("已扫描·分辨率锁定（⑤重置后可调）")
                                                        : QStringLiteral("操作被拒"),
-                                        true);
+                                         true);
                         }
                     }, Qt::QueuedConnection);
                 });

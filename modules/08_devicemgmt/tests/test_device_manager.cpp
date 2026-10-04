@@ -1469,11 +1469,83 @@ TEST(DeviceManager, T25_StandbyKeyRejectAndReadyCredential) {
     EXPECT_NE(dm.menuState().substate, MenuState::Substate::AdjustVoxel);
     EXPECT_EQ(dm.menuState().layer, 2);            // 仍菜单浏览态（未进子态）
 
-    // ⑨ 凭据清位（收尾/重置等价）→ 复拒
+    // ⑨ 凭据清位（收尾等价；重置走⑤链见⑩⑪）→ 复拒
     dm.testInjectTextLine("G01 U1");               // 退菜单
     dm.logicTick(); dm.logicTick();
     dm.setScanReady(false);
     dm.testInjectTextLine("G01 M1");
     dm.logicTick(); dm.logicTick();
     EXPECT_FALSE(dm.isCapturing());
+
+    // ⑩ 261004 分辨率锁定（§3.3.3 ①补充）：会话曾建立（就绪过）即锁——③收尾
+    //    清凭据回 S2 后菜单①仍拒（p2=6）；UI 体素换档口同口径拒
+    dm.testInjectTextLine("G01 U1");               // 进菜单（cursor ①）
+    dm.logicTick(); dm.logicTick();
+    const int64_t lock0 = rec.userParam(120);
+    dm.testInjectTextLine("G01 M1");               // 选中①——已扫描锁定拒
+    dm.logicTick(); dm.logicTick();
+    EXPECT_NE(dm.menuState().substate, MenuState::Substate::AdjustVoxel);   // 未进子态
+    EXPECT_EQ(dm.menuState().layer, 2);            // 仍菜单浏览态
+    EXPECT_EQ(rec.userParam(120), lock0 + 1);      // 拒因留痕恰一条（p2=6）
+    const int voxBefore = dm.voxelLadderIndex();   // UI 换档口：锁定拒（档不动）
+    dm.setVoxelLadderIndex(voxBefore == 1 ? 2 : 1);
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.voxelLadderIndex(), voxBefore);
+
+    // ⑪ ⑤重置确认链＝唯一解锁路径：游标⑤→确认子态→中键执行（p1=105）→锁解→①可进
+    for (int i = 0; i < 4; ++i) dm.testInjectTextLine("G01 L1");   // ①→②→③→④→⑤
+    dm.logicTick(); dm.logicTick();
+    dm.testInjectTextLine("G01 M1");               // ⑤选中→二次确认子态
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.menuState().substate, MenuState::Substate::ConfirmReset);
+    const int64_t rst0 = rec.userParam(105);
+    dm.testInjectTextLine("G01 M1");               // 确认执行——105 派发＋锁定解除
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(rec.userParam(105), rst0 + 1);
+    dm.testInjectTextLine("G01 U1");               // 再进菜单（cursor ①）
+    dm.logicTick(); dm.logicTick();
+    dm.testInjectTextLine("G01 M1");               // ①放行（锁已解）
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.menuState().substate, MenuState::Substate::AdjustVoxel);
+}
+
+// —— T26：分辨率（体素密度）档下限＝0.01mm（261004 用户报：跳挡向下最多只
+//      能调到 0.02）——全链路实证：菜单①子态连续下调从默认 14 档到 index 1
+//      （0.01mm）有效，再按＝到底静默（不环绕、事件不再发）——
+TEST(DeviceManager, T26_VoxelLadderFloor0p01mm) {
+    Scanner::infra::EventBus bus;
+    EventRecorder rec;
+    bus.subscribeAll([&](const Event& e) { rec.record(e); });
+    MockMcu mock;
+    DeviceConfig cfg = makeCfg();
+    DeviceManager dm(cfg, gateOk, &bus, nullptr,
+                     [&](const std::string& f) { return mock.write(f); });
+    mock.dm = &dm;
+    ASSERT_TRUE(dm.open().success);                 // 起步 S2 无会话——①可进（未锁定）
+
+    // 梯表本身：27 档、首档 0.01mm（0.01..0.10 / 0.2..1.0 / 1.5..5.0）
+    const auto steps = Scanner::device::VoxelDensityLadder().steps();
+    ASSERT_EQ(steps.size(), static_cast<size_t>(27));
+    EXPECT_NEAR(steps.front(), 0.01, 1e-12);
+
+    // 菜单①全链：进菜单→选中①进子态→连续下调 13 次到底（默认 14→1）
+    dm.testInjectTextLine("G01 U1");
+    dm.logicTick(); dm.logicTick();
+    dm.testInjectTextLine("G01 M1");
+    dm.logicTick(); dm.logicTick();
+    ASSERT_EQ(dm.menuState().substate, MenuState::Substate::AdjustVoxel);
+    ASSERT_EQ(dm.voxelLadderIndex(), 14);           // 默认中位档
+    const int64_t ev0 = rec.userParam(113);
+    for (int i = 0; i < 13; ++i) {
+        dm.testInjectTextLine("G01 L1");            // 下调（键序＝档值变小方向）
+        dm.logicTick(); dm.logicTick();
+    }
+    EXPECT_EQ(dm.voxelLadderIndex(), 1);            // 到底＝index 1
+    EXPECT_NEAR(dm.voxelLadderValue(), 0.01, 1e-9); // 档值 0.01mm
+    EXPECT_EQ(rec.userParam(113), ev0 + 13);        // 每步恰一条 113 事件
+    // 再按：到底静默——档不动、事件不再发
+    dm.testInjectTextLine("G01 L1");
+    dm.logicTick(); dm.logicTick();
+    EXPECT_EQ(dm.voxelLadderIndex(), 1);
+    EXPECT_EQ(rec.userParam(113), ev0 + 13);
 }
