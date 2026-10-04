@@ -473,8 +473,9 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             showBanner(p2 == 1 ? QStringLiteral("景深 ▸ 远")
                                                : QStringLiteral("景深 ▸ 近"));
                         } else if (p1 == 110) {     // 菜单变化（含子态进出）
-                            refreshBannerPersistent();
-                            refreshMenuDialog();       // P-菜单弹窗
+                            if (m_banner) m_banner->hide();  // 先隐藏（防快照滞后竞态
+                            refreshBannerPersistent();        // 再刷新——仍在菜单则重新显示
+                            refreshMenuDialog();              // P-菜单弹窗
                         } else if (p1 == 115) {     // 换调节对象 → 亮度（P-键盘补）
                             showBanner(QStringLiteral("调节 ▸ 亮度"));
                         } else if (p1 == 116) {     // 换调节对象 → 显示远近（P-键盘补）
