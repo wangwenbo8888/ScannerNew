@@ -61,6 +61,8 @@ Result ScanWorkflow::assemblePipeline() {
     cfg.enableLaser = (scanMode_ == ScanMode::MarkerPlusLaser);
     // P-4 体素密度档（261002 菜单①）：会话启动读档快照（待机改档下会话生效）
     if (ctx_) cfg.voxelSizeMm = static_cast<float>(ctx_->voxelDensityMm());
+    JMW_LOG_INFO("02-ScanWorkflow",
+        "[ScanWorkflow] 会话启动：体素密度={}mm（voxelSizeMm 生效值）", cfg.voxelSizeMm);
 
     // —— #1 L4 读侧（260920 完善流程：装配时探查上次会话产物——GBA 标志点
     //    注入软先验＋existingMarkers seed，仓库快照为空时的兜底/增强）——
