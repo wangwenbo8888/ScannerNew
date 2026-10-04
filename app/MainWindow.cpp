@@ -195,17 +195,12 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
         });
         // 终局遍进度弹窗（260920：finish 后台 GBA 分钟级——用户须见"优化中"；
         // 回调在后台线程 → queued 切 UI 更新/关闭）
+        // 261003 竞态修复：此处不创建弹窗——GBA 瞬时降级（激光缓存=0→3ms 返回）
+        // 时 sessionEnded 先关弹窗置 null，迟到的进度回调到 UI 发现 null 会重建
+        // 新弹窗卡在最后进度（用户实测卡 20% 根因）。弹窗仅在关会话成功时创建
         m_appCtx->setFinalBAProgress([this](int percent, const std::string& stage) {
             QMetaObject::invokeMethod(this, [this, percent, stage]() {
-                if (!m_finalBADlg) {
-                    m_finalBADlg = new QProgressDialog(
-                        QStringLiteral("全局优化中，请稍候……"), QString(), 0, 100, this);
-                    m_finalBADlg->setWindowTitle(QStringLiteral("全局优化"));
-                    m_finalBADlg->setWindowModality(Qt::ApplicationModal);
-                    m_finalBADlg->setMinimumDuration(0);
-                    m_finalBADlg->setAutoClose(false);
-                    m_finalBADlg->show();
-                }
+                if (!m_finalBADlg) return;   // 已关（sessionEnded 先到）——不重建
                 m_finalBADlg->setValue(std::clamp(percent, 0, 100));
                 m_finalBADlg->setLabelText(QString(QStringLiteral("全局优化中（%1%）——%2"))
                                                .arg(percent)
