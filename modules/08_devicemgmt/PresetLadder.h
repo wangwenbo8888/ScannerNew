@@ -29,7 +29,10 @@ public:
     Ladder() = default;
     explicit Ladder(std::vector<TStep> steps, int index = -1)
         : steps_(std::move(steps)) {
-        const int mid = static_cast<int>(steps_.size()) / 2 + 1;   // 默认中位
+        // 261004 修：默认中位与 reset() 统一为 (N+1)/2——原算式 N/2+1 在偶数档
+        // 时高 1（20 档默认 11 而非定版档 10，N10 帧 B52/L52 ≠ 定版 47/47，
+        // 13 个测试断言偏移根因）。261003 定版：亮度梯默认档 10 ≈ 2.9ms/47/47。
+        const int mid = (static_cast<int>(steps_.size()) + 1) / 2;   // 默认中位
         if (index < 1) index = mid;
         if (index > static_cast<int>(steps_.size()))
             index = static_cast<int>(steps_.size());

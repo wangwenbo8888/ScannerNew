@@ -1090,7 +1090,7 @@ TEST(DeviceManager, T23_KeyStateGateInjection) {
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(dm.captureMode(), Scanner::ScanMode::MarkerPlusLaser);   // 模式未切
     EXPECT_EQ(dm.menuState().layer, 1);                               // 未进菜单
-    EXPECT_EQ(dm.presetLadderIndex(), 1);                             // 档位未动
+    EXPECT_EQ(dm.presetLadderIndex(), 10);                            // 档位未动（261003 定版默认中位档 10）
     EXPECT_EQ(rec.userParam(114), 0);                                 // 景深事件未发
 
     // 逃生类豁免：M/H 急停（未采集中＝纯子态解散不崩）＋ U/H 回主界面照常
@@ -1203,7 +1203,7 @@ TEST(DeviceManager, T19_PresetLadderAdjust) {
     dm.testInjectTextLine("G01 R1");   // 已到顶——无效（钳制不环绕）
     dm.logicTick(); dm.logicTick();
     EXPECT_EQ(dm.presetLadderIndex(), 20);
-    expectParams(5.0, 100.0, 80.0);
+    expectParams(5.0, 100.0, 100.0);   // 261003 均分版档20 终值（旧梯 80 为残留错值）
 
     dm.testInjectTextLine("G01 L1");   // 档20→19（下调）
     dm.logicTick(); dm.logicTick();
@@ -1271,16 +1271,16 @@ TEST(DeviceManager, T21_ParamPersistDebounceAndBoot) {
         EXPECT_EQ(saved.find("exposure="), std::string::npos);
         EXPECT_EQ(saved.find("laserLevel="), std::string::npos);
         EXPECT_EQ(saved.find("bgLight="), std::string::npos);
-        EXPECT_NE(saved.find("brightLadder=1"), std::string::npos);
+        EXPECT_NE(saved.find("brightLadder=10"), std::string::npos);   // 默认档 10 入档（261003 定版）
 
-        dm.setBrightnessLadderIndex(10);                // 换档（事务提交后档号入档）
-        dm.logicTick(); dm.logicTick();
+        dm.setBrightnessLadderIndex(12);                // 换档（事务提交后档号入档；
+        dm.logicTick(); dm.logicTick();                 //   默认档已 10——须换不同档才是真变更）
         sleepMs(2100);
         dm.close();                                     // close 兜底（无条件冲）
         EXPECT_EQ(saveCalls, 2);
-        EXPECT_NE(saved.find("brightLadder=10"), std::string::npos);
+        EXPECT_NE(saved.find("brightLadder=12"), std::string::npos);
     }
-    {   // 二代实例：档号制读档——档号展开三参（freqHz=90 复现＋档10 投影复现）
+    {   // 二代实例：档号制读档——档号展开三参（freqHz=90 复现＋档12 投影复现）
         DeviceConfig cfg = makeCfg();
         DeviceManager::ParamIo pio;
         pio.load = [&saved] { return saved; };
@@ -1289,11 +1289,13 @@ TEST(DeviceManager, T21_ParamPersistDebounceAndBoot) {
         ASSERT_TRUE(dm2.open().success);
         dm2.logicTick();
         EXPECT_DOUBLE_EQ(dm2.getParam("freqHz").value, 90.0);
-        EXPECT_EQ(dm2.presetLadderIndex(), 10);         // 档号回账
+        EXPECT_EQ(dm2.presetLadderIndex(), 12);         // 档号回账
         EXPECT_NEAR(dm2.getParam("exposure").value,
-                    PresetLadder::builtinLadder()[9].exposureMs, 1e-9);   // 档10 均分值
-        EXPECT_NEAR(dm2.getParam("laserLevel").value, 70.0, 1e-9);
-        EXPECT_NEAR(dm2.getParam("bgLight").value, 40.0, 1e-9);
+                    PresetLadder::builtinLadder()[11].exposureMs, 1e-9);  // 档12 均分值
+        EXPECT_NEAR(dm2.getParam("laserLevel").value,   // 261003 均分版（旧 70/40 为残留错值）
+                    PresetLadder::builtinLadder()[11].laserLevel, 1e-9);
+        EXPECT_NEAR(dm2.getParam("bgLight").value,
+                    PresetLadder::builtinLadder()[11].bgLight, 1e-9);
     }
 }
 
@@ -1361,9 +1363,11 @@ TEST(DeviceManager, T24_LadderTxnCommitRollbackLastWins) {
         const int64_t evt120_0 = rec.userParam(120);
         dm.setBrightnessLadderIndex(15);                // 事务开表 → 曝光段即败
         dm.logicTick(); dm.logicTick();
-        EXPECT_EQ(dm.presetLadderIndex(), 1);           // 档号从未移动＝天然回弹
+        EXPECT_EQ(dm.presetLadderIndex(), 10);          // 档号从未移动＝天然回弹
+                                                           //（261003 定版默认档 10，旧断言 1 为残留）
         EXPECT_EQ(rec.userParam(111), evt111_0);        // 无 111（未提交）
         EXPECT_EQ(rec.userParam(120), evt120_0 + 1);    // 120 拒因恰一条
-        EXPECT_NEAR(dm.getParam("exposure").value, 1.0, 1e-9);   // 参数账保旧值（档1）
+        EXPECT_NEAR(dm.getParam("exposure").value,      // 参数账保旧值（默认档 10 投影，旧 1.0 为残留）
+                    PresetLadder::builtinLadder()[9].exposureMs, 1e-9);
     }
 }
