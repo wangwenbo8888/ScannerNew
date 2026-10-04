@@ -1494,13 +1494,7 @@ void MainWindow::showBanner(const QString& text, bool danger)
         m_bannerTimer->setSingleShot(true);
         m_bannerTimer->setInterval(10000);   // 261003 用户口径：停留 10 秒
         connect(m_bannerTimer, &QTimer::timeout, this, [this]() {
-            if (!m_bannerPersist.isEmpty()) {
-                // 恢复菜单期常驻（非红——常驻红只属⑤确认子态，由刷新器定色）
-                m_banner->setText(m_bannerPersist);
-                refreshBannerPersistent();
-            } else {
-                m_banner->hide();
-            }
+            if (m_bannerPersist.isEmpty()) m_banner->hide();  // 瞬态 10s 隐藏；常驻（菜单/子态）等确认/退出
         });
     }
     m_banner->setStyleSheet(danger
@@ -1608,7 +1602,8 @@ void MainWindow::refreshBannerPersistent()
     const auto ms = dm->menuState();
     using Sub = Scanner::device::MenuState::Substate;
     if (ms.layer != 2) {
-        m_bannerPersist.clear();                    // 主界面：无常驻
+        m_bannerPersist.clear();
+        if (m_banner) m_banner->hide();   // 退菜单/确认后隐藏
         return;
     }
     static const char* kItems[5] = {"① 分辨率设置", "② 进入就绪", "③ 扫描完成",
