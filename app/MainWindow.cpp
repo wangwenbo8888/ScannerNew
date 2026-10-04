@@ -2429,6 +2429,7 @@ QWidget *MainWindow::createProjectSection()
     markerRoot->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 14)));
     m_projectTree->addTopLevelItem(markerRoot);
     m_markerRootItem = markerRoot;   // 扫描会话节点按实际启动动态创建（见扫描启动 lambda）
+    markerRoot->setExpanded(true);   // 启动即展开（261004 用户口径：当前工程下列表常显）
 
     QTreeWidgetItem *cloudRoot = new QTreeWidgetItem(QStringList() << QStringLiteral("点云/三角面列表"));
     cloudRoot->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/cloudlist-black-11.svg", 14)));
@@ -2437,6 +2438,7 @@ QWidget *MainWindow::createProjectSection()
     QTreeWidgetItem *c2 = new QTreeWidgetItem(cloudRoot, QStringList() << QStringLiteral("三角面 001"));
     c2->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/cloudlist-black-11.svg", 11)));
     m_projectTree->addTopLevelItem(cloudRoot);
+    cloudRoot->setExpanded(true);   // 启动即展开（261004 用户口径）
 
     QTreeWidgetItem* lineRoot = new QTreeWidgetItem(QStringList() << QStringLiteral("特征线列表"));
     lineRoot->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 14)));
@@ -2445,6 +2447,7 @@ QWidget *MainWindow::createProjectSection()
     QTreeWidgetItem *l2 = new QTreeWidgetItem(lineRoot, QStringList() << QStringLiteral("特征线 002"));
     l2->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/marklist-black-11.svg", 11)));
     m_projectTree->addTopLevelItem(lineRoot);
+    lineRoot->setExpanded(true);      // 启动即展开（同上）
 
     layout->addWidget(m_projectTree);
     return section;
