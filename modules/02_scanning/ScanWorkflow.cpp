@@ -397,7 +397,13 @@ void ScanWorkflow::runFinalBA() {
     if (!pipeline_) return;
     const auto t0 = std::chrono::steady_clock::now();
     try {
-        sp::GlobalOptimObject go;
+        // 261004：标点会话（A 模式）跳过 GBA 批算——真机 4888 帧会话 PGO 单迭代
+        // 分钟级（稠密闭环边×34K 参数，时间上限拦不住单迭代）；初值位姿直接
+        // marker 重融合（秒级收口，质量 Degraded 如实标）。见 GlobalOptimObject
+        // ::Config.skipBatchSolve 注释；激光会话（B/C/D）保留批算
+        sp::GlobalOptimObject::Config goCfg;
+        goCfg.skipBatchSolve = (scanMode_ == ScanMode::MarkerOnly);
+        sp::GlobalOptimObject go(goCfg);
         sp::PipelineDeps deps;
         deps.sceneFeed = ctx_ ? ctx_->sceneFeed() : nullptr;
         if (!go.configure(deps).success) {

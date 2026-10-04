@@ -231,6 +231,15 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     // —— 步骤 3：GBA 批算（位姿参数化在算子内：R_init/t_init 直喂，内部转四元数）——
     if (cb) cb(20, "GBA 批算");
     calib::GlobalBAResult gba;
+    // 261004：标点会话跳过批算（Config.skipBatchSolve——根因见字段注释：4888 帧
+    // 稠密闭环边使 PGO 单迭代分钟级，时间上限只在迭代间生效拦不住）。跳过＝
+    // 直接走 !gba.success 降级路径（初值位姿＋marker 重融合），不报 Fault 只
+    // WARN（有意为之，非故障）；质量如实标 Degraded
+    if (cfg_.skipBatchSolve) {
+        gba.success = false;
+        gba.message = "标点会话跳过批算（初值位姿重融合）";
+        JMW_LOG_WARN("07-GlobalOptim", "[GlobalOptim] {}", gba.message);
+    } else
     try {
         // 261004 加固：把 run() 的 CancelToken 接进 Ceres 迭代回调——取消从
         // 「GBA 后检查点才可见」提前到「一次迭代内可见」（秒级打断）。此前
@@ -260,8 +269,9 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
 
     if (!gba.success) {
         // 设计 §4.4 降级路径：Fault 上报 + 沿初值位姿重融合兜底
+        // （skipBatchSolve 有意跳过＝非故障，仅 WARN 不报 Fault——261004）
         quality = Scanner::QualityFlag::Degraded;
-        if (sink_)
+        if (sink_ && !cfg_.skipBatchSolve)
             sink_->report(Scanner::QualityFlag::Fault, kEvtGbaFail,
                           "GBA 失败: " + gba.message + " —— 沿初值位姿重融合兜底");
     }

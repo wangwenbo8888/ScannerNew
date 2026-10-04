@@ -77,6 +77,13 @@ public:
         // 失败），下游按既有 NO_CONVERGENCE 口径标 Degraded 继续走，不丢结果。
         // 0 = 不限（离线工具语义）。详见 09 GlobalBAParams 同名字段注释。
         double maxSolveSecondsPerPhase = 60.0;
+        // 261004：标点会话（MarkerOnly）跳过 GBA 批算——初值位姿直接重融合。
+        // 【为什么】真机 4888 帧标点会话 PGO 单迭代 >5 分钟（时间上限/取消都
+        // 只在迭代间生效，单迭代卡死超限）：稠密闭环边 × 34K 位姿参数使稀疏
+        // Cholesky 填充爆炸。标点会话价值在点云本身，批算收益不抵分钟级卡顿
+        // ——走既有降级路径（质量 Degraded 如实标注）。激光会话保留批算（帧
+        // 数通常较低且收益直接）；帧子采样/关键帧化后可再放开（待办）。
+        bool   skipBatchSolve = false;
     };
 
     /// GBA 执行函数（测试注入假 09 适配；空=真 GlobalBundleAdjustmentCPU::Execute）
