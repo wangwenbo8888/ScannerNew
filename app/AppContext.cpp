@@ -866,6 +866,12 @@ void AppContext::shutdown() {
     // 关闭路径不可依赖。首轮在 main 线程、时序确定，一轮即止
     if (shutdownDone_.exchange(true, std::memory_order_acq_rel)) return;
     if (scanStartThread_.joinable()) scanStartThread_.join();   // 装配线程收尾再关（防竞态 stop 误态）
+    // 261004 加固：join 收尾线程前先取消终局遍——此前 GBA（Ceres 200 迭代×
+    // 最多 4 阶段、tolerance=1e-10 实际必跑满）无界运行，真机 2020 帧会话
+    // 卡 5 分钟+时用户关程序，此处 join 挂死整个进程（实测挂 3 分钟+被 Task 杀）。
+    // 取消位经 07 CancelToken→09 Ceres 迭代回调 SOLVER_ABORT 一次迭代内生效，
+    // join 秒级返回；时长上限（60s/阶段，09 层）是独立第二道闸
+    if (scanWf_) scanWf_->cancelFinalBA();
     if (finishThread_.joinable()) finishThread_.join();         // 完成收尾线程（GBA 终局遍）先收
     if (devStartThread_.joinable()) devStartThread_.join();   // 设备启动收尾再关（防竞态）
     if (hwMonitor_) hwMonitor_->stop();

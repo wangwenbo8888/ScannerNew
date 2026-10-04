@@ -69,6 +69,14 @@ public:
         bool   useSoftPrior = true;
         double defaultPriorSigma = 0.001;
         double sigmaObserved = 0.01;
+        // 261004 真机事故加固：每 Ceres 阶段（含 PGO 预优化）求解时长上限（秒）。
+        // 【为什么】真机 2020 帧会话在「GBA 批算」卡 5 分钟+：tolerance=1e-10 +
+        // maxIterations=200 等价必跑满 200 迭代，千帧级单迭代秒级 → 总时长无上界；
+        // 且关程序时 AppContext 析构 join 收尾线程 → 进程挂死在优化器里被 Task 杀。
+        // 60s×最多 4 阶段 ≈ 最坏 4 分钟封顶；到时 Ceres 保当前最优迭代值（非硬
+        // 失败），下游按既有 NO_CONVERGENCE 口径标 Degraded 继续走，不丢结果。
+        // 0 = 不限（离线工具语义）。详见 09 GlobalBAParams 同名字段注释。
+        double maxSolveSecondsPerPhase = 60.0;
     };
 
     /// GBA 执行函数（测试注入假 09 适配；空=真 GlobalBundleAdjustmentCPU::Execute）

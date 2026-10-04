@@ -19,6 +19,33 @@ CALIB_DEFINE_LOG_TAG(0, GlobalBA);
 
 namespace {
 
+// ── 261004 加固：Ceres 迭代回调（取消 + 心跳）──
+// 【为什么】Solve() 是黑盒，不回调则：① 外部取消（关程序）无法传入，
+// 进程挂死在优化器里；② 长求解期间零日志/零进度，无法区分「在算」和
+// 「死锁」。此回调每次迭代末被 Ceres 调用：查取消钩子 → SOLVER_ABORT
+// 立即中止；每 10 次迭代打一条心跳（含 cost），日志可证明求解器活着。
+// 注意：ceres::Solver::Options::callbacks 不接管所有权，实例须活过 Solve()
+// ——调用方栈上持有即可。
+class CancelHeartbeatCallback final : public ceres::IterationCallback {
+public:
+    CancelHeartbeatCallback(const char* phase, const std::function<bool()>& cancelFn)
+        : phase_(phase), cancelFn_(cancelFn) {}
+
+    ceres::CallbackReturnType operator()(const ceres::IterationSummary& s) override {
+        if (cancelFn_ && cancelFn_())
+            return ceres::SOLVER_ABORT;   // USER_FAILURE 语义：不采用半程解
+        if (s.iteration % 10 == 0)
+            CALIB_LOG_INFO("[{}] phase({}) iter#{} cost={:.6e} (Δcost={:.3e}) [求解器存活心跳]",
+                         GlobalBundleAdjustmentCPU::kLogTag, phase_, s.iteration,
+                         s.cost, s.cost_change);
+        return ceres::SOLVER_CONTINUE;
+    }
+
+private:
+    const char* phase_;                        // 仅用于诊断上下文
+    const std::function<bool()>& cancelFn_;
+};
+
 // Kabsch: 求 R,t 使 R*z_k + t ≈ z_i(成对点集, z_i/z_k 为同一 landmark 在帧 i/k 的本机系坐标)。
 // 返回的 (R, t) 即 "frame-k-local → frame-i-local" 的相对位姿 (R_ik, t_ik), 直接喂给 RelativePoseResidual。
 // SVD + 反射修正(determinant 符号), 保证 R 为正交旋转。
@@ -73,6 +100,8 @@ void GlobalBAParams::validate() const {
     if (loopFrameGap < 1) throw std::invalid_argument("loopFrameGap must be >= 1");
     if (minPointsPerFrame < 3) throw std::invalid_argument("minPointsPerFrame must be >= 3");
     if (defaultPriorSigma <= 0.0) throw std::invalid_argument("defaultPriorSigma must be > 0");
+    // 261004 加固：0=不限是合法值（离线批量工具），负数是配置错误
+    if (maxSolveSecondsPerPhase < 0.0) throw std::invalid_argument("maxSolveSecondsPerPhase must be >= 0 (0 = unlimited)");
 }
 
 nlohmann::json GlobalBAParams::toJson() const {
@@ -88,7 +117,11 @@ nlohmann::json GlobalBAParams::toJson() const {
         {"minPointsPerFrame", minPointsPerFrame},
         {"centerOrigin", centerOrigin},
         {"useSoftPrior", useSoftPrior},
-        {"defaultPriorSigma", defaultPriorSigma}
+        {"defaultPriorSigma", defaultPriorSigma},
+        // 261004 加固：时长上限随参数序列化（离线工具读旧 JSON 缺此键=默认 60s，
+        // 行为安全）；cancelRequested 是 std::function 不可序列化，天然只在
+        // 进程内装配期注入（07 层接 CancelToken），不经 JSON 传递
+        {"maxSolveSecondsPerPhase", maxSolveSecondsPerPhase}
     };
 }
 
@@ -106,6 +139,7 @@ GlobalBAParams GlobalBAParams::fromJson(const nlohmann::json& j) {
     if (j.contains("centerOrigin")) p.centerOrigin = j.at("centerOrigin").get<bool>();
     if (j.contains("useSoftPrior")) p.useSoftPrior = j.at("useSoftPrior").get<bool>();
     if (j.contains("defaultPriorSigma")) p.defaultPriorSigma = j.at("defaultPriorSigma").get<double>();
+    if (j.contains("maxSolveSecondsPerPhase")) p.maxSolveSecondsPerPhase = j.at("maxSolveSecondsPerPhase").get<double>();
     p.validate();
     return p;
 }
@@ -342,6 +376,12 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             opt.max_num_iterations = 100;
             opt.function_tolerance = 1e-9;
             opt.minimizer_progress_to_stdout = false;
+            // 261004 加固：PGO 预优化同样限时+可取消（理由见 GlobalBAParams 注释
+            // ——千帧级会话 PGO 亦可达分钟级，不设限则关程序挂死同样发生在这）
+            if (pImpl_->params.maxSolveSecondsPerPhase > 0.0)
+                opt.max_solver_time_in_seconds = pImpl_->params.maxSolveSecondsPerPhase;
+            CancelHeartbeatCallback pgoCb("PGO", pImpl_->params.cancelRequested);
+            opt.callbacks.push_back(&pgoCb);
             ceres::Solver::Summary sum;
             ceres::Solve(opt, &pgoProblem, &sum);
             const bool hardFail = (sum.termination_type == ceres::FAILURE ||
@@ -565,6 +605,17 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
         opt.parameter_tolerance = pImpl_->params.tolerance;
         opt.max_num_iterations = pImpl_->params.maxIterations;
         opt.minimizer_progress_to_stdout = false;
+        // ── 261004 真机事故加固（理由详见 GlobalBAParams.maxSolveSecondsPerPhase
+        //    注释）：tolerance=1e-10 + maxIterations=200 等价于「必跑满 200 迭代」，
+        //    千帧级问题单迭代秒级 → 无时间上限时终局遍可卡数十分钟且关程序挂死。
+        //    到时终止=NO_CONVERGENCE：参数块已更新到当前最优迭代，下游既有口径
+        //    按 Degraded 保留结果，不丢数据；取消=SOLVER_ABORT→USER_FAILURE，
+        //    既有 isHardFail 口径判硬失败→07 层取消检查点干净退出。──
+        if (pImpl_->params.maxSolveSecondsPerPhase > 0.0)
+            opt.max_solver_time_in_seconds = pImpl_->params.maxSolveSecondsPerPhase;
+        CancelHeartbeatCallback phaseCb(useTukey ? "Tukey" : "plain",
+                                         pImpl_->params.cancelRequested);
+        opt.callbacks.push_back(&phaseCb);
         ceres::Solver::Summary summary;
         ceres::Solve(opt, &problem, &summary);
         // 收敛/用户成功 → info; 否则(未收敛/硬失败)→ warn, 便于排查退化解

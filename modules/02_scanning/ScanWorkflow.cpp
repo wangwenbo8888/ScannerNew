@@ -31,7 +31,17 @@ namespace Scanner::workflow {
 // ============================================================================
 ScanWorkflow::ScanWorkflow(WorkflowContext* ctx) : ctx_(ctx) {}
 
-ScanWorkflow::~ScanWorkflow() { stop(); }
+ScanWorkflow::~ScanWorkflow() {
+    // 261004 加固：析构先取消终局遍再 stop()——防非常规路径（异常态直接析构）
+    // 下 stop() 内 runFinalBA 无限阻塞析构线程（时长上限 60s/阶段之外的第二道闸）
+    finalBACancel_.cancel();
+    stop();
+}
+
+void ScanWorkflow::cancelFinalBA() {
+    // 语义见 ScanWorkflow.h cancelFinalBA 注释——仅关停路径调用；幂等可重入
+    finalBACancel_.cancel();
+}
 
 void ScanWorkflow::setCalibration(const ScanCalibration& calib) {
     calib_ = calib;
@@ -182,6 +192,10 @@ Result ScanWorkflow::assemblePipeline() {
 
 Result ScanWorkflow::start() {
     if (state_ == WorkflowState::Running) return Result::ok("已在运行");
+
+    // 261004：终局遍取消令牌跨会话复用——启动时复位残留取消位（上一会话
+    // 关停路径若曾 cancelFinalBA()，不清位会导致本会话终局遍秒退）
+    finalBACancel_.reset();
 
     auto ar = assemblePipeline();
     if (!ar.success) {
@@ -391,8 +405,12 @@ void ScanWorkflow::runFinalBA() {
             return;
         }
         if (!priorIds_.empty()) go.setExistingPrior(priorIds_, priorXyz_, {});
-        sp::CancelToken cancel;
-        const auto r = go.run(pipeline_->obs(), finalBAProgress_, cancel);
+        // 261004 加固：原局部 CancelToken 无人能 cancel（GBA 卡住时关程序→
+        // AppContext join 收尾线程→进程挂死被 Task 杀）。改用成员令牌
+        // finalBACancel_：AppContext 关停路径调 cancelFinalBA() → 09 层 Ceres
+        // 迭代回调 SOLVER_ABORT → 一次迭代内可打断，进程秒级可退。
+        // 注意：令牌跨会话复用——新会话开扫时不应残留旧取消位，见 start() 处复位。
+        const auto r = go.run(pipeline_->obs(), finalBAProgress_, finalBACancel_);
         const auto& out = go.output();
         const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();

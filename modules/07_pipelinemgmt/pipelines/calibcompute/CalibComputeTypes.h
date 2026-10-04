@@ -85,6 +85,9 @@ class CancelToken {                // 简单原子取消（不可拷贝/移动�
 public:
     void cancel() { v_.store(true, std::memory_order_relaxed); }
     bool cancelled() const { return v_.load(std::memory_order_relaxed); }
+    // 261004：复位口——长生命周期持有者（02 ScanWorkflow 终局遍令牌跨会话复用）
+    // 新会话启动时清残留取消位；短生命周期局部令牌用不到，语义上仅持有者自己复位
+    void reset() { v_.store(false, std::memory_order_relaxed); }
 private:
     std::atomic<bool> v_{false};
 };

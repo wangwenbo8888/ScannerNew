@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <functional>
 #include <cstdint>
 #include <utility>
 #include "common/calib_types.h"
@@ -57,6 +58,29 @@ struct GlobalBAParams {
     // σ 极小=高权重。useSoftPrior=false 或 ids 空 → 行为与无先验完全一致）
     bool   useSoftPrior          = true;
     double defaultPriorSigma     = 0.001;
+
+    // ── 261004 真机事故加固：求解时长上限 + 取消钩子 ──
+    //
+    // 【为什么要这两个字段】261004 真机会话（2020 观测帧）终局遍在「GBA 批算」
+    // 卡 5 分钟以上不返回：本算子最多跑 4 个 Ceres 阶段（plain / 预清洗重解 /
+    // Tukey / chi2 重解），每阶段 maxIterations=200 且 tolerance=1e-10 极紧——
+    // 容差实际不可能触发早退，等价于每阶段固定跑满 200 次迭代；千帧级问题的
+    // 单次稀疏 Cholesky 迭代秒级 → 总时长无上界（数十分钟级）。且 Solve() 是
+    // 不可打断的黑盒，用户关程序时 AppContext 析构 join 收尾线程 → 整个进程
+    // 挂死在优化器里（实测挂 3 分钟+ 被 Task 杀）。
+    //
+    // 【修复策略】
+    // 1) maxSolveSecondsPerPhase：每 Ceres 阶段（含 PGO 预优化）的时间上限。
+    //    到时后 Ceres 以 NO_CONVERGENCE 终止并保留当前最优迭代值（参数块
+    //    已更新——非 FAILURE 语义），下游按既有口径标记 Degraded 继续走，
+    //    不会丢结果。0 = 不限（离线批量工具 gba_dataset_runner 可显式置 0
+    //    换取充分收敛；生产线默认 60s 兜底）。
+    // 2) cancelRequested：每次迭代末回调查询；返回 true → SOLVER_ABORT 中止
+    //    求解（USER_FAILURE 语义=不采用半程解）。空函数=无取消源（离线工具/
+    //    测试默认空）。上层（07）把 CancelToken 接进来后，关程序可在一次
+    //    迭代内（秒级）打断优化器，进程不再挂死。
+    double maxSolveSecondsPerPhase = 60.0;   // 秒；0=不限
+    std::function<bool()> cancelRequested;   // 空=不可取消
 
     void validate() const;
     nlohmann::json toJson() const;

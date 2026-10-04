@@ -147,6 +147,7 @@ calib::GlobalBAParams GlobalOptimObject::gbaParams() const {
     p.useSoftPrior = cfg_.useSoftPrior;
     p.defaultPriorSigma = cfg_.defaultPriorSigma;
     p.sigmaObserved = cfg_.sigmaObserved;
+    p.maxSolveSecondsPerPhase = cfg_.maxSolveSecondsPerPhase;   // 261004 加固透传
     return p;
 }
 
@@ -231,10 +232,18 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     if (cb) cb(20, "GBA 批算");
     calib::GlobalBAResult gba;
     try {
+        // 261004 加固：把 run() 的 CancelToken 接进 Ceres 迭代回调——取消从
+        // 「GBA 后检查点才可见」提前到「一次迭代内可见」（秒级打断）。此前
+        // Solve() 黑盒不可打断：真机 2020 帧会话卡 5 分钟+，用户关程序后
+        // AppContext 析构 join 收尾线程 → 整个进程挂死在优化器里被 Task 杀。
+        // 打断后 Ceres 以 USER_FAILURE 终止 → 下方 gba.success=false → 沿初值
+        // 兜底，随后的取消检查点（原 261004 前已有的「GBA 后检查点」）干净退出。
+        calib::GlobalBAParams gp = gbaParams();
+        gp.cancelRequested = [&cancel]() { return cancel.cancelled(); };
         if (gbaFn_) {
-            gba = gbaFn_(in, gbaParams());
+            gba = gbaFn_(in, gp);
         } else {
-            calib::GlobalBundleAdjustmentCPU op(gbaParams());
+            calib::GlobalBundleAdjustmentCPU op(gp);
             gba = op.Execute(in);
         }
     } catch (const std::exception& e) {

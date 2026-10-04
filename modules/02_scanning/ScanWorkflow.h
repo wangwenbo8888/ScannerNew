@@ -28,6 +28,7 @@
 #include "WorkflowContext.h"
 #include "ScanSessionData.h"
 #include "base/types.h"
+#include "pipelines/calibcompute/CalibComputeTypes.h"   // CancelToken（终局遍取消令牌成员 261004）
 #include <opencv2/core.hpp>
 #include <functional>
 #include <memory>
@@ -127,6 +128,15 @@ public:
     /// pipeline_ 未装配/已停＝nullptr——调方保证会话期访问，停止链先停注入线程）
     Scanner::pipeline::sched::FrameResultQueue<Scanner::pipeline::FrameResult>* outputQueue();
 
+    // ── 261004 加固：终局遍（GBA）外部取消口 ──
+    // 【为什么】runFinalBA 原用局部 CancelToken，无人能 cancel——真机会话在
+    // GBA 批算卡 5 分钟+时，用户关程序 → AppContext 析构 join 收尾线程 →
+    // 进程挂死在优化器里被 Task 杀。改为成员令牌后：AppContext 关停路径先
+    // 调本方法 → 令牌置位 → 09 层 Ceres 迭代回调一次迭代内 SOLVER_ABORT →
+    // 07 取消检查点干净退出 → 收尾线程秒级可 join。（正常关会话不调——
+    // 让 GBA 跑完出全量结果；时长上限另由 60s/阶段兜底，见 09 加固注释）
+    void cancelFinalBA();
+
     // IWorkflow
     std::string getName() const override { return "ScanWorkflow"; }
     Result initialize() override;
@@ -161,6 +171,8 @@ private:
     std::vector<int>    priorIds_;                 // 续扫基准软先验（装配期自仓库快照）
     std::vector<double> priorXyz_;                 // 3n 展开x,y,z
     std::function<void(int, const std::string&)> finalBAProgress_;  // 进度出口（可空）
+    Scanner::pipeline::CancelToken finalBACancel_; // 261004：终局遍取消令牌（原局部
+                                                   // 令牌无人 cancel——见 cancelFinalBA 注释）
 
     // —— 会话记账（D6：归工作流自身；起止时间戳/帧计数，接入期由 07 流水线回调回填）——
     TimestampMs sessionStartTime_   = 0;
