@@ -1512,7 +1512,14 @@ void MainWindow::showBanner(const QString& text, bool danger)
 void MainWindow::refreshBannerPersistent()
 {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
-    if (!dm || !m_banner) return;
+    if (!dm) return;
+    if (!m_banner) {
+        // 懒创建补齐（菜单首次进入时可能尚未触发过任何横幅事件——m_banner 为 null
+        // 导致菜单变化被静默吞掉，用户「点菜单没弹出」根因）
+        showBanner(QStringLiteral("…"), false);
+        if (!m_banner) return;
+        if (!m_bannerTimer) return;   // showBanner 内已建 timer
+    }
     const auto ms = dm->menuState();
     using Sub = Scanner::device::MenuState::Substate;
     if (ms.layer != 2) {
