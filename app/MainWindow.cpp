@@ -1487,6 +1487,7 @@ void MainWindow::showBanner(const QString& text, bool danger)
 {
     if (!m_banner) {
         m_banner = new QLabel(this);
+        m_banner->setAttribute(Qt::WA_TransparentForMouseEvents);  // 点击穿透——不挡关闭按钮
         m_banner->setAlignment(Qt::AlignCenter);
         m_banner->setWordWrap(false);
         m_bannerTimer = new QTimer(this);
