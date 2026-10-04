@@ -78,18 +78,42 @@ struct BrightnessStep {           // 一档＝三参组合（单位同 ParamStor
 };
 using LadderStep = BrightnessStep;    // 兼容旧名（260927 G6 期）
 
-// 20 档产线基线（261003 用户口径：三参按各自取值范围均分 20 档，每档等差）：
-//   曝光 1~5ms → 步长 (5-1)/19 ≈ 0.2105ms
+/// 缺省均匀曝光表（20 档 min→max 等差）——camera.json 缺 brightnessLadder 节/
+/// 非法时兜底（min≤0 / max≤min 回退 0.5~5）
+inline std::vector<double> uniformExposureTable(double minMs, double maxMs) {
+    if (!(minMs > 0.0) || !(maxMs > minMs)) {
+        minMs = 0.5;
+        maxMs = 5.0;
+    }
+    std::vector<double> t;
+    t.reserve(20);
+    for (int i = 0; i < 20; ++i)
+        t.push_back(minMs + static_cast<double>(i) * (maxMs - minMs) / 19.0);
+    return t;
+}
+
+// 20 档产线基线（261003 口径：激光/补光均分 0~100；261004 曝光档值表化——
+// camera.json brightnessLadder.exposureMs 20 元数组逐档注入，缺省均匀 0.5~5）：
+//   曝光 = exposureMs[i]（第 i+1 档；逐档自由，非强制等差——方便产线按需定表）
 //   补光 0~100 → 步长 100/19 ≈ 5.263
 //   激光 0~100 → 步长 100/19 ≈ 5.263
-// 真机定表后经 setSteps 整体替换
-inline std::vector<BrightnessStep> builtinBrightnessLadder20() {
+// 非法表（元素数≠20 / 任一 ≤0）回退内置默认。真机定表后亦可 setSteps 整体替换
+inline std::vector<BrightnessStep> builtinBrightnessLadder20(
+    const std::vector<double>& exposureMs) {
+    auto valid = [](const std::vector<double>& t) {
+        if (t.size() != 20) return false;
+        for (double v : t)
+            if (!(v > 0.0)) return false;
+        return true;
+    };
+    std::vector<double> exp = valid(exposureMs) ? exposureMs
+                                                : uniformExposureTable(0.5, 5.0);
     std::vector<BrightnessStep> steps;
     steps.reserve(20);
     for (int i = 0; i < 20; ++i) {
-        const double t = static_cast<double>(i) / 19.0;   // 0.0 ~ 1.0 均分
+        const double t = static_cast<double>(i) / 19.0;   // 0.0 ~ 1.0 均分（激光/补光）
         steps.push_back(BrightnessStep{
-            1.0 + t * 4.0,      // 曝光 1→5ms 线性均分
+            exp[static_cast<size_t>(i)],     // 曝光＝档值表逐档（camera.json 注入）
             t * 100.0,           // 激光 0→100 线性均分
             t * 100.0});         // 补光 0→100 线性均分
     }
@@ -101,7 +125,7 @@ class PresetLadder : public Ladder<BrightnessStep> {
 public:
     PresetLadder() : Ladder<BrightnessStep>(builtinLadder()) {}
     static std::vector<BrightnessStep> builtinLadder() {
-        return builtinBrightnessLadder20();
+        return builtinBrightnessLadder20(uniformExposureTable(0.5, 5.0));   // 缺省均匀表
     }
     const std::vector<BrightnessStep>& ladder() const { return steps(); }
 };

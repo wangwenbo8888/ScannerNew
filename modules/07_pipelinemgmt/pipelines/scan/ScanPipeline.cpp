@@ -476,12 +476,7 @@ Scanner::Result ScanPipeline::start() {
         if (!fr.success) return Result::fail("ScanPipeline::start: " + fr.message);
     }
     Hooks hooks = testHooksSet_ ? testHooks_ : chains_->assemble();
-    // 261004 根因修复（重置/收尾后 arm 冒 5 万点）：消费水位＝环已写总数——
-    // ring 跨会话复用（02 成员），旧会话残留帧＋writePtr 保留；不注入水位则
-    // lane 从 0 起抓，grabLatest「跳最新」会吃进上一会话尾部真激光帧（每帧
-    // 30-60K 点）在就绪态重放。注入后本会话只消费启动后写入的新帧。
-    auto rs = runtime_.start(scanSchedConfig(), *source_, /*sequential=*/false, &queue_, hooks,
-                             ring_->writePtr());
+    auto rs = runtime_.start(scanSchedConfig(), *source_, /*sequential=*/false, &queue_, hooks);
     if (!rs.success)
         return Result::fail("ScanPipeline::start: runtime 启动失败: " + rs.message);
 
@@ -534,6 +529,12 @@ void ScanPipeline::stop() {
             consumer_ ? consumer_->consumed() : 0, runtime_.lastCounter());
     }
     state_ = State::Stopped;
+    // 261004 会话边界清环（替代 start 水位注入——该法破坏「先推帧再 start」的
+    // 测试/装配模式）：ring 跨会话复用（02 成员），不重置则下会话 lane 从 0 起
+    // 抓，grabLatest「跳最新」吃进本会话尾部真激光帧（30-60K 点/帧）在就绪态
+    // 重放（重置/收尾后 arm 冒 3千~5万点根因）。此处 lanes 已 drain、consumer
+    // 已 join——无并发读者，重置安全；writePtr 归零＝全部旧帧对后续读取不可见
+    if (ring_) ring_->resetForNewSession();
 }
 
 bool ScanPipeline::isRunning() const {

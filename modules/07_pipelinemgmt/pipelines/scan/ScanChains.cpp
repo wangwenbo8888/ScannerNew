@@ -28,7 +28,7 @@
 #include "scanning/laser/laser_match_scan/laser_match_scan_cuda.h"
 #include "scanning/laser/epipolar_pair_cpu/epipolar_pair_cpu.h"   // 同行配对（还账收编）
 #include <cmath>
-#include <fstream>
+#include <fstream>                                   // 261004 撤调试 PLY 导出后暂无使用（保守保留）
 #include <iomanip>
 #include <unordered_map>
 #include "scanning/preprocess/mask_separation/laser_markingpoint_mask_separation_cuda.h"
@@ -650,26 +650,10 @@ ScanChains::Hooks ScanChains::assemble() {
                     return 0;
                 }
 
-                // —— 调试导出（2026-09-06）：滤后激光点写 PLY（exe 目录
-                //    laser_recon_debug.ply 覆盖写——入池内容的真值核对）
-                {
-                    if (!filtered.empty()) {
-                        std::ofstream f("laser_recon_debug.ply", std::ios::trunc);
-                        if (f.is_open()) {
-                            f << "ply\nformat ascii 1.0\n";
-                            f << "element vertex " << filtered.total() << "\n";
-                            f << "property float x\nproperty float y\nproperty float z\n";
-                            f << "end_header\n";
-                            const cv::Vec3f* p3 = filtered.ptr<cv::Vec3f>();
-                            for (size_t k = 0; k < filtered.total(); ++k)
-                                f << std::fixed << std::setprecision(3)
-                                  << p3[k][0] << " " << p3[k][1] << " " << p3[k][2] << "\n";
-                            JMW_LOG_INFO("07-ScanChains",
-                                         "[ScanChains] 激光重建导出 laser_recon_debug.ply（{} 点）",
-                                         filtered.total());
-                        }
-                    }
-                }
+                // —— 调试导出已撤（261004 用户口径）：原每帧同步写文本 PLY
+                //    laser_recon_debug.ply（30-60K 点 ≈3-5MB，lane 线程上估计
+                //    100-300ms/帧）——激光段 375-808ms 的大头之一；真值核对
+                //    需要时临时加回
 
                 // 6) 激光块入池（池耗尽=降级无激光，帧仍有效）
                 if (deps_.laserPool) {

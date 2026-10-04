@@ -337,6 +337,9 @@ void AppContext::initialize() {
         // 261003 景深屏蔽区间（mm；产线可调——camera.json depthOfField 节覆盖）
         double dofNearMin = 150.0, dofNearMax = 500.0;
         double dofFarMin = 400.0, dofFarMax = 700.0;
+        // 261004 曝光档值表（ms——camera.json brightnessLadder.exposureMs 20 元
+        // 数组逐档注入〔逐档自由方便产线定表〕；空=内置均匀 0.5~5）
+        std::vector<double> brightExposureMs;
     };
     CameraSetupCfg camCfg;
     {
@@ -360,6 +363,35 @@ void AppContext::initialize() {
                 camCfg.contrastRight = c.value("contrastRight", camCfg.contrastRight);
                 cameraContrastL_ = camCfg.contrastLeft;   // open 成功后经门面下发
                 cameraContrastR_ = camCfg.contrastRight;
+                // 261004 曝光档值表（camera.json brightnessLadder.exposureMs 20 元数组；
+                // 缺节/非法＝内置均匀 0.5~5；逐档自由非强制等差）
+                if (j.contains("brightnessLadder") && j["brightnessLadder"].is_object()) {
+                    const auto& bl = j["brightnessLadder"];
+                    if (bl.contains("exposureMs") && bl["exposureMs"].is_array()) {
+                        try {
+                            camCfg.brightExposureMs =
+                                bl["exposureMs"].get<std::vector<double>>();
+                        } catch (const std::exception&) {
+                            camCfg.brightExposureMs.clear();   // 元素非数值——回退
+                        }
+                    }
+                    if (camCfg.brightExposureMs.size() != 20) {
+                        JMW_LOG_WARN("app-AppContext",
+                            "[AppContext] brightnessLadder.exposureMs 元素数 {}≠20——"
+                            "回退内置均匀 0.5~5ms", camCfg.brightExposureMs.size());
+                        camCfg.brightExposureMs.clear();
+                    } else {
+                        for (double v : camCfg.brightExposureMs) {
+                            if (!(v > 0.0)) {
+                                JMW_LOG_WARN("app-AppContext",
+                                    "[AppContext] brightnessLadder.exposureMs 含非正值"
+                                    "（{}）——回退内置均匀 0.5~5ms", v);
+                                camCfg.brightExposureMs.clear();
+                                break;
+                            }
+                        }
+                    }
+                }
                 // 261003 景深屏蔽区间（camera.json depthOfField 节；缺节用内置默认）。
                 // 261004 补 enabled 开关（默认 true）：临时测试机匹配走固定视差
                 // （30px），重建 Z 为常数 ≈5703mm（Q 实测 261004）——任何物理
@@ -387,12 +419,20 @@ void AppContext::initialize() {
                 dofFarMax_ = camCfg.dofFarMax;
                 JMW_LOG_INFO("app-AppContext",
                     "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} "
-                    "pairStrict={} tsPair={} contrastL={} contrastR={} dof{} "
-                    "dofNear=[{},{}] dofFar=[{},{}]",
+                    "pairStrict={} tsPair={} contrastL={} contrastR={} "
+                    "expTable={}档[{}..{}]ms "
+                    "dof{} dofNear=[{},{}] dofFar=[{},{}]",
                     camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
                     camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps,
                     camCfg.pairStrictFrameId, camCfg.timestampPairing,
                     camCfg.contrastLeft, camCfg.contrastRight,
+                    camCfg.brightExposureMs.empty() ? 20 : camCfg.brightExposureMs.size(),
+                    camCfg.brightExposureMs.empty()
+                        ? 0.5 : *std::min_element(camCfg.brightExposureMs.begin(),
+                                                  camCfg.brightExposureMs.end()),
+                    camCfg.brightExposureMs.empty()
+                        ? 5.0 : *std::max_element(camCfg.brightExposureMs.begin(),
+                                                  camCfg.brightExposureMs.end()),
                     dofEnabled ? "(开)" : "(停用·全域直通)",
                     camCfg.dofNearMin, camCfg.dofNearMax,
                     camCfg.dofFarMin, camCfg.dofFarMax);
@@ -445,7 +485,8 @@ void AppContext::initialize() {
                 camCfg.rotateRight180, camCfg.triggerSource, camCfg.pairStrictFrameId,
                 camCfg.timestampPairing);
         },
-        nullptr, std::move(paramIo));
+        nullptr, std::move(paramIo),
+        std::move(camCfg.brightExposureMs));   // 261004 曝光档值表（camera.json 20 元数组）
     // P-1 全局态门禁注入（261002 按键域 §3.2.3）：四类键（启停/切模式/调节/菜单）
     // 白名单＝S2 待机/S4 扫标点/S5 标点+激光——S1/S3/S6/S7 全拦（逃生类不问）。
     // 装配期注入（open 前——与 setProtocolVersion 同约定）；08 不认识 10 态

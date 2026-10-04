@@ -99,6 +99,15 @@ public:
     /// 已消费总数（Backpressure）
     uint64_t donePtr() const { return donePtr_.load(std::memory_order_acquire); }
 
+    /// 会话边界重置（261004）：三计数归零＝全部已写帧对后续读取不可见——供
+    /// 跨会话复用的环在会话收尾后调用（须先停消费者：无并发读写下安全）。
+    /// 槽内旧 shared_ptr 不清（下次 write 覆盖；持引用者安全）
+    void resetForNewSession() {
+        writePtr_.store(0, std::memory_order_release);
+        claimPtr_.store(0, std::memory_order_relaxed);
+        donePtr_.store(0, std::memory_order_relaxed);
+    }
+
 private:
     size_t slots_;
     WriterMode mode_;

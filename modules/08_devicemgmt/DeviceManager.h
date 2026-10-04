@@ -139,7 +139,11 @@ public:
     DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* bus,
                   CameraFactory camFactory = nullptr,
                   SerialWriteOverride serialWriteOverride = nullptr,
-                  ParamIo paramIo = {});
+                  ParamIo paramIo = {},
+                  std::vector<double> brightnessExposureMs = {});   // 261004 曝光档值表
+                                                                    // （20 元——camera.json
+                                                                    // brightnessLadder.exposureMs
+                                                                    // 注入；空=内置均匀 0.5~5）
     ~DeviceManager();
     DeviceManager(const DeviceManager&) = delete;
     DeviceManager& operator=(const DeviceManager&) = delete;

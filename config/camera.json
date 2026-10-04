@@ -1,21 +1,23 @@
 {
-    "_说明": "相机装机口径配置（AppContext 启动读取；文件缺失用内置默认并 WARN）。曝光/频率/补光/激光等运行时参数归 08 ParamStore 账本，不放本文件。contrastLeft/contrastRight=对比度·左右分置（自建 cv::LUT 逐帧真实变换；0=直通零开销；正增强/负减弱，域 [-100,100]——自检时读入下发。SDK ImageImprovment 对 Mono8 实测 no-op 已弃用）。depthOfField.nearMin/nearMax/farMin/farMax=景深屏蔽区间（mm，07 激光链 Z 过滤；近/远两档可有重叠过渡区）。",
-    "camera": {
-        "contrastLeft": 90,
-        "contrastRight": 80,
-        "deviceIndexLeft": 0,
-        "deviceIndexRight": 1,
-        "pairStrictFrameId": true,
-        "previewFps": 10,
-        "rotateRight180": true,
-        "triggerSource": "Line2"
-    },
-    "depthOfField": {
-        "_说明": "景深屏蔽（07 激光链 Z 过滤）。enabled=false=停用（区间全域直通）——261004 定：临时机匹配走固定视差，视差已改为按 Q 反算（目标深度 350mm＝工作距离 30-40cm 中位，d≈489px），Z 恒≈350mm；近/远分档对常数 Z 无意义故停用。真机（真匹配 Z 随距离变化）改 enabled=true 并恢复产线定版区间。",
-        "enabled": false,
-        "nearMin": 150.0,
-        "nearMax": 500.0,
-        "farMin": 400.0,
-        "farMax": 700.0
-    }
+  "camera": {
+    "deviceIndexLeft": 0,
+    "deviceIndexRight": 1,
+    "rotateRight180": true,
+    "triggerSource": "Line2",
+    "pairStrictFrameId": true,
+    "previewFps": 10,
+    "contrastLeft": 90,
+    "contrastRight": 80
+  },
+  "depthOfField": {
+    "enabled": false,
+    "nearMin": 150.0,
+    "nearMax": 500.0,
+    "farMin": 400.0,
+    "farMax": 700.0
+  },
+  "brightnessLadder": {
+    "_说明": "曝光档值表（20 元数组逐档注入，元素=该档曝光 ms——逐档自由非强制等差；缺节/元素数≠20/含非正值=回退内置均匀 0.5~5ms）",
+    "exposureMs": [0.5, 0.7368, 0.9737, 1.2105, 1.4474, 1.6842, 1.9211, 2.1579, 2.3947, 2.6316, 2.8684, 3.1053, 3.3421, 3.5789, 3.8158, 4.0526, 4.2895, 4.5263, 4.7632, 5]
+  }
 }

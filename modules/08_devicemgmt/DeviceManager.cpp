@@ -35,9 +35,12 @@ constexpr size_t kPostQueueCap = 64;          // 编队队列容量（满丢新+
 // 调用点统一经 code() 取值
 constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 
-std::vector<ParamSpec> makeParamSpecs() {      // 参数字段定义归 08（红线）
+std::vector<ParamSpec> makeParamSpecs(double expMinMs) {  // 参数字段定义归 08（红线）
+    if (!(expMinMs > 0.0)) expMinMs = 0.5;                // 非法回退（与梯表同源）
     return {
-        {"exposure", 3.0, 1.0, 100.0},        // 曝光 ms（≈档10 中位均分值——boot 后由梯覆写）
+        {"exposure", 3.0, expMinMs, 100.0},        // 曝光 ms（≈档10 中位均分值——boot 后由梯覆写；261004
+                                                  // 下限随曝光档值表最小值同步——账本钳制域与
+                                                  // 梯表同源防档 1 被钳位）
         {"freqHz", 60.0, 1.0, 200.0},         // N10 H 拍照频率＝固定值（261002 按键域定稿：无任何调节入口，
                                               // 仅 N10 组帧读取；60＝带宽账定版 750→375MB/s）
         {"bgLight", 47.0, 0.0, 100.0},        // N10 B 补光（≈档10 中位均分值——boot 后由梯覆写）
@@ -117,7 +120,8 @@ hal::CaptureParams calibPhaseParams(const ParamStore& params, int phase) {
 
 DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* bus,
                              CameraFactory camFactory, SerialWriteOverride serialWrite,
-                             ParamIo paramIo)
+                             ParamIo paramIo,
+                             std::vector<double> brightnessExposureMs)
     : cfg_(std::move(cfg)),
       paramIo_(std::move(paramIo)),
       bus_(bus),
@@ -127,8 +131,15 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
       menu_(std::make_unique<MenuLogic>()),
       mode_(std::make_unique<ModeController>(std::move(gate))),
       warmup_(std::make_unique<WarmupSequence>(cfg_.warmup)) {
+    // 261004 曝光档值表化（camera.json brightnessLadder.exposureMs 20 元数组）：
+    // 梯表整体换＋账本钳制域取表内最小值（非法表回退内置均匀 0.5~5——函数自防）
+    ladder_.setSteps(builtinBrightnessLadder20(brightnessExposureMs));
+    double tblMin = 0.5;
+    if (brightnessExposureMs.size() == 20)
+        tblMin = *std::min_element(brightnessExposureMs.begin(),
+                                   brightnessExposureMs.end());
     buildKeyActions();
-    auto specs = makeParamSpecs();
+    auto specs = makeParamSpecs(tblMin);
     for (const auto& s : specs) paramKeys_.push_back(s.key);   // param1 索引线索
     params_ = std::make_unique<ParamStore>(
         std::move(specs),
