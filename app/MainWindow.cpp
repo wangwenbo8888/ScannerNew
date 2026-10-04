@@ -459,8 +459,14 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         } else if (p1 == 100) {    // View 视点缩放（260927 旧口径保留）
                             if (m_3dView) m_3dView->zoomView(p2 > 0 ? 0.8 : 1.25);
                         } else if (p1 == 112) {    // P-2 显示远近档（261002：5 档距离
-                            // 预设——只改预览观看远近；快照兜底见启动对齐）
-                            if (m_3dView) m_3dView->setViewDistanceLadder(static_cast<int>(p2));
+                            // 预设——只改预览观看远近）。261004 定版：按事件序列档差
+                            // 推方向（锚由 infoTimer 每秒随 DM 快照自愈——面板期
+                            // 快照初值竞态＝首按反向二修）；未同步（0）时跳过缩放
+                            if (m_3dView && m_lastDistGear > 0) {
+                                const int gears = static_cast<int>(p2) - m_lastDistGear;
+                                m_3dView->zoomGears(gears);   // +拉近（放大）/−拉远（缩小）
+                            }
+                            m_lastDistGear = static_cast<int>(p2);
                         } else if (p1 == 111) {    // P-3 档位横幅（按键来源专属——UI 不来）
                             // ＋P-5 回显：参数面板档位滑条同步（阻断防环路）＋三参只读行刷新
                             showBanner(QStringLiteral("亮度 ▸ 第%1/%2档")
@@ -3169,6 +3175,14 @@ void MainWindow::startInfoTimer()
             auto* dmVox = m_appCtx ? m_appCtx->deviceManager() : nullptr;
             if (dmVox && m_voxelSlider->value() != dmVox->voxelLadderIndex())
                 m_voxelSlider->setValue(dmVox->voxelLadderIndex());
+        }
+        // 显示远近档差锚自愈同步（261004 首按反向二修）：面板构建时快照可能
+        // 尚未刷新（成员初值 1≠持久化真档）→ 锚错首按方向反。每秒跟随 DM
+        // 快照收敛——112 事件到来时锚必等于 DM 当前真档（跨事件无其他写者，
+        // 事件后 DM 档＝事件档，下拍同步等价于"记上次事件档"）
+        if (auto* dmDist = m_appCtx ? m_appCtx->deviceManager() : nullptr) {
+            const int dg = dmDist->distanceLadderIndex();
+            if (dg >= 1 && dg <= 5) m_lastDistGear = dg;
         }
     });
     m_infoTimer->start(1000);

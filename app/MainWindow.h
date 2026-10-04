@@ -135,6 +135,11 @@ protected:
     class QSlider *m_param1Slider = nullptr;  // P-5 收敛：亮度档滑条（1-20，与按键
                                               //   同梯同账——松手提交；三参唯一写入口）
     class QSlider *m_voxelSlider = nullptr;   // P-分辨率：体素密度滑条（27 档，菜单①
+    int m_lastDistGear = 0;                   // 显示远近档差锚（261004：0=未同步——
+                                              // infoTimer 每秒随 DM 快照自愈；事件按
+                                              // 前后档差推方向。控件内锚跨重启失步
+                                              // ＝首按反向根因，面板期快照初值竞态
+                                              // ＝二修）
                                               //   同梯同账；仅待机可调，扫描中锁住）
     class QLabel *m_voxelValLbl = nullptr;    // P-分辨率：值标签（mm——113 事件回显
                                               //   用 QSignalBlocker 屏蔽了 valueChanged，

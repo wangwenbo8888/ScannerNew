@@ -102,7 +102,11 @@ public:
     /// P-2 显示远近档（261002 按键域 §3.3.2）：档 1-5 按档值系数相对基准视点
     /// 拉远（基准＝placeOptimalCamera/home 所设距离；系数产线对账前占位）。
     /// 只改预览观看远近，不碰采集参数
-    void setViewDistanceLadder(int idx);
+    void setViewDistanceLadder(int idx);   // 兼容壳（未用可后续清）— 见 zoomGears
+    /// 显示远近按键缩放（261004 定版）：gears>0＝拉近（放大）、<0＝拉远（缩小），
+    /// 每档合成 3 个滚轮刻度（与鼠标滑轮同路径同语义）；0＝no-op。方向由调用方
+    /// （事件序列前后档差）推——控件内部不再持档号锚（跨重启失步＝首按反向根因）
+    void zoomGears(int gears);
     void home();
 
     // Lasso / polyline selection
@@ -230,9 +234,6 @@ private:
     float m_lastMouseX;
     float m_lastMouseY;
     bool m_firstMouse;
-
-    int m_distLadderIdx = 3;   // 显示远近档当前档（1-5；默认中位 3）——261004
-                               // 档间比值伸缩基准（与滚轮同语义），同档 no-op
 
     std::ifstream m_streamFile;
     std::vector<char> m_streamFileBuf;   // 流文件 1MB 缓冲（pubsetbuf——须存活于读全程）

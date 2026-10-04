@@ -144,28 +144,28 @@ void OSGWidget::home()
         m_viewer->getCameraManipulator()->home(0);
 }
 
-// P-2 显示远近档（261002 §3.3.2；261004 三修定版）：**合成滚轮事件**缩放——
-// 与鼠标滑轮完全同一代码路径（TrackballManipulator 内部处理，语义绝对一致：
-// 保留旋转/平移，只沿视轴缩放）。方向：R（升档）＝SCROLL_UP 拉近变大、L（降档）
-// ＝SCROLL_DOWN 拉远变小。历史教训（261004 真机三轮实证）：
+// 显示远近档（261002 §3.3.2；261004 定版）：**合成滚轮事件**缩放——与鼠标
+// 滑轮完全同一代码路径（TrackballManipulator 内部处理：保留旋转/平移，只沿
+// 视轴缩放）。历史教训（261004 真机四轮实证，全部废除）：
 //   ① home 绝对锚版——用户转视角后首换档相机跳回 home 朝向＝画面整体平移；
-//   ② setByMatrix 版——对 Orbit 系 manipulator 距离语义不完整采纳：无响应
-//     （getMatrix 世界系分解失败）或注视点被改写＝点云左右移动；全部废除
-void OSGWidget::setViewDistanceLadder(int idx)
-{
-    if (idx < 1 || idx > 5) return;
-    if (idx == m_distLadderIdx) return;             // 同档 no-op
+//   ② setByMatrix 版——Orbit 系 manipulator 距离语义不完整采纳：无响应或点云
+//     左右移动；③控件内档号锚——档号持久化跨重启失步＝首按方向反（先放大再
+//     缩小）；方向改由调用方按事件序列前后档差推（zoomGears 有符号档数）。
+// 本 manipulator SCROLL_UP＝拉远（真机实证）——拉近须发 DOWN
+void OSGWidget::setViewDistanceLadder(int idx) { (void)idx; /* 兼容壳：档号语义已废 */ }
+
+// 显示远近按键缩放（261004 定版）：见头注。方向：gears>0 拉近＝SCROLL_DOWN
+// （本 manipulator SCROLL_UP＝拉远——真机实证）
+void OSGWidget::zoomGears(int gears) {
+    if (gears == 0) return;
     if (!m_gw || !m_gw->getEventQueue()) return;
-    const int steps = idx - m_distLadderIdx;        // + = 升档（拉近距离）
-    // 真机实证（261004）：本 manipulator SCROLL_UP＝拉远——升档拉近须发 DOWN
     const osgGA::GUIEventAdapter::ScrollingMotion dir =
-        steps > 0 ? osgGA::GUIEventAdapter::SCROLL_DOWN
+        gears > 0 ? osgGA::GUIEventAdapter::SCROLL_DOWN
                   : osgGA::GUIEventAdapter::SCROLL_UP;
     constexpr int kNotchesPerGear = 3;              // 每档 ≈ 3 滚轮刻度（×1.1³≈1.33）
-    const int notches = (steps > 0 ? steps : -steps) * kNotchesPerGear;
+    const int notches = (gears > 0 ? gears : -gears) * kNotchesPerGear;
     for (int i = 0; i < notches; ++i)
         m_gw->getEventQueue()->mouseScroll(dir);
-    m_distLadderIdx = idx;
 }
 
 void OSGWidget::createAxesIndicator()
