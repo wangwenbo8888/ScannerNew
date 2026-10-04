@@ -157,9 +157,10 @@ void OSGWidget::setViewDistanceLadder(int idx)
     if (idx == m_distLadderIdx) return;             // 同档 no-op
     if (!m_gw || !m_gw->getEventQueue()) return;
     const int steps = idx - m_distLadderIdx;        // + = 升档（拉近距离）
+    // 真机实证（261004）：本 manipulator SCROLL_UP＝拉远——升档拉近须发 DOWN
     const osgGA::GUIEventAdapter::ScrollingMotion dir =
-        steps > 0 ? osgGA::GUIEventAdapter::SCROLL_UP
-                  : osgGA::GUIEventAdapter::SCROLL_DOWN;
+        steps > 0 ? osgGA::GUIEventAdapter::SCROLL_DOWN
+                  : osgGA::GUIEventAdapter::SCROLL_UP;
     constexpr int kNotchesPerGear = 3;              // 每档 ≈ 3 滚轮刻度（×1.1³≈1.33）
     const int notches = (steps > 0 ? steps : -steps) * kNotchesPerGear;
     for (int i = 0; i < notches; ++i)
