@@ -428,17 +428,9 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                 ? QStringLiteral("按键就绪——按设备 M 键开始扫描")
                                 : QString::fromStdString("就绪被拒: " + r.message));
                         } else if (p1 == 105) {    // 菜单⑤「重置」（261004 矩阵规则 8：
-                            // 停采＋撕会话「不落库」＋清全部数据回 S2）。设备侧已二次
-                            // 确认（⑤子态）——毁灭性操作 UI 再弹确认框，用户确认才执行
+                            // 停采＋撕会话「不落库」＋清全部数据回 S2）。确认方式＝设备侧
+                            // ⑤子态二次确认（游标⑤→M→再 M 执行，其他键取消）——不另弹窗
                             if (!m_appCtx) return;
-                            const auto ans = QMessageBox::question(this,
-                                QStringLiteral("重置确认"),
-                                QStringLiteral("将停止采集、撕毁会话（数据不落库），\n并清空全部点云数据（不可恢复）。\n\n确定重置？"),
-                                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-                            if (ans != QMessageBox::Yes) {
-                                showBanner(QStringLiteral("已取消重置"), true);
-                                return;
-                            }
                             if (m_appCtx->isScanSessionActive()) {
                                 auto r = m_appCtx->discardScanSession();   // 不落库＋全清
                                 statusBar()->showMessage(r.success
