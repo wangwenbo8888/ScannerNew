@@ -34,6 +34,14 @@ std::vector<Scanner::data::MarkerRecord> SceneFeedAdapter::latestMarkers() const
     return latestMarkers_;
 }
 
+void SceneFeedAdapter::clearCache() {
+    std::lock_guard<std::mutex> lock(markersMtx_);
+    if (!latestMarkers_.empty())
+        JMW_LOG_INFO("app-SceneFeed", "[SceneFeedAdapter] ⑤重置联动：latestMarkers 缓存清（{} 点）",
+                     latestMarkers_.size());
+    latestMarkers_.clear();
+}
+
 void SceneFeedAdapter::pushCloudSnapshot(Scanner::pipeline::CloudViewHandle cloud) {
     pushedClouds_.fetch_add(1, std::memory_order_relaxed);
     if (frozen_.load(std::memory_order_acquire)) {

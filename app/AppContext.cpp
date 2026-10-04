@@ -827,20 +827,23 @@ Scanner::Result AppContext::discardScanSession() {
     if (pointCloudBuffer_) {                                    // ③ 清全部数据
         const auto cr = pointCloudBuffer_->clear();             //   （会话云＋标志点）
         JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤重置数据清理: {}（{}）",
-                     cr.success ? "全清完成" : "清理失败", cr.message);
+                      cr.success ? "全清完成" : "清理失败", cr.message);
     }
+    if (sceneFeed_) sceneFeed_->clearCache();                   //   ④ 显示链缓存同清
+                                                                //   （latestMarkers——防编辑门禁读残留）
     const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0).count();
     JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤重置 discard 链完成 t+{}ms（不落库·全清·回 S2）", el);
     return r;
 }
 
-// ⑤ S2 分支：无会话清残留工作集（同样全清——06 点云仓库）
+// ⑤ S2 分支：无会话清残留工作集（同样全清——06 点云仓库＋显示链缓存）
 Scanner::Result AppContext::clearResidualWorkingSet() {
     if (!pointCloudBuffer_) return Scanner::Result::fail("点云仓库未装配");
     const auto r = pointCloudBuffer_->clear();
+    if (sceneFeed_) sceneFeed_->clearCache();   // latestMarkers 残留同清（261004）
     JMW_LOG_WARN("app-AppContext", "[AppContext] ⑤ S2 残留工作集清理: {}（{}）",
-                 r.success ? "完成" : "失败", r.message);
+                  r.success ? "完成" : "失败", r.message);
     return r;
 }
 

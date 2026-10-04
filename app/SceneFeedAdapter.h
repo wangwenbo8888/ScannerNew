@@ -43,6 +43,10 @@ public:
     /// 扫描合账时由 app 落 06 PointCloudBuffer（A 模式的"生成标志点点云"出口）
     std::vector<Scanner::data::MarkerRecord> latestMarkers() const;
 
+    /// ⑤重置全清联动（261004）：清 latestMarkers 缓存——与 06 仓库 clear 对齐，
+    /// 防 canEnterEditSession 等读口拿到已亡会话的残留
+    void clearCache();
+
 signals:
     // UI 线程消费（MainWindow 接 OSGWidget::loadMarkerPoints；metatype 在 cpp 注册）
     // normals 与 points 等长对齐（NaN 滤除同步）——定向圆盘渲染用（世界系固定朝向）
