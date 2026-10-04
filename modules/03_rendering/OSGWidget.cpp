@@ -2578,19 +2578,59 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
 
 // ============================================================================
 // 左相机视角（实现）——eye 沿 -z 看向点云中心、up=-y（OpenCV 系 y 向下）
+// 261004 稳健化：取景基准优先 robustMarkerBounds（中位数中心＋90 分位半径）——
+// 伪标志点离群值不再拉爆包围球（视角后拉＝扫描中点云"逐渐变小"根因）；
+// 点数不足回退纯包围球（原口径）
 // ============================================================================
+bool OSGWidget::robustMarkerBounds(osg::Vec3d& ctr, double& radius) const
+{
+    if (!m_markerCoords || m_markerCoords->size() < 5) return false;
+    const size_t n = m_markerCoords->size();
+    // 中心＝逐轴中位数（离群不牵引）
+    std::vector<double> xs(n), ys(n), zs(n);
+    for (size_t i = 0; i < n; ++i) {
+        xs[i] = (*m_markerCoords)[i].x();
+        ys[i] = (*m_markerCoords)[i].y();
+        zs[i] = (*m_markerCoords)[i].z();
+    }
+    const auto med = [](std::vector<double>& v) {
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
+    };
+    ctr = osg::Vec3d(med(xs), med(ys), med(zs));
+    // 半径＝点到中心距离 90 分位（≤10% 离群点不参与）；下限 10mm 防退化
+    std::vector<double> d2(n);
+    for (size_t i = 0; i < n; ++i) {
+        const osg::Vec3d d((*m_markerCoords)[i].x() - ctr.x(),
+                           (*m_markerCoords)[i].y() - ctr.y(),
+                           (*m_markerCoords)[i].z() - ctr.z());
+        d2[i] = d.length();
+    }
+    const size_t k90 = n * 9 / 10;                    // 90 分位下标（n≥5 恒有效）
+    std::nth_element(d2.begin(), d2.begin() + k90, d2.end());
+    radius = std::max(d2[k90], 10.0);
+    return true;
+}
+
 void OSGWidget::setLeftCameraView()
 {
     if (!m_viewer || !m_root) return;
-    // 视角基准=标志点自身包围球（与 maybeAutoFrame 同源——全场景 bound 会被
-    // 残留点云污染）
-    const osg::BoundingSphere bs =
-        (m_markerRoot && m_markerRoot->getNumParents() > 0)
-            ? m_markerRoot->getBound()
-            : m_root->getBound();
-    if (!bs.valid() || bs.radius() <= 0) return;
+    osg::Vec3d c;
+    double r = 0.0;
+    if (robustMarkerBounds(c, r)) {
+        // 稳健口径：中位数中心＋90 分位半径（见头注）
+    } else {
+        // 回退：标志点包围球（与 maybeAutoFrame 同源——全场景 bound 会被
+        // 残留点云污染）
+        const osg::BoundingSphere bs =
+            (m_markerRoot && m_markerRoot->getNumParents() > 0)
+                ? m_markerRoot->getBound()
+                : m_root->getBound();
+        if (!bs.valid() || bs.radius() <= 0) return;
+        c = osg::Vec3d(bs.center());
+        r = bs.radius();
+    }
 
-    const osg::Vec3d c(bs.center());
     // 取景距离＝按有效半视场（含宽高比）留边 15%（2026-09-06 用户口径：1.2r
     // 过近看不清工件全貌；与 placeOptimalCamera 同式——工件全貌入画且留余量）
     constexpr double kPi = 3.14159265358979323846;
@@ -2599,11 +2639,10 @@ void OSGWidget::setLeftCameraView()
     const double halfV = 30.0 * 0.5 * kPi / 180.0;
     const double halfH = std::atan(std::tan(halfV) * aspect);
     const double half = std::min(halfV, halfH);
-    const double dist = (bs.radius() / std::sin(half)) * 1.15;
+    const double dist = (r / std::sin(half)) * 1.15;
     const osg::Vec3d eye(c.x(), c.y(), c.z() - dist);
     const osg::Vec3d up(0.0, -1.0, 0.0);
 
-    const double r = bs.radius();
     m_viewer->getCamera()->setProjectionMatrixAsPerspective(30.0, aspect, r * 0.01, r * 100.0);
     m_userProjection = m_viewer->getCamera()->getProjectionMatrix();
 
@@ -2625,24 +2664,31 @@ void OSGWidget::maybeAutoFrame()
     const auto now = std::chrono::steady_clock::now();
     if (m_lastFitRadius >= 0.0 && now - m_lastFitTime < std::chrono::seconds(1)) return;
 
-    // 取景基准=标志点自身包围球（非全场景——残留点云 geode 会污染半径/中心，
+    // 取景基准（261004 稳健化）：优先 robustMarkerBounds（中位数中心＋90 分位
+    // 半径——伪标志点离群值不拉爆取景，扫描中点云"逐渐变小"根因修复）；
+    // 点数不足回退标志点包围球（非全场景——残留点云 geode 会污染半径/中心，
     // 视角过远点过小"看不见"，须导入触发 fit 才可见的根因 2026-09-01）
-    const osg::BoundingSphere bs =
-        (m_markerRoot && m_markerRoot->getNumParents() > 0)
-            ? m_markerRoot->getBound()
-            : osg::BoundingSphere();
-    if (!bs.valid() || bs.radius() <= 0.0) return;
+    osg::Vec3d ctr;
+    double radius = 0.0;
+    if (!robustMarkerBounds(ctr, radius)) {
+        const osg::BoundingSphere bs =
+            (m_markerRoot && m_markerRoot->getNumParents() > 0)
+                ? m_markerRoot->getBound()
+                : osg::BoundingSphere();
+        if (!bs.valid() || bs.radius() <= 0.0) return;
+        radius = bs.radius();
+    }
     // 已取过景且未显著变化（0.8×~1.25× 带内）——视角不动（防每 5 帧一跳）；
     // 带外（显著增大或缩小）都重取：缩小覆盖"停止扫描/二次会话"场景——
     // 此前只防增大，停止后一次跳走的视角永不回来，点云"消失"假象
     if (m_lastFitRadius >= 0.0 &&
-        bs.radius() < m_lastFitRadius * 1.25 &&
-        bs.radius() > m_lastFitRadius * 0.8) return;
+        radius < m_lastFitRadius * 1.25 &&
+        radius > m_lastFitRadius * 0.8) return;
 
     // 扫描标志点路径：取景用左相机视角（用户口径）——通用 fitCameraToRoot
     // 斜视角仅导入路径用
     setLeftCameraView();
-    m_lastFitRadius = bs.radius();
+    m_lastFitRadius = radius;
     m_lastFitTime = now;
 }
 

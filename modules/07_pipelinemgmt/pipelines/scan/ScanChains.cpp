@@ -972,12 +972,34 @@ bool ScanChains::runMarkerChain(const data::EnhancedFrame& frame, ScanLaneOps& o
     }
     if (verbose) JMW_LOG_INFO("07-ScanChains", "[ScanChains] P链观测#{}: reconstruct 完成", pchainSeq);
 
+    // —— 景深门（261004 补标志点侧）：与激光链同区间（相机系 Z，近/远随档；
+    // dofEnabled=false 时 AppContext 注入全域 [0,1e9]＝直通）。伪标志点重建
+    // Z 乱飞（配准污染包围球→视角后拉→点云"变小"根因之一），工作距离真标志
+    // 点 Z≈350mm 落近景带内不受影响——这是有物理依据的门，非 26-08-31 撤销
+    // 的"无差别范围过滤"口径 ——
+    const int dofMk = dofMode_.load(std::memory_order_relaxed);
+    const double mkZMin = (dofMk == 1) ? dofFarMin_.load(std::memory_order_relaxed)
+                                       : dofNearMin_.load(std::memory_order_relaxed);
+    const double mkZMax = (dofMk == 1) ? dofFarMax_.load(std::memory_order_relaxed)
+                                       : dofNearMax_.load(std::memory_order_relaxed);
+    int dofDroppedMk = 0;
     for (const auto& m : pr.markerResults) {
         if (!m.validPlane || !m.validCircle) continue;
+        if (m.centerZ < mkZMin || m.centerZ > mkZMax) {
+            ++dofDroppedMk;
+            continue;                           // 景深带外＝伪点，拒入配准/融合
+        }
         // 无几何过滤（用户口径 2026-08-31：过滤掩盖真实问题——假匹配飞点
         // 须从源头治理：左右匹配质量/曝光/标定，不以范围判定藏污）
         positions.emplace_back(m.centerX, m.centerY, m.centerZ);
         normals.emplace_back(m.normalX, m.normalY, m.normalZ);
+    }
+    if (dofDroppedMk > 0) {
+        static std::atomic<uint64_t> s_mkDofDrop{0};
+        if (s_mkDofDrop.fetch_add(1, std::memory_order_relaxed) % 30 == 0)
+            JMW_LOG_INFO("07-ScanChains",
+                "[标志点排障] 景深门拒入 [{}-{}mm]：本帧 {} 点（累计节流 1/30 打点）",
+                mkZMin, mkZMax, dofDroppedMk);
     }
     if (verbose) {
         const auto matchedCenters = static_cast<size_t>(std::count_if(

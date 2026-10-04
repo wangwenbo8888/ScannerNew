@@ -203,6 +203,10 @@ private:
                             const osg::Vec3d& upv, double radiusMm);
     void maybeAutoFrame();                                // 扫描视角跟随：生长感知＋节流＋交互避让
     void setLeftCameraView();                             // 左相机视角：eye 沿 -z 看向点云中心、up=-y（OpenCV 系 y 向下，画面方向与左相机取景一致）
+    /// 稳健标志点界（261004 视角污染修）：中心＝逐轴中位数、半径＝点到中心
+    /// 距离 90 分位（离群伪点≤10% 不参与取景）。点数<5 或无效＝false（回退
+    /// 纯包围球）。m_markerCoords 为标志点圆盘中心集
+    bool robustMarkerBounds(osg::Vec3d& ctr, double& radius) const;
 
 
 protected:
