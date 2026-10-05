@@ -1,7 +1,7 @@
 # Module 05_editing — 编辑工作流域对象（实施计划 P1 2026-09-05）
 # SelectionService（三栏选择引擎）/ UndoRedoStack（双账本软删除账本）；
 # EditWorkflow（会话主体）P4 落地时编入 app（对齐 01/02 工作流模式）。
-add_library(mod_editing STATIC
+add_library(mod_editing ${JMW_MODULE_LIB_TYPE}
     SelectionService.cpp
     UndoRedoStack.cpp
 )

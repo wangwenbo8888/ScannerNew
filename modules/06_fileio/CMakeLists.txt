@@ -1,7 +1,7 @@
 # Module 06_fileio — 数据管理（运行时容器 + Sink + 文件 IO）
 # Phase 2 迁入：FrameBuffer/PointCloudBuffer/DeviceStateCache + 三 Sink（自 framework/data）
 # B-T3：file_io 收库（点类型 cv::Point3f，命名空间 Scanner::data::fileio）
-add_library(mod_fileio STATIC
+add_library(mod_fileio ${JMW_MODULE_LIB_TYPE}
     FrameBuffer.cpp
     PointCloudBuffer.cpp
     DeviceStateCache.cpp

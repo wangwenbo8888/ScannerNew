@@ -47,7 +47,7 @@ if(NOT BUILD_GLOBAL_OPTIM)
 endif()
 
 # ============================================================================
-add_library(mod_operatorlib STATIC ${OP_SOURCES})
+add_library(mod_operatorlib ${JMW_MODULE_LIB_TYPE} ${OP_SOURCES})
 target_include_directories(mod_operatorlib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}          # #include "core/common/calib_types.h"
     ${CMAKE_CURRENT_SOURCE_DIR}/core     # #include "common/calib_types.h"（3DSCANNER 风格）
@@ -110,6 +110,12 @@ if(BUILD_TESTS)
             ${CMAKE_SOURCE_DIR})
         # CUDA 测试开关（与 3DSCANNER 一致；无害于纯 CPU 测试）
         target_compile_definitions(${tname} PRIVATE WITH_CUDA_TESTS=$<BOOL:${BUILD_CUDA}>)
+        # 261005 DLL 化补账：纯 cpp 测试直接调 cudaDeviceReset 等 cudart API
+        #（静态时代经 mod_operatorlib 静态 obj 引用被动进链；DLL 化后算子符号
+        # 已封进 DLL，须显式链 CUDA::cudart。含 .cu 的测试目标 CMake 自动带，多链幂等）
+        if(BUILD_CUDA)
+            target_link_libraries(${tname} PRIVATE CUDA::cudart)
+        endif()
         if(MSVC)
             target_compile_options(${tname} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
         endif()

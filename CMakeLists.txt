@@ -11,6 +11,34 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
+# ============================================================================
+# 模块 DLL 化（261005 用户口径：模块独立部署/授权）
+# - JMW_BUILD_MODULE_DLLS=ON：mod_fileio/pipelinemgmt/devicemgmt/operatorlib/
+#   observability/editing 六个实体业务库以 SHARED 构建（mod_*.dll + 导入库）；
+#   OFF 回退全静态（原形态）。base 保持 STATIC：纯类型＋实例注入 EventBus，
+#   无全局态，嵌入各 DLL 安全。
+# - CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS：链接期从 .obj 自动生成 .def 全量导出
+#   （98 对象无导出宏，逐头加 dllexport 不现实）。⚠ 铁律：所有模块 DLL 与
+#   exe 必须同工具链同 CRT（全局已是 /MD(D)）——跨边界传 cv::Mat/std::vector/
+#   shared_ptr 依赖同一 STL/CRT 堆。
+# - ⚠ spdlog 必须共享库：JMW_LOG 宏直透 spdlog 全局默认 logger（注册表为
+#   进程级单例），静态链进多个 DLL 会产生各自注册表→日志分裂/文件互踩。
+#   系统 find_package 命中静态 spdlog 时勿用（FetchContent 分支已强制
+#   SPDLOG_BUILD_SHARED）。
+# ============================================================================
+option(JMW_BUILD_MODULE_DLLS "Build business modules as DLLs (independent deploy/license)" ON)
+if(JMW_BUILD_MODULE_DLLS)
+    set(JMW_MODULE_LIB_TYPE SHARED)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    # 统一运行时输出目录：模块 DLL / exe / 测试 exe 同目录（build/bin[/<cfg>]）
+    # ——exe 与 ctest 免 PATH/拷贝即找到自研 DLL；三方 DLL 的 copy_dlls.bat/
+    # jmw_deploy_crt 目标目录随 $<TARGET_FILE_DIR> 自动归一
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    foreach(_cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_cfg} ${CMAKE_BINARY_DIR}/bin)
+    endforeach()
+endif()
+
 option(BUILD_CUDA "Build with CUDA support" ON)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_UI "Build Qt UI layer (deferred)" OFF)
@@ -78,6 +106,11 @@ include(FetchContent)
 
 find_package(spdlog 1.15 QUIET)
 if(NOT spdlog_FOUND)
+    # SPDLOG_BUILD_SHARED：DLL 化下强制共享（见文件头注释——多 DLL 静态链
+    # spdlog 会各自持有注册表单例，默认 logger/落盘文件分裂）
+    if(JMW_BUILD_MODULE_DLLS)
+        set(SPDLOG_BUILD_SHARED ON)
+    endif()
     FetchContent_Declare(spdlog URL ${JMW_GH_MIRROR}https://github.com/gabime/spdlog/archive/refs/tags/v1.15.1.tar.gz)
     FetchContent_MakeAvailable(spdlog)
 endif()

@@ -2,7 +2,7 @@
 
 set(GALAXY_SDK_DIR "C:/Program Files/Daheng Imaging/GalaxySDK/Development/C++ SDK" CACHE PATH "Galaxy SDK 安装目录（见 环境配置汇总）")
 
-add_library(mod_devicemgmt STATIC
+add_library(mod_devicemgmt ${JMW_MODULE_LIB_TYPE}
     CameraControl.cpp
     CameraFactory.cpp
     MCUDriver.cpp

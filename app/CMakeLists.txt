@@ -152,11 +152,21 @@ add_custom_target(seed_configs ALL
 
 # ============================================================================
 # VS2022 调试体验：调试工作目录指向 exe 目录（DLLs/platforms 旁）
-# （启动项目在顶层 CMakeLists.txt 经目录属性 VS_STARTUP_PROJECT 设置）
+# （启动项目在顶层 CMakeLists.txt 经目录属性 VS_STARTUP_PROJECT 设置——
+#  sln 首个工程即 VS 默认启动项）
+# 261005 DLL 化：exe 与模块 DLL 统一落 build/bin（JMW_BUILD_MODULE_DLLS），
+# 工作目录用字面路径（VS_DEBUGGER_* 属性不吃生成器表达式——genex 版会静默
+# 丢弃致 .user 为空，F5 工作目录错）；静态回退形态用原 per-config 目录
 # ============================================================================
-set_target_properties(scan_demo PROPERTIES
-    VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>"
-)
+if(JMW_BUILD_MODULE_DLLS)
+    set_target_properties(scan_demo PROPERTIES
+        VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+else()
+    set_target_properties(scan_demo PROPERTIES
+        VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Debug"
+    )
+endif()
 
 else()
     message(STATUS "app/scan_demo 跳过：缺 Qt5 Svg/SerialPort 或 stubs/ 源码（库+测试基线不受影响）")

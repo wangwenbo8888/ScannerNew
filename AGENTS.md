@@ -58,8 +58,9 @@ JEAMMWARE260705/
 ### 4.1 编译归属
 
 1. `01` 的 UI/工作流类、`02/04` 工作流、`03` OSGWidget：物理在 modules/ 下，**直接编入 scan_demo.exe**（见 `app/CMakeLists.txt`）
-2. `06/07/08/09/10`：各编为 `mod_*` **静态库**（mod_fileio / mod_pipelinemgmt / mod_devicemgmt / mod_operatorlib / mod_observability）
-3. `02/03/04/05/11` 另有同名 INTERFACE 占位库（无源码，仅保目标名）
+2. `05/06/07/08/09/10`：各编为 `mod_*` 库——**261005 起默认 DLL**（`JMW_BUILD_MODULE_DLLS=ON`：mod_editing/fileio/pipelinemgmt/devicemgmt/operatorlib/observability 六个 SHARED，`CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS` 全量导出；OFF 回退全静态）。`base` 恒 STATIC（无全局态可安全嵌入各 DLL）；**spdlog 须共享库**（JMW_LOG 直透 spdlog 进程级默认 logger 注册表，多 DLL 静态链会日志分裂）
+3. `02/03/04/11` 另有同名 INTERFACE 占位库（无源码，仅保目标名）
+4. DLL 模式下全部产物（exe/DLL/测试）统一落 `<build>/bin`，三方 DLL 由 copy_dlls.bat 同目录拷贝
 
 ### 4.2 模块清单
 
@@ -227,27 +228,36 @@ factory_calib/
 ### 8.1 配置
 
 - 根 `CMakeLists.txt`：C++17 / CUDA 17 / `CMAKE_CUDA_ARCHITECTURES=75;86;87` / nvcc pin v12.6 / `/MD(D)` CRT
-- 开关：`BUILD_UI=OFF`（暂缓）、`BUILD_GLOBAL_OPTIM=ON`
+- 开关：`BUILD_UI=OFF`（暂缓）、`BUILD_GLOBAL_OPTIM=ON`、`JMW_BUILD_MODULE_DLLS=ON`（261005 起默认：六个 mod_* 以 DLL 构建＋`CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS` 全量导出＋产物统一落 `<build>/bin`；OFF 回退全静态旧形态）
 - 构建辅助脚本在 `cmake/`
 
 ### 8.2 依赖
 
-| 依赖 | 版本/路径 |
+| 依赖 | 版本/路径（本机现状） |
 |---|---|
-| OpenCV | 4.13（Release `C:/opencv-cuda-4.13.0` / Debug 自建 `C:/opencv-cuda-4.13.0-debug`） |
-| Eigen | 3.4.1（`C:/devlibs/eigen-3.4.1-install`） |
-| Qt | 5.15.2（`C:/devlibs/Qt-5.15.2-msvc2019_64`；scan_demo 需 Core/Gui/Widgets/OpenGL/Svg/SerialPort） |
-| OSG | `C:/devlibs/osg-install` |
-| Ceres 2.2 / spdlog 1.15 / nlohmann_json / gtest | 经 FetchContent（github 被封时 `-DJMW_GH_MIRROR=https://ghfast.top/`） |
+| OpenCV | 4.13（`F:/opencv4.13/install`，含 Debug/Release 双套） |
+| Eigen | 3.4.1（`F:/eigen-3.4.1` 源码树） |
+| Qt | 5.15.2（`C:/Qt/Qt5.15.2/5.15.2/msvc2019_64`；scan_demo 需 Core/Gui/Widgets/OpenGL/Svg/SerialPort） |
+| OSG | `F:/osg3.6.5/install` |
+| Ceres 2.2 / nlohmann_json / gtest | 经 FetchContent（github 被封时 `-DJMW_GH_MIRROR=https://ghfast.top/`） |
+| spdlog 1.15 | 经 FetchContent **强制共享库**（`SPDLOG_BUILD_SHARED=ON`，DLL 模式下必须——见 §4.1） |
 
 路径详见 `环境配置汇总.md`。
 
 ### 8.3 条件构建与注意事项
 
 1. **scan_demo 条件构建**：仅当 Qt5 Svg/SerialPort 齐备 **且** `app/stubs/LEADSCANSeries.h` 存在时构建，否则跳过以保「库＋测试」构建绿
-2. **build/ 是 Debug-only**（`CMAKE_CONFIGURATION_TYPES=Debug`＋Debug OpenCV）：直接在 `build/` 跑 Release 会报 `MSB8013`；Release 请用独立目录 `build-rel`
+2. **build/ 是 Debug-only**（`CMAKE_CONFIGURATION_TYPES=Debug`）：直接在 `build/` 跑 Release 会报 `MSB8013`；Release 请用独立目录 `build-rel`
+3. **DLL 模式**（默认）：全部 exe/模块 DLL/测试统一落 `<build>/bin`，三方 DLL 由 copy_dlls.bat 拷同目录——测试/运行免设 PATH；⚠ 所有模块 DLL 与 exe 必须同工具链同 `/MD(D)` CRT 构建（跨边界传 STL/OpenCV 对象依赖同一堆）
 
-### 8.4 Release（独立目录，95/95 绿）
+### 8.4 VS2022 IDE（编译＋F5 运行）
+
+1. 打开 `build/JEAMMWARE.sln`（Debug-only；Release 用 `build-rel/JEAMMWARE.sln`）
+2. 启动项默认已是 **scan_demo**（sln 首工程，顶层 CMake `VS_STARTUP_PROJECT`）；配置 x64/Debug
+3. 直接 F5：调试工作目录已指向 `build/bin`（`LocalDebuggerWorkingDirectory` 已写入 vcxproj，Qt/OSG/OpenCV/模块 DLL 同目录可直接加载）
+4. 全量构建：生成→生成解决方案；跑测试：`RUN_TESTS` 工程或命令行 ctest（§8.5/8.6）
+
+### 8.5 Release（独立目录，100/100 绿）
 
 ```powershell
 cmake -S . -B build-rel -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES=Release
@@ -255,16 +265,12 @@ cmake --build build-rel --config Release
 ctest --test-dir build-rel -C Release --output-on-failure
 ```
 
-### 8.5 Debug（现有 build/，95/95 绿）
+### 8.6 Debug（现有 build/，100/100 绿）
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DOpenCV_DIR=C:/opencv-cuda-4.13.0-debug/x64/vc17/lib `
-  -DCMAKE_CONFIGURATION_TYPES=Debug `
-  -DJMW_GH_MIRROR=https://ghfast.top/
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES=Debug
 cmake --build build --config Debug
-$env:PATH = 'C:\opencv-cuda-4.13.0-debug\x64\vc17\bin;' + $env:PATH
-ctest --test-dir build -C Debug --output-on-failure
+ctest --test-dir build -C Debug --output-on-failure   # 产物在 build/bin，免设 PATH
 ```
 
 ## 9. 关键根文件

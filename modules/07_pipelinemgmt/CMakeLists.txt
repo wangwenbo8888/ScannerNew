@@ -20,7 +20,7 @@ endif()
 if(BUILD_GLOBAL_OPTIM)                                                  # D 全局优化（GBA 依赖 Ceres）
     list(APPEND JMW_PM_PIPELINE_SRCS pipelines/globaloptim/GlobalOptimObject.cpp)
 endif()
-add_library(mod_pipelinemgmt STATIC sched/FrameResultQueue.cpp sched/PCoreBroker.cpp
+add_library(mod_pipelinemgmt ${JMW_MODULE_LIB_TYPE} sched/FrameResultQueue.cpp sched/PCoreBroker.cpp
     sched/GpuSlotService.cpp sched/CpuTopology.cpp sched/SchedulerRuntime.cpp
     ${JMW_PM_PIPELINE_SRCS})
 target_include_directories(mod_pipelinemgmt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
