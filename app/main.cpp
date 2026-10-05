@@ -53,11 +53,25 @@ int main(int argc, char *argv[])
     // 「标定参数未就绪→扫描键不激活」根因——此后任何方式启动都从 exe 旁读配置
     QDir::setCurrent(QCoreApplication::applicationDirPath());
 
-    QFile styleFile(":/icons/dark.qss");
-    if (styleFile.open(QFile::ReadOnly | QFile::Text)) {
-        app.setStyleSheet(styleFile.readAll());
-        styleFile.close();
-    }
+    // 全局弹窗设计语言（260705）：QMessageBox/QProgressDialog 家族统一白卡风
+    //（白底＋圆角＋#2980B9 交互色；作用域选择器只影响弹窗内控件，主窗按钮不受扰；
+    // QFileDialog 走系统原生不换肤。原 :/icons/dark.qss 未登记 qrc 恒空载——退役）
+    app.setStyleSheet(QStringLiteral(
+        "QMessageBox { background-color: white; }"
+        "QMessageBox QLabel { color: #333; font-size: 14px; }"
+        "QMessageBox QPushButton, QProgressDialog QPushButton {"
+        " background-color: #E8F0FE; color: #1A5276; border: 1px solid #2980B9;"
+        " border-radius: 6px; font-size: 14px; font-weight: bold;"
+        " padding: 6px 18px; min-width: 64px; }"
+        "QMessageBox QPushButton:hover, QProgressDialog QPushButton:hover"
+        " { background-color: #D4E6F1; }"
+        "QMessageBox QPushButton:pressed, QProgressDialog QPushButton:pressed"
+        " { background-color: #AED6F1; }"
+        "QProgressDialog { background-color: white; }"
+        "QProgressDialog QLabel { color: #444; font-size: 14px; }"
+        "QProgressBar { border: none; border-radius: 4px; background-color: #F0F2F5;"
+        " max-height: 10px; text-align: center; color: transparent; }"
+        "QProgressBar::chunk { border-radius: 4px; background-color: #2980B9; }"));
 
     // 装配全部框架组件
     AppContext appCtx;
@@ -108,18 +122,32 @@ int main(int argc, char *argv[])
 
     // 初始化弹窗（模态置顶）：主界面可见但被"初始化中......"挡住不可操作；
     // 自检完成自动消失（20s 兜底——失败也放行，失败项由状态栏横幅持续显示）
+    // 260705 卡片化（与其余弹窗同风）：白底圆角无边框＋酒红标题＋蓝色忙碌条
     QDialog initDlg(&window);
     initDlg.setWindowTitle(QStringLiteral("初始化"));
     initDlg.setModal(true);
     initDlg.setWindowFlags(initDlg.windowFlags() | Qt::WindowStaysOnTopHint);
+    initDlg.setWindowFlag(Qt::FramelessWindowHint, true);
+    initDlg.setAttribute(Qt::WA_TranslucentBackground);
+    initDlg.setFixedSize(360, 180);
+    initDlg.setStyleSheet(
+        "QDialog { background-color: white; border: 1px solid #e0e0e0;"
+        " border-radius: 8px; }");
     {
         auto* dlgLayout = new QVBoxLayout(&initDlg);
+        dlgLayout->setContentsMargins(20, 16, 20, 16);
+        auto* dlgTitle = new QLabel(QStringLiteral("系统初始化"), &initDlg);
+        dlgTitle->setAlignment(Qt::AlignCenter);
+        dlgTitle->setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #8B1A2B; padding: 0 0 8px 0;");
+        dlgLayout->addWidget(dlgTitle);
         auto* dlgMsg = new QLabel(QStringLiteral("初始化中......（设备连接 / 灯路检测 / 相机检测）"), &initDlg);
         dlgMsg->setAlignment(Qt::AlignCenter);
+        dlgMsg->setStyleSheet("color:#444; font-size:13px;");
+        dlgLayout->addWidget(dlgMsg);
         auto* dlgBar = new QProgressBar(&initDlg);
         dlgBar->setRange(0, 0);           // 不确定进度（忙碌指示）
         dlgBar->setFixedWidth(320);
-        dlgLayout->addWidget(dlgMsg);
         dlgLayout->addWidget(dlgBar, 0, Qt::AlignHCenter);
         initDlg.setLayout(dlgLayout);
     }

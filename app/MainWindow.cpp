@@ -206,7 +206,11 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
             QMetaObject::invokeMethod(this, [this, percent, stage]() {
                 if (!m_finalBADlg) return;   // 已关（sessionEnded 先到）——不重建
                 m_finalBADlg->setValue(std::clamp(percent, 0, 100));
-                m_finalBADlg->setLabelText(QString(QStringLiteral("全局优化中（%1%）——%2"))
+                m_finalBADlg->setLabelText(QString(QStringLiteral(
+                        "<div style='color:#8B1A2B; font-weight:bold; font-size:15px;'>"
+                        "全局优化</div>"
+                        "<div style='color:#444; font-size:14px; padding-top:6px;'>"
+                        "全局优化中（%1%）——%2</div>"))
                                                .arg(percent)
                                                .arg(QString::fromStdString(stage)));
                 if (percent >= 100) {               // 完成（点云入库后）——延迟一拍关
@@ -402,14 +406,8 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                             if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                             m_activeScanToolIdx = -1;
                             auto r = m_appCtx->stopScanSession();
-                            if (r.success && !m_finalBADlg) {   // 统一弹「全局优化中」
-                                m_finalBADlg = new QProgressDialog(
-                                    QStringLiteral("全局优化中，请稍候……"), QString(), 0, 100, this);
-                                m_finalBADlg->setWindowTitle(QStringLiteral("全局优化"));
-                                m_finalBADlg->setWindowModality(Qt::ApplicationModal);
-                                m_finalBADlg->setMinimumDuration(0);
-                                m_finalBADlg->setAutoClose(false);
-                                m_finalBADlg->show();
+                            if (r.success) {   // 统一弹「全局优化中」（卡片化共用）
+                                ensureFinalBADlg();
                             }
                             statusBar()->showMessage(r.success
                                 ? QStringLiteral("按键完成扫描——全局优化后台执行中")
@@ -1169,14 +1167,31 @@ void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
         m_scanReadyDlg = new QDialog(this);
         m_scanReadyDlg->setWindowTitle(QStringLiteral("扫描就绪"));
         m_scanReadyDlg->setModal(false);
+        // 260705 卡片化（与菜单/全局优化/表盘同风）
+        m_scanReadyDlg->setWindowFlag(Qt::FramelessWindowHint, true);
+        m_scanReadyDlg->setAttribute(Qt::WA_TranslucentBackground);
         m_scanReadyDlg->setFixedWidth(360);
+        m_scanReadyDlg->setStyleSheet(
+            "QDialog { background-color: white; border: 1px solid #e0e0e0;"
+            " border-radius: 8px; }");
         auto* lay = new QVBoxLayout(m_scanReadyDlg);
+        lay->setContentsMargins(20, 16, 20, 16);
+        lay->setSpacing(8);
+        auto* title = new QLabel(QStringLiteral("扫描就绪"), m_scanReadyDlg);
+        title->setAlignment(Qt::AlignCenter);
+        title->setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #8B1A2B; padding: 0 0 8px 0;");
+        lay->addWidget(title);
         m_scanReadyLabel = new QLabel(m_scanReadyDlg);
         m_scanReadyLabel->setAlignment(Qt::AlignCenter);
         m_scanReadyLabel->setStyleSheet(
             "font-size:14px; padding:12px 8px; color:#202225;");
         lay->addWidget(m_scanReadyLabel);
         auto* cancel = new QPushButton(QStringLiteral("取消（终止会话）"), m_scanReadyDlg);
+        cancel->setStyleSheet(
+            "QPushButton { background-color: #C0392B; color: white; border: none;"
+            " border-radius: 6px; font-size: 14px; font-weight: bold; padding: 8px 12px; }"
+            "QPushButton:hover { background-color: #A93226; }");
         lay->addWidget(cancel);
         connect(cancel, &QPushButton::clicked, this, [this]() {
             if (m_appCtx) {
@@ -1232,20 +1247,32 @@ void MainWindow::showVirtualKeypad() {
     if (!m_vkeyPad) {
         m_vkeyPad = new QDialog(nullptr);   // 无父窗口（独立顶层——全屏主窗口不遮）
         m_vkeyPad->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        // 260705 卡片化（与菜单/全局优化弹窗/悬浮工具栏同风）：白底圆角无边框浮层
+        m_vkeyPad->setWindowFlag(Qt::FramelessWindowHint, true);
+        m_vkeyPad->setAttribute(Qt::WA_TranslucentBackground);
         m_vkeyPad->setWindowTitle(QStringLiteral("虚拟按键表盘"));
         m_vkeyPad->setModal(false);
-        m_vkeyPad->setMinimumSize(560, 520);
+        m_vkeyPad->setMinimumSize(560, 560);
+        m_vkeyPad->setStyleSheet(
+            "QDialog { background-color: white; border: 1px solid #e0e0e0;"
+            " border-radius: 8px; }");
         auto* lay = new QGridLayout(m_vkeyPad);
-        lay->setContentsMargins(16, 12, 16, 12);
+        lay->setContentsMargins(16, 14, 16, 12);
         lay->setHorizontalSpacing(10);
         lay->setVerticalSpacing(8);
+        // 卡片标题（frameless 无系统标题栏——内置品牌标题行，同菜单弹窗）
+        auto* padTitle = new QLabel(QStringLiteral("虚拟按键表盘"), m_vkeyPad);
+        padTitle->setAlignment(Qt::AlignCenter);
+        padTitle->setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #8B1A2B; padding: 0 0 8px 0;");
+        lay->addWidget(padTitle, 0, 0, 1, 4);
         const QStringList gestures{
             QStringLiteral("单击"), QStringLiteral("双击"), QStringLiteral("长按")};
         for (int g = 0; g < 3; ++g) {
             auto* h = new QLabel(gestures[g], m_vkeyPad);
             h->setAlignment(Qt::AlignCenter);
             h->setStyleSheet("font-weight: bold; font-size: 14px; padding: 4px;");
-            lay->addWidget(h, 0, g + 1);
+            lay->addWidget(h, 1, g + 1);
         }
         // 行序＝U/D/L/R/M；按钮文本＝功能名（非手势名——列头已有手势，按钮要
         // 一眼看懂「按了干什么」）；tooltip＝完整描述（§3.2.2 手势总表对齐）
@@ -1285,7 +1312,7 @@ void MainWindow::showVirtualKeypad() {
             lbl->setStyleSheet(row.inProto
                 ? "font-weight: bold; font-size: 14px; padding: 4px;"
                 : "color:#999; font-size: 14px; padding: 4px;");
-            lay->addWidget(lbl, r + 1, 0);
+            lay->addWidget(lbl, r + 2, 0);
             for (int g = 0; g < 3; ++g) {
                 auto* btn = new QPushButton(row.btnText[g], m_vkeyPad);
                 btn->setMinimumHeight(44);           // 手指可点的高度
@@ -1303,7 +1330,7 @@ void MainWindow::showVirtualKeypad() {
                     });
                 }
                 // 不在此设 enabled——updateVirtualKeypadStates 统一按当前态定
-                lay->addWidget(btn, r + 1, g + 1);  // ← 关键行：加入网格布局
+                lay->addWidget(btn, r + 2, g + 1);  // ← 关键行：加入网格布局
             }
         }
         auto* note = new QLabel(
@@ -1312,12 +1339,12 @@ void MainWindow::showVirtualKeypad() {
             m_vkeyPad);
         note->setStyleSheet("color:#888; font-size: 12px; padding: 4px;");
         note->setAlignment(Qt::AlignCenter);
-        lay->addWidget(note, 6, 0, 1, 4);
+        lay->addWidget(note, 7, 0, 1, 4);
         // 当前全局态常驻标签（灰化/恢复是否与系统态同步——用户可验证）
         m_vkeyStateLbl = new QLabel(m_vkeyPad);
         m_vkeyStateLbl->setAlignment(Qt::AlignCenter);
         m_vkeyStateLbl->setStyleSheet("font-size: 13px; padding: 6px;");
-        lay->addWidget(m_vkeyStateLbl, 7, 0, 1, 4);
+        lay->addWidget(m_vkeyStateLbl, 8, 0, 1, 4);
 
         // 独立刷新定时器（500ms）——不依赖 info timer，排除连接问题
         auto* padTimer = new QTimer(m_vkeyPad);
@@ -1327,6 +1354,10 @@ void MainWindow::showVirtualKeypad() {
         padTimer->start(500);
 
         updateVirtualKeypadStates();                  // 首建即对齐当前态
+        // 260705 用户口径：贴屏幕左缘垂直居中——不挡中央三维显示窗口
+        m_vkeyPad->adjustSize();
+        const QRect ag = m_vkeyPad->screen()->availableGeometry();
+        m_vkeyPad->move(ag.left() + 12, ag.top() + (ag.height() - m_vkeyPad->height()) / 2);
     }
     m_vkeyPad->show();
     m_vkeyPad->raise();
@@ -1602,17 +1633,30 @@ void MainWindow::refreshMenuDialog() {
     }
 
     // 懒建弹窗（首次进菜单时创建独立置顶窗）
+    // 260705 用户口径美化：对齐悬浮工具栏卡片风（白底＋#e0e0e0 边＋8px 圆角
+    // 无边框浮层）＋navBar 品牌酒红标题；条目去 ①-⑤ 序号
     if (!m_menuDlg) {
         m_menuDlg = new QDialog(nullptr);
         m_menuDlg->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        m_menuDlg->setWindowFlag(Qt::FramelessWindowHint, true);
+        m_menuDlg->setAttribute(Qt::WA_TranslucentBackground);
         m_menuDlg->setWindowTitle(QStringLiteral("菜单"));
         m_menuDlg->setModal(false);
-        m_menuDlg->setMinimumSize(320, 300);
+        m_menuDlg->setMinimumSize(320, 320);
+        m_menuDlg->setStyleSheet(
+            "QDialog { background-color: white; border: 1px solid #e0e0e0;"
+            " border-radius: 8px; }");
         auto* lay = new QVBoxLayout(m_menuDlg);
-        lay->setContentsMargins(20, 16, 20, 12);
-        lay->setSpacing(4);
+        lay->setContentsMargins(20, 16, 20, 14);
+        lay->setSpacing(6);
+        // 卡片标题（frameless 无系统标题栏——内置品牌标题行）
+        auto* title = new QLabel(QStringLiteral("菜  单"), m_menuDlg);
+        title->setAlignment(Qt::AlignCenter);
+        title->setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #8B1A2B; padding: 0 0 10px 0;");
+        lay->addWidget(title);
         static const char* kNames[5] = {
-            "① 分辨率设置", "② 进入就绪", "③ 扫描完成", "④ 后处理", "⑤ 重置"
+            "分辨率设置", "进入就绪", "扫描完成", "后处理", "重置"
         };
         for (int i = 0; i < 5; ++i) {
             m_menuItems[i] = new QLabel(QString::fromUtf8(kNames[i]), m_menuDlg);
@@ -1627,11 +1671,11 @@ void MainWindow::refreshMenuDialog() {
         auto* hint = new QLabel(
             QStringLiteral("L↓/R↑ 移动游标 · M 选中 · U 退出"), m_menuDlg);
         hint->setAlignment(Qt::AlignCenter);
-        hint->setStyleSheet("color: #888; font-size: 12px;");
+        hint->setStyleSheet("color: #888; font-size: 12px; padding-top: 6px;");
         lay->addWidget(hint);
     }
 
-    // 五项样式：当前游标高亮蓝底白字，其余白底黑字
+    // 五项样式：当前游标高亮蓝底白字（就绪窗/选中项同款 #2980B9），其余浅灰
     for (int i = 0; i < 5; ++i) {
         const bool cur = (ms.cursor == i + 1);
         m_menuItems[i]->setStyleSheet(cur
@@ -1662,6 +1706,36 @@ void MainWindow::refreshMenuDialog() {
     m_menuDlg->activateWindow();
 }
 
+// ============================================================================
+// P-全局优化进度弹窗（260705 卡片化·与菜单弹窗/悬浮工具栏同风）：白底圆角
+// 无边框浮层（1px #e0e0e0 边＋8px 圆角）＋品牌酒红标题行＋细进度条（#2980B9）
+// 两处点火路径共用（菜单③完成/模式键关会话）——已存在则不动（进度续显）
+// ============================================================================
+void MainWindow::ensureFinalBADlg() {
+    if (m_finalBADlg) return;
+    m_finalBADlg = new QProgressDialog(QString(), QString(), 0, 100, this);
+    m_finalBADlg->setWindowTitle(QStringLiteral("全局优化"));
+    m_finalBADlg->setWindowModality(Qt::ApplicationModal);
+    m_finalBADlg->setMinimumDuration(0);
+    m_finalBADlg->setAutoClose(false);
+    m_finalBADlg->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+    m_finalBADlg->setWindowFlag(Qt::FramelessWindowHint, true);
+    m_finalBADlg->setAttribute(Qt::WA_TranslucentBackground);
+    m_finalBADlg->setMinimumWidth(400);
+    m_finalBADlg->setStyleSheet(
+        "QProgressDialog { background-color: white; border: 1px solid #e0e0e0;"
+        " border-radius: 8px; }"
+        "QProgressBar { border: none; border-radius: 4px;"
+        " background-color: #F0F2F5; max-height: 10px; text-align: center;"
+        " color: transparent; }"
+        "QProgressBar::chunk { border-radius: 4px; background-color: #2980B9; }");
+    m_finalBADlg->setLabelText(QStringLiteral(
+        "<div style='color:#8B1A2B; font-weight:bold; font-size:15px;'>全局优化</div>"
+        "<div style='color:#444; font-size:14px; padding-top:6px;'>"
+        "全局优化中，请稍候……</div>"));
+    m_finalBADlg->show();
+}
+
 // 常驻行重建（菜单变化/子态/①档位变化后调）：菜单期显示游标项，①⑤子态显
 // 子态文案（⑤红底）；主界面＝无常驻（瞬态自然消失）
 void MainWindow::refreshBannerPersistent()
@@ -1682,8 +1756,8 @@ void MainWindow::refreshBannerPersistent()
         if (m_banner) m_banner->hide();   // 退菜单/确认后隐藏
         return;
     }
-    static const char* kItems[5] = {"① 分辨率设置", "② 进入就绪", "③ 扫描完成",
-                                    "④ 后处理", "⑤ 重置"};
+        static const char* kItems[5] = {"分辨率设置", "进入就绪", "扫描完成",
+                                      "后处理", "重置"};
     if (ms.substate == Sub::AdjustVoxel) {
         m_bannerPersist = QStringLiteral("分辨率 %1mm（L/R 调 M 确认）")
                               .arg(dm->voxelLadderValue(), 0, 'f', 2);
@@ -2049,21 +2123,13 @@ QWidget *MainWindow::createToolBar()
                     auto sr = m_appCtx->stopScanSession();
                     if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
                     m_activeScanToolIdx = -1;
-                    if (sr.success) {
-                        // 260927 弹窗与进度回调解耦：关闭即弹「全局优化中」——GBA 降级
-                        // 秒完/无进度回调（真机迭代=0 终局遍 195ms）时用户亦有可见反馈；
-                        // 完成关闭归 endedHandler 兜底/100% 路径
-                        if (!m_finalBADlg) {
-                            m_finalBADlg = new QProgressDialog(
-                                QStringLiteral("全局优化中，请稍候……"), QString(), 0, 100, this);
-                            m_finalBADlg->setWindowTitle(QStringLiteral("全局优化"));
-                            m_finalBADlg->setWindowModality(Qt::ApplicationModal);
-                            m_finalBADlg->setMinimumDuration(0);
-                            m_finalBADlg->setAutoClose(false);
-                            m_finalBADlg->show();
-                        }
-                        statusBar()->showMessage(
-                            QStringLiteral("会话已关闭——全局优化（GBA）后台执行中"));
+                     if (sr.success) {
+                         // 260927 弹窗与进度回调解耦：关闭即弹「全局优化中」——GBA 降级
+                         // 秒完/无进度回调（真机迭代=0 终局遍 195ms）时用户亦有可见反馈；
+                         // 完成关闭归 endedHandler 兜底/100% 路径
+                         ensureFinalBADlg();   // 卡片化共用（已存在则续显不重建）
+                         statusBar()->showMessage(
+                             QStringLiteral("会话已关闭——全局优化（GBA）后台执行中"));
                     } else {
                         statusBar()->showMessage(
                             QString::fromStdString("关闭被拒: " + sr.message));
@@ -3435,7 +3501,7 @@ void MainWindow::updateInfoSection()
                     s = QStringLiteral("分辨率 %1mm")
                         .arg(dm->voxelLadderValue(), 0, 'f', 2);
                 } else if (ms.substate == Sub::ConfirmReset) {
-                    s = QStringLiteral("⑤重置：再按 M 确认（其他键取消）");
+                    s = QStringLiteral("重置：再按 M 确认（其他键取消）");
                 } else {
                     QString curs;
                     for (int i = 1; i <= 5; ++i)

@@ -128,6 +128,7 @@ protected:
     // 亮度梯 S2 放行＝261004 用户裁定（待机 UI 可调三参）
     void updateParamPanelStates();
     void refreshMenuDialog();              // P-菜单弹窗：进菜单弹出/退菜单关闭/游标高亮/子态
+    void ensureFinalBADlg();               // P-全局优化进度弹窗（260705 卡片化）：两处点火路径共用
     QList<QPushButton*> m_navLeftButtons;
     QList<QPushButton*> m_navRightButtons;
     QList<QPushButton*> m_toolButtons;
