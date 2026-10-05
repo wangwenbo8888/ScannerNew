@@ -66,6 +66,10 @@ int main(int argc, char *argv[])
     // —— 串口通信监视弹窗（调试）：上位机 TX / 下位机 RX 双向实时显示 ——
     //（open 前挂 wireTap，探测/自检/扫描全链路帧都进窗口；回调来自 rx/写线程，
     //  invokeMethod queued 投递到 UI 线程追加；窗口关闭后投递自动丢弃）
+    // 261005 用户口径：弹窗隐藏（保留实现——kShowCommMonitor 改 true 即恢复；
+    // 不挂 wireTap，通信监视零开销）
+    static constexpr bool kShowCommMonitor = false;
+    if (kShowCommMonitor) {
     QDialog tapDlg(&window);
     tapDlg.setWindowTitle(QStringLiteral("串口通信监视（下位机调试）"));
     tapDlg.resize(760, 480);
@@ -94,6 +98,7 @@ int main(int argc, char *argv[])
         }, Qt::QueuedConnection);
     });
     tapDlg.show();   // 通信监视弹窗（2026-09-06 用户调试：暂停/续采串口消息排查）
+    }
 
     // 初始化弹窗（模态置顶）：主界面可见但被"初始化中......"挡住不可操作；
     // 自检完成自动消失（20s 兜底——失败也放行，失败项由状态栏横幅持续显示）
