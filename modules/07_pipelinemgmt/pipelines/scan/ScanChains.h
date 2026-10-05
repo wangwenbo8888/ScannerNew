@@ -10,8 +10,9 @@
 //     → enableLaser=false：ccl 后 guard.reset() 提前归还（A 模式短路）
 //   P 核链（PCoreBroker 上，与激光链帧内并行）：
 //     image_split → zernike_edge → image_merge → undistort_cpu(R1/R2/P1/P2/Q=snapshot)
-//     → ellipse_fit → marker_match → epipolar_intersect → edge_match
-//     → point_reconstruct → 配准（ prevState 原子快照：首帧初始化 / optical_flow_fuse
+//       → ellipse_fit → marker_match → epipolar_intersect → edge_match
+//     → point_reconstruct → 配准（ prevState 原子快照：首帧初始化（≥4 点门，
+//       不足整帧丢弃直到够格帧——261005） / optical_flow_fuse
 //       失败→frame_fuse 兜底 / 再失败→沿用快照 R/T 记 Degraded → 成功 atomic_store）
 //   E 核终段：fut.get() 收 P 链 → 汇合组装 FrameResult（帧号/R/T/markers/laser/quality）
 //     → sink push（T8 契约：eFinalize 自行 push）

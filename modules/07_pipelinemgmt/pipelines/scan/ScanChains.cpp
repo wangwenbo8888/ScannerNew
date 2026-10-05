@@ -90,6 +90,11 @@ std::unique_ptr<calib::EpipolarPairCPU> epipolarPair;   // 同行配对（无表
 
 namespace {
 
+// 首帧立锚最少标志点（261005 用户口径）：锚空期间标志点 <4 的帧整帧丢弃
+//（不建锚、不发点）——3 点位姿欠定，后续帧间配准/融合链全歪（"开始标志点
+// 太少后面没法融合"根因）；直到出现 ≥4 点帧才立为首帧
+constexpr size_t kFirstFrameMinMarkers = 4;
+
 Scanner::QualityFlag toScannerQuality(calib::QualityFlag q) {
     switch (q) {
         case calib::QualityFlag::Normal:   return Scanner::QualityFlag::Normal;
@@ -1044,7 +1049,15 @@ void ScanChains::runRegistration(const data::EnhancedFrame& frame, ScanLaneOps& 
 
     // —— 首帧初始化分支（锚空 / 锚内无点）——
     if (!prev || prev->rawPoints.empty()) {
-        if (n == 0) {                           // 无点且无锚：I 位姿，降级
+        // 首帧门（261005 用户口径）：标志点 <4 的帧丢弃——I 位姿、降级、
+        // 不建锚不发点，后续帧继续走本分支直到 ≥4 点帧立为首帧
+        if (n < kFirstFrameMinMarkers) {
+            static std::atomic<uint64_t> s_firstGateDrop{0};
+            const uint64_t k = s_firstGateDrop.fetch_add(1, std::memory_order_relaxed);
+            if (k < 3 || k % 30 == 0)
+                JMW_LOG_INFO("07-ScanChains",
+                    "[ScanChains] 首帧门：帧 {} 标志点 {}<{} 不立锚丢弃（累计 {} 帧）",
+                    frame.frameId, n, kFirstFrameMinMarkers, k + 1);
             fillRT(result, cv::Matx33d::eye(), cv::Vec3d(0, 0, 0));
             result.quality = Scanner::QualityFlag::Degraded;
             return;
