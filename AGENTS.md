@@ -247,30 +247,29 @@ factory_calib/
 ### 8.3 条件构建与注意事项
 
 1. **scan_demo 条件构建**：仅当 Qt5 Svg/SerialPort 齐备 **且** `app/stubs/LEADSCANSeries.h` 存在时构建，否则跳过以保「库＋测试」构建绿
-2. **build/ 是 Debug-only**（`CMAKE_CONFIGURATION_TYPES=Debug`）：直接在 `build/` 跑 Release 会报 `MSB8013`；Release 请用独立目录 `build-rel`
-3. **DLL 模式**（默认）：全部 exe/模块 DLL/测试统一落 `<build>/bin`，三方 DLL 由 copy_dlls.bat 拷同目录——测试/运行免设 PATH；⚠ 所有模块 DLL 与 exe 必须同工具链同 `/MD(D)` CRT 构建（跨边界传 STL/OpenCV 对象依赖同一堆）
+2. **build/ 已是 Debug+Release 双配置**（261005 起，`CMAKE_CONFIGURATION_TYPES=Debug;Release`）——**日常优先编 Release**（用户口径，真机用 Release）；独立目录 `build-rel/` 仍可用（Release-only）
+3. **DLL 模式**（默认）：产物按配置落 `<build>/bin/<Debug|Release>`（exe/模块 DLL/测试同目录，三方 DLL 由 copy_dlls.bat 拷同目录）——测试/运行免设 PATH；⚠ 所有模块 DLL 与 exe 必须同工具链同 `/MD(D)` CRT 构建（跨边界传 STL/OpenCV 对象依赖同一堆）；⚠ 改 CMake 后首个构建若仍走旧目录，确认 ZERO_CHECK 重跑过 cmake（sln 内自动）或手动重配置
 
 ### 8.4 VS2022 IDE（编译＋F5 运行）
 
-1. 打开 `build/JEAMMWARE.sln`（Debug-only；Release 用 `build-rel/JEAMMWARE.sln`）
-2. 启动项默认已是 **scan_demo**（sln 首工程，顶层 CMake `VS_STARTUP_PROJECT`）；配置 x64/Debug
-3. 直接 F5：调试工作目录已指向 `build/bin`（`LocalDebuggerWorkingDirectory` 已写入 vcxproj，Qt/OSG/OpenCV/模块 DLL 同目录可直接加载）
+1. 打开 `build/JEAMMWARE.sln`（Debug/Release 双配置；或 `build-rel/JEAMMWARE.sln` 仅 Release）
+2. 启动项默认已是 **scan_demo**（sln 首工程，顶层 CMake `VS_STARTUP_PROJECT`）；配置 x64 + **Release（日常默认）**
+3. 直接 F5：调试工作目录已按配置指向 `build/bin/<配置>`（`VS_DEBUGGER_WORKING_DIRECTORY_<CONFIG>` 已写入 vcxproj，Qt/OSG/OpenCV/模块 DLL 同目录可直接加载）
 4. 全量构建：生成→生成解决方案；跑测试：`RUN_TESTS` 工程或命令行 ctest（§8.5/8.6）
 
-### 8.5 Release（独立目录，100/100 绿）
+### 8.5 Release（100/100 绿）
 
 ```powershell
-cmake -S . -B build-rel -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES=Release
-cmake --build build-rel --config Release
-ctest --test-dir build-rel -C Release --output-on-failure
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_CONFIGURATION_TYPES=Debug;Release"
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure   # 产物在 build/bin/Release，免设 PATH
 ```
 
-### 8.6 Debug（现有 build/，100/100 绿）
+### 8.6 Debug（100/100 绿）
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES=Debug
 cmake --build build --config Debug
-ctest --test-dir build -C Debug --output-on-failure   # 产物在 build/bin，免设 PATH
+ctest --test-dir build -C Debug --output-on-failure     # 产物在 build/bin/Debug
 ```
 
 ## 9. 关键根文件

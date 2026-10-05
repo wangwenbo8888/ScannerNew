@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QDateTime>
+#include <QDir>
 #include <QDialog>
 #include <QFile>
 #include <QFont>
@@ -46,6 +47,11 @@ int main(int argc, char *argv[])
     QSurfaceFormat::setDefaultFormat(fmt);
 
     QApplication app(argc, argv);
+
+    // 锚定 CWD 到 exe 目录（260705 根治）：config//logs/dumps 全走相对路径，
+    // 启动器工作目录各异（VS 默认工程目录/资源管理器/快捷方式/真机自启）曾是
+    // 「标定参数未就绪→扫描键不激活」根因——此后任何方式启动都从 exe 旁读配置
+    QDir::setCurrent(QCoreApplication::applicationDirPath());
 
     QFile styleFile(":/icons/dark.qss");
     if (styleFile.open(QFile::ReadOnly | QFile::Text)) {

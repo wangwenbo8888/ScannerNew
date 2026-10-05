@@ -154,14 +154,25 @@ add_custom_target(seed_configs ALL
 # VS2022 调试体验：调试工作目录指向 exe 目录（DLLs/platforms 旁）
 # （启动项目在顶层 CMakeLists.txt 经目录属性 VS_STARTUP_PROJECT 设置——
 #  sln 首个工程即 VS 默认启动项）
-# 261005 DLL 化：exe 与模块 DLL 统一落 build/bin（JMW_BUILD_MODULE_DLLS），
-# 工作目录用字面路径（VS_DEBUGGER_* 属性不吃生成器表达式——genex 版会静默
-# 丢弃致 .user 为空，F5 工作目录错）；静态回退形态用原 per-config 目录
+# 261005 DLL 化：exe 与模块 DLL 统一落 build/bin/<配置>。⚠ CMake VS 生成器
+# 不支持 VS_DEBUGGER_WORKING_DIRECTORY_<CONFIG> 按配置变体（genex 与之均
+# 静默丢弃）——工作目录错＝CWD 落 build/app，config/ 标定档加载不到→arm 被拒
+# 「标定参数未就绪」→扫描键不激活（260705 真机实证）。故手写 .vcxproj.user
+# 双配置 LocalDebuggerWorkingDirectory（VS 原生按配置条件生效）
 # ============================================================================
-if(JMW_BUILD_MODULE_DLLS)
-    set_target_properties(scan_demo PROPERTIES
-        VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-    )
+if(JMW_BUILD_MODULE_DLLS AND CMAKE_GENERATOR MATCHES "Visual Studio")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scan_demo.vcxproj.user" "<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<Project ToolsVersion=\"Current\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">
+  <PropertyGroup Condition=\"'\$(Configuration)|\$(Platform)'=='Debug|x64'\">
+    <LocalDebuggerWorkingDirectory>${CMAKE_BINARY_DIR}/bin/Debug</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <PropertyGroup Condition=\"'\$(Configuration)|\$(Platform)'=='Release|x64'\">
+    <LocalDebuggerWorkingDirectory>${CMAKE_BINARY_DIR}/bin/Release</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+</Project>
+")
 else()
     set_target_properties(scan_demo PROPERTIES
         VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Debug"

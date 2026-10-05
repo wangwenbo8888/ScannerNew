@@ -30,13 +30,19 @@ option(JMW_BUILD_MODULE_DLLS "Build business modules as DLLs (independent deploy
 if(JMW_BUILD_MODULE_DLLS)
     set(JMW_MODULE_LIB_TYPE SHARED)
     set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
-    # 统一运行时输出目录：模块 DLL / exe / 测试 exe 同目录（build/bin[/<cfg>]）
+    # 统一运行时输出目录：模块 DLL / exe / 测试 exe 同目录（<build>/bin/<配置>）
     # ——exe 与 ctest 免 PATH/拷贝即找到自研 DLL；三方 DLL 的 copy_dlls.bat/
-    # jmw_deploy_crt 目标目录随 $<TARGET_FILE_DIR> 自动归一
+    # jmw_deploy_crt 目标目录随 $<TARGET_FILE_DIR> 自动归一。
+    # 按配置分子目录：双配置构建目录（build/ = Debug+Release）下同名
+    # mod_*.dll/scan_demo.exe Debug 与 Release 互不覆盖
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-    foreach(_cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
-        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_cfg} ${CMAKE_BINARY_DIR}/bin)
-    endforeach()
+    # 按配置分子目录（目录名规范大小写，与 VS_DEBUGGER_WORKING_DIRECTORY_* 一致）：
+    # 双配置构建目录（build/ = Debug+Release）下同名 mod_*.dll/scan_demo.exe
+    # Debug 与 Release 互不覆盖
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG          ${CMAKE_BINARY_DIR}/bin/Debug)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE        ${CMAKE_BINARY_DIR}/bin/Release)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_BINARY_DIR}/bin/RelWithDebInfo)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL     ${CMAKE_BINARY_DIR}/bin/MinSizeRel)
 endif()
 
 option(BUILD_CUDA "Build with CUDA support" ON)
