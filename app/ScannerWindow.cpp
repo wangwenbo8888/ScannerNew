@@ -5,8 +5,8 @@
 #include "CalibrationWorkflow.h"
 //（原 KeyManager emit 宏守卫已删：KeyManager 随协议批1 退役，08 头链无 emit
 // 标识符冲突；本 TU 自身 emit 信号走 Qt 宏展开不受影响）
-#include "modules/08_devicemgmt/DeviceManager.h"
-#include "modules/08_devicemgmt/HardwareMonitor.h"
+#include "modules/DeviceManager/DeviceManager.h"
+#include "modules/DeviceManager/HardwareMonitor.h"
 #include "StateMachine.h"
 #include "CommandGate.h"
 

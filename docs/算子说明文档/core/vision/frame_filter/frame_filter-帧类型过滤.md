@@ -1,6 +1,6 @@
 # 帧类型过滤
 
-> 本算子**已实现**（`modules/09_operatorlib/core/vision/frame_filter/`，7/7 测试绿）。注：主工程编排层尚为骨架桩（`modules/01_calibration/calibration.cpp` 空命名空间），本算子的**编排层接入**（调用 frame_filter、据 isMarkerFrame 销毁激光线帧）待 framework 实现阶段2 姿态判断链时落地。
+> 本算子**已实现**（`modules/OperatorLib/core/vision/frame_filter/`，7/7 测试绿）。注：主工程编排层尚为骨架桩（`modules/01_calibration/calibration.cpp` 空命名空间），本算子的**编排层接入**（调用 frame_filter、据 isMarkerFrame 销毁激光线帧）待 framework 实现阶段2 姿态判断链时落地。
 
 ## A. 标识
 
@@ -184,6 +184,6 @@ frame_filter/
 |------|------|
 | **判定** | **已实现**（7/7 测试绿） |
 
-- 算子代码已落地：`modules/09_operatorlib/core/vision/frame_filter/`（5 文件 + 7 测试）。
+- 算子代码已落地：`modules/OperatorLib/core/vision/frame_filter/`（5 文件 + 7 测试）。
 - **待办（非算子代码）**：①`maskRatioThreshold` 实测标定（需真实标记点帧/激光线帧跑 mask_extract 统计占比分布）；②编排层接入（framework 实现阶段2 姿态判断链时，调用 frame_filter 并据 isMarkerFrame 销毁激光线帧）；③与 `mask_extract` 联调确认两类帧掩膜分布区分度；④kLogTag 编号全局统一。
 - 参见：`docs/流水线/客户端标定流水线.md` 1.1 节流程图（2-1b 框）+ 二节算子表 2-1b 行。

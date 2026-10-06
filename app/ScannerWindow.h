@@ -16,7 +16,7 @@
 #include "ui_ScannerWindow.h"
 
 #include "base/types.h"
-#include "modules/08_devicemgmt/IScannerCamera.h"   // StereoFrame（帧出口签名）
+#include "modules/DeviceManager/IScannerCamera.h"   // StereoFrame（帧出口签名）
 #include "FrameBuffer.h"
 
 class AppContext;

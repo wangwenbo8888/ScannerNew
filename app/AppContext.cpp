@@ -29,10 +29,10 @@
 #include "PerfMonitor.h"
 #include "jmw_logging.h"
 #include "base/EventBus.h"
-#include "modules/08_devicemgmt/DeviceManager.h"
-#include "modules/08_devicemgmt/CameraFactory.h"   // 相机工厂契约（实现细节收在 08）
-#include "modules/08_devicemgmt/HardwareMonitor.h"
-#include "modules/08_devicemgmt/SelfCheckCollector.h"
+#include "modules/DeviceManager/DeviceManager.h"
+#include "modules/DeviceManager/CameraFactory.h"   // 相机工厂契约（实现细节收在 08）
+#include "modules/DeviceManager/HardwareMonitor.h"
+#include "modules/DeviceManager/SelfCheckCollector.h"
 #include "WorkflowContext.h"
 #include "ScanWorkflow.h"
 #include "CalibrationWorkflow.h"

@@ -40,7 +40,7 @@ struct ILaserFuse;               // 05 P4 编辑账本窄出口·激光侧（同
 class FrameObsAccumulator;
 }
 
-// 前向声明（07 流水线对象；定义见 modules/07_pipelinemgmt/pipelines/scan/）
+// 前向声明（07 流水线对象；定义见 modules/PipelineManager/pipelines/scan/）
 namespace Scanner::pipeline {
 class ScanPipeline;
 class SimScanSource;                                       // 中段模拟提取源（调试件）

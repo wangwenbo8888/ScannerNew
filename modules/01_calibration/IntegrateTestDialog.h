@@ -17,7 +17,7 @@
 #include <QSpinBox>
 #include <QTimer>
 
-#include "modules/08_devicemgmt/IScannerCamera.h"
+#include "modules/DeviceManager/IScannerCamera.h"
 
 class IntegrateTestDialog : public QDialog
 {

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(JEAMMWARE VERSION 0.1.0 LANGUAGES CXX)
+project(LeadScannerK2 VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,7 +13,7 @@ endif()
 
 # ============================================================================
 # 模块 DLL 化（261005 用户口径：模块独立部署/授权）
-# - JMW_BUILD_MODULE_DLLS=ON：mod_datamgmt/pipelinemgmt/devicemgmt/operatorlib/
+# - JMW_BUILD_MODULE_DLLS=ON：DataManager/pipelinemgmt/devicemgmt/operatorlib/
 #   observability/editing 六个实体业务库以 SHARED 构建（mod_*.dll + 导入库）；
 #   OFF 回退全静态（原形态）。base 保持 STATIC：纯类型＋实例注入 EventBus，
 #   无全局态，嵌入各 DLL 安全。
@@ -34,10 +34,10 @@ if(JMW_BUILD_MODULE_DLLS)
     # ——exe 与 ctest 免 PATH/拷贝即找到自研 DLL；三方 DLL 的 copy_dlls.bat/
     # jmw_deploy_crt 目标目录随 $<TARGET_FILE_DIR> 自动归一。
     # 按配置分子目录：双配置构建目录（build/ = Debug+Release）下同名
-    # mod_*.dll/scan_demo.exe Debug 与 Release 互不覆盖
+    # mod_*.dll/LeadScannerK2.exe Debug 与 Release 互不覆盖
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
     # 按配置分子目录（目录名规范大小写，与 VS_DEBUGGER_WORKING_DIRECTORY_* 一致）：
-    # 双配置构建目录（build/ = Debug+Release）下同名 mod_*.dll/scan_demo.exe
+    # 双配置构建目录（build/ = Debug+Release）下同名 mod_*.dll/LeadScannerK2.exe
     # Debug 与 Release 互不覆盖
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG          ${CMAKE_BINARY_DIR}/bin/Debug)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE        ${CMAKE_BINARY_DIR}/bin/Release)
@@ -68,7 +68,7 @@ endif()
 # 自行从注册表解析到 v12.4 并以普通变量 CMAKE_CUDA_COMPILER 遮蔽 CACHE 中的 pin 值
 #（PATH/CUDA_PATH/VS CUDA props 均只有 12.6，实际编译与 OpenCV-CUDA 都是 12.6）。
 # 故用 $CACHE{} 直读上方写入的 pin 原值，反推工具链根并覆写检测变量。
-#（原置 modules/07_pipelinemgmt（P1-T1）；上移至此（T31 技术债）——统一在
+#（原置 modules/PipelineManager（P1-T1）；上移至此（T31 技术债）——统一在
 #   enable_language(CUDA) 之后、任何 find_package(CUDAToolkit) 之前解析一次，
 #   保护全部消费方、与目录遍历序无关；模块侧仅剩消费。）
 if(BUILD_CUDA)
@@ -183,9 +183,9 @@ endfunction()
 
 # base/ 共享内核（Phase 1 新增；framework/* 转发壳引用 "base/*.h"，需项目根在全局 include 路径）
 include_directories(${CMAKE_SOURCE_DIR})
-include_directories(${CMAKE_SOURCE_DIR}/modules/06_datamgmt)
-include_directories(${CMAKE_SOURCE_DIR}/modules/08_devicemgmt)
-include_directories(${CMAKE_SOURCE_DIR}/modules/10_observability)
+include_directories(${CMAKE_SOURCE_DIR}/modules/DataManager)
+include_directories(${CMAKE_SOURCE_DIR}/modules/DeviceManager)
+include_directories(${CMAKE_SOURCE_DIR}/modules/Observability)
 
 # Qt5 搜索路径前置（modules/08 的 find_package(Qt5 SerialPort) 先于 app 配置，
 # CMAKE_PREFIX_PATH 必须在首个 add_subdirectory 前就位，不依赖 cache 残留）
@@ -196,7 +196,7 @@ add_subdirectory(base)
 add_subdirectory(modules)
 add_subdirectory(app)
 
-# VS 生成器默认启动项目为 ALL_BUILD（不可运行）；改设 scan_demo 为 sln 首个工程
-if(TARGET scan_demo)
-    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT scan_demo)
+# VS 生成器默认启动项目为 ALL_BUILD（不可运行）；改设 LeadScannerK2 为 sln 首个工程
+if(TARGET LeadScannerK2)
+    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT LeadScannerK2)
 endif()

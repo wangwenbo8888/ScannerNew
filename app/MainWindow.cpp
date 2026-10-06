@@ -22,8 +22,8 @@
 #include "StateMachine.h"  // P1-2: getCurrentState() 需完整类型
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
-#include "modules/08_devicemgmt/ParamStore.h"      // ParamEntry::Source
-#include "modules/08_devicemgmt/DeviceManager.h"   // setParam 三路联动（完整类型）
+#include "modules/DeviceManager/ParamStore.h"      // ParamEntry::Source
+#include "modules/DeviceManager/DeviceManager.h"   // setParam 三路联动（完整类型）
 
 #include <algorithm>
 #include <chrono>
@@ -154,7 +154,7 @@ void ArrowSlider::paintEvent(QPaintEvent *event)
 MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent), m_appCtx(appCtx)
 {
     setObjectName("mainWindow");
-    setWindowTitle(QStringLiteral("LeadScan K2"));
+    setWindowTitle(QStringLiteral("LeadScanner K2"));
     setWindowFlags(Qt::FramelessWindowHint);
 
     QWidget *central = new QWidget();

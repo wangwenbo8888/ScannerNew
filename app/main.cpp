@@ -1,6 +1,6 @@
 #include "MainWindow.h"
 #include "AppContext.h"
-#include "modules/08_devicemgmt/DeviceManager.h"   // setWireTap（串口监视弹窗）
+#include "modules/DeviceManager/DeviceManager.h"   // setWireTap（串口监视弹窗）
 #include "ObsLogger.h"
 #include "CrashHandler.h"
 #include "jmw_logging.h"

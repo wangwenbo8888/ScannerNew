@@ -20,7 +20,7 @@
 
 ### 1.1 模块背景〔AI 预填，迭代时刷新〕
 
-- **模块定位**：`app/MainWindow.h`＋`app/MainWindow.cpp`（176/2714 行）＝ 无边框全屏主窗口 "LeadScan K2"——全部 UI 布局、扫描/标定/文件/编辑操作入口、渲染接线与系统信息可视化；持 `AppContext*` 按需取用，不 new 组件
+- **模块定位**：`app/MainWindow.h`＋`app/MainWindow.cpp`（176/2714 行）＝ 无边框全屏主窗口 "LeadScanner K2"——全部 UI 布局、扫描/标定/文件/编辑操作入口、渲染接线与系统信息可视化；持 `AppContext*` 按需取用，不 new 组件
 - **上下游依赖**：
   - 上游：`app/main.cpp`（构造）；AppContext（会话点火/仓库/EventBus/SceneFeed，见 02）
   - 下游：模块03 OSGWidget（渲染）；模块02/04 工作流（编辑物理化/进度回调）；模块07 契约（融合云移除/obs 剔除——经 02 工作流出口触达）；模块06 file_io（导入导出）＋仓库；模块08 DeviceManager（参数账本）；模块10 StateMachine/PerfMonitor；app/stubs 桩（标定槽）
@@ -72,7 +72,7 @@
 
 ```
 【MainWindow 布局树】
-QMainWindow（无边框 "LeadScan K2"，全屏）
+QMainWindow（无边框 "LeadScanner K2"，全屏）
 ├─ 标题栏 createTitleBar（logo/翻页三钮/工程名/保存/最小化/关闭）
 ├─ 导航栏 createNavBar（菜单/扫描/管理/集成测试/加载点云 · 右侧五模式展示键）
 ├─ 工具栏 createToolBar（数据管理/校准设备/四扫描模式键/正反/切面/重置 · 模拟数据开关）
@@ -132,7 +132,7 @@ QMainWindow（无边框 "LeadScan K2"，全屏）
 
 | 功能 | 对应文件 | 实现方法一句话 | 达成情况 |
 |------|---------|--------------|---------|
-| 导入 | `app/MainWindow.cpp`（数据管理菜单） | 标志点/点云（同时 stash 供模拟源）/网格/工程四项；点云走 `modules/06_datamgmt/file_io.h` | G4：已达成（工程占位 D5） |
+| 导入 | `app/MainWindow.cpp`（数据管理菜单） | 标志点/点云（同时 stash 供模拟源）/网格/工程四项；点云走 `modules/DataManager/file_io.h` | G4：已达成（工程占位 D5） |
 | 导出 | 同上 | 标志点/点云走仓库内存直导（数量回显）；后处理导出 STL＝真点火 | G4：已达成 |
 | 后处理入口 | `startPostProcessSession` 调用＋进度回调 | gate 点火 S2→S6；阶段名/百分位透传状态栏 | G4：已达成 |
 

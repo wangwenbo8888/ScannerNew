@@ -1,4 +1,4 @@
-# Module 03_rendering — INTERFACE（OSGWidget 源编入 scan_demo；本目标承载纯函数件）
+# Module 03_rendering — INTERFACE（OSGWidget 源编入 LeadScannerK2；本目标承载纯函数件）
 # P1 渲染加固（docs/plans/2026-08-25-渲染模块加固计划.md）：
 #   RenderSanity.h 纯函数挂本目标（无 Qt/OSG 依赖，测试可无头跑）
 add_library(mod_rendering INTERFACE)
@@ -6,7 +6,7 @@ target_include_directories(mod_rendering INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(mod_rendering INTERFACE ${OpenCV_LIBS})
 
 # ============================================================================
-# 单测：每文件一 exe + 注册 ctest（仿 06_datamgmt）
+# 单测：每文件一 exe + 注册 ctest（仿 DataManager）
 # ============================================================================
 if(BUILD_TESTS)
     file(GLOB RENDER_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")

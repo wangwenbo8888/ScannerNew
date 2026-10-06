@@ -10,7 +10,7 @@ find_package(Qt5 5.15 COMPONENTS Core Gui Widgets OpenGL Svg SerialPort)
 # OSG（本机 F:/osg3.6.5/install，直接 lib 路径，非 imported target）
 set(OSG_ROOT "F:/osg3.6.5/install" CACHE PATH "OSG 安装目录")
 
-# scan_demo 仅在 Qt5 Svg/SerialPort 齐备 + stubs/ 源码存在时构建
+# LeadScannerK2 仅在 Qt5 Svg/SerialPort 齐备 + stubs/ 源码存在时构建
 # （stubs/ 5 个桩头已补齐，当前正常构建；若桩头缺失则跳过以保"库+测试"构建绿）
 if(Qt5_FOUND AND Qt5Svg_FOUND AND Qt5SerialPort_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/stubs/LEADSCANSeries.h")
 
@@ -27,7 +27,7 @@ set(APP_SOURCES
     WorkflowContext.h
 )
 
-# === 模块文件（物理在 modules/ 下，编译进 scan_demo）===
+# === 模块文件（物理在 modules/ 下，编译进 LeadScannerK2）===
 set(MOD_CALIBRATION
     ${CMAKE_SOURCE_DIR}/modules/01_calibration/calib_workflow.cpp
     ${CMAKE_SOURCE_DIR}/modules/01_calibration/calib_workflow.h
@@ -53,8 +53,8 @@ set(MOD_WORKFLOWS
     ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibrationWorkflow.h
     ${CMAKE_SOURCE_DIR}/modules/04_postprocessing/PostProcessWorkflow.cpp
     ${CMAKE_SOURCE_DIR}/modules/04_postprocessing/PostProcessWorkflow.h
-    ${CMAKE_SOURCE_DIR}/modules/05_editing/EditWorkflow.cpp
-    ${CMAKE_SOURCE_DIR}/modules/05_editing/EditWorkflow.h
+    ${CMAKE_SOURCE_DIR}/modules/Editing/EditWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/Editing/EditWorkflow.h
 )
 
 set(MOD_RENDERING
@@ -72,7 +72,7 @@ add_custom_command(
     VERBATIM
 )
 
-add_executable(scan_demo
+add_executable(LeadScannerK2
     ${APP_SOURCES}
     ${MOD_CALIBRATION}
     ${MOD_SCANNING}
@@ -83,22 +83,22 @@ add_executable(scan_demo
 
 # 261004 排障：Release 链接带 /DEBUG 出 PDB（仅加调试目录不改代码布局；
 # 性能不受影响——此后崩溃转储可直接符号化）
-target_link_options(scan_demo PRIVATE $<$<CONFIG:Release>:/DEBUG>)
+target_link_options(LeadScannerK2 PRIVATE $<$<CONFIG:Release>:/DEBUG>)
 
-target_include_directories(scan_demo PRIVATE
+target_include_directories(LeadScannerK2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/modules/01_calibration
     ${CMAKE_SOURCE_DIR}/modules/02_scanning
     ${CMAKE_SOURCE_DIR}/modules/03_rendering
-    ${CMAKE_SOURCE_DIR}/modules/05_editing
-    ${CMAKE_SOURCE_DIR}/modules/06_datamgmt
+    ${CMAKE_SOURCE_DIR}/modules/Editing
+    ${CMAKE_SOURCE_DIR}/modules/DataManager
     ${CMAKE_SOURCE_DIR}/modules/04_postprocessing
     ${OSG_ROOT}/include
 )
 
 # OSG 按配置分库（261002 修复）：Debug 链 d 后缀库（osg161-osgd.dll 等）——原写死
-# Release 库名，Debug scan_demo 混链 Release OSG（/MDd exe 配 /MD DLL），CRT/迭代器
+# Release 库名，Debug LeadScannerK2 混链 Release OSG（/MDd exe 配 /MD DLL），CRT/迭代器
 # 布局跨 DLL 不匹配，OSGWidget::initializeGL 首个 OSG 对象构造即跳 0x0 崩溃
 # （0xC0000005 执行位置 0x0，261002 VS2022 Debug 实证；F: 的 OSG 带 debug 库/PDB）
 foreach(_osg_lib osg osgDB osgViewer osgGA osgUtil osgText OpenThreads)
@@ -107,14 +107,14 @@ foreach(_osg_lib osg osgDB osgViewer osgGA osgUtil osgText OpenThreads)
         "$<$<NOT:$<CONFIG:Debug>>:${OSG_ROOT}/lib/${_osg_lib}.lib>")
 endforeach()
 
-target_link_libraries(scan_demo PRIVATE
+target_link_libraries(LeadScannerK2 PRIVATE
     base
-    mod_devicemgmt
-    mod_operatorlib
-    mod_datamgmt
-    mod_pipelinemgmt
-    mod_observability
-    mod_editing
+    DeviceManager
+    OperatorLib
+    DataManager
+    PipelineManager
+    Observability
+    Editing
     Qt5::Widgets
     Qt5::OpenGL
     Qt5::Svg
@@ -125,7 +125,7 @@ target_link_libraries(scan_demo PRIVATE
     nlohmann_json::nlohmann_json
 )
 
-target_compile_definitions(scan_demo PRIVATE
+target_compile_definitions(LeadScannerK2 PRIVATE
     NOMINMAX
     _CRT_SECURE_NO_WARNINGS
 )
@@ -133,8 +133,8 @@ target_compile_definitions(scan_demo PRIVATE
 # ============================================================================
 # Copy DLLs to output directory via batch script (handles Debug/Release)
 # ============================================================================
-add_custom_command(TARGET scan_demo POST_BUILD
-    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/copy_dlls.bat" "$<TARGET_FILE_DIR:scan_demo>" "$<CONFIG>"
+add_custom_command(TARGET LeadScannerK2 POST_BUILD
+    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/copy_dlls.bat" "$<TARGET_FILE_DIR:LeadScannerK2>" "$<CONFIG>"
     COMMENT "Copying DLLs to output directory..."
 )
 
@@ -145,7 +145,7 @@ add_custom_command(TARGET scan_demo POST_BUILD
 # config/ 只作全新构建目录的出厂基线（custom_target 恒跑＝零编译增量也会补种）
 # ============================================================================
 add_custom_target(seed_configs ALL
-    COMMAND ${CMAKE_COMMAND} "-DSRC=${CMAKE_SOURCE_DIR}" "-DDEST=$<TARGET_FILE_DIR:scan_demo>"
+    COMMAND ${CMAKE_COMMAND} "-DSRC=${CMAKE_SOURCE_DIR}" "-DDEST=$<TARGET_FILE_DIR:LeadScannerK2>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/seed_config.cmake"
     COMMENT "Seeding config files (only if missing)..."
 )
@@ -161,7 +161,7 @@ add_custom_target(seed_configs ALL
 # 双配置 LocalDebuggerWorkingDirectory（VS 原生按配置条件生效）
 # ============================================================================
 if(JMW_BUILD_MODULE_DLLS AND CMAKE_GENERATOR MATCHES "Visual Studio")
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scan_demo.vcxproj.user" "<?xml version=\"1.0\" encoding=\"utf-8\"?>
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/LeadScannerK2.vcxproj.user" "<?xml version=\"1.0\" encoding=\"utf-8\"?>
 <Project ToolsVersion=\"Current\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">
   <PropertyGroup Condition=\"'\$(Configuration)|\$(Platform)'=='Debug|x64'\">
     <LocalDebuggerWorkingDirectory>${CMAKE_BINARY_DIR}/bin/Debug</LocalDebuggerWorkingDirectory>
@@ -174,11 +174,11 @@ if(JMW_BUILD_MODULE_DLLS AND CMAKE_GENERATOR MATCHES "Visual Studio")
 </Project>
 ")
 else()
-    set_target_properties(scan_demo PROPERTIES
+    set_target_properties(LeadScannerK2 PROPERTIES
         VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Debug"
     )
 endif()
 
 else()
-    message(STATUS "app/scan_demo 跳过：缺 Qt5 Svg/SerialPort 或 stubs/ 源码（库+测试基线不受影响）")
+    message(STATUS "app/LeadScannerK2 跳过：缺 Qt5 Svg/SerialPort 或 stubs/ 源码（库+测试基线不受影响）")
 endif()

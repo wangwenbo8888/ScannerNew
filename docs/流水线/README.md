@@ -1,6 +1,6 @@
 # 流水线文档
 
-> 本目录描述 JEAMMWARE 工程涉及的三条流水线 + 跨帧并行调度设计。
+> 本目录描述 LeadScannerK2 工程涉及的三条流水线 + 跨帧并行调度设计。
 > 逐算子说明见 `docs/算子说明文档/`。
 
 ## 流水线清单
@@ -45,12 +45,12 @@
 
 ## 算子复用
 
-三条流水线共享 `modules/09_operatorlib/` 算子库（命名空间 `calib::`）：
+三条流水线共享 `modules/OperatorLib/` 算子库（命名空间 `calib::`）：
 
 - **标记点链**（`core/marker/`，12 算子）：01 姿态判断 + 02 扫描配准共用
 - **激光线链**（`core/laser/`，4 算子）：01 激光标定 + 02 扫描共用
 - **视觉前端**（`core/vision/`：`mask_extract` + `ccl`）：所有流水线共用入口
-- 03 `factory_calib/` 为独立子工程，算子逐字拷贝自 09_operatorlib（受保护，独立演进）
+- 03 `factory_calib/` 为独立子工程，算子逐字拷贝自 OperatorLib（受保护，独立演进）
 
 ## 标定 vs 扫描的关键差异
 

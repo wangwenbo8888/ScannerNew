@@ -88,8 +88,8 @@ HAL 接线：DeviceManager（门禁回调→StateMachine）· HardwareMonitor（
 | 功能 | 对应文件 | 实现方法一句话 | 达成情况 |
 |------|---------|--------------|---------|
 | Infra/Data 层持有 | `app/AppContext.h` | EventBus（`base/EventBus.h`）；FrameBuffer(60)/PointCloudBuffer/DeviceStateCache（06）；CalibrationRepository（06，load config/calibration.json 合并 laser_calib.json） | G1：已达成 |
-| Service 层持有 | `app/AppContext.h` ＋ `modules/10_observability/StateMachine.h` 等 | StateMachine/FaultHandler/CommandGate/PerfMonitor（10）＋ParameterManager（06） | G1：已达成 |
-| HAL 层持有 | `app/AppContext.h` ＋ `modules/08_devicemgmt/DeviceManager.h` 等 | DeviceManager（相机＋MCU 门面）＋SelfCheckCollector＋HardwareMonitor；相机经 `modules/08_devicemgmt/CameraFactory.h` 工厂构造 | G1：已达成 |
+| Service 层持有 | `app/AppContext.h` ＋ `modules/Observability/StateMachine.h` 等 | StateMachine/FaultHandler/CommandGate/PerfMonitor（10）＋ParameterManager（06） | G1：已达成 |
+| HAL 层持有 | `app/AppContext.h` ＋ `modules/DeviceManager/DeviceManager.h` 等 | DeviceManager（相机＋MCU 门面）＋SelfCheckCollector＋HardwareMonitor；相机经 `modules/DeviceManager/CameraFactory.h` 工厂构造 | G1：已达成 |
 | 渲染推送/工作流持有 | `app/AppContext.h` ＋ `app/SceneFeedAdapter.h` ＋ `app/WorkflowContext.h` | SceneFeedAdapter（app）＋WorkflowContext（app）＋Scan/Calibration/PostProcess Workflow（02/01/04） | G1：已达成 |
 | 析构序设计 | `app/AppContext.h` | 成员声明序＝逆析构序（gate/perf 先亡、sceneFeed 先于总线亡、门面最后亡） | G1/G2：已达成 |
 | shutdown 逆序 | `app/AppContext.cpp` | once 守卫→join 装配/完成/设备三线程→巡检停→退订故障桥/灯桥→三工作流 stop→faultHandler stop→门面 close | G2：已达成 |
@@ -114,7 +114,7 @@ UI 点键关闭 ──► stopScanSession（stopCapture N11H0 → finish_scan �
 
 | 功能 | 对应文件 | 实现方法一句话 | 达成情况 |
 |------|---------|--------------|---------|
-| 命令注册 | `app/AppContext.cpp` ＋ `modules/10_observability/DefaultCommands.h` | DefaultCommands 全集 7 条注册；app 为其中 4 条填 handler/pre（start_calibration/start_scan/finish_scan/start_postprocess） | G3：已达成 |
+| 命令注册 | `app/AppContext.cpp` ＋ `modules/Observability/DefaultCommands.h` | DefaultCommands 全集 7 条注册；app 为其中 4 条填 handler/pre（start_calibration/start_scan/finish_scan/start_postprocess） | G3：已达成 |
 | start_scan 后台装配 | `app/AppContext.cpp` | scanStartThread_ 后台装配＋会话代 scanActGen_（过期回滚跳过，防停启竞态扑杀新会话） | G3/G4：已达成 |
 | finish_scan 后台终局 | `app/AppContext.cpp` | finishThread_ 执行 stop()（含 GBA 终局遍，分钟级）＋notifyCompleted 合账 | G3/G4：已达成 |
 | 就绪/直启/停止 | `app/AppContext.cpp`（armScanSession/startScanSession/stopScanSession） | arm＝备会话不启采（M 键才开扫）；start＝arm＋startCapture；stop＝N11H0＋finish_scan | G4：已达成 |
@@ -138,7 +138,7 @@ UI 点键关闭 ──► stopScanSession（stopCapture N11H0 → finish_scan �
 |------|---------|--------------|---------|
 | 帧流双投递 | `app/AppContext.cpp`（armScanSession 内 startFrameStream） | ①预览链→06 FrameBuffer；②扫描链→pushSessionFrame（带温度/模式/T-V 判定随帧） | G6：已达成 |
 | 调试分路 | `app/AppContext.h`（setDebugFrameTap） | 相机 SDK 线程直调；每 300 帧记 tap 心跳/空转双路日志（监视窗死因定位锚） | G6：已达成 |
-| 渲染推送适配器 | `app/SceneFeedAdapter.cpp` ＋ `modules/07_pipelinemgmt/pipelines/ISceneFeed.h` | ISceneFeed 首个实现：pushCloudSnapshot 调用线程值拷贝→queued 信号推 UI；冻结期丢弃保末帧；latestMarkers 末次快照缓存 | G6：已达成（D5） |
+| 渲染推送适配器 | `app/SceneFeedAdapter.cpp` ＋ `modules/PipelineManager/pipelines/ISceneFeed.h` | ISceneFeed 首个实现：pushCloudSnapshot 调用线程值拷贝→queued 信号推 UI；冻结期丢弃保末帧；latestMarkers 末次快照缓存 | G6：已达成（D5） |
 | 依赖聚合器 | `app/WorkflowContext.cpp` | 窄接口注入工作流（Data 四件/Service 两件/EventBus/SceneFeed）＋publishProgress/publishEvent 快捷口 | G6：已达成 |
 
 #### 4.2.5 配置装载（服务 G7）
@@ -146,7 +146,7 @@ UI 点键关闭 ──► stopScanSession（stopCapture N11H0 → finish_scan �
 | 功能 | 对应文件 | 实现方法一句话 | 达成情况 |
 |------|---------|--------------|---------|
 | 相机装机口径 | `app/AppContext.cpp`（camera.json 解析） | L/R 设备号、右图 180°、触发源、previewFps、帧号严格配对、时间戳配对；缺档默认＋WARN | G7：已达成 |
-| 标定档 | `app/AppContext.cpp` ＋ `modules/06_datamgmt/CalibrationRepository.h` | config/calibration.json＋同目录 laser_calib.json 工厂档自动合并；未装载不阻断 | G7：已达成 |
+| 标定档 | `app/AppContext.cpp` ＋ `modules/DataManager/CalibrationRepository.h` | config/calibration.json＋同目录 laser_calib.json 工厂档自动合并；未装载不阻断 | G7：已达成 |
 | 设备参数档 | `app/AppContext.cpp`（ParamIo 注入 DeviceManager） | load/persist 落 config/device_params.txt（防抖 2s＋close 兜底归 08 管理） | G7：已达成 |
 
 #### 4.2.6 中段模拟提取（服务 G8，调试件）
@@ -155,7 +155,7 @@ UI 点键关闭 ──► stopScanSession（stopCapture N11H0 → finish_scan �
 |------|---------|--------------|---------|
 | 开关 | `app/AppContext.h`＋`app/AppContext.cpp`（setSimExtract/assembleSimSource） | UI「模拟数据」开关，start_scan 装配时读取组装；默认关零影响 | G8：已达成 |
 | 数据源组装 | `app/AppContext.cpp`（assembleSimSource） | 标志点←PLY（JMW_SIM_MARKERS_PLY 覆写，缺省 D:/markers_30.ply）；激光←导入 stash→JMW_SIM_LASER_PLY 覆写→D:/pointcloud_100M.ply 前 3000 万点→builtin 大平面多级兜底 | G8：已达成 |
-| 铺展与轨迹 | `app/AppContext.cpp` ＋ `modules/07_pipelinemgmt/pipelines/scan/SimScanSource.h` | FPS 最远点采样铺标志点（工作距护栏＋离群围栏）；SimTrajParams 递增观测调度（设备静止） | G8：已达成 |
+| 铺展与轨迹 | `app/AppContext.cpp` ＋ `modules/PipelineManager/pipelines/scan/SimScanSource.h` | FPS 最远点采样铺标志点（工作距护栏＋离群围栏）；SimTrajParams 递增观测调度（设备静止） | G8：已达成 |
 | 限量读取器 | `app/AppContext.cpp`（匿名命名空间两个限量读取器） | 装配层自持大文件读取（06 importPLY 对 3100 万点级实测失败回退） | G8：已达成 |
 
 ### 4.3 有雏形但未完成的部分

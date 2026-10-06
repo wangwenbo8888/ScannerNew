@@ -20,7 +20,7 @@
 
 - 分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`
   - 06 只链 base＋nlohmann_json
-  - 07（mod_pipelinemgmt）链 base＋mod_datamgmt＋mod_operatorlib——五流水线对象消费容器与算子
+  - 07（PipelineManager）链 base＋DataManager＋OperatorLib——五流水线对象消费容器与算子
   - 08 只链 base＋Qt SerialPort——HardwareMonitor 状态落经 `IDeviceStateSink` 契约接口（06 实现类 include 已清账 d5948e5，app 装配注入）
   - 10 链 base＋spdlog
 - 全量 ctest **95/95 绿**（Debug＋Release 双绿）
@@ -31,8 +31,8 @@
 ```
 JEAMMWARE260705/
 ├── base/           # 共享内核（types.h + EventBus；STATIC lib `base`；极薄，禁业务代码）
-├── modules/        # 11 业务模块（mod_* 静态库 + 编入 scan_demo 的源文件）
-├── app/            # 应用入口与装配层（scan_demo.exe；Qt5 UI + OSG）
+├── modules/        # 11 业务模块（mod_* 静态库 + 编入 LeadScannerK2 的源文件）
+├── app/            # 应用入口与装配层（LeadScannerK2.exe；Qt5 UI + OSG）
 ├── cmake/          # 构建辅助（CompilerSettings / PatchVcxproj / PatchCudaVcxproj / Version.h.in）
 ├── factory_calib/  # 厂家标定独立子工程（AI 只读保护区）
 ├── docs/           # 流水线 / 模块功能 / 算子说明 / 应用层 / 共享内核 / 开发信息
@@ -57,8 +57,8 @@ JEAMMWARE260705/
 
 ### 4.1 编译归属
 
-1. `01` 的 UI/工作流类、`02/04` 工作流、`03` OSGWidget：物理在 modules/ 下，**直接编入 scan_demo.exe**（见 `app/CMakeLists.txt`）
-2. `05/06/07/08/09/10`：各编为 `mod_*` 库——**261005 起默认 DLL**（`JMW_BUILD_MODULE_DLLS=ON`：mod_editing/fileio/pipelinemgmt/devicemgmt/operatorlib/observability 六个 SHARED，`CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS` 全量导出；OFF 回退全静态）。`base` 恒 STATIC（无全局态可安全嵌入各 DLL）；**spdlog 须共享库**（JMW_LOG 直透 spdlog 进程级默认 logger 注册表，多 DLL 静态链会日志分裂）
+1. `01` 的 UI/工作流类、`02/04` 工作流、`03` OSGWidget：物理在 modules/ 下，**直接编入 LeadScannerK2.exe**（见 `app/CMakeLists.txt`）
+2. `05/06/07/08/09/10`：各编为 `mod_*` 库——**261005 起默认 DLL**（`JMW_BUILD_MODULE_DLLS=ON`：Editing/fileio/pipelinemgmt/devicemgmt/operatorlib/observability 六个 SHARED，`CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS` 全量导出；OFF 回退全静态）。`base` 恒 STATIC（无全局态可安全嵌入各 DLL）；**spdlog 须共享库**（JMW_LOG 直透 spdlog 进程级默认 logger 注册表，多 DLL 静态链会日志分裂）
 3. `02/03/04/11` 另有同名 INTERFACE 占位库（无源码，仅保目标名）
 4. DLL 模式下全部产物（exe/DLL/测试）统一落 `<build>/bin`，三方 DLL 由 copy_dlls.bat 同目录拷贝
 
@@ -66,25 +66,25 @@ JEAMMWARE260705/
 
 | 编号 | 模块 | 状态 | 内容 |
 |---|---|---|---|
-| 01 | `calibration` | 部分实现 | CalibrationWorkflow / calib_workflow / CalibDialog / CalibDisplay / IntegrateTestDialog（编入 scan_demo）；工作流帧处理移交 07 A/B 对象；仓库写入走 06 RepoWriter 直写 |
-| 02 | `scanning` | 部分实现 | ScanWorkflow（编入 scan_demo）；帧处理移交 07 ScanPipeline，自身只留编排/记账 |
-| 03 | `rendering` | 部分实现 | OSGWidget（编入 scan_demo）；`mod_rendering` 为 INTERFACE 占位 |
-| 04 | `postprocessing` | 部分实现 | PostProcessWorkflow（编入 scan_demo）；五阶段编排移交 07 PostProcessPipeline |
+| 01 | `calibration` | 部分实现 | CalibrationWorkflow / calib_workflow / CalibDialog / CalibDisplay / IntegrateTestDialog（编入 LeadScannerK2）；工作流帧处理移交 07 A/B 对象；仓库写入走 06 RepoWriter 直写 |
+| 02 | `scanning` | 部分实现 | ScanWorkflow（编入 LeadScannerK2）；帧处理移交 07 ScanPipeline，自身只留编排/记账 |
+| 03 | `rendering` | 部分实现 | OSGWidget（编入 LeadScannerK2）；`mod_rendering` 为 INTERFACE 占位 |
+| 04 | `postprocessing` | 部分实现 | PostProcessWorkflow（编入 LeadScannerK2）；五阶段编排移交 07 PostProcessPipeline |
 | 05 | `editing` | 桩 | — |
-| 06 | `fileio` | ✅ 承重 | 库 `mod_datamgmt`：SlotRing / RingBuffer / FrameBuffer / PointCloudBuffer（点云仓库）/ DeviceStateCache / EnhancedFrame / CycleUnit / FrameEnricher / CalibrationRepository（JSON 单文件＋readyForScan 门禁）/ ScanSessionData / CalibSessionData / Sink 契约三接口 / IWorkflow / ParameterManager / file_io（`Scanner::data::fileio`） |
-| 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology / PCoreBroker / GpuSlotService / IFrameSource / FrameResultQueue / SchedulerRuntime）＋五流水线对象（A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）＋装配公共件；命名空间 `Scanner::pipeline` |
-| 08 | `devicemgmt` | ✅（真机联调待做） | 库 `mod_devicemgmt`：serial/ 协议层三小层（SerialPort / FrameCodec / CommandChannel / McuFrame）＋DeviceManager 总门面（逻辑线程 post 编队 / 故障 8 码 / ParamStore / WarmupSequence / ModeController）＋按键链（KeySemantics 直收 MCU 手势 / MenuLogic）＋CameraControl＋MCUDriver（typed N10/N11H0/N12T/N13S＋G01–G03 上行）＋HardwareMonitor＋SelfCheckCollector（PDH/NVML） |
-| 09 | `operatorlib` | ✅ 全部算子 | 单库 `mod_operatorlib`，命名空间 `calib::`（见 §4.3）；GBA 含软先验、marker_cloud_fuse 含 seed()。待建：网格四族算子（07-E 消费） |
-| 10 | `observability` | 部分实现 | 库 `mod_observability`：StateMachine/IState（7 态表驱动 CAS）＋CommandGate 统一命令通道（双口）＋FaultHandler＋ObsLogger/jmw_logging＋CrashHandler＋PerfMonitor。已完成：08 故障桥两待办（10 文档 §2.4——param1 语义对齐＋完整链 app 桥）、UI 状态图标（StateChanged 订阅·状态栏常驻◆指示） |
+| 06 | `fileio` | ✅ 承重 | 库 `DataManager`：SlotRing / RingBuffer / FrameBuffer / PointCloudBuffer（点云仓库）/ DeviceStateCache / EnhancedFrame / CycleUnit / FrameEnricher / CalibrationRepository（JSON 单文件＋readyForScan 门禁）/ ScanSessionData / CalibSessionData / Sink 契约三接口 / IWorkflow / ParameterManager / file_io（`Scanner::data::fileio`） |
+| 07 | `pipelinemgmt` | ✅ | 库 `PipelineManager`：并行调度底座（sched/：CpuTopology / PCoreBroker / GpuSlotService / IFrameSource / FrameResultQueue / SchedulerRuntime）＋五流水线对象（A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）＋装配公共件；命名空间 `Scanner::pipeline` |
+| 08 | `devicemgmt` | ✅（真机联调待做） | 库 `DeviceManager`：serial/ 协议层三小层（SerialPort / FrameCodec / CommandChannel / McuFrame）＋DeviceManager 总门面（逻辑线程 post 编队 / 故障 8 码 / ParamStore / WarmupSequence / ModeController）＋按键链（KeySemantics 直收 MCU 手势 / MenuLogic）＋CameraControl＋MCUDriver（typed N10/N11H0/N12T/N13S＋G01–G03 上行）＋HardwareMonitor＋SelfCheckCollector（PDH/NVML） |
+| 09 | `operatorlib` | ✅ 全部算子 | 单库 `OperatorLib`，命名空间 `calib::`（见 §4.3）；GBA 含软先验、marker_cloud_fuse 含 seed()。待建：网格四族算子（07-E 消费） |
+| 10 | `observability` | 部分实现 | 库 `Observability`：StateMachine/IState（7 态表驱动 CAS）＋CommandGate 统一命令通道（双口）＋FaultHandler＋ObsLogger/jmw_logging＋CrashHandler＋PerfMonitor。已完成：08 故障桥两待办（10 文档 §2.4——param1 语义对齐＋完整链 app 桥）、UI 状态图标（StateChanged 订阅·状态栏常驻◆指示） |
 | 11 | `deploy` | 桩 | — |
 
-### 4.3 modules/09_operatorlib/ — 算子库
+### 4.3 modules/OperatorLib/ — 算子库
 
-单静态库 `mod_operatorlib`（core＋calibration＋scanning 合建），命名空间 `calib::`。
+单静态库 `OperatorLib`（core＋calibration＋scanning 合建），命名空间 `calib::`。
 规范见 `算子规范.md`，逐算子说明见 `docs/算子说明文档/`。
 
 ```
-09_operatorlib/
+OperatorLib/
 ├── core/                               # ── 共享算子（标定/扫描双链复用）──
 │   ├── common/                         #   共享类型头 ×11（非算子）
 │   ├── vision/                         #   底层视觉核 [CUDA]
@@ -163,13 +163,13 @@ JEAMMWARE260705/
 
 ## 5. app/ — 应用入口与装配层（组合根）
 
-产物 `scan_demo.exe`（Qt5 Widgets＋Svg/SerialPort＋OSG）。app 不实现业务逻辑，只做装配与依赖注入：`AppContext` 拥有全部运行时组件，经 `WorkflowContext` 窄接口注入；分层装配＋逆序析构。
+产物 `LeadScannerK2.exe`（Qt5 Widgets＋Svg/SerialPort＋OSG）。app 不实现业务逻辑，只做装配与依赖注入：`AppContext` 拥有全部运行时组件，经 `WorkflowContext` 窄接口注入；分层装配＋逆序析构。
 
 ```
 app/
 ├── main.cpp                  # 入口（Qt/OSG/spdlog 初始化 → 装配 AppContext → 全屏主窗口）
 ├── AppContext.h/.cpp         # 装配根
-├── MainWindow.h/.cpp         # 主窗口 UI（无边框 "LeadScan K2"）
+├── MainWindow.h/.cpp         # 主窗口 UI（无边框 "LeadScanner K2"）
 ├── WorkflowContext.h/.cpp    # 工作流注入窄接口
 ├── ScannerWindow.h/.cpp/.ui  # 扫描窗口 UI
 ├── stubs/                    # 外部依赖桩头（LEADSCANSeries.h 等 5 个，人工提供）
@@ -237,7 +237,7 @@ factory_calib/
 |---|---|
 | OpenCV | 4.13（`F:/opencv4.13/install`，含 Debug/Release 双套） |
 | Eigen | 3.4.1（`F:/eigen-3.4.1` 源码树） |
-| Qt | 5.15.2（`C:/Qt/Qt5.15.2/5.15.2/msvc2019_64`；scan_demo 需 Core/Gui/Widgets/OpenGL/Svg/SerialPort） |
+| Qt | 5.15.2（`C:/Qt/Qt5.15.2/5.15.2/msvc2019_64`；LeadScannerK2 需 Core/Gui/Widgets/OpenGL/Svg/SerialPort） |
 | OSG | `F:/osg3.6.5/install` |
 | Ceres 2.2 / nlohmann_json / gtest | 经 FetchContent（github 被封时 `-DJMW_GH_MIRROR=https://ghfast.top/`） |
 | spdlog 1.15 | 经 FetchContent **强制共享库**（`SPDLOG_BUILD_SHARED=ON`，DLL 模式下必须——见 §4.1） |
@@ -246,14 +246,14 @@ factory_calib/
 
 ### 8.3 条件构建与注意事项
 
-1. **scan_demo 条件构建**：仅当 Qt5 Svg/SerialPort 齐备 **且** `app/stubs/LEADSCANSeries.h` 存在时构建，否则跳过以保「库＋测试」构建绿
+1. **LeadScannerK2 条件构建**：仅当 Qt5 Svg/SerialPort 齐备 **且** `app/stubs/LEADSCANSeries.h` 存在时构建，否则跳过以保「库＋测试」构建绿
 2. **build/ 已是 Debug+Release 双配置**（261005 起，`CMAKE_CONFIGURATION_TYPES=Debug;Release`）——**日常优先编 Release**（用户口径，真机用 Release）；独立目录 `build-rel/` 仍可用（Release-only）
 3. **DLL 模式**（默认）：产物按配置落 `<build>/bin/<Debug|Release>`（exe/模块 DLL/测试同目录，三方 DLL 由 copy_dlls.bat 拷同目录）——测试/运行免设 PATH；⚠ 所有模块 DLL 与 exe 必须同工具链同 `/MD(D)` CRT 构建（跨边界传 STL/OpenCV 对象依赖同一堆）；⚠ 改 CMake 后首个构建若仍走旧目录，确认 ZERO_CHECK 重跑过 cmake（sln 内自动）或手动重配置
 
 ### 8.4 VS2022 IDE（编译＋F5 运行）
 
-1. 打开 `build/JEAMMWARE.sln`（Debug/Release 双配置；或 `build-rel/JEAMMWARE.sln` 仅 Release）
-2. 启动项默认已是 **scan_demo**（sln 首工程，顶层 CMake `VS_STARTUP_PROJECT`）；配置 x64 + **Release（日常默认）**
+1. 打开 `build/LeadScannerK2.sln`（Debug/Release 双配置；或 `build-rel/LeadScannerK2.sln` 仅 Release）
+2. 启动项默认已是 **LeadScannerK2**（sln 首工程，顶层 CMake `VS_STARTUP_PROJECT`）；配置 x64 + **Release（日常默认）**
 3. 直接 F5：调试工作目录已按配置指向 `build/bin/<配置>`（`VS_DEBUGGER_WORKING_DIRECTORY_<CONFIG>` 已写入 vcxproj，Qt/OSG/OpenCV/模块 DLL 同目录可直接加载）
 4. 全量构建：生成→生成解决方案；跑测试：`RUN_TESTS` 工程或命令行 ctest（§8.5/8.6）
 

@@ -4,7 +4,7 @@
 // P6-T29c：旧七阶段（GBA/重融合/法线/封装/补洞/光顺/边界）sleep 空壳删除
 // （GBA/重融合 Q5 定案归 02）——本类装配 07 PostProcessPipeline 阻塞 run：
 // 进度回调透传 UI、STL 导出经 StlExportFn 适配 06 file_io exportSTL
-// （B-T3 file_io 已收库 mod_datamgmt，适配不再受 app 编译单元限制）。
+// （B-T3 file_io 已收库 DataManager，适配不再受 app 编译单元限制）。
 // ============================================================================
 
 #include "PostProcessWorkflow.h"

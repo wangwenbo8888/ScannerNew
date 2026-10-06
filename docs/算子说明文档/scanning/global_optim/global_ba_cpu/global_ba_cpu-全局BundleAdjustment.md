@@ -11,7 +11,7 @@
 | 所属流程 | 后处理（离线全局优化，模块4）；非实时扫描链算子 |
 | 精度档次 | ②（亚毫米级全局一致性） |
 
-> 说明：本算子位于 `modules/09_operatorlib/scanning/global_optim/`，属"全局优化"类，与实时扫描流水线算子分开。供后处理编排调用。
+> 说明：本算子位于 `modules/OperatorLib/scanning/global_optim/`，属"全局优化"类，与实时扫描流水线算子分开。供后处理编排调用。
 
 ## B. 数据流
 
