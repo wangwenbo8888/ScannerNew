@@ -341,6 +341,10 @@ void AppContext::initialize() {
         // 261004 曝光档值表（ms——camera.json brightnessLadder.exposureMs 20 元
         // 数组逐档注入〔逐档自由方便产线定表〕；空=内置均匀 0.5~5）
         std::vector<double> brightExposureMs;
+        // 261006 采集矩阵（camera.json "width"/"height"；0=不设用传感器缺省——
+        // 传感器上限钳制/Inc 对齐/居中 ROI 由 08 CameraControl 兜）
+        int acqWidth = 0;
+        int acqHeight = 0;
     };
     CameraSetupCfg camCfg;
     {
@@ -364,6 +368,19 @@ void AppContext::initialize() {
                 camCfg.contrastRight = c.value("contrastRight", camCfg.contrastRight);
                 cameraContrastL_ = camCfg.contrastLeft;   // open 成功后经门面下发
                 cameraContrastR_ = camCfg.contrastRight;
+                // 261006 采集矩阵（须成对正整数；单边/非正值→警告并忽略）
+                camCfg.acqWidth = c.value("width", camCfg.acqWidth);
+                camCfg.acqHeight = c.value("height", camCfg.acqHeight);
+                if ((camCfg.acqWidth > 0) != (camCfg.acqHeight > 0)) {
+                    JMW_LOG_WARN("app-AppContext",
+                        "[AppContext] camera.json width/height 须成对正整数"
+                        "（{}x{}）——忽略，用传感器缺省",
+                        camCfg.acqWidth, camCfg.acqHeight);
+                    camCfg.acqWidth = 0;
+                    camCfg.acqHeight = 0;
+                }
+                cameraAcqW_ = camCfg.acqWidth;   // open 成功后经门面下发
+                cameraAcqH_ = camCfg.acqHeight;
                 // 261004 曝光档值表（camera.json brightnessLadder.exposureMs 20 元数组；
                 // 缺节/非法＝内置均匀 0.5~5；逐档自由非强制等差）
                 if (j.contains("brightnessLadder") && j["brightnessLadder"].is_object()) {
@@ -420,13 +437,14 @@ void AppContext::initialize() {
                 dofFarMax_ = camCfg.dofFarMax;
                 JMW_LOG_INFO("app-AppContext",
                     "[AppContext] camera.json 已载：L={} R={} rot180={} trig={} previewFps={} "
-                    "pairStrict={} tsPair={} contrastL={} contrastR={} "
+                    "pairStrict={} tsPair={} contrastL={} contrastR={} acq={}x{} "
                     "expTable={}档[{}..{}]ms "
                     "dof{} dofNear=[{},{}] dofFar=[{},{}]",
                     camCfg.deviceIndexLeft, camCfg.deviceIndexRight,
                     camCfg.rotateRight180, camCfg.triggerSource, camCfg.previewFps,
                     camCfg.pairStrictFrameId, camCfg.timestampPairing,
                     camCfg.contrastLeft, camCfg.contrastRight,
+                    camCfg.acqWidth, camCfg.acqHeight,
                     camCfg.brightExposureMs.empty() ? 20 : camCfg.brightExposureMs.size(),
                     camCfg.brightExposureMs.empty()
                         ? 0.5 : *std::min_element(camCfg.brightExposureMs.begin(),
@@ -643,6 +661,14 @@ void AppContext::startDevicesAsync() {
             // 若机型/SDK 路径异常自动回落直通（驱动内已兜）
             if (cameraContrastL_ != 0 || cameraContrastR_ != 0)
                 deviceManager_->setCameraContrast(cameraContrastL_, cameraContrastR_);
+            // 261006 采集矩阵：camera.json "width"/"height"（0=不设）——open 成功后
+            // 下发（未采集中立即生效；08 pending 记账，重开相机沿用）
+            if (cameraAcqW_ > 0 && cameraAcqH_ > 0) {
+                const auto resR = deviceManager_->setCameraResolution(cameraAcqW_, cameraAcqH_);
+                JMW_LOG_INFO("app-AppContext",
+                    "[AppContext] 采集矩阵下发 {}x{}: {}（传感器上限/Inc 对齐后以实际 ROI 为准）",
+                    cameraAcqW_, cameraAcqH_, resR.message);
+            }
             // G8 设备指示灯：open 成功补发当前态（此前 StateChanged 已过——MCU 未开
             // 时的码被去重缓存，此处按当前态重发一次落地）
             if (deviceManager_ && stateMachine_) {

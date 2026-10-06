@@ -238,6 +238,10 @@ private:
     Scanner::infra::SubscriberId captureStateSubId_ = 0;   // 261002 采集翻转沿：M 停采→工作流暂停（可编辑）
     int cameraContrastL_ = 0;                         // camera.json "contrastLeft"（0=直通；open 后下发）
     int cameraContrastR_ = 0;                         // camera.json "contrastRight"
+    // 261006 采集矩阵（camera.json "width"/"height"——实际 ROI 尺寸；0=不设用传感器
+    // 缺省。open 成功后下发；注意须与标定参数 meta.imageSize 一致，否则 readyForScan 拦扫描）
+    int cameraAcqW_ = 0;
+    int cameraAcqH_ = 0;
     // 261003 景深屏蔽区间（camera.json depthOfField 节；AppContext 装配读→
     // WorkflowContext::dofRange() 虚口→02 会话启动注入 07 ScanChains）
     double dofNearMin_ = 150.0, dofNearMax_ = 500.0;
