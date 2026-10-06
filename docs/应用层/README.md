@@ -26,7 +26,6 @@
 | `ScannerWindow.h/.cpp/.ui` | 集成测试窗口（设备开闭/预览消费/参数滑条，经 DeviceManager 门面） |
 | `stubs/`（5 个桩头） | LEADSCANSeries/CameraControl/标定工作流桩（人工提供，构建门禁依赖） |
 | `CMakeLists.txt`＋`copy_dlls.bat`＋`resources.qrc`＋`resources/icons/` | 构建/部署/Qt 资源（三态 SVG 图标） |
-| `dark.qss` | 暗色主题（未登记 qrc，暂不生效） |
 
 ## 三大关键设计
 

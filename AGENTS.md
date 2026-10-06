@@ -175,7 +175,6 @@ app/
 ├── stubs/                    # 外部依赖桩头（LEADSCANSeries.h 等 5 个，人工提供）
 ├── copy_dlls.bat             # POST_BUILD 拷贝 Qt/OSG/OpenCV 运行时 DLL
 ├── resources.qrc + resources/icons/  # Qt 资源（三态 SVG 图标）
-└── dark.qss                  # 暗色主题（未登记进 qrc，暂不生效）
 ```
 
 详见 `docs/应用层/`（README＋01-入口与启动 / 02-AppContext装配 / 03-MainWindow-UI / 04-构建与依赖）。
