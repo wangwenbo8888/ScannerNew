@@ -7,7 +7,7 @@
 1. **代码对象速查** → `模块功能目录.md` §2
    - 按实际代码提炼的逐对象职责＋要点（98 对象，编号 `模块号-序号`；260831 协议对齐后 KeyManager 退役 −1）；对象职责以代码为准
 2. **数据归属/管理** → 原则见 `数据管理原则.md`（L1–L4 分类＋判定规则）
-   - 代码现状/修改目标/待增加见 `docs/模块功能/06-文件管理.md`
+   - 代码现状/修改目标/待增加见 `docs/模块功能/06-数据管理.md`
 3. **整体框架图** → `框架整体.md`（仅 §1 静态架构：5 层主架构＋部署期 wrapper＋横切）
 4. **会话接力/当前进度** → `开发进度.md`（默认限读：快照＋关键决策＋近 10 条日志）
 5. **app 应用层** → `docs/应用层/README.md`（入口与启动 / AppContext 装配 / MainWindow UI / 构建与依赖）
@@ -20,7 +20,7 @@
 
 - 分层依赖单向：`base ← 06/07/08 ← 业务模块 ← app`
   - 06 只链 base＋nlohmann_json
-  - 07（mod_pipelinemgmt）链 base＋mod_fileio＋mod_operatorlib——五流水线对象消费容器与算子
+  - 07（mod_pipelinemgmt）链 base＋mod_datamgmt＋mod_operatorlib——五流水线对象消费容器与算子
   - 08 只链 base＋Qt SerialPort——HardwareMonitor 状态落经 `IDeviceStateSink` 契约接口（06 实现类 include 已清账 d5948e5，app 装配注入）
   - 10 链 base＋spdlog
 - 全量 ctest **95/95 绿**（Debug＋Release 双绿）
@@ -71,7 +71,7 @@ JEAMMWARE260705/
 | 03 | `rendering` | 部分实现 | OSGWidget（编入 scan_demo）；`mod_rendering` 为 INTERFACE 占位 |
 | 04 | `postprocessing` | 部分实现 | PostProcessWorkflow（编入 scan_demo）；五阶段编排移交 07 PostProcessPipeline |
 | 05 | `editing` | 桩 | — |
-| 06 | `fileio` | ✅ 承重 | 库 `mod_fileio`：SlotRing / RingBuffer / FrameBuffer / PointCloudBuffer（点云仓库）/ DeviceStateCache / EnhancedFrame / CycleUnit / FrameEnricher / CalibrationRepository（JSON 单文件＋readyForScan 门禁）/ ScanSessionData / CalibSessionData / Sink 契约三接口 / IWorkflow / ParameterManager / file_io（`Scanner::data::fileio`） |
+| 06 | `fileio` | ✅ 承重 | 库 `mod_datamgmt`：SlotRing / RingBuffer / FrameBuffer / PointCloudBuffer（点云仓库）/ DeviceStateCache / EnhancedFrame / CycleUnit / FrameEnricher / CalibrationRepository（JSON 单文件＋readyForScan 门禁）/ ScanSessionData / CalibSessionData / Sink 契约三接口 / IWorkflow / ParameterManager / file_io（`Scanner::data::fileio`） |
 | 07 | `pipelinemgmt` | ✅ | 库 `mod_pipelinemgmt`：并行调度底座（sched/：CpuTopology / PCoreBroker / GpuSlotService / IFrameSource / FrameResultQueue / SchedulerRuntime）＋五流水线对象（A 姿态判断 / B 标定计算 / C 扫描处理 / D 全局优化 / E 后处理）＋装配公共件；命名空间 `Scanner::pipeline` |
 | 08 | `devicemgmt` | ✅（真机联调待做） | 库 `mod_devicemgmt`：serial/ 协议层三小层（SerialPort / FrameCodec / CommandChannel / McuFrame）＋DeviceManager 总门面（逻辑线程 post 编队 / 故障 8 码 / ParamStore / WarmupSequence / ModeController）＋按键链（KeySemantics 直收 MCU 手势 / MenuLogic）＋CameraControl＋MCUDriver（typed N10/N11H0/N12T/N13S＋G01–G03 上行）＋HardwareMonitor＋SelfCheckCollector（PDH/NVML） |
 | 09 | `operatorlib` | ✅ 全部算子 | 单库 `mod_operatorlib`，命名空间 `calib::`（见 §4.3）；GBA 含软先验、marker_cloud_fuse 含 seed()。待建：网格四族算子（07-E 消费） |

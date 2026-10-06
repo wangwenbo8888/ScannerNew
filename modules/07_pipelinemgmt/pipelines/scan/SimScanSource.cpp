@@ -3,7 +3,7 @@
 // ============================================================================
 #include "pipelines/scan/SimScanSource.h"
 
-#include "file_io.h"   // Scanner::data::fileio::importPLY（06；07 已链 mod_fileio）
+#include "file_io.h"   // Scanner::data::fileio::importPLY（06；07 已链 mod_datamgmt）
 
 #include <algorithm>
 #include <cmath>

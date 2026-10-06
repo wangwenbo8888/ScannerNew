@@ -10,7 +10,7 @@
 // 默认内置桩返回 degraded("operator pending")（09 落地后由 04/09 经
 // setStageOp 替换实现，编排不变；法线阶段 T27 实接 laser_cloud_normal 适配）。
 //
-// STL 导出：06 fileio::exportSTL（B-T3 收库 mod_fileio，cv::Point3f 解 OSG）。
+// STL 导出：06 fileio::exportSTL（B-T3 收库 mod_datamgmt，cv::Point3f 解 OSG）。
 // 07 编排引擎经 StlExportFn 注入保持与文件 IO 解耦（默认空=产物占位+
 // Degraded 1902）；适配接线在 04 工作流（app 编译单元）。
 //

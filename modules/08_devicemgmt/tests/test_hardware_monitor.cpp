@@ -2,7 +2,7 @@
 // test_hardware_monitor.cpp — HardwareMonitor 升级测（H-T16：删 IMCU 轮询/
 // 帧率三件套/HealthMetrics 快照出口；08 设计 §5.2）
 //
-// 链接 mod_devicemgmt + mod_fileio（DeviceStateCache 真件；测试 exe 是叶子
+// 链接 mod_devicemgmt + mod_datamgmt（DeviceStateCache 真件；测试 exe 是叶子
 // 消费方，引 06 头不违「06 不链 08」铁律——库间依赖方向不变）。
 // 假件仅一处边界：LocalFakeCam（IScannerCamera 全接口空壳，isOpen/温度可控）。
 // 时序敏感用例统一 200ms 裕量 + 10ms 轮询等待（waitUntil），防 flaky。
@@ -14,7 +14,7 @@
 #include "modules/08_devicemgmt/IScannerCamera.h"
 #include "modules/08_devicemgmt/SelfCheckCollector.h"
 #include "modules/08_devicemgmt/serial/McuFrame.h"
-#include "modules/06_fileio/DeviceStateCache.h"
+#include "modules/06_datamgmt/DeviceStateCache.h"
 
 #include <atomic>
 #include <chrono>

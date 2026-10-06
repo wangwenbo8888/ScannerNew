@@ -92,7 +92,7 @@ target_include_directories(scan_demo PRIVATE
     ${CMAKE_SOURCE_DIR}/modules/02_scanning
     ${CMAKE_SOURCE_DIR}/modules/03_rendering
     ${CMAKE_SOURCE_DIR}/modules/05_editing
-    ${CMAKE_SOURCE_DIR}/modules/06_fileio
+    ${CMAKE_SOURCE_DIR}/modules/06_datamgmt
     ${CMAKE_SOURCE_DIR}/modules/04_postprocessing
     ${OSG_ROOT}/include
 )
@@ -111,7 +111,7 @@ target_link_libraries(scan_demo PRIVATE
     base
     mod_devicemgmt
     mod_operatorlib
-    mod_fileio
+    mod_datamgmt
     mod_pipelinemgmt
     mod_observability
     mod_editing

@@ -13,7 +13,7 @@ endif()
 
 # ============================================================================
 # 模块 DLL 化（261005 用户口径：模块独立部署/授权）
-# - JMW_BUILD_MODULE_DLLS=ON：mod_fileio/pipelinemgmt/devicemgmt/operatorlib/
+# - JMW_BUILD_MODULE_DLLS=ON：mod_datamgmt/pipelinemgmt/devicemgmt/operatorlib/
 #   observability/editing 六个实体业务库以 SHARED 构建（mod_*.dll + 导入库）；
 #   OFF 回退全静态（原形态）。base 保持 STATIC：纯类型＋实例注入 EventBus，
 #   无全局态，嵌入各 DLL 安全。
@@ -183,7 +183,7 @@ endfunction()
 
 # base/ 共享内核（Phase 1 新增；framework/* 转发壳引用 "base/*.h"，需项目根在全局 include 路径）
 include_directories(${CMAKE_SOURCE_DIR})
-include_directories(${CMAKE_SOURCE_DIR}/modules/06_fileio)
+include_directories(${CMAKE_SOURCE_DIR}/modules/06_datamgmt)
 include_directories(${CMAKE_SOURCE_DIR}/modules/08_devicemgmt)
 include_directories(${CMAKE_SOURCE_DIR}/modules/10_observability)
 

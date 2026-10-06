@@ -1234,7 +1234,7 @@ void AppContext::assembleSimSource() {
     }
     if (scene.laser.empty())
         JMW_LOG_WARN("app-AppContext",
-            "[SimScan] 导入 stash 与数据集文件均空（先「文件管理→导入点云」或置 "
+            "[SimScan] 导入 stash 与数据集文件均空（先「数据管理→导入点云」或置 "
             "JMW_SIM_LASER_PLY）——builtin 兜底");
     if (scene.markers.empty()) {
         const auto fb = Scanner::pipeline::SimScene::builtin();

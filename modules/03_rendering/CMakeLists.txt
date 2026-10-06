@@ -6,7 +6,7 @@ target_include_directories(mod_rendering INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(mod_rendering INTERFACE ${OpenCV_LIBS})
 
 # ============================================================================
-# 单测：每文件一 exe + 注册 ctest（仿 06_fileio）
+# 单测：每文件一 exe + 注册 ctest（仿 06_datamgmt）
 # ============================================================================
 if(BUILD_TESTS)
     file(GLOB RENDER_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")

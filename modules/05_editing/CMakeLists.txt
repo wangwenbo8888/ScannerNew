@@ -9,7 +9,7 @@ target_include_directories(mod_editing PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(mod_editing PUBLIC base ${OpenCV_LIBS})
 
 # ============================================================================
-# 单测：每文件一 exe + 注册 ctest（仿 06_fileio / 03_rendering）
+# 单测：每文件一 exe + 注册 ctest（仿 06_datamgmt / 03_rendering）
 # ============================================================================
 if(BUILD_TESTS)
     file(GLOB EDITING_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")

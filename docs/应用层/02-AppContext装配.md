@@ -146,7 +146,7 @@ UI 点键关闭 ──► stopScanSession（stopCapture N11H0 → finish_scan �
 | 功能 | 对应文件 | 实现方法一句话 | 达成情况 |
 |------|---------|--------------|---------|
 | 相机装机口径 | `app/AppContext.cpp`（camera.json 解析） | L/R 设备号、右图 180°、触发源、previewFps、帧号严格配对、时间戳配对；缺档默认＋WARN | G7：已达成 |
-| 标定档 | `app/AppContext.cpp` ＋ `modules/06_fileio/CalibrationRepository.h` | config/calibration.json＋同目录 laser_calib.json 工厂档自动合并；未装载不阻断 | G7：已达成 |
+| 标定档 | `app/AppContext.cpp` ＋ `modules/06_datamgmt/CalibrationRepository.h` | config/calibration.json＋同目录 laser_calib.json 工厂档自动合并；未装载不阻断 | G7：已达成 |
 | 设备参数档 | `app/AppContext.cpp`（ParamIo 注入 DeviceManager） | load/persist 落 config/device_params.txt（防抖 2s＋close 兜底归 08 管理） | G7：已达成 |
 
 #### 4.2.6 中段模拟提取（服务 G8，调试件）

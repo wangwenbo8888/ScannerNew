@@ -1995,7 +1995,7 @@ QWidget *MainWindow::createToolBar()
     // D 管）/ 深孔(5)=DeepHoleScan（新增，C 管）；深孔 icon 复用 cloudscan
     // （不新增美术资源，专属图标待设计）
     QList<ToolItem> items = {
-        {"filemanager-black-14", QStringLiteral("文件管理")},
+        {"filemanager-black-14", QStringLiteral("数据管理")},
         {"equipcalib-black-14", QStringLiteral("校准设备")},
         {"markscan-black-14", QStringLiteral("标点扫描")},
         {"meshscan-black-14", QStringLiteral("面片扫描")},
@@ -2191,7 +2191,7 @@ QWidget *MainWindow::createToolBar()
             });
         }
 
-        // 文件管理：弹出导入/导出菜单
+        // 数据管理：弹出导入/导出菜单
         if (i == 0) {
             connect(btn, &QPushButton::clicked, this, [this, btn]() {
                 QMenu menu(btn);
@@ -2392,7 +2392,7 @@ QWidget *MainWindow::createToolBar()
 
         // 标点扫描/面片扫描/精细扫描/深孔扫描/正反扫描/切面扫描：切换回默认界面
         //（键位随深孔新增右移：扫描四模式 2-5，正反=6；正反保留切回行为）
-        // 注意：i==0 是"文件管理/导入"按钮，只开菜单，不能在这里 clearScene（否则导入后被清空）
+        // 注意：i==0 是"数据管理/导入"按钮，只开菜单，不能在这里 clearScene（否则导入后被清空）
         if (i == 2 || i == 3 || i == 4 || i == 5 || i == 6) {
             connect(btn, &QPushButton::clicked, this, [this]() {
                 // 仅从标定分屏切回时恢复（clearScene 会清扫描标志点——恢复

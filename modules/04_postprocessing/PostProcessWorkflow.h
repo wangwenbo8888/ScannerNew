@@ -9,7 +9,7 @@
 //
 // 数据流：WorkflowContext 点云快照（PointCloudBuffer.getSnapshot）→
 // MeshData（xyz）→ pipeline run（skipStages 位掩码透传）→ STL 经
-// StlExportFn 接 06 fileio::exportSTL（B-T3 已收库 mod_fileio、解 OSG）；
+// StlExportFn 接 06 fileio::exportSTL（B-T3 已收库 mod_datamgmt、解 OSG）；
 // 经注入点接线在本文件（app 编译单元），保持 07 与文件 IO 解耦。
 //
 // TODO(接入期接线)：

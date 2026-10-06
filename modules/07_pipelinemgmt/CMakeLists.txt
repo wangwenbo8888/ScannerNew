@@ -24,7 +24,7 @@ add_library(mod_pipelinemgmt ${JMW_MODULE_LIB_TYPE} sched/FrameResultQueue.cpp s
     sched/GpuSlotService.cpp sched/CpuTopology.cpp sched/SchedulerRuntime.cpp
     ${JMW_PM_PIPELINE_SRCS})
 target_include_directories(mod_pipelinemgmt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(mod_pipelinemgmt PUBLIC base mod_fileio mod_operatorlib
+target_link_libraries(mod_pipelinemgmt PUBLIC base mod_datamgmt mod_operatorlib
     spdlog::spdlog ${OpenCV_LIBS})
 if(BUILD_CUDA)
     # CUDAToolkit v12.6 pin/守卫已上移根 CMakeLists（enable_language 后、任何消费方之前，
