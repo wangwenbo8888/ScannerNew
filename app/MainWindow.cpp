@@ -1542,7 +1542,9 @@ void MainWindow::createFloatingToolbar()
 {
     m_floatingToolbar = new QWidget();
     m_floatingToolbar->setObjectName("floatingToolbar");
-    m_floatingToolbar->setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    // Qt::Tool＝工具窗口（260706）：不进任务栏/Alt+Tab——无父顶级窗口会吃
+    // exe 默认名 LeadScannerK2 的任务栏项，观感「程序开了两个」
+    m_floatingToolbar->setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     m_floatingToolbar->setAttribute(Qt::WA_TranslucentBackground);
     m_floatingToolbar->setStyleSheet("background-color: white; border: 1px solid #e0e0e0; border-radius: 8px;");
     m_floatingToolbar->setMinimumWidth(400);
