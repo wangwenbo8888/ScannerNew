@@ -81,6 +81,11 @@ struct GlobalBAParams {
     //    迭代内（秒级）打断优化器，进程不再挂死。
     double maxSolveSecondsPerPhase = 60.0;   // 秒；0=不限
     std::function<bool()> cancelRequested;   // 空=不可取消
+    // 261017 批算进度钩子：每次迭代末回调 f∈[0,1]（跨 PGO+四 Ceres 阶段固定槽位
+    // 加权映射；被跳过的阶段不回调=进度直接跨过该槽，单调不回退）。空=不上报
+    // （离线工具/测试默认空）。上层（07）把它接到终局遍进度条——真机 GBA 百秒级
+    // 黑盒期 UI 只能停在 20% 的排障口径由此消除
+    std::function<void(double)> progressCb;
 
     void validate() const;
     nlohmann::json toJson() const;

@@ -249,6 +249,11 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
         // 兜底，随后的取消检查点（原 261004 前已有的「GBA 后检查点」）干净退出。
         calib::GlobalBAParams gp = gbaParams();
         gp.cancelRequested = [&cancel]() { return cancel.cancelled(); };
+        // 261017 批算进度：算子逐迭代回调 [0,1] → 映射 20%~48%（此后 marker/激光
+        // 重放/入库占 50-100%）——百秒级 Ceres 黑盒期进度条不再停在 20%
+        gp.progressCb = [cb](double f) {
+            if (cb) cb(20 + static_cast<int>(28.0 * f), "GBA 批算");
+        };
         if (gbaFn_) {
             gba = gbaFn_(in, gp);
         } else {
@@ -268,6 +273,12 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     out_.gbaMarkers = std::move(gba.optimizedMarkers);
 
     if (!gba.success) {
+        // 261017 开发期日志补全：失败原因第一时间落日志（原只进事件不上日志——
+        // 真机「优化后点数不变」排障时全靠翻代码猜）
+        JMW_LOG_WARN("07-GlobalOptim",
+            "[GlobalOptim] GBA 批算失败（迭代={} 初RMSE={:.4f} 末RMSE={:.4f} 输入帧={}）: {}",
+            gba.statistics.ceresIterations, gba.statistics.initialRMSE,
+            gba.statistics.finalRMSE, snap.obs.size(), gba.message);
         // 设计 §4.4 降级路径：Fault 上报 + 沿初值位姿重融合兜底
         // （skipBatchSolve 有意跳过＝非故障，仅 WARN 不报 Fault——261004）
         quality = Scanner::QualityFlag::Degraded;
@@ -306,13 +317,50 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
         }
     }
 
-    // —— 步骤 4a：marker 重融合（新实例按修正位姿重放全部观测）——
-    if (cb) cb(50, "marker 重融合");
+    // —— 步骤 4a：marker 终版云——GBA 成功直接采用 BA 最优解（261017：原一律体素
+    // 重放——重放无 id 概念，同一标志点逐帧观测散布跨体素边界即分裂＋链断观测
+    // （globalId<0）入云，真机 30 真实点重放出 52；optimizedMarkers 是逐 globalId
+    // 的 BA 最优位置，直接就是答案）。仅 GBA 失败（或解空）兜底走 5mm 体素重放
+    // （沿初值位姿，与 C 线同参）
+    if (cb) cb(50, gba.success ? "marker BA 最优解" : "marker 重融合兜底");
     size_t markerFuseFails = 0;
+    if (gba.success && !out_.gbaMarkers.empty()) {
+        // 按共视数降序拷贝：链断重锚的重复 id 中观测多者（id 可信）先入列——
+        // 后续近距合并保留先到者，即保留可信 id 的 BA 位置
+        auto byCovis = out_.gbaMarkers;
+        std::sort(byCovis.begin(), byCovis.end(),
+                  [](const calib::GlobalMarker& a, const calib::GlobalMarker& b) {
+                      return a.covisCount > b.covisCount;
+                  });
+        out_.markerCloud.clear();
+        out_.markerCloud.reserve(byCovis.size());
+        for (const auto& m : byCovis) {
+            calib::MarkerCloudPoint p;
+            p.x = static_cast<float>(m.X.x);
+            p.y = static_cast<float>(m.X.y);
+            p.z = static_cast<float>(m.X.z);
+            out_.markerCloud.push_back(p);
+        }
+        JMW_LOG_INFO("07-GlobalOptim",
+            "[GlobalOptim] marker 终版云=GBA 最优解 {} 点（免体素重放；id 数≠物理点数——"
+            "链断重锚的重复 id 仍待近距合并）",
+            out_.markerCloud.size());
+    } else {
+        if (gba.success)
+            JMW_LOG_WARN("07-GlobalOptim",
+                "[GlobalOptim] GBA 成功但 optimizedMarkers 空——回退体素重放");
     {
-        calib::MarkerCloudFuseCPU mFuse;           // 新实例=重放语义（与 C 线默认参数一致）
+        calib::MarkerCloudFuseCPUParams mfp;
+        mfp.voxelSize = 5.0f;   // 261017 与 C 线对齐（ScanPipeline 会话装配同值）——原默认
+                                // 构造 0.5mm：重放时同一标志点的逐帧观测（亚毫米噪声）
+                                // 各自成点 → 全局优化后 marker 数爆涨为观测量级
+        calib::MarkerCloudFuseCPU mFuse{mfp};  // 新实例=重放语义（参数与 C 线一致）
         for (size_t i = 0; i < snap.obs.size(); ++i) {
             if (cancel.cancelled()) break;         // 帧间检查点
+            if (cb && (i % 128) == 0)              // 261017 逐段进度（50→68%）
+                cb(50 + static_cast<int>(18.0 * static_cast<double>(i) /
+                                         static_cast<double>(snap.obs.size())),
+                   "marker 重融合兜底");
             const auto& fo = snap.obs[i];
             if (fo.markerObs.empty()) continue;
             std::vector<calib::MarkerFuseInput> pts(fo.markerObs.size());
@@ -346,7 +394,35 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
         }
         out_.markerCloud = mFuse.GetFusedPoints();
     }
+    }   // ← else（GBA 失败兜底体素重放）结束
     if (markerFuseFails > 0) quality = Scanner::QualityFlag::Degraded;
+
+    // —— 261017 终版云近距合并：链断重锚的重复 id（同一物理点两个 globalId，BA
+    // 后位置几乎重合——RMSE 0.013mm 级）在此归一。阈值 10mm << 标志点间距 30mm
+    // 安全；GBA 路径已按共视数降序＝可信 id 位置先入列被保留。真机对账：30 物理
+    // 点此前显示 34（+4 幽灵 id）即此因。合并对数落日志（幽灵点/误检对账依据：
+    // 若合并后仍 >物理点数，余量为误检假点——须上游检测质量解决）
+    {
+        constexpr float kMergeRadiusMm = 10.0f;
+        const float r2 = kMergeRadiusMm * kMergeRadiusMm;
+        std::vector<calib::MarkerCloudPoint> kept;
+        kept.reserve(out_.markerCloud.size());
+        size_t mergedCnt = 0;
+        for (const auto& p : out_.markerCloud) {
+            bool dup = false;
+            for (const auto& q : kept) {
+                const float dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
+                if (dx * dx + dy * dy + dz * dz < r2) { dup = true; break; }
+            }
+            if (dup) ++mergedCnt; else kept.push_back(p);
+        }
+        if (mergedCnt > 0) {
+            JMW_LOG_INFO("07-GlobalOptim",
+                "[GlobalOptim] 终版云近距合并：{} 点并入邻点（阈值 {}mm）→ 保留 {} 点",
+                mergedCnt, kMergeRadiusMm, kept.size());
+            out_.markerCloud = std::move(kept);
+        }
+    }
 
     if (cancel.cancelled()) {
         out_.cancelled = true;
@@ -363,6 +439,11 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     if (anyLaser) {
         if (obsAcc.degradedLaser()) {
             // 近似路径：无激光修正重融合——沿 C 线初值融合结果不重算激光（简化，如实注明）
+            // 261017 开发期日志补全：降级跳过时把账面数字落日志（原只有事件码）
+            JMW_LOG_WARN("07-GlobalOptim",
+                "[GlobalOptim] 激光缓存已降级：缓存字节={} 缓存帧={} ——跳过激光修正重融合"
+                "（沿初值融合结果不重算；预算见 ScanWorkflow laserCacheBudgetMB）",
+                obsAcc.laserBytesUsed(), snap.laserFrames.size());
             out_.laserDegraded = true;
             quality = Scanner::QualityFlag::Degraded;
             if (sink_)
@@ -375,6 +456,10 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
             size_t laserFuseFails = 0;              // 融合失败/异常帧聚合（I1）
             for (size_t i = 0; i < snap.obs.size(); ++i) {
                 if (cancel.cancelled()) break;     // 帧间检查点
+                if (cb && (i % 64) == 0)           // 261017 逐段进度（70→84%）
+                    cb(70 + static_cast<int>(14.0 * static_cast<double>(i) /
+                                             static_cast<double>(snap.obs.size())),
+                       "laser 重融合重放");
                 const size_t slot = snap.obs[i].laserCacheSlot;
                 if (slot == FrameObs::kNoLaserSlot) continue;   // 本帧无激光（A 帧/空帧）
                 if (slot >= snap.laserFrames.size()) continue;  // 防御（契约不会发生）

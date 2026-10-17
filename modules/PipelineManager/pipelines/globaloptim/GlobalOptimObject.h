@@ -10,7 +10,8 @@
 //   3 Ceres GBA（global_ba_cpu，位姿参数化由算子内部完成——R_init/t_init 直喂，
 //     算子转四元数参与优化）→ 修正位姿数组
 //   4 重融合（成对语义）：marker——新 MarkerCloudFuseCPU 实例按修正位姿重放全部
-//     观测；laser——未降级（degradedLaser()==false，kNoLaserSlot 帧=本帧无激光）
+//     观测（体素 5mm 与 C 线对齐——261017 修复：原默认 0.5mm 致重放点数爆涨）；
+//     laser——未降级（degradedLaser()==false，kNoLaserSlot 帧=本帧无激光）
 //     → 新融合实例重放全部缓存激光帧；降级 → 近似路径：无激光修正重融合（沿
 //     C 线初值融合结果不重算激光——简化，记 Degraded）
 //   5 cloudRepo->write(tag)（句柄 tag 形态）+ sink 完成事件

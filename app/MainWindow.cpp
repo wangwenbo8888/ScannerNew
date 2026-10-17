@@ -42,6 +42,7 @@
 #include <QHeaderView>
 #include <QScreen>
 #include <QResizeEvent>
+#include <QMoveEvent>     // 261017 表盘跟随主窗口移动/最小化
 #include <QTimer>
 #include <QScrollArea>
 #include <QButtonGroup>
@@ -1245,33 +1246,44 @@ void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
 // 「拒＝可按但有反馈」与「拦＝无效直接灰」区分，设计 §3.2.5 定版口径）
 void MainWindow::showVirtualKeypad() {
     if (!m_vkeyPad) {
-        m_vkeyPad = new QDialog(nullptr);   // 无父窗口（独立顶层——全屏主窗口不遮）
-        m_vkeyPad->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        m_vkeyPad = new QDialog(this);   // 261017 用户口径：挂主窗——跟随移动/最小化同隐/不再压其它软件
         // 260705 卡片化（与菜单/全局优化弹窗/悬浮工具栏同风）：白底圆角无边框浮层
         m_vkeyPad->setWindowFlag(Qt::FramelessWindowHint, true);
         m_vkeyPad->setAttribute(Qt::WA_TranslucentBackground);
         m_vkeyPad->setWindowTitle(QStringLiteral("虚拟按键表盘"));
         m_vkeyPad->setModal(false);
-        m_vkeyPad->setMinimumSize(560, 560);
         m_vkeyPad->setStyleSheet(
             "QDialog { background-color: white; border: 1px solid #e0e0e0;"
             " border-radius: 8px; }");
         auto* lay = new QGridLayout(m_vkeyPad);
-        lay->setContentsMargins(16, 14, 16, 12);
-        lay->setHorizontalSpacing(10);
-        lay->setVerticalSpacing(8);
-        // 卡片标题（frameless 无系统标题栏——内置品牌标题行，同菜单弹窗）
+        lay->setContentsMargins(10, 8, 10, 8);
+        lay->setHorizontalSpacing(6);
+        lay->setVerticalSpacing(5);
+        // 卡片标题（frameless 无系统标题栏——内置品牌标题行＋✕ 收掉表盘，同菜单弹窗）
         auto* padTitle = new QLabel(QStringLiteral("虚拟按键表盘"), m_vkeyPad);
         padTitle->setAlignment(Qt::AlignCenter);
         padTitle->setStyleSheet(
-            "font-size: 15px; font-weight: bold; color: #8B1A2B; padding: 0 0 8px 0;");
-        lay->addWidget(padTitle, 0, 0, 1, 4);
+            "font-size: 13px; font-weight: bold; color: #8B1A2B; padding: 0 0 6px 0;");
+        lay->addWidget(padTitle, 0, 0, 1, 3);
+        auto* padClose = new QPushButton(QStringLiteral("✕"), m_vkeyPad);
+        padClose->setFixedSize(22, 22);
+        padClose->setCursor(Qt::PointingHandCursor);
+        padClose->setStyleSheet(
+            "QPushButton { border: none; color: #999; font-size: 13px; }"
+            "QPushButton:hover { color: #c0392b; }");
+        connect(padClose, &QPushButton::clicked, this, [this]() {
+            if (!m_vkeyPad) return;
+            m_vkeyPad->hide();
+            m_vkeyPad->deleteLater();   // 表盘可随时收掉——不再常驻挡屏
+            m_vkeyPad = nullptr;
+        });
+        lay->addWidget(padClose, 0, 3, Qt::AlignRight | Qt::AlignTop);
         const QStringList gestures{
             QStringLiteral("单击"), QStringLiteral("双击"), QStringLiteral("长按")};
         for (int g = 0; g < 3; ++g) {
             auto* h = new QLabel(gestures[g], m_vkeyPad);
             h->setAlignment(Qt::AlignCenter);
-            h->setStyleSheet("font-weight: bold; font-size: 14px; padding: 4px;");
+            h->setStyleSheet("font-weight: bold; font-size: 12px; padding: 2px;");
             lay->addWidget(h, 1, g + 1);
         }
         // 行序＝U/D/L/R/M；按钮文本＝功能名（非手势名——列头已有手势，按钮要
@@ -1310,13 +1322,13 @@ void MainWindow::showVirtualKeypad() {
             const auto& row = rows[r];
             auto* lbl = new QLabel(row.name, m_vkeyPad);
             lbl->setStyleSheet(row.inProto
-                ? "font-weight: bold; font-size: 14px; padding: 4px;"
-                : "color:#999; font-size: 14px; padding: 4px;");
+                ? "font-weight: bold; font-size: 12px; padding: 2px;"
+                : "color:#999; font-size: 12px; padding: 2px;");
             lay->addWidget(lbl, r + 2, 0);
             for (int g = 0; g < 3; ++g) {
                 auto* btn = new QPushButton(row.btnText[g], m_vkeyPad);
-                btn->setMinimumHeight(44);           // 手指可点的高度
-                btn->setMinimumWidth(110);           // 文字不截断
+                btn->setMinimumHeight(28);           // 261017 缩小表盘（原 44 手指高度）
+                btn->setMinimumWidth(72);            // 文字不截断
                 m_vkeyBtns[r][g] = btn;               // 存指针（态同步用）
                 btn->setToolTip(row.tips[g]);
                 if (row.inProto) {
@@ -1337,13 +1349,13 @@ void MainWindow::showVirtualKeypad() {
             QStringLiteral("261002 临时测试机：经 G01 注入测试缝下发，与真机按键同链路\n"
                            "蓝框＝可按 · 灰框＝当前态不可用（拦）或协议预留"),
             m_vkeyPad);
-        note->setStyleSheet("color:#888; font-size: 12px; padding: 4px;");
+        note->setStyleSheet("color:#888; font-size: 11px; padding: 2px;");
         note->setAlignment(Qt::AlignCenter);
         lay->addWidget(note, 7, 0, 1, 4);
         // 当前全局态常驻标签（灰化/恢复是否与系统态同步——用户可验证）
         m_vkeyStateLbl = new QLabel(m_vkeyPad);
         m_vkeyStateLbl->setAlignment(Qt::AlignCenter);
-        m_vkeyStateLbl->setStyleSheet("font-size: 13px; padding: 6px;");
+        m_vkeyStateLbl->setStyleSheet("font-size: 12px; padding: 4px;");
         lay->addWidget(m_vkeyStateLbl, 8, 0, 1, 4);
 
         // 独立刷新定时器（500ms）——不依赖 info timer，排除连接问题
@@ -1354,10 +1366,9 @@ void MainWindow::showVirtualKeypad() {
         padTimer->start(500);
 
         updateVirtualKeypadStates();                  // 首建即对齐当前态
-        // 260705 用户口径：贴屏幕左缘垂直居中——不挡中央三维显示窗口
+        // 261017 用户口径：贴主窗口左缘垂直居中（repositionVkeyPad 跟随移动/缩放）
         m_vkeyPad->adjustSize();
-        const QRect ag = m_vkeyPad->screen()->availableGeometry();
-        m_vkeyPad->move(ag.left() + 12, ag.top() + (ag.height() - m_vkeyPad->height()) / 2);
+        repositionVkeyPad();
     }
     m_vkeyPad->show();
     m_vkeyPad->raise();
@@ -1516,7 +1527,7 @@ void MainWindow::setScanButtonVisual(int idx, bool active){
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    // 261003：独立顶层弹窗（nullptr 父——主窗口关闭时不会自动关，须显式收）
+    // 261003：弹窗显式收（261017 起表盘已挂主窗随主窗销毁，保留统一收口无害）
     if (m_vkeyPad) { m_vkeyPad->close(); delete m_vkeyPad; m_vkeyPad = nullptr; }
     if (m_menuDlg) { m_menuDlg->close(); delete m_menuDlg; m_menuDlg = nullptr; }
     if (m_banner) { delete m_banner; m_banner = nullptr; }
@@ -1582,7 +1593,35 @@ void MainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
     QTimer::singleShot(0, this, [this]() { repositionFloatingToolbar(); });
+    repositionVkeyPad();                              // 表盘跟随主窗口缩放
     if (m_banner) m_banner->setGeometry(0, 0, width(), 56);   // P-3 横幅全宽贴顶
+}
+
+void MainWindow::moveEvent(QMoveEvent *event)
+{
+    QMainWindow::moveEvent(event);
+    repositionVkeyPad();                              // 表盘跟随主窗口移动
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+        if (isMinimized()) {
+            if (m_vkeyPad) m_vkeyPad->hide();         // 261017：主窗最小化表盘同步隐藏
+        } else if (m_vkeyPad) {
+            m_vkeyPad->show();                        // 还原即回来（✕ 收掉则 m_vkeyPad=null 不复活）
+            repositionVkeyPad();
+        }
+    }
+}
+
+// 261017 表盘跟随：贴主窗口左缘垂直居中（原贴屏幕左缘常驻——改挂主窗几何）
+void MainWindow::repositionVkeyPad()
+{
+    if (!m_vkeyPad) return;
+    const QRect g = geometry();
+    m_vkeyPad->move(g.left() + 12, g.top() + (g.height() - m_vkeyPad->height()) / 2);
 }
 
 // ============================================================================
@@ -2138,20 +2177,17 @@ QWidget *MainWindow::createToolBar()
                     }
                     if (wasSelf || !sr.success) return;   // 本键＝纯关闭；他键落下启新
                 }
-                if (mode == Scanner::ScanMode::MarkerOnly)
-                    // 261004 撤推荐预设套用（用户口径：应从前面设置的档位开始，
-                    // 非默认档 10）——档位走账本持久化，用户设过即沿用
+                if (mode == Scanner::ScanMode::MarkerOnly) {
+                    // 261017 恢复推荐预设套用（261004 曾撤——当日口径「沿用当前档」；
+                    // 261017 排障确认补光卡低档（档6=B31）后用户裁定恢复，仅新启会话套用）
+                    applyMarkerPreset();
                     statusBar()->showMessage(
-                        QStringLiteral("标点扫描就绪（亮度沿用当前档 %1/20）")
-                            .arg(m_appCtx->deviceManager()
-                                     ? m_appCtx->deviceManager()->presetLadderIndex()
-                                     : 0), 3000);
-                else if (mode == Scanner::ScanMode::MarkerPlusLaser)
+                        QStringLiteral("标点扫描就绪（已套推荐亮度档 10/20）"), 3000);
+                } else if (mode == Scanner::ScanMode::MarkerPlusLaser) {
+                    applyMeshPreset();
                     statusBar()->showMessage(
-                        QStringLiteral("面片扫描就绪（亮度沿用当前档 %1/20）")
-                            .arg(m_appCtx->deviceManager()
-                                     ? m_appCtx->deviceManager()->presetLadderIndex()
-                                     : 0), 3000);
+                        QStringLiteral("面片扫描就绪（已套推荐亮度档 10/20）"), 3000);
+                }
                 // 精细/深孔：P-5 收敛后无独立预设（保持当前亮度档——待真机标定预设）
                 m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
                 // 260927 就绪流程（用户口径）：UI 模式键只备会话（模式/帧流/工作流），
@@ -2755,13 +2791,13 @@ void MainWindow::applyMeshPreset() {
         QStringLiteral("面片扫描推荐参数已套用（亮度档 10/20）"), 3000);
 }
 
-// 标点扫描推荐预设（P-5 收敛 261002）：B=40＝亮度梯档 10 同档（L 在标点模式
-// 实发恒 0 由 effectiveN10 强制，账本值占位）；仅新启会话套用
+// 标点扫描推荐预设（P-5 收敛 261002）：档10 中位＝均分梯 B≈47（L 在标点模式
+// 实发恒 0 由 effectiveN10 强制，账本值占位）；仅新启会话套用（261017 恢复接回）
 void MainWindow::applyMarkerPreset() {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
     dm->setBrightnessLadderIndex(10);          // 档10 中位（标点检测从此档起步调）
-    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（亮度档 10/20·B=40）"), 3000);
+    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（亮度档 10/20）"), 3000);
 }
 
 QWidget *MainWindow::createInfoSection()

@@ -8,6 +8,9 @@
 #include <fstream>
 #include <utility>
 
+#include <spdlog/spdlog.h>
+#include "jmw_logging.h"
+
 namespace Scanner::pipeline {
 
 namespace {
@@ -39,7 +42,13 @@ void FrameObsAccumulator::push(FrameObs obs, const std::vector<float>& laserXyz)
             obs.laserCacheSlot = laserFrames_.size() - 1;
             usedBytes_ += bytes;
         } else {
-            degradedLaser_.store(true, std::memory_order_relaxed);  // 超限停累加
+            // 261017 开发期日志补全：超预算翻转只发生一次——落账面数字（用掉/本帧/
+            // 预算），D 线重放降级的根因由此可直接对账
+            if (!degradedLaser_.exchange(true, std::memory_order_relaxed))
+                JMW_LOG_WARN("07-FrameObs",
+                    "[FrameObs] 激光缓存超预算停累加：已用 {}B + 本帧 {}B > 预算 {}B"
+                    "（后续激光帧不入缓存，全局优化重放将降级）",
+                    usedBytes_, bytes, budgetBytes_);
         }
     }
     obsList_.push_back(std::move(obs));             // markerObs 照常累加，整体不失败

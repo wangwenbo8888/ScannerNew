@@ -6,6 +6,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <array>
+#include <cstdint>
 #include <map>
 #include <stdexcept>
 #include <unordered_map>
@@ -44,6 +45,28 @@ public:
 private:
     const char* phase_;                        // 仅用于诊断上下文
     const std::function<bool()>& cancelFn_;
+};
+
+// ── 261017 批算进度回调：槽位加权映射 [0,1]（与 CancelHeartbeatCallback 同乘
+// 一次迭代回调；base/span 由调用方按阶段槽位传入）。不接管所有权，栈上持有。
+class PhaseProgressCallback final : public ceres::IterationCallback {
+public:
+    PhaseProgressCallback(const std::function<void(double)>& fn,
+                          double base, double span, int maxIters)
+        : fn_(fn), base_(base), span_(span), maxIters_(std::max(1, maxIters)) {}
+
+    ceres::CallbackReturnType operator()(const ceres::IterationSummary& s) override {
+        if (fn_) {
+            const double r = std::min(1.0, static_cast<double>(s.iteration) / maxIters_);
+            fn_(std::min(base_ + span_ * r, base_ + span_));
+        }
+        return ceres::SOLVER_CONTINUE;
+    }
+
+private:
+    const std::function<void(double)>& fn_;
+    double base_, span_;
+    int maxIters_;
 };
 
 // Kabsch: 求 R,t 使 R*z_k + t ≈ z_i(成对点集, z_i/z_k 为同一 landmark 在帧 i/k 的本机系坐标)。
@@ -172,17 +195,32 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
         res.message = "input frames empty";
         return res;
     }
+    // 261017 坏帧剔除：标志点观测 < minPointsPerFrame 的帧不进批算（原口径「一票
+    // 否决=整体失败」——真机灯光差/检测弱时单帧即拖垮全局优化恒空转）。剔除续解，
+    // 被剔帧位姿由 07 层按 frameId miss→初值兜底；全剔=无有效观测走下方 nPoints==0。
+    std::vector<GlobalBAFrame> keptFrames;
+    keptFrames.reserve(input.frames.size());
+    size_t culledFrames = 0;
+    uint64_t firstCulledId = 0;
     for (const auto& f : input.frames) {
         if (static_cast<int>(f.markerObs.size()) < pImpl_->params.minPointsPerFrame) {
-            res.message = "frame " + std::to_string(f.frameId)
-                        + " has fewer than minPointsPerFrame markers";
-            return res;
+            if (culledFrames == 0) firstCulledId = f.frameId;
+            ++culledFrames;
+            continue;
         }
+        keptFrames.push_back(f);
     }
+    if (culledFrames > 0)
+        CALIB_LOG_WARN("[{}] 坏帧剔除: {}/{} 帧标志点观测数 < minPointsPerFrame={}"
+                       "（首例 frameId={}）——剔除续解，被剔帧位姿沿初值",
+                       GlobalBundleAdjustmentCPU::kLogTag, culledFrames,
+                       input.frames.size(), pImpl_->params.minPointsPerFrame, firstCulledId);
+    const std::vector<GlobalBAFrame>& frames =
+        (culledFrames > 0) ? keptFrames : input.frames;
     // 1) 为每帧建 globalId 集合(std::unordered_set<int>),存于 vector
     std::vector<std::unordered_set<int>> frameIds;
-    frameIds.reserve(input.frames.size());
-    for (const auto& f : input.frames) {
+    frameIds.reserve(frames.size());
+    for (const auto& f : frames) {
         std::unordered_set<int> s;
         for (const auto& obs : f.markerObs) {
             if (obs.globalId < 0) continue;  // 跳过未赋值的哨兵 globalId,避免误触发闭环
@@ -192,7 +230,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
     }
     // 2) 检测闭环边:非相邻帧(|i-k|>loopFrameGap)共视 >= minCovisForLoopEdge
     bool loop = false;
-    int n = static_cast<int>(input.frames.size());
+    int n = static_cast<int>(frames.size());
     for (int i = 0; i < n && !loop; ++i) {
         for (int k = i + 1; k < n; ++k) {
             if (k - i <= pImpl_->params.loopFrameGap) continue;
@@ -206,8 +244,13 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
         }
     }
     pImpl_->stats.loopDetected = loop;
-    // ===== 核心 Global Bundle Adjustment =====
-    const auto& frames = input.frames;
+    // 261017 预处理段进度/心跳：闭环检测→建边→PGO 求解前无任何回调——真机
+    // 稠密共视下此段分钟级静默（进度条停 20% 的直接原因）。槽位：检测后 0.02
+    if (pImpl_->params.progressCb) pImpl_->params.progressCb(0.02);
+    CALIB_LOG_INFO("[{}] 闭环检测完成: loopDetected={} 帧数={}",
+                   GlobalBundleAdjustmentCPU::kLogTag, loop,
+                   static_cast<int>(frames.size()));
+    // ===== 核心 Global Bundle Adjustment =====（frames=坏帧剔除后的有效帧集）
 
     // 1) 收集唯一 globalId → 连续索引
     std::unordered_map<int, int> idToIdx;
@@ -278,23 +321,46 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
             for (const auto& obs : frames[i].markerObs)
                 if (obs.globalId >= 0)
                     gidToFrames[obs.globalId].push_back(i);
-        std::map<std::pair<size_t, size_t>, int> covisCount;
+        // 261017 O(ΣF²) 共视对累计改哈希表（原 std::map 红黑树——稠密共视下千万级
+        // 递增=分钟级静默卡段）＋逐段进度（槽 [0.02,0.08]）＋心跳日志
+        std::unordered_map<std::uint64_t, int> covisCount;
+        covisCount.reserve(gidToFrames.size() * 8);
+        const size_t covisTotalGids = gidToFrames.size();
+        size_t covisGidDone = 0;
         for (auto& kv : gidToFrames) {
             const auto& fl = kv.second;
             for (size_t a = 0; a < fl.size(); ++a)
                 for (size_t b = a + 1; b < fl.size(); ++b) {
-                    size_t lo = std::min(fl[a], fl[b]), hi = std::max(fl[a], fl[b]);
-                    if (lo != hi) ++covisCount[{lo, hi}];
+                    const size_t lo = std::min(fl[a], fl[b]), hi = std::max(fl[a], fl[b]);
+                    if (lo != hi) ++covisCount[(static_cast<std::uint64_t>(lo) << 32) | hi];
                 }
+            if (pImpl_->params.progressCb && (++covisGidDone % 8 == 0 || covisGidDone == covisTotalGids))
+                pImpl_->params.progressCb(
+                    0.02 + 0.06 * static_cast<double>(covisGidDone) /
+                               static_cast<double>(std::max<size_t>(covisTotalGids, 1)));
+            if (covisGidDone % 64 == 0)
+                CALIB_LOG_INFO("[{}] PGO 共视累计心跳: {}/{} gid, 对数={}",
+                               GlobalBundleAdjustmentCPU::kLogTag, covisGidDone,
+                               covisTotalGids, covisCount.size());
         }
+        CALIB_LOG_INFO("[{}] PGO 共视累计完成: {} gid → {} 对",
+                       GlobalBundleAdjustmentCPU::kLogTag, covisTotalGids,
+                       covisCount.size());
 
         // (2) 构建共视边 + Kabsch 相对位姿测量(共视阈值 3, 小于闭环阈值 5, 便于铺满位姿图)
         struct PGOEdge { size_t i, k; Eigen::Matrix3d R_ik; Eigen::Vector3d t_ik; bool isLoop; };
         std::vector<PGOEdge> edges;
         const int pgoCovisThresh = 3;
+        const size_t edgePairsTotal = covisCount.size();
+        size_t edgePairsDone = 0;
         for (const auto& kv : covisCount) {
+            if (pImpl_->params.progressCb && (++edgePairsDone % 4096 == 0))
+                pImpl_->params.progressCb(
+                    0.08 + 0.02 * static_cast<double>(edgePairsDone) /
+                               static_cast<double>(std::max<size_t>(edgePairsTotal, 1)));
             if (kv.second < pgoCovisThresh) continue;
-            size_t i = kv.first.first, k = kv.first.second;
+            const size_t i = static_cast<size_t>(kv.first >> 32);
+            const size_t k = static_cast<size_t>(kv.first & 0xFFFFFFFFu);
             const auto& mi = localById[i];
             const auto& mk = localById[k];
             std::vector<cv::Point3d> zi, zk;
@@ -382,6 +448,11 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
                 opt.max_solver_time_in_seconds = pImpl_->params.maxSolveSecondsPerPhase;
             CancelHeartbeatCallback pgoCb("PGO", pImpl_->params.cancelRequested);
             opt.callbacks.push_back(&pgoCb);
+            // 261017 进度：PGO 求解槽位 [0.10,0.18]（预处理占 [0.02,0.10]——
+            // 检测/共视累计/建边；GBA 四阶段占 [0.20,1.0]）
+            PhaseProgressCallback pgoProg(pImpl_->params.progressCb, 0.10, 0.08,
+                                          opt.max_num_iterations);
+            if (pImpl_->params.progressCb) opt.callbacks.push_back(&pgoProg);
             ceres::Solver::Summary sum;
             ceres::Solve(opt, &pgoProblem, &sum);
             const bool hardFail = (sum.termination_type == ceres::FAILURE ||
@@ -562,7 +633,11 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
         int iters = 0;
         ceres::TerminationType term = ceres::CONVERGENCE;
     };
-    auto solvePhase = [&](bool useTukey) -> PhaseResult {
+    // 261017 进度槽位（progressCb 映射）：检测后 0.02｜共视累计 [0.02,0.08]｜建边
+    // [0.08,0.10]｜PGO 求解 [0.10,0.18]｜plain [0.20,0.50]｜预清洗重解 [0.50,0.60]
+    // ｜Tukey [0.60,0.85]｜chi2 重解 [0.85,1.00]。条件阶段被跳过时不回调=进度
+    // 跨过该槽，单调不回退
+    auto solvePhase = [&](bool useTukey, double progBase, double progSpan) -> PhaseResult {
         ceres::Problem problem;
         // 帧0锚定:q0/t0 设为常量(6-DoF gauge)
         problem.AddParameterBlock(q[0].data(), 4);
@@ -616,6 +691,9 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
         CancelHeartbeatCallback phaseCb(useTukey ? "Tukey" : "plain",
                                          pImpl_->params.cancelRequested);
         opt.callbacks.push_back(&phaseCb);
+        PhaseProgressCallback phaseProg(pImpl_->params.progressCb, progBase, progSpan,
+                                        opt.max_num_iterations);
+        if (pImpl_->params.progressCb) opt.callbacks.push_back(&phaseProg);
         ceres::Solver::Summary summary;
         ceres::Solve(opt, &problem, &summary);
         // 收敛/用户成功 → info; 否则(未收敛/硬失败)→ warn, 便于排查退化解
@@ -637,7 +715,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
         }
         return { static_cast<int>(summary.iterations.size()), summary.termination_type };
     };
-    auto r1 = solvePhase(false);
+    auto r1 = solvePhase(false, 0.20, 0.30);
 
     // ===== Layer 1 预清洗: 阶段1(plain LM, 含全部观测)给出残差估计; ||r||>gate 者为粗差飞点 =====
     //   关键: 阶段1 会被粗差飞点污染——好观测残差可达 ~0.1mm(>>5sigma=0.05mm), 纯 5sigma 门限会
@@ -673,10 +751,10 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
     // 预清洗后 plain 重解: 移除飞点后好观测不再被污染, plain LM 即可恢复到 ~sigma。
     //   (Tukey c=3sigma 无法从 ~0.1mm 恢复: 0.1mm>>c 把所有好观测降权→零梯度→卡住, 故必须 plain 重解。)
     PhaseResult rRec;
-    if (anyPre) rRec = solvePhase(false);
+    if (anyPre) rRec = solvePhase(false, 0.50, 0.10);
 
     // ===== Layer 2: Tukey(阶段2)精修(无飞点的好观测集, 残差 ~sigma < c, 正常收敛) =====
-    PhaseResult r2 = solvePhase(true);
+    PhaseResult r2 = solvePhase(true, 0.60, 0.25);
 
     // ===== Layer 3 卡方剔除 + 重解一次: chi2=||r/sigma||^2 > chiSquareGate 者剔除 =====
     //   此时好观测 ~sigma(chi2~1), 漏网飞点 chi2>>gate; 绝对门限 11.34(3-DoF 99%) 正确生效。
@@ -695,7 +773,7 @@ GlobalBAResult GlobalBundleAdjustmentCPU::Execute(const GlobalBAInput& input) {
                          chi2, pImpl_->params.chiSquareGate);
         }
     }
-    if (anyCulled) r3 = solvePhase(true);
+    if (anyCulled) r3 = solvePhase(true, 0.85, 0.15);
 
     pImpl_->stats.ceresIterations = r1.iters + rRec.iters + r2.iters + r3.iters;
 

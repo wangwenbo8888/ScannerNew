@@ -136,7 +136,9 @@ Result ScanWorkflow::assemblePipeline() {
     }
     // 逐帧激光缓存预算 2048→6144MB（260919：流水线 60fps 后 35k 点/帧×12B×60
     // ≈25MB/s，2048MB 仅 ~81s 会话——终局遍重融合需逐帧数据，超限丢最旧=GBA 缺观测）
-    cfg.laserCacheBudgetMB = 6144;
+    // 261017 6144→10240MB：真机长会话实测 6.44GB 顶满 6144 → D 线激光重放恒降级
+    // （1608）；开发期放大到 10GB 换完整重放，宿主内存吃紧再回收
+    cfg.laserCacheBudgetMB = 10240;
     pipeline_ = std::make_unique<sp::ScanPipeline>(cfg);
     if (simSource_) pipeline_->attachSimSource(simSource_);   // 中段模拟提取（调试件）
 
