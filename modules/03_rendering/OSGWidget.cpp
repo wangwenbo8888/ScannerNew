@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <atomic>
+#include <cmath>
 
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
@@ -18,6 +19,9 @@
 #include <osgDB/ReadFile>
 #include <osg/LineWidth>
 #include <osg/BlendFunc>
+#include <osg/Program>
+#include <osg/Shader>
+#include <osg/Uniform>
 #include <osgText/Text>
 #include <osg/ComputeBoundsVisitor>
 
@@ -324,43 +328,127 @@ void OSGWidget::updateAxesView()
     m_axesCamera->setViewMatrix(vm);
 }
 
+namespace {
+// 261017 方块点相机参数同步（每帧）：uPixPerMm（视口高/2tan(fov/2)）＋相机
+// 右/上轴（世界系＝视图矩阵旋转列——行向量约定，identity 时 right=(1,0,0)）
+struct SquareCamSync : public osg::NodeCallback {
+    osg::Uniform *ppm, *right, *up;
+    osg::Camera* cam;
+    SquareCamSync(osg::Uniform* a, osg::Uniform* r, osg::Uniform* u, osg::Camera* c)
+        : ppm(a), right(r), up(u), cam(c) {}
+    void operator()(osg::Node* n, osg::NodeVisitor* nv) override {
+        if (cam) {
+            double fovY = 30.0, aspect = 1.0, zn = 1.0, zf = 1e6;
+            cam->getProjectionMatrixAsPerspective(fovY, aspect, zn, zf);
+            const osg::Viewport* vp = cam->getViewport();
+            const float h = vp ? static_cast<float>(vp->height()) : 1080.0f;
+            const double t = std::tan(fovY * 0.5 * (osg::PI / 180.0));
+            if (t > 1e-6 && ppm) ppm->set(h / static_cast<float>(2.0 * t));
+            const osg::Matrixd V = cam->getViewMatrix();
+            if (right) right->set(osg::Vec3f(
+                static_cast<float>(V(0, 0)), static_cast<float>(V(1, 0)),
+                static_cast<float>(V(2, 0))));
+            if (up) up->set(osg::Vec3f(
+                static_cast<float>(V(0, 1)), static_cast<float>(V(1, 1)),
+                static_cast<float>(V(2, 1))));
+        }
+        traverse(n, nv);
+    }
+};
+// 方块点顶点着色器（每点 4 顶点＋aCorner 四角，相机朝向扩边；GL_POINTS 本机
+// 恒圆点故弃点路线）：屏幕边长=√体素mm×12×相机比例/距离，钳 [5,24]px；
+// uWorldSize<=0＝固定 4px（旧观感兜底）
+const char* kSquarePointVs =
+    "uniform float uWorldSize;\n"
+    "uniform float uPixPerMm;\n"
+    "uniform vec3 uCamRight;\n"
+    "uniform vec3 uCamUp;\n"
+    "attribute vec2 aCorner;\n"
+    "void main() {\n"
+    "  vec4 world = gl_Vertex;\n"
+    "  vec4 mv0 = gl_ModelViewMatrix * world;\n"
+    "  float d = max(1.0, length(mv0.xyz));\n"
+    "  float px = (uWorldSize > 0.0)\n"
+    "      ? clamp(12.0 * sqrt(uWorldSize) * uPixPerMm / d, 5.0, 24.0)\n"
+    "      : 4.0;\n"
+    "  float halfW = px * d / uPixPerMm * 0.5;\n"
+    "  world.xyz += (uCamRight * aCorner.x + uCamUp * aCorner.y) * halfW;\n"
+    "  gl_Position = gl_ProjectionMatrix * gl_ModelViewMatrix * world;\n"
+    "  gl_FrontColor = gl_Color;\n"
+    "}\n";
+} // namespace
+
+// 261017 方块点共享材质（懒建一次）：激光/仓库快照/导入云 buildCloudGeode 全部
+// 走此——GL_POINTS 光栅在驱动+8x MSAA 下实测恒圆点（三轮教训），真四边形根治
+void OSGWidget::applySquarePointState(osg::StateSet* ss, osg::Node* cbHost)
+{
+    if (!ss) return;
+    if (!m_laserWorldSizeUni) {
+        m_laserWorldSizeUni = new osg::Uniform("uWorldSize", m_laserPointWorldMm);
+        m_laserPixPerMmUni = new osg::Uniform("uPixPerMm", 1000.0f);
+        m_laserCamRightUni = new osg::Uniform(osg::Uniform::FLOAT_VEC3, "uCamRight");
+        m_laserCamUpUni = new osg::Uniform(osg::Uniform::FLOAT_VEC3, "uCamUp");
+    }
+    if (!m_sqProg) {
+        m_sqProg = new osg::Program;
+        m_sqProg->addBindAttribLocation("aCorner", 8);
+        osg::ref_ptr<osg::Shader> vs = new osg::Shader(osg::Shader::VERTEX, kSquarePointVs);
+        m_sqProg->addShader(vs.get());
+    }
+    ss->setAttributeAndModes(m_sqProg.get(), osg::StateAttribute::ON);
+    ss->addUniform(m_laserWorldSizeUni.get());
+    ss->addUniform(m_laserPixPerMmUni.get());
+    ss->addUniform(m_laserCamRightUni.get());
+    ss->addUniform(m_laserCamUpUni.get());
+    ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+    if (cbHost && m_viewer)
+        cbHost->addUpdateCallback(new SquareCamSync(
+            m_laserPixPerMmUni.get(), m_laserCamRightUni.get(),
+            m_laserCamUpUni.get(), m_viewer->getCamera()));
+}
+
 osg::ref_ptr<osg::Geode> OSGWidget::buildCloudGeode(const std::vector<osg::Vec3>& points,
                                                     const std::vector<osg::Vec4ub>* colors)
 {
-    // LeadScan 风格：Vec4Array(float 颜色) + VBO + DYNAMIC
-    // 分配集中于此——调用方在挂场景前构建（异常可弃，旧画面不动）
+    // 261017 方块点：每点扩 4 顶点（QUADS＋aCorner 四角）——真四边形恒方形
+    // （原 GL_POINTS 3px 在本机光栅呈圆点）。分配集中于此——调用方挂场景前
+    // 构建（异常可弃，旧画面不动）
+    const size_t n = points.size();
     osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
     osg::ref_ptr<osg::Vec4Array> c = new osg::Vec4Array();
-    v->reserve(points.size());
-    c->reserve(points.size());
-
-    for (size_t i = 0; i < points.size(); ++i) {
-        v->push_back(points[i]);
-        if (colors && i < colors->size())
-            c->push_back(osg::Vec4((*colors)[i].r() / 255.0f, (*colors)[i].g() / 255.0f,
-                                   (*colors)[i].b() / 255.0f, (*colors)[i].a() / 255.0f));
-        else
-            c->push_back(osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));  // LeadScan 蓝
+    osg::ref_ptr<osg::Vec2Array> corners = new osg::Vec2Array();
+    v->reserve(n * 4);
+    c->reserve(n * 4);
+    corners->reserve(n * 4);
+    static const osg::Vec2 kQ[4] = {osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
+                                    osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
+    for (size_t i = 0; i < n; ++i) {
+        const osg::Vec4 col = (colors && i < colors->size())
+            ? osg::Vec4((*colors)[i].r() / 255.0f, (*colors)[i].g() / 255.0f,
+                        (*colors)[i].b() / 255.0f, (*colors)[i].a() / 255.0f)
+            : osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f);   // LeadScan 蓝
+        for (int k = 0; k < 4; ++k) {
+            v->push_back(points[i]);
+            c->push_back(col);
+            corners->push_back(kQ[k]);
+        }
     }
 
     osg::ref_ptr<osg::Geometry> geom = new osg::Geometry();
     geom->setUseVertexBufferObjects(true);
     geom->setUseDisplayList(false);
     geom->setDataVariance(osg::Object::DYNAMIC);
-
     geom->setVertexArray(v.get());
-    geom->setColorArray(c.get());
-    geom->setColorBinding(osg::Geometry::BIND_PER_VERTEX);
-    geom->addPrimitiveSet(new osg::DrawArrays(osg::PrimitiveSet::POINTS, 0, v->size()));
+    geom->setColorArray(c.get(), osg::Array::BIND_PER_VERTEX);
+    geom->setVertexAttribArray(8 /* aCorner（addBindAttribLocation 同值）*/,
+                               corners.get());
+    geom->setVertexAttribBinding(8, osg::Geometry::BIND_PER_VERTEX);
+    geom->addPrimitiveSet(
+        new osg::DrawArrays(osg::PrimitiveSet::QUADS, 0, static_cast<int>(n * 4)));
 
     osg::ref_ptr<osg::Geode> geode = new osg::Geode();
     geode->addDrawable(geom.get());
-
-    // Point size 3.0 (LeadScan 风格)
-    osg::ref_ptr<osg::StateSet> ss = geode->getOrCreateStateSet();
-    osg::ref_ptr<osg::Point> pointSize = new osg::Point;
-    pointSize->setSize(3.0f);
-    ss->setAttribute(pointSize);
+    applySquarePointState(geode->getOrCreateStateSet(), geode.get());
     return geode;
 }
 
@@ -2522,6 +2610,18 @@ void OSGWidget::loadMarkerPoints(const std::vector<osg::Vec3>& markers,
 // eye 置于点云中心正后方（沿 -z），看向中心，up=(0,-1,0)——画面方向与左
 // 相机原图一致（用户口径 2026-08-31）
 // ============================================================================
+// 261017 方块点尺寸注入：体素边长 mm（P-分辨率档值，存原值——屏幕边长在
+// 着色器按 √档值×8 平方根映射，覆盖 27 档全区间 2~64px）；<=0 回退固定 4px。
+// 几何未建时仅记账（loadLaserPoints 重建时按此初始化 uniform）；已建即时生效
+void OSGWidget::setLaserPointWorldSize(float worldMm)
+{
+    m_laserPointWorldMm = worldMm > 0.0f ? worldMm : 0.0f;
+    if (m_laserWorldSizeUni) m_laserWorldSizeUni->set(m_laserPointWorldMm);
+    JMW_LOG_INFO("03-OSGWidget",
+        "[OSGWidget] 激光方块点尺寸: 体素 {}mm（√映射→约 {}px @800mm 口径，clamp[5,24]；0=固定 4px）",
+        worldMm, worldMm > 0.0f ? 12.0 * std::sqrt(static_cast<double>(worldMm)) * 1900.0 / 800.0 : 4.0);
+}
+
 void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
 {
     if (laser.empty()) return;
@@ -2537,9 +2637,12 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
         m_laserRoot->addChild(m_laserGeode);
         m_root->addChild(m_laserRoot);
 
-        osg::ref_ptr<osg::Point> pointSize = new osg::Point;
-        pointSize->setSize(4.0f);   // 260915：2px 浅蓝点远距不可辨（用户只见标志点）——对齐导入云可视尺寸再加大
-        m_laserRoot->getOrCreateStateSet()->setAttribute(pointSize);
+        // 261017 方块点 v3（用户口径：一个点显示成一个方块）：GL_POINTS 光栅在
+        // 本机驱动+8x MSAA 下实测恒呈圆点（三轮实测）——弃点路线，改**真四边
+        // 形**：每点扩 4 顶点（aCorner 四角），共享方块材质（applySquarePoint
+        // State——仓库快照/导入云同源）。上版缺 setVertexAttribBinding(8)＝角属
+        // 性未启用→4 顶点重合零面积＝扫描中激光不显示的根因
+        applySquarePointState(m_laserRoot->getOrCreateStateSet(), m_laserRoot.get());
         m_laserRoot->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
         // 混合开：软删 alpha=0 隐藏（05 P4b 激光删除链——旧版 BIND_OVERALL
         // 单色无逐顶点色，套索删除 dynamic_cast 失败直接跳过＝删了没反应）
@@ -2549,31 +2652,56 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
         m_laserRoot->getOrCreateStateSet()->setAttribute(lbf);
         m_laserCoords = new osg::Vec3Array;
         m_laserColors = new osg::Vec4ubArray;   // 成员复用（见头文件注）
+        m_laserCorners = new osg::Vec2Array;    // 261017 方块点：四角属性（4 顶点/点）
     }
     m_laserRoot->setNodeMask(m_laserVisible ? ~0u : 0u);      // 重建后承袭开关
-    m_laserCoords->assign(laser.begin(), laser.end());
+    // 261017 方块点：每点扩 4 顶点（QUADS）——坐标重复 4 份＋角属性常量模式
+    const size_t n = laser.size();
+    m_laserCoords->resize(n * 4);
+    for (size_t i = 0; i < n; ++i) {
+        const auto& p = laser[i];
+        (*m_laserCoords)[4 * i + 0] = p;
+        (*m_laserCoords)[4 * i + 1] = p;
+        (*m_laserCoords)[4 * i + 2] = p;
+        (*m_laserCoords)[4 * i + 3] = p;
+    }
+    static const osg::Vec2 kQuadCorner[4] = {
+        osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
+        osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
+    m_laserCorners->resize(n * 4);
+    for (size_t i = 0; i < n; ++i)
+        for (int c = 0; c < 4; ++c) (*m_laserCorners)[4 * i + c] = kQuadCorner[c];
+    m_laserCorners->dirty();
     m_laserCoords->dirty();   // 260915：同指针 setVertexArray 早退不重传 VBO——原地改必须显式 dirty
     static std::atomic<uint64_t> s_laserLoadCnt{0};
     if (const auto k = s_laserLoadCnt.fetch_add(1); k % 30 == 0) {
         JMW_LOG_INFO("03-OSGWidget",
-            "[OSGWidget] 激光点渲染: {} 点（第 {} 次）nodeMask={} parents={}",
-            laser.size(), k + 1, m_laserRoot->getNodeMask(), m_laserRoot->getNumParents());
+            "[OSGWidget] 激光点渲染（方块 quad）: {} 点（第 {} 次）nodeMask={} parents={}",
+            n, k + 1, m_laserRoot->getNodeMask(), m_laserRoot->getNumParents());
     }
     m_laserGeom->setVertexArray(m_laserCoords);
+    m_laserGeom->setVertexAttribArray(8 /* aCorner（prog->addBindAttribLocation 同值）*/,
+                                     m_laserCorners.get());
+    // 上版缺此调用＝角属性未按逐顶点启用→4 顶点重合零面积（激光不显示根因）
+    m_laserGeom->setVertexAttribBinding(8, osg::Geometry::BIND_PER_VERTEX);
     // 逐顶点色（成员复用——260919 卡顿修复：每次 push new 数组=MB 级分配＋
     // VBO 全量重传抖动）：默认=导入点云色（LeadScan 浅蓝）；待物理化删除的
-    // 下标 alpha=0 隐藏（周期重推不复活——物理化在就绪态续采/完成前）
+    // 点＝其 4 顶点 alpha=0 隐藏（周期重推不复活——物理化在就绪态续采/完成前）
     if (!m_laserColors) m_laserColors = new osg::Vec4ubArray;
     const osg::Vec4ub kLaserColor(134, 206, 250, 255);
-    m_laserColors->assign(laser.size(), kLaserColor);
+    m_laserColors->assign(n * 4, kLaserColor);
     for (uint32_t vi : m_pendingCloudDel)
-        if (vi < m_laserColors->size()) (*m_laserColors)[vi] = osg::Vec4ub(0, 0, 0, 0);
+        if (vi < n)
+            for (int c = 0; c < 4; ++c)
+                (*m_laserColors)[4 * vi + c] = osg::Vec4ub(0, 0, 0, 0);
     m_laserColors->dirty();
     m_laserGeom->setColorArray(m_laserColors.get(), osg::Array::BIND_PER_VERTEX);
     if (m_laserGeom->getNumPrimitiveSets() == 0)
-        m_laserGeom->addPrimitiveSet(new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)laser.size()));
+        m_laserGeom->addPrimitiveSet(
+            new osg::DrawArrays(osg::DrawArrays::QUADS, 0, static_cast<int>(n * 4)));
     else
-        m_laserGeom->setPrimitiveSet(0, new osg::DrawArrays(osg::DrawArrays::POINTS, 0, (int)laser.size()));
+        m_laserGeom->setPrimitiveSet(
+            0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0, static_cast<int>(n * 4)));
 }
 
 // ============================================================================

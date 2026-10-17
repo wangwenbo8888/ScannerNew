@@ -334,11 +334,15 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         f.write(out);
                     }
                 }
-                        if (!m_3dView) return;
-                        // —— 仓库写入已退役（260919 正式写口上线）：07 FuseConsumer
-                        //    融合线程经 ICloudWarehouse 直写 06 PointCloudBuffer
-                        //    （会话两层：start 折叠基线＋节流推会话层替换）——
-                        //    本 UI 处理器只余显示/导出，不再承担数据通道
+                         if (!m_3dView) return;
+                         // —— 仓库写入已退役（260919 正式写口上线）：07 FuseConsumer
+                         //    融合线程经 ICloudWarehouse 直写 06 PointCloudBuffer
+                         //    （会话两层：start 折叠基线＋节流推会话层替换）——
+                         //    本 UI 处理器只余显示/导出，不再承担数据通道
+                         // 261017 方块点：随推送同步当前分辨率档体素值（显示边长随档变化）
+                         if (auto* dmV = m_appCtx ? m_appCtx->deviceManager() : nullptr)
+                             m_3dView->setLaserPointWorldSize(
+                                 static_cast<float>(dmV->voxelLadderValue()));
                          // 3D 激光显示（累积渲染；>150 万点抽样——见头部减负注）
                          std::vector<osg::Vec3> laser;
                          laser.reserve((pts.size() + stride - 1) / stride);
@@ -2763,7 +2767,13 @@ QWidget *MainWindow::createParamSection()
             m_voxelSlider = voxSlider;              // 成员存（113 事件回显＋扫描锁）
             QObject::connect(voxSlider, &QSlider::sliderReleased, this, [this]() {
                 auto* d = m_appCtx ? m_appCtx->deviceManager() : nullptr;
-                if (d && m_voxelSlider) d->setVoxelLadderIndex(m_voxelSlider->value());
+                if (d && m_voxelSlider) {
+                    d->setVoxelLadderIndex(m_voxelSlider->value());
+                    // 261017 方块点：换档即时重设显示边长（不等下一次点云推送）
+                    if (m_3dView)
+                        m_3dView->setLaserPointWorldSize(
+                            static_cast<float>(d->voxelLadderValue()));
+                }
             });
             voxRowLay->addLayout(voxCtl);
             slidersLayout->addWidget(voxRow);
@@ -3336,6 +3346,22 @@ void MainWindow::startInfoTimer()
         std::vector<cv::Point3f> points;
         std::vector<cv::Vec3b> colors;
         pcb->getSnapshot(version, points, colors);
+        // 261017 方块点减负：显示几何每点 4 顶点（真四边形），仓库全量（真机
+        // 2500 万级）×4 会爆内存/VBO——抽样到 ≤200 万显示（计数/导出仍全量真值）
+        constexpr size_t kDispMaxCloud = 2000000;
+        if (points.size() > kDispMaxCloud) {
+            const size_t stride = (points.size() + kDispMaxCloud - 1) / kDispMaxCloud;
+            std::vector<cv::Point3f> sampled;
+            std::vector<cv::Vec3b> sampledCol;
+            sampled.reserve((points.size() + stride - 1) / stride);
+            if (!colors.empty()) sampledCol.reserve(sampled.capacity());
+            for (size_t i = 0; i < points.size(); i += stride) {
+                sampled.push_back(points[i]);
+                if (i < colors.size()) sampledCol.push_back(colors[i]);
+            }
+            points = std::move(sampled);
+            colors = std::move(sampledCol);
+        }
         JMW_LOG_INFO("app-MainWindow",
             "[cloudTimer] 3D 重载 {} 点（仓库计数 {}）——261004 排障插桩",
             points.size(), curCount);

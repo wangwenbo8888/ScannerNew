@@ -53,6 +53,10 @@ public:
     void loadMarkerPoints(const std::vector<osg::Vec3>& markers,
                           const osg::Vec4& color = osg::Vec4(1.0f, 0.0f, 0.0f, 1.0f));
     void loadLaserPoints(const std::vector<osg::Vec3>& laser);   // 激光点云（青色小点，host 块直推）
+    /// 261017 方块点（用户口径：按分辨率档显示大小不同的方块）：激光点按体素值
+    /// 透视缩放 gl_PointSize（GL_POINTS 默认方形光栅化——顶点着色器逐点算屏幕
+    /// 边长=体素 mm×增益×相机比例/距离）。worldMm<=0＝回退旧固定 4px 圆点口径
+    void setLaserPointWorldSize(float worldMm);
 
     /// 定向圆盘版（2026-09-05）：按重建法线做**世界系固定朝向**圆盘——标志点
     /// 与法线不随视角变化（侧看变扁＝物理正确；点精灵版永远正对相机为旧观感）。
@@ -60,6 +64,11 @@ public:
     /// m_markerDiscRadiusMm（默认 2.5mm）。
     void loadMarkerPoints(const std::vector<osg::Vec3>& markers,
                           const std::vector<osg::Vec3>& normals);
+
+    /// 261017 方块点共享材质：懒建 program＋uniforms（激光/仓库快照/导入云
+    /// buildCloudGeode 全部走此——GL_POINTS 光栅本机恒圆点的根治替换）；
+    /// cbHost 挂相机参数同步回调（每帧 uPixPerMm/uCamRight/uCamUp）
+    void applySquarePointState(osg::StateSet* ss, osg::Node* cbHost);
 
     // LeadScan 移植：自动相机定位到场景包围球
     void autoFitCamera();
@@ -418,6 +427,19 @@ private:
     osg::ref_ptr<osg::Vec3Array> m_laserCoords;
     osg::ref_ptr<osg::Vec4ubArray> m_laserColors;   // 逐顶点色（成员复用——每次
                                                     // push new 数组=MB 级分配抖动）
+    osg::ref_ptr<osg::Vec2Array> m_laserCorners;    // 261017 方块点：四角属性
+                                                    //   （每点 4 顶点 QUADS——GL_POINTS
+                                                    //   光栅在本机恒圆点，弃点路线）
+    float m_laserPointWorldMm = 0.0f;               // 261017 方块点：体素边长 mm
+                                                    //   （存原值，0=固定 4px 口径；
+                                                    //   屏幕边长=着色器 √档值×12 平方
+                                                    //   根映射——27 档全区间 5~24px）
+    osg::ref_ptr<osg::Uniform> m_laserWorldSizeUni; // uWorldSize（setLaserPointWorldSize 同步）
+    osg::ref_ptr<osg::Uniform> m_laserPixPerMmUni;  // uPixPerMm（每帧回调按相机同步）
+    osg::ref_ptr<osg::Uniform> m_laserCamRightUni;  // uCamRight（每帧回调＝视图矩阵列 0）
+    osg::ref_ptr<osg::Uniform> m_laserCamUpUni;     // uCamUp（每帧回调＝视图矩阵列 1）
+    osg::ref_ptr<osg::Program> m_sqProg;            // 261017 方块点共享 program
+                                                    //   （激光/仓库快照/导入云一份数据）
     bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角）
     bool m_markersVisible = true;                   // 标志点显示开关（右键菜单；NodeMask 0=隐藏）
     bool m_laserVisible = true;                     // 激光点显示开关（右键菜单；NodeMask 0=隐藏）
