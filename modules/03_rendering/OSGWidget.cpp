@@ -357,13 +357,14 @@ struct SquareCamSync : public osg::NodeCallback {
 };
 // 方块点顶点着色器（每点 4 顶点＋aCorner 四角，相机朝向扩边；GL_POINTS 本机
 // 恒圆点故弃点路线）：屏幕边长=√体素mm×12×相机比例/距离，钳 [5,24]px；
-// uWorldSize<=0＝固定 4px（旧观感兜底）
+// uWorldSize<=0＝固定 4px（旧观感兜底）。vCorner 透传片元做软边抗锯齿
 const char* kSquarePointVs =
     "uniform float uWorldSize;\n"
     "uniform float uPixPerMm;\n"
     "uniform vec3 uCamRight;\n"
     "uniform vec3 uCamUp;\n"
     "attribute vec2 aCorner;\n"
+    "varying vec2 vCorner;\n"
     "void main() {\n"
     "  vec4 world = gl_Vertex;\n"
     "  vec4 mv0 = gl_ModelViewMatrix * world;\n"
@@ -373,8 +374,19 @@ const char* kSquarePointVs =
     "      : 4.0;\n"
     "  float halfW = px * d / uPixPerMm * 0.5;\n"
     "  world.xyz += (uCamRight * aCorner.x + uCamUp * aCorner.y) * halfW;\n"
+    "  vCorner = aCorner;\n"
     "  gl_Position = gl_ProjectionMatrix * gl_ModelViewMatrix * world;\n"
     "  gl_FrontColor = gl_Color;\n"
+    "}\n";
+// 261017 方块点软边抗锯齿（片元）：角空间距边做 smoothstep 渐隐——MSAA 对该
+// 路径无效（实测硬边锯齿），软边带=25% 半宽（5px 方块≈0.6px/24px≈3px 渐隐），
+// 方形轮廓保留、锯齿消除；须开混合（applySquarePointState 统一设）
+const char* kSquarePointFs =
+    "varying vec2 vCorner;\n"
+    "void main() {\n"
+    "  float m = max(abs(vCorner.x), abs(vCorner.y));\n"
+    "  float a = 1.0 - smoothstep(0.75, 1.0, m);\n"
+    "  gl_FragColor = vec4(gl_Color.rgb, gl_Color.a * a);\n"
     "}\n";
 } // namespace
 
@@ -393,7 +405,9 @@ void OSGWidget::applySquarePointState(osg::StateSet* ss, osg::Node* cbHost)
         m_sqProg = new osg::Program;
         m_sqProg->addBindAttribLocation("aCorner", 8);
         osg::ref_ptr<osg::Shader> vs = new osg::Shader(osg::Shader::VERTEX, kSquarePointVs);
+        osg::ref_ptr<osg::Shader> fs = new osg::Shader(osg::Shader::FRAGMENT, kSquarePointFs);
         m_sqProg->addShader(vs.get());
+        m_sqProg->addShader(fs.get());
     }
     ss->setAttributeAndModes(m_sqProg.get(), osg::StateAttribute::ON);
     ss->addUniform(m_laserWorldSizeUni.get());
@@ -401,6 +415,11 @@ void OSGWidget::applySquarePointState(osg::StateSet* ss, osg::Node* cbHost)
     ss->addUniform(m_laserCamRightUni.get());
     ss->addUniform(m_laserCamUpUni.get());
     ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+    // 软边抗锯齿须开混合（仓库快照/导入云链原先无混合——统一在此设）
+    ss->setMode(GL_BLEND, osg::StateAttribute::ON);
+    osg::ref_ptr<osg::BlendFunc> bf = new osg::BlendFunc;
+    bf->setFunction(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    ss->setAttributeAndModes(bf.get(), osg::StateAttribute::ON);
     if (cbHost && m_viewer)
         cbHost->addUpdateCallback(new SquareCamSync(
             m_laserPixPerMmUni.get(), m_laserCamRightUni.get(),
