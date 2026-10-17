@@ -40,7 +40,12 @@ private:
         EventHandler handler;
     };
 
-    mutable std::mutex mutex_;
+    // 261017 嵌套发布崩溃根因修复：原 std::mutex（非递归）——订阅者回调内再
+    // publish（如 p1=2000→pause()→syncState 故障上报）＝同线程二次加锁 UB，
+    // MSVC 抛 system_error→未捕获→terminate→abort（真机 18:15 崩溃实证）。
+    // recursive_mutex：同线程重入合法（嵌套事件内联分发），跨线程仍串行；
+    // 原「锁内不得 transition（重入死锁）」限制随之解除（QTimer 延后兜底兼容不撤）
+    mutable std::recursive_mutex mutex_;
     std::vector<Subscription> subscribers_;
     std::atomic<SubscriberId> nextId_{1};
 };
