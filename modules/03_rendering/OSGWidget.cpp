@@ -430,11 +430,13 @@ osg::ref_ptr<osg::Geode> OSGWidget::buildCloudGeode(const std::vector<osg::Vec3>
                                                     const std::vector<osg::Vec4ub>* colors)
 {
     // 261017 方块点：每点扩 4 顶点（QUADS＋aCorner 四角）——真四边形恒方形
-    // （原 GL_POINTS 3px 在本机光栅呈圆点）。分配集中于此——调用方挂场景前
+    // （原 GL_POINTS 3px 在本机光栅呈圆点）。颜色改 Vec4ubArray（圈选命中/
+    // 删除/高亮三路只认 ub——原 Vec4Array float 色致快照云整体圈不中删不掉，
+    // 261017「只取表面删不掉任何点」根因）。分配集中于此——调用方挂场景前
     // 构建（异常可弃，旧画面不动）
     const size_t n = points.size();
     osg::ref_ptr<osg::Vec3Array> v = new osg::Vec3Array();
-    osg::ref_ptr<osg::Vec4Array> c = new osg::Vec4Array();
+    osg::ref_ptr<osg::Vec4ubArray> c = new osg::Vec4ubArray();
     osg::ref_ptr<osg::Vec2Array> corners = new osg::Vec2Array();
     v->reserve(n * 4);
     c->reserve(n * 4);
@@ -442,10 +444,9 @@ osg::ref_ptr<osg::Geode> OSGWidget::buildCloudGeode(const std::vector<osg::Vec3>
     static const osg::Vec2 kQ[4] = {osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
                                     osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
     for (size_t i = 0; i < n; ++i) {
-        const osg::Vec4 col = (colors && i < colors->size())
-            ? osg::Vec4((*colors)[i].r() / 255.0f, (*colors)[i].g() / 255.0f,
-                        (*colors)[i].b() / 255.0f, (*colors)[i].a() / 255.0f)
-            : osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f);   // LeadScan 蓝
+        const osg::Vec4ub col = (colors && i < colors->size())
+            ? (*colors)[i]
+            : osg::Vec4ub(134, 206, 250, 255);   // LeadScan 蓝
         for (int k = 0; k < 4; ++k) {
             v->push_back(points[i]);
             c->push_back(col);
@@ -1998,10 +1999,18 @@ void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
             for (unsigned int vi : kv.second)
                 m_pendingMarkerDel.push_back(vi / divisor);
         }
-        // 激光几何 → 记录融合云下标（P4b 激光侧：顶点 1:1，显示序＝融合序）
+        // 激光几何 → 记录融合云下标（P4b 激光侧）：261017 方块点后顶点 4:1
+        // （QUADS 角顶点→点下标须 ÷4，否则错位到 4 倍远处别的点——贯穿模式
+        // 「只删到表面一层」观感的 contributory 根因）
         if (geom == m_laserGeom.get()) {
+            bool isQuad = false;
+            if (m_laserGeom->getNumPrimitiveSets() > 0) {
+                const auto* ps = m_laserGeom->getPrimitiveSet(0);
+                isQuad = ps && ps->getMode() == osg::PrimitiveSet::QUADS;
+            }
+            const uint32_t divisor = isQuad ? 4 : 1;
             for (unsigned int vi : kv.second)
-                m_pendingCloudDel.push_back(vi);
+                m_pendingCloudDel.push_back(vi / divisor);
         }
 
         std::vector<osg::Vec4ub> orig;
