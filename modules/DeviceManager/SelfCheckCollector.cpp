@@ -26,6 +26,7 @@
 #endif
 #include <windows.h>
 #include <pdh.h>
+#include <pdhmsg.h>   // 261018 PDH_MORE_DATA（数组两次调用模式判定）
 
 #include <chrono>
 #include <utility>
