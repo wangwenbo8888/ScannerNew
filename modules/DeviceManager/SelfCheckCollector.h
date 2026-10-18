@@ -64,7 +64,8 @@ private:
 
     // 采集辅助（.cpp 实装；静态成员方可用私有 Native 形参）
     static double cpuPercentNative(Native& n);
-    static void   gpuProbeNative(Native& n, double& tempC, double& memPercent);
+    static void   gpuProbeNative(Native& n, double& tempC, double& memPercent,
+                                 double& utilPercent);   // 261018 增出参：SM 利用率
 
     mutable std::mutex hbMutex_;          // beat 被各业务线程并发调，map 读写互斥
     std::map<std::string, Heartbeat> heartbeats_;

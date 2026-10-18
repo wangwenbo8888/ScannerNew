@@ -23,6 +23,7 @@
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
 #include "modules/DeviceManager/ParamStore.h"      // ParamEntry::Source
+#include "modules/DeviceManager/HardwareMonitor.h" // 261018 相机预览 GPU 行（snapshot 完整类型）
 #include "modules/DeviceManager/DeviceManager.h"   // setParam 三路联动（完整类型）
 
 #include <algorithm>
@@ -1006,7 +1007,8 @@ QImage camMatToImage(const cv::Mat& m) {
 void MainWindow::showCameraMonitor() {
     // 261005 用户口径：相机预览监视弹窗隐藏（保留全链实现——需现场调试时
     // 改 true 即恢复弹出；早退同时不挂 debug 帧分路，预览零开销）
-    static constexpr bool kShowCamMonitor = false;
+    // 261018 用户恢复 true：真机联调期看左右相机实况（补光/标志点可见性排障）
+    static constexpr bool kShowCamMonitor = true;
     if (!kShowCamMonitor) return;
     if (!m_appCtx) return;
     if (!m_camDlg) {
@@ -1024,6 +1026,27 @@ void MainWindow::showCameraMonitor() {
         m_camFrameLabel = new QLabel(m_camDlg);
         m_camFrameLabel->setStyleSheet(
             "color:#3c7ad9; font-family:Consolas; font-size:12px; padding:2px 8px;");
+        // 261018 GPU 行（用户口径：预览里看 CUDA 利用率）：NVML SM 利用率＋显存＋
+        // 温度，1s 轮询 hwMonitor 快照（巡检线程刷新，此处只读显示；-1=NVML 不可用）
+        m_camGpuLabel = new QLabel(m_camDlg);
+        m_camGpuLabel->setStyleSheet(
+            "color:#2e8b57; font-family:Consolas; font-size:12px; padding:2px 8px;");
+        auto* camGpuTimer = new QTimer(m_camDlg);
+        connect(camGpuTimer, &QTimer::timeout, this, [this]() {
+            if (!m_camGpuLabel || !m_appCtx) return;
+            auto* hw = m_appCtx->hwMonitor();
+            if (!hw) return;
+            const auto m = hw->snapshot();
+            const auto fmt = [](double v, const char* unit) {
+                return v < 0.0 ? QStringLiteral("--")
+                               : QStringLiteral("%1%2").arg(v, 0, 'f', 0).arg(unit);
+            };
+            m_camGpuLabel->setText(QStringLiteral("GPU 利用率 %1 · 显存 %2 · 温度 %3")
+                                       .arg(fmt(m.gpuUtilPercent, "%"),
+                                            fmt(m.gpuMemPercent, "%"),
+                                            fmt(m.gpuTempC, "°C")));
+        });
+        camGpuTimer->start(1000);
         // 单一 QVBoxLayout：上层图片行（QHBoxLayout）＋底部帧号行
         auto* vLay = new QVBoxLayout(m_camDlg);
         vLay->setContentsMargins(4, 4, 4, 2);
@@ -1034,6 +1057,7 @@ void MainWindow::showCameraMonitor() {
         imgLay->addWidget(m_camRight);
         vLay->addLayout(imgLay);
         vLay->addWidget(m_camFrameLabel);
+        vLay->addWidget(m_camGpuLabel);
         // 关闭即摘分路（帧回调不再进 UI）——260912：记日志（tap 空＝监视窗死因
         // 定位锚点：关闭时刻 vs 后续画面停时刻的相对关系直接读日志）
         connect(m_camDlg, &QDialog::finished, this, [this]() {

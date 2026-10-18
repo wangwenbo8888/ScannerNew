@@ -113,6 +113,7 @@ protected:
     QLabel *m_camLeft = nullptr;      // 左相机图
     QLabel *m_camRight = nullptr;
     QLabel *m_camFrameLabel = nullptr; // 左右帧号＋偏移显示（调试）
+    QLabel *m_camGpuLabel = nullptr;   // 261018 GPU 行：SM 利用率/显存/温度（1s 轮询）
     QDialog *m_scanReadyDlg = nullptr;      // 扫描就绪窗口（260927 就绪流程，懒建）
     QLabel *m_scanReadyLabel = nullptr;     // 就绪提示文案（模式名注入）
     class QTimer *m_scanReadyPoll = nullptr; // 就绪轮询（200ms 查 isCapturing→自动关）

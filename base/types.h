@@ -101,9 +101,10 @@ enum class ScanMode : uint8_t {
 // 健康指标快照（08 侧采集 / 10 侧消费；字段对齐 08 文档差距清单）
 struct HealthMetrics {
     double cpuTempC{-1.0};      // CPU 温度 ℃
-    double cpuPercent{-1.0};    // CPU 占用 %（仅记录）
+    double cpuPercent{-1.0};    // CPU 占用 %（最近记录）
     double gpuMemPercent{-1.0}; // GPU 显存 %
     double gpuTempC{-1.0};      // GPU 温度 ℃
+    double gpuUtilPercent{-1.0};// GPU SM 利用率 %（261018 相机预览监视新增；-1=NVML 不可用）
     double memPercent{-1.0};    // 内存水位 %
     double diskFreeGB{-1.0};    // 磁盘剩余 GB
     double captureFps{-1.0};    // 采集帧率

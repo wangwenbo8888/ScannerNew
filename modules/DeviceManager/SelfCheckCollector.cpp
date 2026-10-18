@@ -40,10 +40,17 @@ struct NvmlMemory {      // 现行 nvmlMemory_t 布局（total/reserved/used，�
     unsigned long long reserved;
     unsigned long long used;
 };
+struct NvmlUtilization { // nvmlUtilization_t 布局（261018 增：SM/显存/编解利用率）
+    unsigned int gpu;      // SM 利用率 %（相机预览监视显示）
+    unsigned int memory;
+    unsigned int encoder;
+    unsigned int decoder;
+};
 using PFN_nvmlInit_v2               = NvmlReturn(*)(void);
 using PFN_nvmlDeviceGetHandleByIndex = NvmlReturn(*)(unsigned int, NvmlDevice*);
 using PFN_nvmlDeviceGetTemperature   = NvmlReturn(*)(NvmlDevice, int, unsigned int*);  // int=传感器类型，GPU=0
 using PFN_nvmlDeviceGetMemoryInfo    = NvmlReturn(*)(NvmlDevice, NvmlMemory*);
+using PFN_nvmlDeviceGetUtilizationRates = NvmlReturn(*)(NvmlDevice, NvmlUtilization*);
 
 // —— 句柄域（仅巡检线程触碰：collect 由 1s 巡检线程单线程调，不加锁）——
 struct SelfCheckCollector::Native {
@@ -59,6 +66,7 @@ struct SelfCheckCollector::Native {
     PFN_nvmlDeviceGetHandleByIndex nvmlGetHandle{nullptr};
     PFN_nvmlDeviceGetTemperature   nvmlGetTemp{nullptr};
     PFN_nvmlDeviceGetMemoryInfo    nvmlGetMem{nullptr};
+    PFN_nvmlDeviceGetUtilizationRates nvmlGetUtil{nullptr};   // 261018（可选——旧驱动缺此出口不挡温度/显存）
     NvmlDevice  nvmlDev{nullptr};    // 设备 0（单卡工控机口径）
 
     ~Native() {
@@ -112,9 +120,11 @@ double SelfCheckCollector::cpuPercentNative(Native& n) {
 }
 
 // GPU：lazy 加载一次；任一步败对应字段留 -1
-void SelfCheckCollector::gpuProbeNative(Native& n, double& tempC, double& memPercent) {
+void SelfCheckCollector::gpuProbeNative(Native& n, double& tempC, double& memPercent,
+                                        double& utilPercent) {
     tempC = -1.0;
     memPercent = -1.0;
+    utilPercent = -1.0;
     if (!n.nvmlTried) {
         n.nvmlTried = true;
         n.nvmlLib = LoadLibraryA("nvml.dll");
@@ -127,6 +137,8 @@ void SelfCheckCollector::gpuProbeNative(Native& n, double& tempC, double& memPer
             GetProcAddress(n.nvmlLib, "nvmlDeviceGetTemperature"));
         n.nvmlGetMem    = reinterpret_cast<PFN_nvmlDeviceGetMemoryInfo>(
             GetProcAddress(n.nvmlLib, "nvmlDeviceGetMemoryInfo"));
+        n.nvmlGetUtil   = reinterpret_cast<PFN_nvmlDeviceGetUtilizationRates>(
+            GetProcAddress(n.nvmlLib, "nvmlDeviceGetUtilizationRates"));
         if (!n.nvmlInit || !n.nvmlGetHandle || !n.nvmlGetTemp || !n.nvmlGetMem) return;
         if (n.nvmlInit() != 0) return;
         if (n.nvmlGetHandle(0, &n.nvmlDev) != 0) {
@@ -143,6 +155,10 @@ void SelfCheckCollector::gpuProbeNative(Native& n, double& tempC, double& memPer
     NvmlMemory mem{};
     if (n.nvmlGetMem(n.nvmlDev, &mem) == 0 && mem.total > 0)
         memPercent = static_cast<double>(mem.used) * 100.0 / static_cast<double>(mem.total);
+
+    NvmlUtilization util{};
+    if (n.nvmlGetUtil && n.nvmlGetUtil(n.nvmlDev, &util) == 0)
+        utilPercent = static_cast<double>(util.gpu);
 }
 
 // ============================================================================
@@ -189,7 +205,7 @@ Scanner::HealthMetrics SelfCheckCollector::collect(int64_t nowMs) const {
     m.diskFreeGB  = diskProbe_ ? diskProbe_(diskPath_) : win32DiskFreeGB(diskPath_);
     m.cpuPercent  = cpuPercentNative(*native_);
     m.cpuTempC    = -1.0;      // WMI 温度降级不采（口径钉死，见文件头）
-    gpuProbeNative(*native_, m.gpuTempC, m.gpuMemPercent);
+    gpuProbeNative(*native_, m.gpuTempC, m.gpuMemPercent, m.gpuUtilPercent);
 
     // 帧率三件套（captureFps/processFps/dropRate）归 HardwareMonitor 填——留 -1
     m.timestampMs = nowMs;
