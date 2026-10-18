@@ -85,6 +85,11 @@ void PointCloudBuffer::beginCloudSession() {
     version_.fetch_add(1, std::memory_order_release);
 }
 
+size_t PointCloudBuffer::cloudBaselineCount() const {
+    std::shared_lock lock(rwlock_);
+    return cloudBaseCount_;
+}
+
 void PointCloudBuffer::pushSessionCloud(const std::vector<float>& xyzInterleaved) {
     const size_t n = xyzInterleaved.size() / 3;
     JMW_LOG_INFO("06-PointCloudBuffer",
@@ -104,6 +109,26 @@ void PointCloudBuffer::pushSessionCloud(const std::vector<float>& xyzInterleaved
     }
     version_.fetch_add(1, std::memory_order_release);
     totalPoints_.store(static_cast<int>(cloudBaseCount_ + n), std::memory_order_release);
+}
+
+void PointCloudBuffer::appendSessionCloud(const std::vector<float>& xyzTailInterleaved) {
+    // 261018 增量推送口：尾部追加＝pushSessionCloud(全量) 的等价账面（调用方
+    // FuseConsumer 保证 tail 语义——融合云追加制、pushSessionCloud 截回基线重建
+    // 会话段的两步在此合并为纯 append）；计数/version 语义与整包一致
+    const size_t n = xyzTailInterleaved.size() / 3;
+    if (n == 0) return;
+    {
+        std::unique_lock lock(rwlock_);
+        allPoints_.reserve(allPoints_.size() + n);
+        for (size_t i = 0; i < n; ++i)
+            allPoints_.emplace_back(xyzTailInterleaved[i * 3],
+                                    xyzTailInterleaved[i * 3 + 1],
+                                    xyzTailInterleaved[i * 3 + 2]);
+    }
+    version_.fetch_add(1, std::memory_order_release);
+    totalPoints_.store(static_cast<int>(allPoints_.size()), std::memory_order_release);
+    JMW_LOG_INFO("06-PointCloudBuffer",
+        "[仓库] appendSessionCloud: +{} 点（合计 {}）——261018 增量推送", n, allPoints_.size());
 }
 
 void PointCloudBuffer::setMarkers(const std::vector<MarkerRecord>& markers) {

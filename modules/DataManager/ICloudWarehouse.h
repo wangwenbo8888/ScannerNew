@@ -23,6 +23,12 @@ public:
     virtual ~ICloudWarehouse() = default;
     virtual void beginCloudSession() = 0;
     virtual void pushSessionCloud(const std::vector<float>& xyzInterleaved) = 0;
+    /// 261018 会话层尾部追加（增量推送）：调用方保证 tail 语义（融合云追加制
+    /// ——与 pushSessionCloud(全量) 等价账面；唯一实现 PointCloudBuffer）
+    virtual void appendSessionCloud(const std::vector<float>& xyzTailInterleaved) = 0;
+    /// 会话基线点数（beginCloudSession 折入的既有内容量——UI「基线＋会话实时
+    /// 值」拼显示用；261018 轻计数通道配套）
+    virtual size_t cloudBaselineCount() const { return 0; }
 };
 
 } // namespace Scanner::data

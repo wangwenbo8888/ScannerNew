@@ -47,18 +47,29 @@ public:
     /// 防 canEnterEditSession 等读口拿到已亡会话的残留
     void clearCache();
 
+    /// 261018 轻计数通道实现：会话激光融合累计点数（消费线程逐帧 store——
+    /// host 计数器零成本；UI 轮询读）
+    void notifyLaserCount(size_t sessionPts) override {
+        latestLaserCount_.store(sessionPts, std::memory_order_release);
+    }
+    size_t laserFusedCount() const { return latestLaserCount_.load(std::memory_order_acquire); }
+
 signals:
     // UI 线程消费（MainWindow 接 OSGWidget::loadMarkerPoints；metatype 在 cpp 注册）
     // normals 与 points 等长对齐（NaN 滤除同步）——定向圆盘渲染用（世界系固定朝向）
     void markerCloudUpdated(const std::vector<cv::Point3f>& points,
                             const std::vector<cv::Vec3f>& normals);
     void laserCloudUpdated(const std::vector<cv::Point3f>& points);   // 激光点（host 块直推，2026-08-31）
+    /// 261018 增量追加（laserAppend 句柄）：points＝自上次推送后的新增尾部
+    /// ——显示端只追加不重建整幅；全量纠正仍走 laserCloudUpdated
+    void laserCloudAppended(const std::vector<cv::Point3f>& points);
     void freezeChanged(bool frozen);
 
 private:
     std::atomic<bool>     frozen_{false};
     std::atomic<uint64_t> pushedClouds_{0};
     std::atomic<uint64_t> droppedByFreeze_{0};
+    std::atomic<size_t>   latestLaserCount_{0};   // 261018 轻计数（notifyLaserCount 写/UI 读）
 
     mutable std::mutex markersMtx_;                          // latestMarkers 缓存锁
     std::vector<Scanner::data::MarkerRecord> latestMarkers_; // 末次推送快照（推线程写/任意读）

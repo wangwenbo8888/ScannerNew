@@ -60,6 +60,16 @@ struct ILaserFuse {
     virtual size_t fusedPointCount() const { return 0; }
     /// 融合云 host 下载（交错 xyz，3N floats；默认空兼容测试假实现）
     virtual std::vector<float> downloadFusedXyz() const { return {}; }
+    /// 261018 尾部增量下载：自第 fromPts 点起（追加语义——LaserCloudFuseCuda
+    /// 首点代表制不改写老点）。默认＝全量后截尾（测试假实现兼容；生产适配器
+    /// 覆写为偏移 cudaMemcpy 只传新增段）
+    virtual std::vector<float> downloadFusedXyzTail(size_t fromPts) const {
+        auto all = downloadFusedXyz();
+        if (fromPts * 3 >= all.size()) return {};
+        all.erase(all.begin(),
+                  all.begin() + static_cast<std::ptrdiff_t>(fromPts * 3));
+        return all;
+    }
     /// 编辑账本移除（05 双账本·激光云侧）：按下标移除融合点——默认 fail
     /// （测试假实现可不覆写）；生产适配器透传 09 LaserCloudFuseCuda::removePoints
     virtual calib::ResultStatus removePoints(const std::vector<uint32_t>& indices) {
@@ -110,6 +120,9 @@ private:
     std::atomic<uint64_t> consumed_{0};
     std::thread thread_;
     bool laserDegradeReported_ = false;       // 降级一次性上报标记（仅消费线程访问）
+    size_t lastPushedLaserPts_ = 0;           // 261018 增量推送锚：上次推送时融合云
+                                              //  累计点数（新会话随 pipeline 重建归零）
+    uint64_t pushSeq_ = 0;                    // 推送序号（每 10 次全量一纠偏）
 };
 
 } // namespace Scanner::pipeline

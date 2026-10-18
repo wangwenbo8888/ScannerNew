@@ -40,6 +40,7 @@ void SceneFeedAdapter::clearCache() {
         JMW_LOG_INFO("app-SceneFeed", "[SceneFeedAdapter] ⑤重置联动：latestMarkers 缓存清（{} 点）",
                      latestMarkers_.size());
     latestMarkers_.clear();
+    latestLaserCount_.store(0, std::memory_order_release);   // 261018 轻计数同清
 }
 
 void SceneFeedAdapter::pushCloudSnapshot(Scanner::pipeline::CloudViewHandle cloud) {
@@ -92,7 +93,9 @@ void SceneFeedAdapter::pushCloudSnapshot(Scanner::pipeline::CloudViewHandle clou
             if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z))
                 laser.emplace_back(x, y, z);
         }
-        emit laserCloudUpdated(laser);            // queued → UI 线程
+        // 261018 增量口径分派：追加推 appended（UI 只补新增）、全量推 Updated
+        if (cloud.laserAppend) emit laserCloudAppended(laser);
+        else                    emit laserCloudUpdated(laser);
     }
 }
 

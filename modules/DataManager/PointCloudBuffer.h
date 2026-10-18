@@ -47,6 +47,8 @@ public:
     // —— ICloudWarehouse（07 融合线程直写正式口；见 ICloudWarehouse.h）——
     void beginCloudSession() override;
     void pushSessionCloud(const std::vector<float>& xyzInterleaved) override;
+    void appendSessionCloud(const std::vector<float>& xyzTailInterleaved) override;   // 261018 增量
+    size_t cloudBaselineCount() const override;   // 261018 UI 实时拼值（基线＋轻计数）
 
     // 人工按需导出（02-D5 唯一出口）：锁内拷贝后走 fileio，扩展名分派 ply/pcd/xyz
     // markers 导出 globalId 不落盘（标志点格式只有坐标），续扫基准走内存通道

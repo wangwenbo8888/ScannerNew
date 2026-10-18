@@ -380,12 +380,36 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                              m_3dView->setLaserPointWorldSize(
                                  static_cast<float>(dmV->voxelLadderValue()));
                          // 3D 激光显示（累积渲染；>150 万点抽样——见头部减负注）
-                         std::vector<osg::Vec3> laser;
-                         laser.reserve((pts.size() + stride - 1) / stride);
-                         for (size_t i = 0; i < pts.size(); i += stride)
-                             laser.emplace_back(pts[i].x, pts[i].y, pts[i].z);
-                         m_3dView->loadLaserPoints(laser);
-                     });
+                          std::vector<osg::Vec3> laser;
+                          laser.reserve((pts.size() + stride - 1) / stride);
+                          for (size_t i = 0; i < pts.size(); i += stride)
+                              laser.emplace_back(pts[i].x, pts[i].y, pts[i].z);
+                          m_3dView->loadLaserPoints(laser);
+                          m_laserDispPts = laser.size();   // 261018 增量帽锚（全量路径重置）
+                      });
+            // 261018 增量追加（用户口径：只渲染增加的点）：消费线程只传尾部新增
+            // ——此处按 200 万硬帽对尾段抽稀（超帽时旧段不动、新段降密度；全量
+            // 纠正推每 10 次自来一次，届时回到 ≤150 万均匀抽样）
+            connect(feed, &SceneFeedAdapter::laserCloudAppended, this,
+                    [this](const std::vector<cv::Point3f>& pts) {
+                        if (pts.empty() || !m_3dView) return;
+                        if (auto* dmV = m_appCtx ? m_appCtx->deviceManager() : nullptr)
+                            m_3dView->setLaserPointWorldSize(
+                                static_cast<float>(dmV->voxelLadderValue()));
+                        constexpr size_t kDispHardCap = 2000000;
+                        size_t take = pts.size();
+                        if (m_laserDispPts + take > kDispHardCap)
+                            take = m_laserDispPts < kDispHardCap
+                                       ? kDispHardCap - m_laserDispPts : 0;
+                        if (take == 0) return;   // 已顶帽——等全量纠正推裁剪
+                        const size_t stride = (pts.size() + take - 1) / take;
+                        std::vector<osg::Vec3> add;
+                        add.reserve(take);
+                        for (size_t i = 0; i < pts.size() && add.size() < take; i += stride)
+                            add.emplace_back(pts[i].x, pts[i].y, pts[i].z);
+                        m_3dView->appendLaserPoints(add);
+                        m_laserDispPts += add.size();
+                      });
             connect(feed, &SceneFeedAdapter::freezeChanged, this,
                     [this](bool frozen) {
                         // D 批处理期冻结：画面保持末帧（ingest 已由 adapter 丢弃）——状态条提示可后续挂
@@ -3416,10 +3440,20 @@ void MainWindow::startInfoTimer()
         if (!pcb) return;
         static int lastCount = 0;
         int curCount = pcb->getTotalPointCount();
-        // 260912b 标签独立于 3D 重载：计数始终刷新（真值=仓库快照）
-        if (m_cloudItem001 && curCount != lastCount)
+        // 261018 统计列表实时拼值：重推送节流 3s 后仓库账面也 3s 一跳——会话期
+        // 改「基线＋轻计数通道实时值」（消费线程逐帧上报 host 计数器，亚秒级）；
+        // 会话外仍用仓库真值。3D 重载门控仍按仓库 curCount（不变）
+        size_t labelCount = static_cast<size_t>(curCount);
+        if (m_appCtx->isScanSessionActive()) {
+            if (auto* feedLc = m_appCtx->sceneFeed())
+                labelCount = pcb->cloudBaselineCount() + feedLc->laserFusedCount();
+        }
+        static size_t lastLabelN = static_cast<size_t>(-1);
+        if (m_cloudItem001 && labelCount != lastLabelN) {
             m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
-                                        .arg(curCount));
+                                        .arg(qulonglong(labelCount)));
+            lastLabelN = labelCount;
+        }
         // 3D 快照重载仅非扫描期（扫描期激光由 laserCloudUpdated 直渲——
         // 此处再拉同份点＝双份顶点/内存；会话结束后（含导入云）才走此路）
         if (curCount == 0 || curCount == lastCount) return;

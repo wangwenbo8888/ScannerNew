@@ -210,6 +210,26 @@ public:
         return host;
     }
 
+    std::vector<float> downloadFusedXyzTail(size_t fromPts) const override {
+        // 261018 增量推送：偏移 D2H 只传新增段（融合数组追加语义——新体素
+        // atomicAdd 追加首点、老点仅 counts++ 不改写，尾部即新增）。全量
+        // 2400 万点 ~288MB → 扫描中每 3s 仅传新增 ~几十 MB
+        const auto ctx = fuse_.GetDeviceContext();
+        if (!ctx.d_fusedXyz || ctx.fusedPointCount <= fromPts) return {};
+        const size_t n = ctx.fusedPointCount - fromPts;
+        std::vector<float> host(n * 3);
+        const cudaStream_t cs = cv::cuda::StreamAccessor::getStream(fuseStream_);
+        if (cudaMemcpyAsync(host.data(), ctx.d_fusedXyz + fromPts * 3,
+                            host.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost, cs) != cudaSuccess ||
+            cudaStreamSynchronize(cs) != cudaSuccess) {
+            JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] laser 融合云尾部下载失败（from={}）",
+                         fromPts);
+            return {};
+        }
+        return host;
+    }
+
     calib::ResultStatus removePoints(const std::vector<uint32_t>& indices) override {
         // 透传 09 LaserCloudFuseCuda::removePoints（设备端压缩＋法线同映射）
         return fuse_.removePoints(indices);

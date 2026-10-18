@@ -159,6 +159,7 @@ protected:
     // 计数/导出跨会话只增不减（正反扫描两趟合导出的数据基础）
     std::vector<cv::Point3f> m_laserBasePts;
     bool m_laserSessionLatched = false;
+    size_t m_laserDispPts = 0;          // 261018 增量帽锚：当前显示激光点数（全量路径重置）
     void applyMarkerPreset();                 // 标点扫描推荐预设（261002 P-5：档10
                                               //   B=40 成功基线；续采不套用）
     void applyMeshPreset();                   // 面片扫描推荐预设（261002 P-5：档10

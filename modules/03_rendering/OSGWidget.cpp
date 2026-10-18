@@ -2659,6 +2659,41 @@ void OSGWidget::setLaserPointWorldSize(float worldMm)
         worldMm, worldMm > 0.0f ? 12.0 * std::sqrt(static_cast<double>(worldMm)) * 1900.0 / 800.0 : 4.0);
 }
 
+// 261018 增量追加：尾部补 4 顶点/点——老段坐标/角/色零重建（消费线程增量
+// 推送的用户口径落地：只渲染增加的点）。OSG 数组 dirty 仍整幅 VBO 重传（03
+// 层限制，后续可分块几何细化），但 UI 线程的百万级重建循环全免
+void OSGWidget::appendLaserPoints(const std::vector<osg::Vec3>& add) {
+    if (add.empty()) return;
+    if (!m_laserRoot || m_laserRoot->getNumParents() == 0 || !m_laserCoords ||
+        !m_laserGeom) {
+        loadLaserPoints(add);   // 未建几何＝首推，走全量路径
+        return;
+    }
+    m_laserRoot->setNodeMask(m_laserVisible ? ~0u : 0u);
+    const size_t basePts = m_laserCoords->size() / 4;
+    const size_t n = add.size();
+    m_laserCoords->resize((basePts + n) * 4);
+    m_laserCorners->resize((basePts + n) * 4);
+    m_laserColors->resize((basePts + n) * 4);
+    static const osg::Vec2 kQ[4] = {osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
+                                    osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
+    const osg::Vec4ub kLaserColor(134, 206, 250, 255);
+    for (size_t i = 0; i < n; ++i) {
+        const auto& p = add[i];
+        for (int c = 0; c < 4; ++c) {
+            (*m_laserCoords)[(basePts + i) * 4 + c] = p;
+            (*m_laserCorners)[(basePts + i) * 4 + c] = kQ[c];
+            (*m_laserColors)[(basePts + i) * 4 + c] = kLaserColor;
+        }
+    }
+    m_laserCoords->dirty();
+    m_laserCorners->dirty();
+    m_laserColors->dirty();
+    m_laserGeom->setPrimitiveSet(
+        0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0,
+                               static_cast<int>((basePts + n) * 4)));
+}
+
 void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
 {
     if (laser.empty()) return;

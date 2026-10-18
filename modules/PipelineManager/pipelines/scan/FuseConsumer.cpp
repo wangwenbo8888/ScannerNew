@@ -131,6 +131,11 @@ void FuseConsumer::processOne(FrameResult& fr) {
 #endif
         tLaser = msSince() - tMarker;
 
+        // 261018 轻计数上报（逐帧、host 计数器零成本）：重推送已节流 3s——
+        // 统计列表经此通道亚秒级刷新（仓库账面随 append 同步，两者终值一致）
+        if (deps_.sceneFeed && deps_.laserFuse)
+            deps_.sceneFeed->notifyLaserCount(deps_.laserFuse->fusedPointCount());
+
         // 3) 渲染节流（先于 obs.push，序见文件头）：第 1、N+1…帧推送一次
         //    （激光句柄由 ILaserFuse 适配器持有 → nullptr）。
         //    ＋时间门控 ≥300ms（260919 卡顿修复：帧计数节流按 7fps 设计，
@@ -149,28 +154,35 @@ void FuseConsumer::processOne(FrameResult& fr) {
             CloudViewHandle h;
             h.hostMarker = &deps_.markerFuse->fusedPoints();
             h.deviceLaser = nullptr;
-            // 激光显示推融合云累计值（体素去重后单调不减——修复「点数忽
-            // 大忽小」：旧版推当帧块，T/V 交替 79K/124K 跳变）
+            // 261018 增量推送（用户口径：只渲染增加的点）：融合云追加制（首点
+            // 代表、老点不改写）→ 首推全量、此后只传尾部新增；每 10 次全量
+            // 一纠偏（防御任何非追加偏差）；点数回退＝异常，立即回退全量
+            const size_t curPts = deps_.laserFuse ? deps_.laserFuse->fusedPointCount() : 0;
+            const bool fullPush = lastPushedLaserPts_ == 0 || lastPushedLaserPts_ > curPts ||
+                                  pushSeq_ % 10 == 0;
             std::vector<float> fusedXyz;
 #ifdef JMW_BUILD_CUDA
-            if (deps_.laserFuse) fusedXyz = deps_.laserFuse->downloadFusedXyz();
+            if (deps_.laserFuse)
+                fusedXyz = fullPush ? deps_.laserFuse->downloadFusedXyz()
+                                    : deps_.laserFuse->downloadFusedXyzTail(lastPushedLaserPts_);
 #endif
-            // 点云仓库直写（260919 正式口）：融合云累计快照直入 06 PointCloudBuffer
-            //（会话层替换语义——app UI「基线锁存+整包替换」补丁链由此退役）。
-            // 仓库＝全量真值（计数/导出/后处理原料——不抽稀）
-            if (deps_.cloudWarehouse && !fusedXyz.empty())
-                deps_.cloudWarehouse->pushSessionCloud(fusedXyz);
-            // 261018 UI 块抽稀 ≤200 万点：推送链上 adapter 值拷贝＋Qt queued 各
-            // ~288MB（2400 万点×12B）＝render 段大头之二——UI 显示本来就抽 150
-            // 万（MainWindow kDispMax），此处先抽省两跳大拷贝；仓库/日志计数仍
-            // 全量真值
+            lastPushedLaserPts_ = curPts;
+            ++pushSeq_;
+            // 仓库＝全量真值账（计数/导出/后处理原料）：全量推整包替换、增量推
+            // 尾部追加（等价账面——appendSessionCloud）
+            if (deps_.cloudWarehouse && !fusedXyz.empty()) {
+                if (fullPush) deps_.cloudWarehouse->pushSessionCloud(fusedXyz);
+                else          deps_.cloudWarehouse->appendSessionCloud(fusedXyz);
+            }
+            // UI 块：全量推抽稀 ≤200 万（adapter 值拷贝＋Qt queued 两跳 ~288MB×2
+            // 的 261018 大头）；增量推原样新增段（本就只有新增、量小不抽）
             std::vector<float> uiXyz;
             constexpr size_t kUiMaxPts = 2000000;
-            const size_t totalPts = fusedXyz.size() / 3;
-            if (totalPts > kUiMaxPts) {
-                const size_t stride = (totalPts + kUiMaxPts - 1) / kUiMaxPts;
-                uiXyz.reserve((totalPts + stride - 1) / stride * 3);
-                for (size_t i = 0; i < totalPts; i += stride) {
+            const size_t totalPts = fullPush ? fusedXyz.size() / 3 : curPts;
+            if (fullPush && fusedXyz.size() / 3 > kUiMaxPts) {
+                const size_t stride = (fusedXyz.size() / 3 + kUiMaxPts - 1) / kUiMaxPts;
+                uiXyz.reserve((fusedXyz.size() / 3 + stride - 1) / stride * 3);
+                for (size_t i = 0; i * 3 < fusedXyz.size(); i += stride) {
                     uiXyz.push_back(fusedXyz[i * 3 + 0]);
                     uiXyz.push_back(fusedXyz[i * 3 + 1]);
                     uiXyz.push_back(fusedXyz[i * 3 + 2]);
@@ -179,11 +191,13 @@ void FuseConsumer::processOne(FrameResult& fr) {
             const std::vector<float>& laserOut = uiXyz.empty() ? fusedXyz : uiXyz;
             h.hostLaser = laserOut.empty() ? nullptr : laserOut.data();
             h.laserCount = laserOut.size() / 3;
-            // 显示链观测（节流同频）：融合云点数（全量真值）——0=融合无产出；
-            // >0=断在下游（SceneFeed/UI）
+            h.laserAppend = !fullPush;          // 显示端走追加路径（不重建整幅 VBO）
+            h.laserTotal = curPts;
+            // 显示链观测（节流同频）：融合云点数（全量真值）＋推送形态
             JMW_LOG_INFO("07-ScanChains",
-                "[FuseConsumer] 推送渲染: 融合云={} 点 激光融合云={} 点（UI 抽稀 {} 点，帧 {}）",
-                deps_.markerFuse->fusedPoints().size(), totalPts, h.laserCount, n);
+                "[FuseConsumer] 推送渲染: 融合云={} 点 激光融合云={} 点（{}：UI {} 点，帧 {}）",
+                deps_.markerFuse->fusedPoints().size(), curPts,
+                fullPush ? "全量" : "增量", h.laserCount, n);
             deps_.sceneFeed->pushCloudSnapshot(h);
         }
         tRender = msSince() - tMarker - tLaser;

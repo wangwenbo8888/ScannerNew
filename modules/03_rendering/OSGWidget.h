@@ -56,6 +56,10 @@ public:
     void loadMarkerPoints(const std::vector<osg::Vec3>& markers,
                           const osg::Vec4& color = osg::Vec4(1.0f, 0.0f, 0.0f, 1.0f));
     void loadLaserPoints(const std::vector<osg::Vec3>& laser);   // 激光点云（青色小点，host 块直推）
+    /// 261018 增量追加（用户口径：只渲染增加的点）：几何未建时回退全量路径；
+    /// 已建则在尾部补 4 顶点/点（老段零重建——OSG dirty 整幅 VBO 重传仍在，
+    /// 但 UI 线程的重建循环/色数组全免）。显示总点数由 MainWindow 帽控
+    void appendLaserPoints(const std::vector<osg::Vec3>& add);
     /// 261017 方块点（用户口径：按分辨率档显示大小不同的方块）：激光点按体素值
     /// 透视缩放 gl_PointSize（GL_POINTS 默认方形光栅化——顶点着色器逐点算屏幕
     /// 边长=体素 mm×增益×相机比例/距离）。worldMm<=0＝回退旧固定 4px 圆点口径
