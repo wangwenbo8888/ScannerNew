@@ -112,11 +112,15 @@ void SchedulerRuntime::watchdogLoop(int hangTimeoutMs) {
             if (stale > static_cast<int64_t>(hangTimeoutMs)) {
                 bool exp = false;
                 if (!hangLatched_.compare_exchange_strong(exp, true)) break;
-                hangDetected_.store(true, std::memory_order_release);
                 spdlog::error("[SchedulerRuntime] lane {} 心跳静默 {}ms（阈 {}ms）——requestStop",
                               i, stale, hangTimeoutMs);
                 requestStop();                   // 可见 stopFlag 的 lane 自行退出；死循环算子须限时 drain
                 if (onHang) onHang(static_cast<int>(i), stale);
+                // 261018 置位后移：hangDetected_ 是观测口（测试轮询它再读回调
+                // 数据）——原序「先置位后回调」存在窗口，轮询到 true 时
+                // onHang 尚未写 hangLane（test_sched_runtime W1 3-4/10 概率
+                // 误报实证，与业务无关的存量竞态）。回调数据就绪再置位
+                hangDetected_.store(true, std::memory_order_release);
                 break;
             }
         }

@@ -10,13 +10,11 @@
 
 #include <opencv2/core/cuda.hpp>
 #include <thrust/device_vector.h>
+#include <cuda_runtime.h>   // 261018：float2 成员类型需无条件可见（原仅 NDEBUG 下引入）
 #include <memory>
 #include <atomic>
 #include <vector>
-
-#ifndef NDEBUG
-#include <cuda_runtime.h>
-#endif
+#include <cstddef>
 
 #include "steger_extract_cuda.h"
 
@@ -48,6 +46,17 @@ struct StegerExtractorCUDA::Impl {
 
     thrust::device_vector<SubpixelPoint> d_points_;
     thrust::device_vector<int> d_point_count_;
+
+    // 261018 逐帧分配退役：持久 device 缓冲（resize 仅增长，容量跨帧复用；
+    // Execute 尾部 Step 6 同步保证复用安全）
+    thrust::device_vector<SubpixelPoint> d_valid_points_;
+    thrust::device_vector<float2> d_coords_;
+    thrust::device_vector<int> d_labels_buf_;
+
+    // 261018 pinned host 回读缓冲（pageable cudaMemcpyAsync 退化同步暂存拷贝）
+    int* h_pinned_count_ = nullptr;
+    SubpixelPoint* h_pinned_points_ = nullptr;
+    size_t h_pinned_points_cap_ = 0;
 
     bool warmed_up_ = false;
     int warmup_rows_ = 0;

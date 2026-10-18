@@ -258,10 +258,14 @@ UndistortPointsResult UndistortPointsCuda::Impl::Execute(
 
         result.success = true;
         result.message = "Success";
-        result.d_rectifiedPoints = std::make_shared<cv::cuda::GpuMat>(d_output_.colRange(0, pointCount).clone());
+        // 261018 流序拷贝退役 .clone()：clone 走 legacy 默认流（与调用流互斥＝
+        // 多 lane 下隐式全局串行化）——copyTo(stream) 保持在调用流内异步有序
+        result.d_rectifiedPoints = std::make_shared<cv::cuda::GpuMat>();
+        d_output_.colRange(0, pointCount).copyTo(*result.d_rectifiedPoints, stream);
 
         if (!d_line_ids.empty()) {
-            result.d_line_ids = std::make_shared<cv::cuda::GpuMat>(d_line_ids.clone());
+            result.d_line_ids = std::make_shared<cv::cuda::GpuMat>();
+            d_line_ids.copyTo(*result.d_line_ids, stream);
         }
 
     } catch (const std::exception& e) {

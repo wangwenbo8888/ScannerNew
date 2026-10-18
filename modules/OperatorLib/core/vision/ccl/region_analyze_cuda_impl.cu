@@ -204,6 +204,7 @@ void RegionAnalyzerCUDA::Impl::freeStatsBuffers() {
     if (d_compact_)   { cudaFree(d_compact_);   d_compact_   = nullptr; }
     if (h_pinned_count_)   { cudaFreeHost(h_pinned_count_);   h_pinned_count_   = nullptr; }
     if (h_pinned_compact_) { cudaFreeHost(h_pinned_compact_); h_pinned_compact_ = nullptr; }
+    if (ev_legacy_done_)   { cudaEventDestroy(ev_legacy_done_); ev_legacy_done_ = nullptr; }  // 261018 随缓冲一并释放
     stats_capacity_ = 0;
 }
 
@@ -339,8 +340,17 @@ RegionAnalysisResult RegionAnalyzerCUDA::Impl::Execute(
 
         // === Step 1: GPU CCL ===（OpenCV 4.13 此重载无 stream 参——走默认流；
         // 其余步骤已全部挂调用流 cs，默认流交互仅此一处）
+        // 261018 非阻塞调用流适配：默认流不再隐式等待调用流（阻塞式互斥随
+        // GpuSlotService 非阻塞化解除）——调用流先显式排空（上游掩膜写入
+        // 落定），CC 完成经 legacy 尾事件接回调用流
         if (sampleTiming) cudaEventRecord(ev0, cs);
+        if (!ev_legacy_done_) {
+            cudaEventCreateWithFlags(&ev_legacy_done_, cudaEventDisableTiming);
+        }
+        cudaStreamSynchronize(cs);
         cv::cuda::connectedComponents(d_inputBinaryMask, d_labels_, 8, CV_32SC1);
+        cudaEventRecord(ev_legacy_done_, nullptr);       // nullptr = legacy 默认流尾
+        cudaStreamWaitEvent(cs, ev_legacy_done_, 0);
         if (sampleTiming) cudaEventRecord(ev1, cs);
 
         // === Step 2: GPU initStats (5 数组 + remap + num_valid) ===

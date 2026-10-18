@@ -396,6 +396,13 @@ void SchedulerRuntime::laneLoop(IFrameSource<TFrame>& source, bool sequential,
             if (!submitted.load()) {
                 frontReady();                         // 兜底提交：gpuChain 返回 true 且未触发（A 模式）
             }
+            // 261018 B 模式槽周转：gpuChain 返回即链尾已同步（07 两流水线契约
+            // ——scan 链尾 waitForCompletion / posture 链 ccl Step7 内同步），
+            // 移交数据（host 结果/池块）皆已落定；eFinalize 纯 CPU（fut.get
+            // 等 P 链＋组装入队，不触流）——提前归还 GPU 槽，槽周转不再被
+            // P 链尾延拖住（4 槽名义容量兑现的前提；reset 幂等，gpuChain 内
+            // A 模式已 reset 的二次调用为 no-op）
+            guard.reset();
             const auto te0 = LaneCLK::now();
             const bool efinOk = hooks.eFinalize(frame, *front, *result, fut).success;
             acc.efinMs += msSince(te0);               // 含 fut.get() 等 P 链完成

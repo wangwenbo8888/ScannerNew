@@ -35,6 +35,7 @@ struct LaserReconstructCuda::Impl {
     void* d_cub_temp_ = nullptr;
     size_t cub_temp_size_ = 0;
     int last_max_count_ = 0;
+    int* h_pinned_count_ = nullptr;   // 261018：count 回读 pinned host（pageable Async 退化同步拷贝）
 
     bool warmed_up_ = false;
     int warmup_count_ = 0;

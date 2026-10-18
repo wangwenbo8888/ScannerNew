@@ -581,39 +581,40 @@ ScanChains::Hooks ScanChains::assemble() {
                 if (rc.validCount == 0 || !hasPts(rc.d_points3d)) return 0;
 
                 // —— P-4 景深屏蔽（261002 §3.3.2）：仅当前景深区间内点入池——近/远
-                //    两档分辨率完全相同，区别只在计算侧屏蔽区间（§3.3.2）。滤波在
-                //    调试下载的同一份 h3d 上做（不额外 D2H）；扫描中切档逐帧生效。
-                //    区间〔产线对账占位〕：近 [200,800]mm / 远 [800,2000]mm（相机系 Z）
+                //    两档分辨率完全相同，区别只在计算侧屏蔽区间（§3.3.2）。扫描中
+                //    切档逐帧生效。区间〔产线对账占位〕：近 [200,800]mm / 远
+                //    [800,2000]mm（相机系 Z）
+                // 261018 GPU 直通：原 D2H→CPU 逐点过滤→H2D 入池（两次
+                //    waitForCompletion＋PCIe 双跳＋lane 线程 30-60K 点循环——GPU
+                //    链中段空窗主源之一）改 split→inRange 掩码→copyTo(mask)
+                //    压缩→merge 全程 device 流序完成（模式同 261004 固定视差
+                //    块）；滤后 D2D 直拷入池块，链尾统一同步（下方
+                //    waitForCompletion）代原入池前置同步
                 const int dof = dofMode_.load(std::memory_order_relaxed);
                 const double zMin = (dof == 1) ? dofFarMin_.load(std::memory_order_relaxed)
                                                : dofNearMin_.load(std::memory_order_relaxed);
                 const double zMax = (dof == 1) ? dofFarMax_.load(std::memory_order_relaxed)
                                                : dofNearMax_.load(std::memory_order_relaxed);
-                cv::Mat h3d;
-                rc.d_points3d->download(h3d, stream);
-                stream.waitForCompletion();
-                cv::Mat filtered;                       // 1×n CV_32FC3（滤后列压缩）
-                // 261004 UAF 根因修复：keep 原声明在下方 if 块内——filtered 以
-                // 零拷贝包装 keep.data()（cv::Mat 外部数据不持所有权），块结束
-                // keep 即析构，其后 PLY 导出/入池上传全在读已亡缓冲。视差修正
-                // 放通数据前 keep 恒空提前 return 未达此处——路径首次激活即崩
-                // （15:01 转储实证：movss float 循环读已解提交堆块＝AV READ）。
-                // 提升作用域至 lambda 末尾，覆盖全部消费点
-                std::vector<cv::Vec3f> keep;
-                if (!h3d.empty()) {
-                    const cv::Vec3f* src = h3d.ptr<cv::Vec3f>();
-                    const size_t total = h3d.total();
-                    keep.reserve(total);
-                    for (size_t k = 0; k < total; ++k)
-                        if (src[k][2] >= zMin && src[k][2] <= zMax) keep.push_back(src[k]);
-                    if (keep.empty()) {
-                        // 261004 排障：滤空帧打 Z 实测统计（min/中位/max）——
-                        // 固定视差路径 Z 常数理论值与实测对账（区间配置依据）
+                const int total = rc.validCount;              // host 侧已知（recon 回读）
+                int kept = 0;
+                cv::cuda::GpuMat dFiltered;                   // 1×n' CV_32FC3（滤后压缩）
+                {
+                    cv::cuda::GpuMat ch[3], mKeep;
+                    cv::cuda::split(*rc.d_points3d, ch, stream);
+                    cv::cuda::inRange(ch[2], cv::Scalar(static_cast<float>(zMin)),
+                                      cv::Scalar(static_cast<float>(zMax)), mKeep, stream);
+                    cv::cuda::GpuMat xF, yF, zF;
+                    ch[0].copyTo(xF, mKeep, stream);      // 掩码压缩（shape 调用内即定——无同步）
+                    kept = xF.rows * xF.cols;
+                    if (kept == 0) {
+                        // 261004 排障口径保留：滤空帧打 Z 实测统计（min/中位/
+                        // max）。罕见路径——仅此时下载 z 通道到 host 计算
                         double zMinV = 1e30, zMaxV = -1e30, zMedV = 0;
-                        {
-                            std::vector<float> zs;
-                            zs.reserve(total);
-                            for (size_t k = 0; k < total; ++k) zs.push_back(src[k][2]);
+                        cv::Mat hz;
+                        ch[2].download(hz, stream);
+                        stream.waitForCompletion();
+                        if (!hz.empty()) {
+                            std::vector<float> zs(hz.begin<float>(), hz.end<float>());
                             std::sort(zs.begin(), zs.end());
                             zMinV = zs.front(); zMaxV = zs.back();
                             zMedV = zs[zs.size() / 2];
@@ -624,15 +625,15 @@ ScanChains::Hooks ScanChains::assemble() {
                             dof == 1 ? "远" : "近", total, zMin, zMax, zMinV, zMedV, zMaxV);
                         return 0;
                     }
-                    if (keep.size() != total)
-                        JMW_LOG_INFO("07-ScanChains",
-                            "[ScanChains] 景深屏蔽（{} [{}-{}mm]）：{} → {} 点",
-                            dof == 1 ? "远" : "近", zMin, zMax, total, keep.size());
-                    filtered = cv::Mat(1, static_cast<int>(keep.size()), CV_32FC3,
-                                       keep.data());
-                } else {
-                    return 0;
+                    ch[1].copyTo(yF, mKeep, stream);
+                    ch[2].copyTo(zF, mKeep, stream);
+                    cv::cuda::merge(std::vector<cv::cuda::GpuMat>{xF, yF, zF}, dFiltered, stream);
+                    dFiltered = dFiltered.reshape(3, 1);  // 统一 1×n'（池块契约）
                 }
+                if (kept != total)
+                    JMW_LOG_INFO("07-ScanChains",
+                        "[ScanChains] 景深屏蔽（{} [{}-{}mm]）：{} → {} 点",
+                        dof == 1 ? "远" : "近", zMin, zMax, total, kept);
 
                 // —— 调试导出已撤（261004 用户口径）：原每帧同步写文本 PLY
                 //    laser_recon_debug.ply（30-60K 点 ≈3-5MB，lane 线程上估计
@@ -643,20 +644,17 @@ ScanChains::Hooks ScanChains::assemble() {
                 if (deps_.laserPool) {
                     auto blk = deps_.laserPool->acquire(deps_.poolAcquireTimeout);
                     if (blk) {
-                        int n = std::min<int>(filtered.cols,      // 滤后点数
+                        int n = std::min<int>(kept,                    // 滤后点数
                                               blk->get()->points.cols);  // 池容量裁剪
-                        if (n < filtered.cols) {
+                        if (n < kept) {
                             JMW_LOG_WARN("07-ScanChains", "[ScanChains] 激光点数 {} 超池块容量 {}，"
                                          "截断至 {}（降级）",
-                                         filtered.cols, blk->get()->points.cols, n);
+                                         kept, blk->get()->points.cols, n);
                             front.laserTruncated = true;
                         }
                         if (n > 0) {
                             cv::cuda::GpuMat dst = blk->get()->points.colRange(0, n);
-                            dst.upload(filtered.colRange(0, n), stream);   // 滤后上传
-                            // 261004：filtered 包装的 keep 已提升作用域至此仍存活，
-                            // 数据源有效；同步等拷贝落定防块回池后 DMA 尚在读
-                            stream.waitForCompletion();
+                            dFiltered.colRange(0, n).copyTo(dst, stream);   // D2D 流序直拷
                             blk->get()->count = n;
                             blk->get()->frameId = frame->frameId;
                             front.laserBlock = std::move(*blk);

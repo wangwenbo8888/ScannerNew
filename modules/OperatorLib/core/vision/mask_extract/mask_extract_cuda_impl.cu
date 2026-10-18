@@ -229,13 +229,17 @@ MaskExtractResult MaskExtractCUDA::Impl::Execute(
         // Step 2-5: 执行形态学流水线
         executePipeline(d_cleanedMask, stream);
 
-        // 填充结果（使用 shared_ptr 管理 GpuMat，clone 确保结果独立于内部缓冲区）
+        // 填充结果（shared_ptr 管理结果 GpuMat；261018 clone 改流序 copyTo——
+        // 原 .clone() 走 legacy 默认流，与调用流互斥＝多 lane 隐式全局串行化）
         result.success = true;
         result.message = "Extraction successful";
         result.qualityFlag = calib::QualityFlag::Normal;
-        result.d_grayImage = std::make_shared<cv::cuda::GpuMat>(d_inputBuffer.clone());
-        result.d_laserMask = std::make_shared<cv::cuda::GpuMat>(d_laserMask.clone());
-        result.d_cleanedMask = std::make_shared<cv::cuda::GpuMat>(d_cleanedMask.clone());
+        result.d_grayImage = std::make_shared<cv::cuda::GpuMat>();
+        d_inputBuffer.copyTo(*result.d_grayImage, stream);
+        result.d_laserMask = std::make_shared<cv::cuda::GpuMat>();
+        d_laserMask.copyTo(*result.d_laserMask, stream);
+        result.d_cleanedMask = std::make_shared<cv::cuda::GpuMat>();
+        d_cleanedMask.copyTo(*result.d_cleanedMask, stream);
 
     } catch (const cv::Exception& e) {
         result.success = false;

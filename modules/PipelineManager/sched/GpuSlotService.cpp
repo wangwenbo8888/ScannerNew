@@ -10,7 +10,11 @@ Result GpuSlotService::start(int slots, StreamFactory factory, StreamDestroyer d
         return Result::fail("GpuSlotService::start: slots must be > 0");
     }
 #ifdef JMW_BUILD_CUDA
-    if (!factory)   factory   = [](StreamHandle* s) { return static_cast<int>(cudaStreamCreate(s)); };
+    // 261018 非阻塞流：阻塞式（默认 flags）lane 流与 legacy 默认流互为同步
+    // ——任何默认流操作（算子残留 clone/OpenCV 无 stream 重载）都会闸住全部
+    // lane＝隐式全局串行化。非阻塞流解除该互斥；个别仍走默认流的调用点排序
+    // 责任自负（见 ccl Step1 的显式排空＋legacy 尾事件栅栏）
+    if (!factory)   factory   = [](StreamHandle* s) { return static_cast<int>(cudaStreamCreateWithFlags(s, cudaStreamNonBlocking)); };
     if (!destroyer) destroyer = [](StreamHandle s) { cudaStreamDestroy(s); };
 #else
     // CUDA 关闭：无默认真流实现，必须注入工厂（假工厂测试不受影响）

@@ -406,6 +406,18 @@ void StegerExtractorCUDA::Impl::Destroy() {
     d_points_.shrink_to_fit();
     d_point_count_.clear();
     d_point_count_.shrink_to_fit();
+    d_valid_points_.clear();
+    d_valid_points_.shrink_to_fit();
+    d_coords_.clear();
+    d_coords_.shrink_to_fit();
+    d_labels_buf_.clear();
+    d_labels_buf_.shrink_to_fit();
+    if (h_pinned_count_) { cudaFreeHost(h_pinned_count_); h_pinned_count_ = nullptr; }
+    if (h_pinned_points_) {
+        cudaFreeHost(h_pinned_points_);
+        h_pinned_points_ = nullptr;
+        h_pinned_points_cap_ = 0;
+    }
     warmed_up_ = false;
     warmup_rows_ = 0;
     warmup_cols_ = 0;
@@ -622,9 +634,22 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
         }
 
         // === Step 5: Get point count + sort by label ===
-        thrust::host_vector<int> h_count(1);
-        thrust::copy(d_point_count_.begin(), d_point_count_.end(), h_count.begin());
-        int point_count = std::min(h_count[0], max_points);
+        // 261018 流序回读：原 thrust 同步拷贝到 pageable host_vector＝legacy
+        // 默认流全流同步——改 pinned＋本流 Async＋本流同步（ccl Step7 同款）
+        if (!h_pinned_count_) {
+            cudaError_t perr = cudaMallocHost(&h_pinned_count_, sizeof(int));
+            if (perr != cudaSuccess) {
+                result.success = false;
+                result.message = std::string("pinned count alloc failed: ") + cudaGetErrorString(perr);
+                CALIB_LOG_ERROR("Execute(): {}", result.message);
+                return result;
+            }
+        }
+        int point_count = 0;
+        cudaMemcpyAsync(h_pinned_count_, thrust::raw_pointer_cast(d_point_count_.data()),
+                        sizeof(int), cudaMemcpyDeviceToHost, cuda_stream);
+        cudaStreamSynchronize(cuda_stream);
+        point_count = std::min(*h_pinned_count_, max_points);
 
         CALIB_LOG_INFO("Extracted {} subpixel points", point_count);
 
@@ -635,59 +660,92 @@ StegerResult StegerExtractorCUDA::Impl::Execute(
             return result;
         }
 
-        thrust::device_vector<SubpixelPoint> d_valid_points(
-            d_points_.begin(), d_points_.begin() + point_count);
+        // 261018 持久缓冲退役逐帧 device 分配（thrust device_vector 构造/析构
+        // ＝每帧隐式 cudaMalloc/cudaFree）；尾部 Step 6 同步保证复用安全
+        if (static_cast<int>(d_valid_points_.size()) < point_count) {
+            d_valid_points_.resize(point_count);
+        }
+        thrust::copy(thrust::cuda::par_nosync.on(cuda_stream),
+                     d_points_.begin(), d_points_.begin() + point_count,
+                     d_valid_points_.begin());
 
         thrust::stable_sort(
             thrust::cuda::par_nosync.on(cuda_stream),
-            d_valid_points.begin(), d_valid_points.end(),
+            d_valid_points_.begin(), d_valid_points_.begin() + point_count,
             SubpixelPointLabelComp());
 
         if (sampleTiming) cudaEventRecord(ev_s5, cuda_stream);
 
         // === Step 5.5: Build GPU output arrays (d_centerPoints + d_line_ids) ===
         {
-            thrust::device_vector<float2> d_coords(point_count);
-            thrust::device_vector<int> d_labels_buf(point_count);
+            if (static_cast<int>(d_coords_.size()) < point_count) {
+                d_coords_.resize(point_count);
+                d_labels_buf_.resize(point_count);
+            }
 
             thrust::transform(
                 thrust::cuda::par_nosync.on(cuda_stream),
-                d_valid_points.begin(),
-                d_valid_points.begin() + point_count,
-                d_coords.begin(),
+                d_valid_points_.begin(),
+                d_valid_points_.begin() + point_count,
+                d_coords_.begin(),
                 SubpixelPointToCoord());
 
             thrust::transform(
                 thrust::cuda::par_nosync.on(cuda_stream),
-                d_valid_points.begin(),
-                d_valid_points.begin() + point_count,
-                d_labels_buf.begin(),
+                d_valid_points_.begin(),
+                d_valid_points_.begin() + point_count,
+                d_labels_buf_.begin(),
                 SubpixelPointToLabel());
 
-            thrust::host_vector<float2> h_coords(d_coords);
-            thrust::host_vector<int> h_labels_buf(d_labels_buf);
-
-            cv::Mat h_coords_mat(1, point_count, CV_32FC2);
-            memcpy(h_coords_mat.ptr<float2>(), h_coords.data(), point_count * sizeof(float2));
-
-            cv::Mat h_labels_mat(1, point_count, CV_32SC1);
-            memcpy(h_labels_mat.ptr<int>(), h_labels_buf.data(), point_count * sizeof(int));
-
+            // 261018 GPU 直通退役 D2H→host Mat→H2D 往返：原路径把 coords/labels
+            // 同步下载到 host 再原样上传回 device（PCIe 双跳＋3 次隐式全同步
+            // ＝GPU 链中段空窗主源之一）——改流序 D2D 直拷入结果 GpuMat
             auto d_cp = std::make_shared<cv::cuda::GpuMat>();
-            d_cp->upload(h_coords_mat, stream);
+            cv::cuda::createContinuous(1, point_count, CV_32FC2, *d_cp);
+            cudaMemcpyAsync(d_cp->ptr<float2>(),
+                            thrust::raw_pointer_cast(d_coords_.data()),
+                            static_cast<size_t>(point_count) * sizeof(float2),
+                            cudaMemcpyDeviceToDevice, cuda_stream);
 
             auto d_pl = std::make_shared<cv::cuda::GpuMat>();
-            d_pl->upload(h_labels_mat, stream);
+            cv::cuda::createContinuous(1, point_count, CV_32SC1, *d_pl);
+            cudaMemcpyAsync(d_pl->ptr<int>(),
+                            thrust::raw_pointer_cast(d_labels_buf_.data()),
+                            static_cast<size_t>(point_count) * sizeof(int),
+                            cudaMemcpyDeviceToDevice, cuda_stream);
 
             result.d_centerPoints = d_cp;
             result.d_line_ids = d_pl;
         }
 
         // === Step 6: D2H copy and build CPU result ===
-        thrust::host_vector<SubpixelPoint> h_points(d_valid_points);
+        // 261018 pinned＋流序回读（原 thrust host_vector 构造＝legacy 全同步）；
+        // 本同步同时排空 Step 5.5 的 D2D 拷贝——持久缓冲复用安全点
+        if (h_pinned_points_cap_ < static_cast<size_t>(point_count)) {
+            if (h_pinned_points_) {
+                cudaFreeHost(h_pinned_points_);
+                h_pinned_points_ = nullptr;
+                h_pinned_points_cap_ = 0;
+            }
+            cudaError_t perr = cudaMallocHost(
+                &h_pinned_points_, static_cast<size_t>(point_count) * sizeof(SubpixelPoint));
+            if (perr != cudaSuccess) {
+                result.success = false;
+                result.message = std::string("pinned points alloc failed: ") + cudaGetErrorString(perr);
+                CALIB_LOG_ERROR("Execute(): {}", result.message);
+                return result;
+            }
+            h_pinned_points_cap_ = static_cast<size_t>(point_count);
+        }
+        cudaMemcpyAsync(h_pinned_points_,
+                        thrust::raw_pointer_cast(d_valid_points_.data()),
+                        static_cast<size_t>(point_count) * sizeof(SubpixelPoint),
+                        cudaMemcpyDeviceToHost, cuda_stream);
+        cudaStreamSynchronize(cuda_stream);
 
         std::map<int, std::vector<cv::Point2f>> centerPoints;
-        for (const auto& pt : h_points) {
+        for (int k = 0; k < point_count; ++k) {
+            const auto& pt = h_pinned_points_[k];
             centerPoints[pt.label].emplace_back(pt.px, pt.py);
         }
 

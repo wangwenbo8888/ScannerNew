@@ -24,6 +24,7 @@
 
 #ifdef JMW_BUILD_CUDA
 #include <opencv2/core/cuda.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>   // 261018：downloadFusedXyz 原生流序拷贝取 cudaStream_t
 #include <cuda_runtime.h>
 #include "scanning/fusion/laser_cloud_fuse_cuda/laser_cloud_fuse_cuda.h"
 #include "scanning/fusion/laser_cloud_normal_cuda/laser_cloud_normal_cuda.h"
@@ -45,7 +46,10 @@ constexpr int kScanGpuSlots = 4;               // 扫描 GPU 槽（§4.3；2026-
                                               // 2→4——120fps 目标下 GPU 段 20ms×
                                               // 帧并发需 ≥3 槽，2 槽上限 100fps）
 constexpr int kRenderThrottleFrames = 5;       // 渲染节流（首帧起每 N 帧）
-constexpr std::chrono::milliseconds kPoolAcquireTimeout{50};
+// 261018 50→5ms：消费线程跟不上时池干涸，lane 在 GPU 槽内干等 50ms/帧＝
+// laser 段 60-90ms 主因＋槽周转砍半（10-18 真机日志：取块超时 47395 次/会话）。
+// 池耗尽=无激光降级语义不变，只是不再占用 GPU 槽空等
+constexpr std::chrono::milliseconds kPoolAcquireTimeout{5};
 constexpr std::chrono::milliseconds kRecoverJoinTimeout{2000};  // recover 限时 drain（僵尸 detach 兜底）
 #ifdef JMW_BUILD_CUDA
 constexpr size_t kLaserPoolBlocks = 8;                 // 在飞激光块上限
@@ -168,12 +172,15 @@ public:
             const int n = (block.count > 0) ? std::min(block.count, cols) : cols;
             if (n <= 0) return;
             cv::cuda::GpuMat view = block.points.colRange(0, n);   // 1×n CV_32FC3 视图
-            auto fr = fuse_.Execute(view, matxFromArr9(R), vec3FromArr3(T));
+            // 261018 接流退役逐调用新建流：原无 stream 重载内部每次
+            // cv::cuda::Stream 构造/析构（cudaStreamCreate/Destroy 每帧×2）
+            // ——改适配器持久流（fuse/normal 同流保序）
+            auto fr = fuse_.Execute(view, matxFromArr9(R), vec3FromArr3(T), fuseStream_);
             if (!fr.success) {
                 JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] laser 融合失败: {}", fr.message);
                 return;
             }
-            auto nr = normal_.Execute(fuse_, fr);                  // 新体素法线估计
+            auto nr = normal_.Execute(fuse_, fr, fuseStream_);      // 新体素法线估计
             if (!nr.success) JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] laser 法线估计失败: {}", nr.message);
         } catch (const std::exception& e) {
             JMW_LOG_ERROR("07-ScanPipeline", "[ScanPipeline] laser 融合适配器异常: {}", e.what());
@@ -189,9 +196,14 @@ public:
         const auto ctx = fuse_.GetDeviceContext();
         if (!ctx.d_fusedXyz || ctx.fusedPointCount == 0) return {};
         std::vector<float> host(ctx.fusedPointCount * 3);
-        if (cudaMemcpy(host.data(), ctx.d_fusedXyz,
-                       host.size() * sizeof(float),
-                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+        // 261018 流序下载退役 legacy 同步 cudaMemcpy（与 lane 阻塞流互斥＝
+        // 跨 lane 闸；融合云大时数百 ms 全局停顿）——异步拷贝＋本流同步
+        //（fusedXyz 由 fuseStream_ 流序写入，同流读取保序）
+        const cudaStream_t cs = cv::cuda::StreamAccessor::getStream(fuseStream_);
+        if (cudaMemcpyAsync(host.data(), ctx.d_fusedXyz,
+                            host.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost, cs) != cudaSuccess ||
+            cudaStreamSynchronize(cs) != cudaSuccess) {
             JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] laser 融合云下载失败");
             return {};
         }
@@ -218,6 +230,9 @@ private:
     }
     calib::LaserCloudFuseCuda fuse_{fuseParams()};
     calib::LaserCloudNormalCuda normal_;
+    // 261018：fuse/normal/融合云下载共用的持久流（fuse/normal 同流保序；
+    // const 下载口经 mutable 复用）
+    mutable cv::cuda::Stream fuseStream_;
 };
 #endif // JMW_BUILD_CUDA
 

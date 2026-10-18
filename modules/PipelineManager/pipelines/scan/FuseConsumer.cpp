@@ -12,6 +12,7 @@
 
 #ifdef JMW_BUILD_CUDA
 #include <opencv2/core.hpp>
+#include <opencv2/core/cuda.hpp>
 #endif
 
 namespace Scanner::pipeline {
@@ -31,7 +32,12 @@ std::vector<float> defaultLaserDownload(const GpuPointCloudBlock& b) {
         const int n = (b.count > 0) ? (b.count < cols ? b.count : cols) : cols;
         if (n <= 0) return {};
         cv::Mat host;
-        b.points.download(host);                       // 真 CUDA（默认流同步）
+        // 261018 流序下载退役默认流：原 download(host) 走 legacy 默认流（与
+        // lane 阻塞流互斥＝跨 lane 闸）——thread_local 持有流＋本流同步
+        //（块数据在入队前已经 lane 链尾同步落定，任意流读取皆安全）
+        static thread_local cv::cuda::Stream s_dlStream;
+        b.points.download(host, s_dlStream);
+        s_dlStream.waitForCompletion();
         if (host.empty() || !host.isContinuous()) return {};
         const float* p = host.ptr<float>();
         return std::vector<float>(p, p + static_cast<size_t>(n) * 3);
@@ -98,9 +104,18 @@ void FuseConsumer::loop() {
 void FuseConsumer::processOne(FrameResult& fr) {
     // 0) 出队即计数（异常帧也计入 consumed）；取 fetch_add 前值判渲染节流 → 首帧即推
     const uint64_t n = consumed_.fetch_add(1, std::memory_order_relaxed);
+    // 261018 消费段打点（节流 1/30）：10-18 真机实测消费仅 13fps（60fps 生产
+    // →池干涸→47k 取块超时），补分段观测定位消费侧耗时归属
+    using CLK = std::chrono::steady_clock;
+    const auto tC0 = CLK::now();
+    auto msSince = [&tC0] {
+        return std::chrono::duration<double, std::milli>(CLK::now() - tC0).count();
+    };
+    double tMarker = 0, tLaser = 0, tRender = 0;
     try {
         // 1) 标记点融合（A/B 模式均跑；R/T 为配准结果，融合进全局云）
         deps_.markerFuse->fuse(fr.markers, fr.R, fr.T);
+        tMarker = msSince();
 
         // 2) 激光融合 + host 下载（A 模式 laserFuse 空 / 帧无块 → 跳过整段）
         std::vector<float> laserXyz;
@@ -110,7 +125,11 @@ void FuseConsumer::processOne(FrameResult& fr) {
             laserXyz = deps_.laserDownload ? deps_.laserDownload(*fr.laser)
                                            : defaultLaserDownload(*fr.laser);
         }
+        // 261018 块即用即还：下载完成后立即归池——原持有到帧析构（渲染/obs
+        // 段数十 ms 且随融合云增长），期间块被白占＝池干涸推手之二
+        fr.laser.reset();
 #endif
+        tLaser = msSince() - tMarker;
 
         // 3) 渲染节流（先于 obs.push，序见文件头）：第 1、N+1…帧推送一次
         //    （激光句柄由 ILaserFuse 适配器持有 → nullptr）。
@@ -148,6 +167,7 @@ void FuseConsumer::processOne(FrameResult& fr) {
                          deps_.markerFuse->fusedPoints().size(), h.laserCount, n);
             deps_.sceneFeed->pushCloudSnapshot(h);
         }
+        tRender = msSince() - tMarker - tLaser;
 
         // 4) 攒观测：R_init/T_init 逐帧保留；markerObs 查高精度集；激光 host 拷贝入缓存
         FrameObs fo;
@@ -165,6 +185,16 @@ void FuseConsumer::processOne(FrameResult& fr) {
             fo.markerObs.push_back(mo);
         }
         deps_.obs->push(std::move(fo), laserXyz);
+
+        // 消费段打点（节流 1/30）：marker=标记点融合 / laser=激光融合+下载
+        // / render=节流推送（融合云全量下载+仓库整包） / obs=观测累加
+        {
+            static std::atomic<uint64_t> s_fcSeg{0};
+            if (s_fcSeg.fetch_add(1, std::memory_order_relaxed) % 30 == 0)
+                JMW_LOG_INFO("07-ScanChains",
+                             "[FuseConsumer] 消费分段: marker={:.1f} laser={:.1f} render={:.1f} obs={:.1f} ms（帧 {}）",
+                             tMarker, tLaser, tRender, msSince() - tMarker - tLaser - tRender, n);
+        }
 
         if (deps_.sink && !laserDegradeReported_ && deps_.obs->degradedLaser()) {
             deps_.sink->report(Scanner::QualityFlag::Degraded, kEvtLaserCacheDegraded,

@@ -430,9 +430,10 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::binarizeSpot(
         result.success = true;
         result.message = "Spot binarize successful";
         result.qualityFlag = calib::QualityFlag::Normal;
-        result.d_laserMask = std::make_shared<cv::cuda::GpuMat>(d_laser_mask.clone());
-        result.d_markingPointMask =
-            std::make_shared<cv::cuda::GpuMat>(d_marking_final.clone());
+        result.d_laserMask = std::make_shared<cv::cuda::GpuMat>();
+        d_laser_mask.copyTo(*result.d_laserMask, stream);      // 261018 流序拷贝（原 clone 走默认流）
+        result.d_markingPointMask = std::make_shared<cv::cuda::GpuMat>();
+        d_marking_final.copyTo(*result.d_markingPointMask, stream);
     } catch (const cv::Exception& e) {
         result.success = false; result.message = std::string("OpenCV: ") + e.what();
         result.qualityFlag = calib::QualityFlag::Degraded;

@@ -69,6 +69,10 @@ struct RegionAnalyzerCUDA::Impl {
     int stats_capacity_ = 0;           // 当前已分配的 max_label+1 容量
     static constexpr int COMPACT_MAX = 65536;  // d_compact_ 最大条目
 
+    // 261018：Step1 connectedComponents 走 legacy 默认流的完成事件（非阻塞
+    // 调用流适配——默认流不再隐式等调用流，排序经事件栅栏显式接回）
+    cudaEvent_t ev_legacy_done_ = nullptr;
+
     bool warmed_up_ = false;
     int warmup_rows_ = 0;
     int warmup_cols_ = 0;
