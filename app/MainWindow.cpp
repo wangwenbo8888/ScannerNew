@@ -1565,6 +1565,11 @@ void MainWindow::createFloatingToolbar()
     m_floatingToolbar->setMinimumWidth(400);
     m_floatingToolbar->setMaximumWidth(800);
     m_floatingToolbar->setFixedHeight(47);
+    // 261017 用户口径：悬浮工具栏仅扫描暂停态可用（M 停采→暂停；其它任何时候
+    // ——未开会话/扫描中/会话已关——圈选/删除一律不可操作）。创建即置灰，
+    // updateToolbarEditGate 每秒随 infoTimer 刷新（覆盖 09-21 口径的 S2 待机
+    // 分支——当日裁定收窄为暂停专用）
+    m_floatingToolbar->setEnabled(false);
 
     QHBoxLayout *toolbarLayout = new QHBoxLayout(m_floatingToolbar);
     toolbarLayout->setContentsMargins(16, 0, 16, 0);
@@ -2793,6 +2798,20 @@ QWidget *MainWindow::createParamSection()
 // 面片扫描推荐预设（P-5 收敛 261002）：B=10/L=40/曝光 3ms＝亮度梯档 10 精确点
 // （档值表插值锚——260912 口径随档入梯）。换档走 setBrightnessLadderIndex（与
 // 按键/UI 滑条同一把梯同一本账）；滑条回显经 111 事件回刷（此处只同步预置位）
+// 261017 悬浮工具栏编辑门禁（用户口径收窄版）：仅「扫描会话暂停态」可用——
+// M 键停采→工作流 Paused→可圈选/删除标志点与激光点；扫描中/未开会话/会话已
+// 关一律整窗置灰不可操作。每秒随 infoTimer 刷新（M 停/续采最多 1s 延迟收敛）
+void MainWindow::updateToolbarEditGate() {
+    if (!m_floatingToolbar) return;
+    const bool ok = m_appCtx && m_appCtx->isScanSessionPaused();
+    if (m_floatingToolbar->isEnabled() != ok) {
+        m_floatingToolbar->setEnabled(ok);
+        statusBar()->showMessage(ok
+            ? QStringLiteral("扫描已暂停——可圈选编辑（悬浮工具栏已解锁）")
+            : QStringLiteral("悬浮工具栏已锁定（仅扫描暂停时可用）"), 2500);
+    }
+}
+
 void MainWindow::applyMeshPreset() {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
@@ -3303,6 +3322,7 @@ void MainWindow::startInfoTimer()
         updateInfoSection();
         updateVirtualKeypadStates();   // P-键盘：每秒刷新——响应 SystemState
                                         // ＋calibArmed/采集等非 StateChanged 驱动态
+        updateToolbarEditGate();       // 261017：悬浮工具栏门禁——仅扫描暂停态可用
         // P-分辨率：滑条与 DM 同步（非拖动时——初始时序偏差自动收敛）
         if (m_voxelSlider && !m_voxelSlider->isSliderDown()) {
             auto* dmVox = m_appCtx ? m_appCtx->deviceManager() : nullptr;

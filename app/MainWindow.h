@@ -134,6 +134,7 @@ protected:
     void updateParamPanelStates();
     void refreshMenuDialog();              // P-菜单弹窗：进菜单弹出/退菜单关闭/游标高亮/子态
     void ensureFinalBADlg();               // P-全局优化进度弹窗（260705 卡片化）：两处点火路径共用
+    void updateToolbarEditGate();          // 261017 悬浮工具栏门禁：仅扫描暂停态可用（每秒刷新）
     QList<QPushButton*> m_navLeftButtons;
     QList<QPushButton*> m_navRightButtons;
     QList<QPushButton*> m_toolButtons;

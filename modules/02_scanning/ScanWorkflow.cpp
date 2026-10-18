@@ -57,6 +57,34 @@ Result ScanWorkflow::initialize() {
     return Result::ok();
 }
 
+namespace {
+// 261017 种子净化：上次会话产物（GBA 标志点/仓库快照）装载时 10mm 近距去重——
+// 链断重锚的重复 id 随会话时长累积（真机 30min 会话 921 id/终版 287 点实证），
+// 不净化则下会话开场即冒出数百标志点。10mm << 标志点间距 30mm 安全；>150 仍
+// 偏大＝上次会话脏账残留，告警提示清 artifacts 重扫
+void dedupSeedMarkers(std::vector<calib::MarkerCloudPoint>& pts) {
+    constexpr float kR2 = 10.0f * 10.0f;
+    std::vector<calib::MarkerCloudPoint> kept;
+    kept.reserve(pts.size());
+    for (const auto& p : pts) {
+        bool dup = false;
+        for (const auto& q : kept) {
+            const float dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
+            if (dx * dx + dy * dy + dz * dz < kR2) { dup = true; break; }
+        }
+        if (!dup) kept.push_back(p);
+    }
+    if (kept.size() != pts.size())
+        JMW_LOG_WARN("02-ScanWorkflow", "[种子净化] {} → {} 点（<10mm 近距合并）",
+                     pts.size(), kept.size());
+    if (kept.size() > 150)
+        JMW_LOG_WARN("02-ScanWorkflow",
+            "[种子净化] 净化后仍 {} 点——上次会话脏账残留可能（链断 id 累积），"
+            "换新工件前建议清 artifacts/scan/ 并重置", kept.size());
+    pts.swap(kept);
+}
+} // namespace
+
 Result ScanWorkflow::assemblePipeline() {
     namespace sp = Scanner::pipeline;
 
@@ -83,19 +111,21 @@ Result ScanWorkflow::assemblePipeline() {
         if (probe.get("scan/markers_gba", probeBlob)) {
             std::vector<Scanner::data::ArtifactMarker> l4Markers;
             if (deserializeMarkers(probeBlob, l4Markers) && !l4Markers.empty()) {
-                priorIds_.reserve(l4Markers.size());
-                priorXyz_.reserve(l4Markers.size() * 3);
-                cfg.existingMarkers.reserve(l4Markers.size());
-                for (size_t i = 0; i < l4Markers.size(); ++i) {
+                std::vector<calib::MarkerCloudPoint> seed;
+                seed.reserve(l4Markers.size());
+                for (const auto& m : l4Markers)
+                    seed.push_back(calib::MarkerCloudPoint{
+                        static_cast<float>(m.x), static_cast<float>(m.y),
+                        static_cast<float>(m.z), 0.0f, 0.0f, 1.0f});
+                dedupSeedMarkers(seed);   // 261017：链断重复 id 净化后再入种子/先验
+                priorIds_.reserve(seed.size());
+                priorXyz_.reserve(seed.size() * 3);
+                cfg.existingMarkers = seed;
+                for (size_t i = 0; i < seed.size(); ++i) {
                     priorIds_.push_back(static_cast<int>(i));
-                    priorXyz_.push_back(l4Markers[i].x);
-                    priorXyz_.push_back(l4Markers[i].y);
-                    priorXyz_.push_back(l4Markers[i].z);
-                    cfg.existingMarkers.push_back(
-                        calib::MarkerCloudPoint{static_cast<float>(l4Markers[i].x),
-                                                static_cast<float>(l4Markers[i].y),
-                                                static_cast<float>(l4Markers[i].z),
-                                                0.0f, 0.0f, 1.0f});
+                    priorXyz_.push_back(seed[i].x);
+                    priorXyz_.push_back(seed[i].y);
+                    priorXyz_.push_back(seed[i].z);
                 }
                 JMW_LOG_INFO("02-ScanWorkflow",
                     "[L4 读侧] 上次会话 GBA 标志点 {} 个装载（软先验＋seed）← artifacts/scan/markers_gba",
@@ -111,24 +141,27 @@ Result ScanWorkflow::assemblePipeline() {
     if (ctx_ && ctx_->pointCloudBuffer())
         ctx_->pointCloudBuffer()->snapshotMarkers(markerVer, markerRecs);
     if (!markerRecs.empty()) {
+        cfg.existingMarkers.clear();
         cfg.existingMarkers.reserve(markerRecs.size());
         for (const auto& r : markerRecs)
             cfg.existingMarkers.push_back(
                 calib::MarkerCloudPoint{r.pos.x, r.pos.y, r.pos.z,
                                         r.normal[0], r.normal[1], r.normal[2]});
+        dedupSeedMarkers(cfg.existingMarkers);   // 261017：仓库快照种子同样净化
         // 终局遍软先验留档（Q5：GlobalOptimObject.setExistingPrior 消费；
         // id=下标 0..n-1——与 07 seed/hpGlobalIds 下标语义对接）
         priorIds_.clear();
         priorXyz_.clear();
-        priorIds_.reserve(markerRecs.size());
-        priorXyz_.reserve(markerRecs.size() * 3);
-        for (size_t i = 0; i < markerRecs.size(); ++i) {
+        priorIds_.reserve(cfg.existingMarkers.size());
+        priorXyz_.reserve(cfg.existingMarkers.size() * 3);
+        for (size_t i = 0; i < cfg.existingMarkers.size(); ++i) {
             priorIds_.push_back(static_cast<int>(i));
-            priorXyz_.push_back(markerRecs[i].pos.x);
-            priorXyz_.push_back(markerRecs[i].pos.y);
-            priorXyz_.push_back(markerRecs[i].pos.z);
+            priorXyz_.push_back(cfg.existingMarkers[i].x);
+            priorXyz_.push_back(cfg.existingMarkers[i].y);
+            priorXyz_.push_back(cfg.existingMarkers[i].z);
         }
-        JMW_LOG_INFO("02-ScanWorkflow", "[ScanWorkflow] 续扫基准 {} 点", markerRecs.size());
+        JMW_LOG_INFO("02-ScanWorkflow", "[ScanWorkflow] 续扫基准 {} 点（净化后）",
+                     cfg.existingMarkers.size());
     } else {
         priorIds_.clear();
         priorXyz_.clear();
