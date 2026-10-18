@@ -48,6 +48,9 @@ public:
 
     // LeadScan 移植：加载网格文件（STL/OBJ，带光照材质）
     bool loadMesh(const QString& filepath);
+    /// 261017 最近一次 loadMesh 的三角面数（失败清 0；非索引网格＝顶点数/3）
+    /// ——工程树「三角面 001」计数显示用
+    size_t lastMeshTriangleCount() const { return m_lastMeshTriangles; }
 
     // LeadScan 移植：加载标志点（点精灵版——无法线数据时的回退）
     void loadMarkerPoints(const std::vector<osg::Vec3>& markers,
@@ -443,6 +446,7 @@ private:
     bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角）
     bool m_markersVisible = true;                   // 标志点显示开关（右键菜单；NodeMask 0=隐藏）
     bool m_laserVisible = true;                     // 激光点显示开关（右键菜单；NodeMask 0=隐藏）
+    size_t m_lastMeshTriangles = 0;                 // 261017 最近导入网格三角面数（树计数用）
     QPoint m_rightPressGlobalPos;                   // 右键按下位置（拖拽阈值判定）
     bool m_suppressContextMenu = false;             // 右键拖拽平移/圈选闭合后松开不弹菜单
     double m_lastFitRadius = -1.0;                  // 上次取景时场景半径（-1=未取过）

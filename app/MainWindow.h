@@ -168,6 +168,7 @@ protected:
     QLabel *m_projectName;
     QTreeWidget *m_projectTree;
     QTreeWidgetItem *m_cloudItem001;
+    QTreeWidgetItem *m_meshItem001 = nullptr;        // 261017 三角面 001（导入网格计数回写）
     QTreeWidgetItem *m_markerRootItem = nullptr;     // 标记点列表根（动态挂扫描会话节点）
     QTreeWidgetItem *m_markerCurrentItem = nullptr;  // 当前扫描会话节点（实时计数落点）
     int m_markerScanSeq = 0;                         // 会话序号（标记点 001、002…）

@@ -2354,9 +2354,14 @@ QWidget *MainWindow::createToolBar()
                         QApplication::processEvents();
 
                         m_3dView->clearScene();
-                        if (m_3dView->loadMesh(path))
+                        if (m_3dView->loadMesh(path)) {
                             statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe7\xbd\x91\xe6\xa0\xbc\xe6\x88\x90\xe5\x8a\x9f: ") + path);
-                        else {
+                            // 261017 三角面 001 计数回写（对齐导入点云口径）
+                            if (m_meshItem001)
+                                m_meshItem001->setText(
+                                    0, QStringLiteral("三角面 001 (%1)")
+                                              .arg(m_3dView->lastMeshTriangleCount()));
+                        } else {
                             statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe7\xbd\x91\xe6\xa0\xbc\xe5\xa4\xb1\xe8\xb4\xa5"));
                             QMessageBox::warning(this, "Import", "Failed to read mesh.");
                         }
@@ -2607,6 +2612,7 @@ QWidget *MainWindow::createProjectSection()
     m_cloudItem001->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/cloudlist-black-11.svg", 11)));
     QTreeWidgetItem *c2 = new QTreeWidgetItem(cloudRoot, QStringList() << QStringLiteral("三角面 001"));
     c2->setIcon(0, QIcon(renderSvg(":/icons/resources/icons/icon/left/cloudlist-black-11.svg", 11)));
+    m_meshItem001 = c2;   // 261017 导入网格计数回写（原局部变量够不着）
     m_projectTree->addTopLevelItem(cloudRoot);
     cloudRoot->setExpanded(true);   // 启动即展开（261004 用户口径）
 

@@ -2324,10 +2324,15 @@ bool OSGWidget::loadMesh(const QString& filepath)
     // 用 file_io 解析
     Scanner::data::fileio::MeshData mesh;
     std::string spath(cpath);
+    m_lastMeshTriangles = 0;   // 261017 失败清 0（树计数消费）
     if (!Scanner::data::fileio::importMesh(spath, mesh) || mesh.vertices.empty()) {
         if (lf) { fprintf(lf, "  importMesh failed\n"); fclose(lf); }
         return false;
     }
+    // 261017 三角面计数（索引网格＝indices/3；非索引＝顶点数/3）
+    m_lastMeshTriangles = mesh.indices.empty()
+        ? mesh.vertices.size() / 3
+        : mesh.indices.size() / 3;
 
     if (lf) { fprintf(lf, "  verts=%zu indices=%zu\n", mesh.vertices.size(), mesh.indices.size()); fclose(lf); }
 
