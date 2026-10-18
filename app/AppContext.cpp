@@ -606,6 +606,11 @@ void AppContext::initialize() {
     // P1-1 入口已接：文件菜单「后处理导出 STL」→ startPostProcessSession 点火
     postWf_->setOnFinished([this](bool ok) {
         commandGate_->notifyCompleted("start_postprocess", ok);
+        // 261017 后处理完成出口（UI 三角面计数刷新——后台线程，UI 侧须 queued）
+        if (postProcessFinished_) {
+            const std::string stl = postWf_ ? postWf_->outputPath() : std::string();
+            try { postProcessFinished_(ok, stl); } catch (...) {}
+        }
     });
 
     JMW_LOG_INFO("app-AppContext", "[AppContext] 全部组件装配完成");

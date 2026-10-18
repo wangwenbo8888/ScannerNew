@@ -148,6 +148,12 @@ public:
     void setFinalBAProgress(std::function<void(int, const std::string&)> cb) {
         finalBAProgress_ = std::move(cb);
     }
+    /// 261017 后处理完成回调（04 postThread_ 尾调——后台线程，UI 侧须自行切主线程）：
+    /// ok=STL 三角化成败，stlPath=输出路径——工程树「三角面 001」计数刷新用
+    void setPostProcessFinished(
+        std::function<void(bool ok, const std::string& stlPath)> cb) {
+        postProcessFinished_ = std::move(cb);
+    }
 void setSimExtract(bool on) { simExtract_.store(on, std::memory_order_relaxed); }
     bool simExtract() const { return simExtract_.load(std::memory_order_relaxed); }
     /// 「导入点云」stash：模拟扫描的激光数据源（导入点云菜单写入；sim 启动读取）
@@ -215,6 +221,7 @@ private:
     std::thread scanStartThread_;               // 扫描装配后台线程（§3.3 handler 毫秒级契约；
     std::thread finishThread_;                  // finish background (260920: stop()+GBA final pass, minutes — was blocking UI)
     std::function<void(int, const std::string&)> finalBAProgress_;   // 终局遍进度出口（可空）
+    std::function<void(bool, const std::string&)> postProcessFinished_;  // 261017 后处理完成出口（可空）
                                                 //   stop/shutdown 先 join——防与 stop() 竞态）
     std::atomic<uint64_t> scanActGen_{0};       // 扫描会话代（260911）：每次 start_scan
                                                 //   尝试/finish_scan 递增——后台装配失败

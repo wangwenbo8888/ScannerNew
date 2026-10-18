@@ -44,6 +44,8 @@ public:
     ~PostProcessWorkflow() override;
 
     void setOutputPath(const std::string& path) { outputPath_ = path; }
+    /// 261017 输出路径查询（app 后处理完成回调取 STL 路径——三角面计数刷新）
+    const std::string& outputPath() const { return outputPath_; }
     /// 位掩码透传 07 E：bit0 法线 bit1 封装 bit2 补洞 bit3 光顺 bit4 边界
     void setSkipStages(uint32_t mask) { skipStages_ = mask; }
 

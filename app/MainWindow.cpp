@@ -56,6 +56,7 @@
 #include <QProgressDialog>
 #include <QGridLayout>     // 虚拟按键表盘（261002 临时测试机）
 #include <cstdio>
+#include <cstring>   // 261017 STL 三角面计数（二进制头 uint32 读取）
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -219,6 +220,40 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         if (m_finalBADlg) { m_finalBADlg->close(); m_finalBADlg = nullptr; }
                     }, Qt::QueuedConnection);
                 }
+            }, Qt::QueuedConnection);
+        });
+        // 261017 后处理完成 → 「三角面 001」计数刷新（用户口径：点云三角化在后
+        // 处理——计数随 STL 产物刷新，导入网格仅外部来源）。回调在 postThread_
+        // 后台线程 → queued 切 UI
+        m_appCtx->setPostProcessFinished([this](bool ok, const std::string& stlPath) {
+            QMetaObject::invokeMethod(this, [this, ok, stlPath]() {
+                if (!ok) {
+                    statusBar()->showMessage(QStringLiteral("后处理三角化失败——详见日志"), 4000);
+                    return;
+                }
+                // STL 三角面数：二进制＝头 80 字节后 uint32（校验 84+50n==文件长）；
+                // ASCII＝数 "facet" 行
+                size_t tris = 0;
+                if (QFile f(QString::fromStdString(stlPath)); f.open(QIODevice::ReadOnly)) {
+                    const qint64 size = f.size();
+                    if (size >= 84) {
+                        const QByteArray head = f.read(84);
+                        quint32 n = 0;
+                        std::memcpy(&n, head.constData() + 80, 4);
+                        if (size == 84 + static_cast<qint64>(n) * 50) {
+                            tris = n;
+                        } else if (f.seek(0)) {
+                            while (!f.atEnd())
+                                if (f.readLine(64).startsWith("facet")) ++tris;
+                        }
+                    }
+                }
+                if (m_meshItem001)
+                    m_meshItem001->setText(0, QStringLiteral("三角面 001 (%1)").arg(qulonglong(tris)));
+                statusBar()->showMessage(
+                    QStringLiteral("后处理完成——点云已三角化：%1 三角面（%2）")
+                        .arg(qulonglong(tris))
+                        .arg(QString::fromStdString(stlPath)), 5000);
             }, Qt::QueuedConnection);
         });
     }
