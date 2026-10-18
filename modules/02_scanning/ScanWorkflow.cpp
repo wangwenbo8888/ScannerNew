@@ -80,10 +80,15 @@ void dedupSeedMarkers(std::vector<calib::MarkerCloudPoint>& pts) {
     if (kept.size() != pts.size())
         JMW_LOG_WARN("02-ScanWorkflow", "[种子净化] {} → {} 点（<10mm 近距合并）",
                      pts.size(), kept.size());
-    if (kept.size() > 150)
+    // 261018 超量拒种：真实标志板数十个量级——净化后仍 >150 ＝上次会话脏账
+    // （假点散布 >10mm 合不掉；真机实证 3728→709 开场冒 700+）。拒种＝零种子
+    // 干净起步，好会话重写 markers_gba 后自动恢复续扫能力
+    if (kept.size() > 150) {
         JMW_LOG_WARN("02-ScanWorkflow",
-            "[种子净化] 净化后仍 {} 点——上次会话脏账残留可能（链断 id 累积），"
-            "换新工件前建议清 artifacts/scan/ 并重置", kept.size());
+            "[种子净化] 净化后 {} 点仍超 150——判定脏账，拒种（零种子起步）；"
+            "本会话产物将覆写 artifacts/scan/markers_gba", kept.size());
+        kept.clear();
+    }
     pts.swap(kept);
 }
 } // namespace
