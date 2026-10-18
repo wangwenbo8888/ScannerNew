@@ -1026,6 +1026,13 @@ QImage camMatToImage(const cv::Mat& m) {
 
 // pushParam1Scaled（260912 三参比例旋钮）随 P-5 收敛退役——三参唯一合法写入口
 // 是亮度梯换档（禁绕梯直改三参，设计 §3.3.2 一本账纪律）
+
+// 261018 点云计数万位口径（用户口径：万以下统计没意义）——≥1万 显示整数万
+// （72360636→7236万），以下显示原值（扫描起步仍可见增长）
+QString fmtCloudCount(qulonglong n) {
+    return n >= 10000 ? QStringLiteral("%1万").arg(n / 10000)
+                      : QString::number(n);
+}
 } // namespace
 
 void MainWindow::showCameraMonitor() {
@@ -2410,7 +2417,7 @@ QWidget *MainWindow::createToolBar()
                         m_importedCloudCount = points.size();
                         if (m_cloudItem001)
                             m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
-                                                        .arg(points.size()));
+                                                        .arg(fmtCloudCount(points.size())));
                         if (m_3dView) {
                             m_3dView->setCenterOverlayVisible(false);
                             m_3dView->loadPointCloud(points);
@@ -3043,7 +3050,8 @@ QWidget *MainWindow::create3DViewArea()
         [this](int loaded, int total)
         {
             if (m_cloudItem001)
-                m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)").arg(loaded));
+                m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
+                                            .arg(fmtCloudCount(static_cast<qulonglong>(loaded))));
         });
     viewLayout->addWidget(m_3dView, 1);
 
@@ -3222,11 +3230,13 @@ QWidget *MainWindow::createBottomToolBar()
                                   .arg(vis));
                 }
                 // 点云计数（260912 收口）：仓库计数为准（软删不改仓库——导出
-                // 口径与计数一致；渲染侧软删仅影响画面）
+                // 口径与计数一致；渲染侧软删仅影响画面）——261018 万位口径
                 if (auto* pcbCnt = m_appCtx ? m_appCtx->pointCloudBuffer() : nullptr;
                     m_cloudItem001 && pcbCnt) {
                     m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
-                                                .arg(pcbCnt->getTotalPointCount()));
+                                                .arg(fmtCloudCount(
+                                                    static_cast<qulonglong>(
+                                                        pcbCnt->getTotalPointCount()))));
                 }
                 JMW_LOG_INFO("app-MainWindow", "[lassoCompleted] 三栏复位完成（0-6 全清）");
             });
@@ -3451,7 +3461,7 @@ void MainWindow::startInfoTimer()
         static size_t lastLabelN = static_cast<size_t>(-1);
         if (m_cloudItem001 && labelCount != lastLabelN) {
             m_cloudItem001->setText(0, QStringLiteral("点云数据 001 (%1)")
-                                        .arg(qulonglong(labelCount)));
+                                        .arg(fmtCloudCount(qulonglong(labelCount))));
             lastLabelN = labelCount;
         }
         // 3D 快照重载仅非扫描期（扫描期激光由 laserCloudUpdated 直渲——
