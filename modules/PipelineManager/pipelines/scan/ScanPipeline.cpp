@@ -553,10 +553,24 @@ void ScanPipeline::stop() {
     if (state_ == State::Idle) return;            // 未配置：无物可停（保持 Idle 可装配）
     syncState();                                  // Faulted 一次性上报后再收尾
     runtime_.requestStop();                       // 幂等；未 start 过也安全
-    runtime_.drainAndShutdown();
-    if (consumer_) {
-        consumer_->requestStop();
-        consumer_->join();                        // drain 语义：排空队列后返回
+    {
+        // 261018 收尾分段打点：drain＝无限时 join（冻结 lane 会阻塞任意久——
+        // 「全局优化弹窗停 0%」的直接嫌疑段），分段计时定位
+        const auto t0 = std::chrono::steady_clock::now();
+        runtime_.drainAndShutdown();
+        const auto t1 = std::chrono::steady_clock::now();
+        if (consumer_) {
+            consumer_->requestStop();
+            consumer_->join();                    // drain 语义：排空队列后返回
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+        const auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        JMW_LOG_WARN("07-ScanPipeline",
+            "[ScanPipeline] 收尾分段: lane排空={:.0f}ms consumer排空={:.0f}ms"
+            "（lane>2000ms＝冻结 lane 拖尾，查 hang_*.dmp）",
+            ms(t0, t1), ms(t1, t2));
     }
     // 自动检查点（cfg.checkpointPath 非空时）：崩溃恢复链的常规落盘点。
     // 失败仅上报不改变 stop 语义（数据已在内存完成收尾，检查点属保险）

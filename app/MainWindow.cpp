@@ -1870,9 +1870,11 @@ void MainWindow::ensureFinalBADlg() {
         " color: transparent; }"
         "QProgressBar::chunk { border-radius: 4px; background-color: #2980B9; }");
     m_finalBADlg->setLabelText(QStringLiteral(
-        "<div style='color:#8B1A2B; font-weight:bold; font-size:15px;'>全局优化</div>"
+        "<div style='color:#8B1A2B; font-weight:bold; font-size:15px;'>扫描收尾</div>"
         "<div style='color:#444; font-size:14px; padding-top:6px;'>"
-        "全局优化中，请稍候……</div>"));
+        "扫描收尾中（lane 排空＋检查点）……<br>"
+        "随后自动进入全局优化——若长时间停留此页，"
+        "详见日志（lane 冻结收尾耗时）</div>"));
     m_finalBADlg->show();
 }
 
