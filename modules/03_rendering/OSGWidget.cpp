@@ -1944,10 +1944,9 @@ void OSGWidget::filterLassoFirstLayer(std::vector<LassoHit>& hits) {
 void OSGWidget::applyLassoHighlight(const std::vector<LassoHit>& hits) {
     std::map<osg::Geometry*, std::vector<unsigned int>> byGeom;
     for (const auto& h : hits) {
-        bool already = false;
-        for (auto& e : m_highlights)
-            if (e.geom == h.geom) { already = true; break; }
-        if (already) continue;                        // 已高亮几何跳过（原语义）
+        // 261018 撤「同几何跳过」：跨圈选残留的旧条目会把第二次圈选高亮整个
+        // 吞掉（用户「第二次圈选没效果」的反馈环之一）——同几何允许重复
+        // 高亮（恢复按条目幂等，clearHighlight 已带已删跳过保护）
         byGeom[h.geom].push_back(h.vi);
     }
     for (auto& kv : byGeom) {
@@ -1971,6 +1970,8 @@ void OSGWidget::applyLassoHighlight(const std::vector<LassoHit>& hits) {
 }
 
 void OSGWidget::highlightSelectedPoints() {
+    clearHighlight();   // 261018 先清前次高亮（蓝→原色，已删点跳过）——防跨圈选
+                        // 蓝色叠加污染二次高亮的 originalColors 快照
     std::vector<LassoHit> hits;
     collectLassoHits(m_selectedPolylines.empty()
                          ? nullptr : m_selectedPolylines.back().get(), hits);
@@ -2041,6 +2042,7 @@ void OSGWidget::deletePointsInPolyline() {
                  hits.size(), m_lassoFirstLayer, m_lassoTargets);
     if (m_lassoFirstLayer) filterLassoFirstLayer(hits);
     applyLassoDelete(hits);
+    clearHighlight();   // 261018 删除后清高亮残留条目（防后续误恢复/吞高亮）
     update();
     m_selectedPolylines.clear();
 }
@@ -2094,8 +2096,12 @@ void OSGWidget::clearHighlight()
         for (size_t i = 0; i < entry.indices.size(); ++i)
         {
             unsigned int vi = entry.indices[i];
-            if (vi < colors->size())
-                (*colors)[vi] = entry.originalColors[i];
+            if (vi >= colors->size()) continue;
+            // 261018 已删不复活：当前色 alpha=0＝该点已被删除路径置隐——
+            // 恢复 originalColors 会把已删点拉回画面（二次圈选删除失效+
+            // 首删点复活的根因）。只把「高亮蓝」还原成原色
+            if ((*colors)[vi].a() == 0) continue;
+            (*colors)[vi] = entry.originalColors[i];
         }
         colors->dirty();
         entry.geom->setColorArray(colors);
