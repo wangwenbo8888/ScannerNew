@@ -15,6 +15,9 @@
 #include "WorkflowArtifactStore.h"                     // L4 产物仓库（终版持久化）
 #include "file_io.h"                                   // exportPLY（终版激光大载荷落盘）
 #include <filesystem>
+#include <algorithm>      // 261018 终版云排除（拷贝保留）
+#include <cmath>
+#include <unordered_map>  // 261018 排除集空间哈希
 #include "pipelines/scan/ScanPipeline.h"
 
 #include <nlohmann/json.hpp>
@@ -472,9 +475,66 @@ void ScanWorkflow::runFinalBA() {
         }
         // 终版激光融合云入 06 仓库（260920：优化后顶掉优化前 C 线版）
         if (ctx_ && ctx_->pointCloudBuffer() && !out.laserXyzFinal.empty()) {
-            ctx_->pointCloudBuffer()->pushSessionCloud(out.laserXyzFinal);
+            // 261018 激光编辑排除：GBA 重放不知道软删（重放重排后下标也找不回）
+            // ——按删除位置空间剔除（1mm 体素哈希＋27 邻域查，容差 0.5mm 覆盖
+            // 位姿修正残余位移）；计数/导出随终版云一致变少。out 为 const——
+            // 过滤结果落局部副本再入仓
+            std::vector<float> finalLaser = out.laserXyzFinal;
+            if (!laserEditExclusions_.empty()) {
+                constexpr float kCell = 1.0f;             // 哈希格边长 mm
+                constexpr float kTol2 = 0.5f * 0.5f;      // 命中容差平方
+                const auto hCoord = [](float v) -> int32_t {
+                    return static_cast<int32_t>(std::floor(v / 1.0f));
+                };
+                const auto keyOf = [&hCoord](float x, float y, float z) -> int64_t {
+                    return (static_cast<int64_t>(hCoord(x) & 0x1FFFFF) << 42) |
+                           (static_cast<int64_t>(hCoord(y) & 0x1FFFFF) << 21) |
+                           static_cast<int64_t>(hCoord(z) & 0x1FFFFF);
+                };
+                std::unordered_map<int64_t, std::vector<cv::Point3f>> grid;
+                grid.reserve(laserEditExclusions_.size() * 2);
+                for (const auto& p : laserEditExclusions_)
+                    grid[keyOf(p.x, p.y, p.z)].push_back(p);
+                std::vector<float> kept;
+                kept.reserve(finalLaser.size());
+                size_t removed = 0;
+                for (size_t i = 0; i + 2 < finalLaser.size(); i += 3) {
+                    const float x = finalLaser[i], y = finalLaser[i + 1],
+                                z = finalLaser[i + 2];
+                    bool hit = false;
+                    const int32_t cx = hCoord(x), cy = hCoord(y), cz = hCoord(z);
+                    for (int32_t dx = -1; dx <= 1 && !hit; ++dx)
+                        for (int32_t dy = -1; dy <= 1 && !hit; ++dy)
+                            for (int32_t dz = -1; dz <= 1 && !hit; ++dz) {
+                                const int64_t k = (static_cast<int64_t>((cx + dx) & 0x1FFFFF) << 42) |
+                                                  (static_cast<int64_t>((cy + dy) & 0x1FFFFF) << 21) |
+                                                  static_cast<int64_t>((cz + dz) & 0x1FFFFF);
+                                const auto it = grid.find(k);
+                                if (it == grid.end()) continue;
+                                for (const auto& p : it->second) {
+                                    const float ddx = p.x - x, ddy = p.y - y, ddz = p.z - z;
+                                    if (ddx * ddx + ddy * ddy + ddz * ddz <= kTol2) {
+                                        hit = true;
+                                        break;
+                                    }
+                                }
+                            }
+                    if (hit) {
+                        ++removed;
+                    } else {
+                        kept.push_back(x);
+                        kept.push_back(y);
+                        kept.push_back(z);
+                    }
+                }
+                JMW_LOG_WARN("02-ScanWorkflow",
+                    "[终局遍] 激光编辑排除: 排除集 {} 点 → 终版剔除 {} 点（容差 0.5mm）",
+                    laserEditExclusions_.size(), removed);
+                finalLaser = std::move(kept);
+            }
+            ctx_->pointCloudBuffer()->pushSessionCloud(finalLaser);
             JMW_LOG_INFO("02-ScanWorkflow",
-                "[终局遍] 激光终版入仓: {} 点（替换 C 线中间版）", out.laserXyzFinal.size() / 3);
+                "[终局遍] 激光终版入仓: {} 点（替换 C 线中间版）", finalLaser.size() / 3);
         }
         // —— L4 产物仓库持久化（260920：优化后位姿＋GBA 标志点＋会话元信息
         //    落盘——隔天离线重优化/后处理重跑可用；仓目录=exe 旁 artifacts/）

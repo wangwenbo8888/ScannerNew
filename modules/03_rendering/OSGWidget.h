@@ -60,6 +60,12 @@ public:
     /// 已建则在尾部补 4 顶点/点（老段零重建——OSG dirty 整幅 VBO 重传仍在，
     /// 但 UI 线程的重建循环/色数组全免）。显示总点数由 MainWindow 帽控
     void appendLaserPoints(const std::vector<osg::Vec3>& add);
+    /// 261018 软删计数：激光显示级已删点数（applyLassoDelete 增/undoDelete 减/
+    /// 全量重建清零）——统计栏「删除即变少」口径（仓库真值随物理化对齐）
+    size_t laserSoftDeleted() const { return m_laserSoftDeleted; }
+    /// 261018 激光删除位置集（撤销账本驱动）：终版云（GBA 重放）按下标找不回
+    /// 删除点（重放重排）——按空间位置剔除；返回当前有效删除位置
+    std::vector<osg::Vec3> laserDeletedPositions() const;
     /// 261017 方块点（用户口径：按分辨率档显示大小不同的方块）：激光点按体素值
     /// 透视缩放 gl_PointSize（GL_POINTS 默认方形光栅化——顶点着色器逐点算屏幕
     /// 边长=体素 mm×增益×相机比例/距离）。worldMm<=0＝回退旧固定 4px 圆点口径
@@ -380,6 +386,8 @@ private:
         uint64_t actionId = 0;   // 同一次圈选删除（跨几何：点云+标志点）同组——
                                  // undo 按组整批恢复（260919：逐条恢复曾致
                                  // 「恢复后标志点未恢复」=一条已弹一条还压栈）
+        std::vector<osg::Vec3> laserPos;   // 261018 激光删除点的空间位置（几何
+                                           // 下标跨 GBA 重放失效——按位置剔除）
     };
     std::vector<DeleteEntry> m_deleteHistory;
     uint64_t m_deleteActionSeq = 0;   // 删除动作序号（applyLassoDelete 每次 ++）
@@ -451,6 +459,7 @@ private:
     bool m_markersVisible = true;                   // 标志点显示开关（右键菜单；NodeMask 0=隐藏）
     bool m_laserVisible = true;                     // 激光点显示开关（右键菜单；NodeMask 0=隐藏）
     size_t m_lastMeshTriangles = 0;                 // 261017 最近导入网格三角面数（树计数用）
+    size_t m_laserSoftDeleted = 0;                  // 261018 软删计数（统计栏即时扣减口径）
     QPoint m_rightPressGlobalPos;                   // 右键按下位置（拖拽阈值判定）
     bool m_suppressContextMenu = false;             // 右键拖拽平移/圈选闭合后松开不弹菜单
     double m_lastFitRadius = -1.0;                  // 上次取景时场景半径（-1=未取过）

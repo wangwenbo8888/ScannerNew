@@ -123,6 +123,12 @@ public:
     void setFinalBAProgress(std::function<void(int, const std::string&)> cb) {
         finalBAProgress_ = std::move(cb);
     }
+    /// 261018 激光编辑排除集（用户口径：删除要在全局优化后保持）：终版云
+    /// （GBA 重放）按下标找不回删除点——按空间位置剔除（重放位姿修正位移
+    /// 亚毫米级，容差 0.5mm）；undo 驱动（撤销后调用方应重设）
+    void setLaserEditExclusions(std::vector<cv::Point3f> pts) {
+        laserEditExclusions_ = std::move(pts);
+    }
 
     /// 输出队列透传（调试注入口：SimScanSource→真融合链，2026-09-13 模拟调通；
     /// pipeline_ 未装配/已停＝nullptr——调方保证会话期访问，停止链先停注入线程）
@@ -175,6 +181,7 @@ private:
     std::vector<int>    priorIds_;                 // 续扫基准软先验（装配期自仓库快照）
     std::vector<double> priorXyz_;                 // 3n 展开x,y,z
     std::function<void(int, const std::string&)> finalBAProgress_;  // 进度出口（可空）
+    std::vector<cv::Point3f> laserEditExclusions_;   // 261018 激光编辑排除集（终版云位置剔除）
     Scanner::pipeline::CancelToken finalBACancel_; // 261004：终局遍取消令牌（原局部
                                                    // 令牌无人 cancel——见 cancelFinalBA 注释）
 

@@ -2211,6 +2211,15 @@ QWidget *MainWindow::createToolBar()
                 //    剔除，编辑从此真实有效（非显示级掩盖）——
                 auto materializeEdits = [this]() {
                     if (!m_3dView) return;
+                    // 261018 终版云排除集同步（GBA 重放不知道删除——按位置在终版
+                    // 入仓前剔除；撤销账本驱动，每次物理化时刷新当前有效集）
+                    if (auto* swEx = m_appCtx ? m_appCtx->scanWorkflow() : nullptr) {
+                        const auto pos = m_3dView->laserDeletedPositions();
+                        std::vector<cv::Point3f> cvPos;
+                        cvPos.reserve(pos.size());
+                        for (const auto& p : pos) cvPos.emplace_back(p.x(), p.y(), p.z());
+                        swEx->setLaserEditExclusions(std::move(cvPos));
+                    }
                     const auto pending = m_3dView->pendingMarkerDeleteIndices();
                     if (!pending.empty()) {
                         auto* sw = m_appCtx ? m_appCtx->scanWorkflow() : nullptr;

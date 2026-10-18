@@ -6,6 +6,7 @@
 #include <cstring>
 #include <atomic>
 #include <cmath>
+#include <unordered_set>  // 261018 圈选删除去重（软删计数口径）
 
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
@@ -2003,6 +2004,7 @@ void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
         // 激光几何 → 记录融合云下标（P4b 激光侧）：261017 方块点后顶点 4:1
         // （QUADS 角顶点→点下标须 ÷4，否则错位到 4 倍远处别的点——贯穿模式
         // 「只删到表面一层」观感的 contributory 根因）
+        std::vector<osg::Vec3> laserPosBatch;   // 261018 删除位置（终版云按位置剔除）
         if (geom == m_laserGeom.get()) {
             bool isQuad = false;
             if (m_laserGeom->getNumPrimitiveSets() > 0) {
@@ -2010,8 +2012,17 @@ void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
                 isQuad = ps && ps->getMode() == osg::PrimitiveSet::QUADS;
             }
             const uint32_t divisor = isQuad ? 4 : 1;
-            for (unsigned int vi : kv.second)
-                m_pendingCloudDel.push_back(vi / divisor);
+            std::unordered_set<unsigned int> uniq;   // 261018 本批去重（软删计数口径）
+            const auto* lverts =
+                dynamic_cast<const osg::Vec3Array*>(m_laserGeom->getVertexArray());
+            for (unsigned int vi : kv.second) {
+                const unsigned int pi = vi / divisor;
+                m_pendingCloudDel.push_back(pi);
+                uniq.insert(pi);
+                if (lverts && pi * divisor < lverts->size())
+                    laserPosBatch.push_back((*lverts)[pi * divisor]);
+            }
+            m_laserSoftDeleted += uniq.size();   // 统计栏「删除即变少」
         }
 
         std::vector<osg::Vec4ub> orig;
@@ -2022,6 +2033,9 @@ void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
             (*newColors)[vi] = osg::Vec4ub(0, 0, 0, 0);   // alpha=0 软删（GL_BLEND）
         }
         pushDeleteUndo(geom, kv.second, orig);
+        if (!laserPosBatch.empty() && !m_deleteHistory.empty() &&
+            m_deleteHistory.back().geom == geom)
+            m_deleteHistory.back().laserPos = std::move(laserPosBatch);
         newColors->dirty();
         geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
         geom->dirtyDisplayList();
@@ -2046,9 +2060,18 @@ void OSGWidget::deletePointsInPolyline() {
     update();
     m_selectedPolylines.clear();
 }
+// 261018 激光删除位置集：撤销账本驱动（undo 弹栈后自动失效）——终版云
+// （GBA 重放按下标找不回删除点）按空间位置剔除的唯一凭据
+std::vector<osg::Vec3> OSGWidget::laserDeletedPositions() const {
+    std::vector<osg::Vec3> out;
+    for (const auto& e : m_deleteHistory)
+        if (e.geom == m_laserGeom.get())
+            out.insert(out.end(), e.laserPos.begin(), e.laserPos.end());
+    return out;
+}
+
 size_t OSGWidget::visibleMarkerCount() const
-{
-    // 软删计数：标志点几何 alpha>0 顶点数（点精灵版＝顶点数；圆盘版＝4 顶点/盘
+{    // 软删计数：标志点几何 alpha>0 顶点数（点精灵版＝顶点数；圆盘版＝4 顶点/盘
     // 折半为盘数——两版按当前几何类型换算）
     if (!m_markerGeom.valid()) return 0;
     const auto* colors =
@@ -2160,7 +2183,20 @@ void OSGWidget::undoDelete()
             const uint32_t div = markerDivisor();
             for (unsigned int vi : entry.indices) undoMarkerIdx.push_back(vi / div);
         } else if (entry.geom == m_laserGeom.get()) {
-            for (unsigned int vi : entry.indices) undoCloudIdx.push_back(vi);
+            // 261017 方块点后顶点 4:1——原 vi 未 ÷4（4 倍空间下标），purge 差集
+            // 永远对不上＝撤销后的点在物化时仍被真删（存量 bug 顺手修）
+            uint32_t div = 1;
+            if (m_laserGeom->getNumPrimitiveSets() > 0) {
+                const auto* ps = m_laserGeom->getPrimitiveSet(0);
+                if (ps && ps->getMode() == osg::PrimitiveSet::QUADS) div = 4;
+            }
+            std::unordered_set<unsigned int> uniq;   // 261018 软删计数回扣（去重）
+            for (unsigned int vi : entry.indices) {
+                const unsigned int pi = vi / div;
+                undoCloudIdx.push_back(pi);
+                uniq.insert(pi);
+            }
+            m_laserSoftDeleted -= std::min(m_laserSoftDeleted, uniq.size());
         }
     }
     // pending 物理化账本撤销登记（单趟集合差——逐元素 remove 扫全表在圈选
