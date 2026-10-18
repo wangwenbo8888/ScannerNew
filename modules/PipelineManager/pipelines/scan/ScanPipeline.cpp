@@ -440,6 +440,11 @@ Scanner::Result ScanPipeline::configure(const PipelineDeps& deps) {
     cloudWarehouse_ = deps.cloudWarehouse;       // start() 会话边界用
     cd.sink = sink_.get();
     cd.renderThrottleFrames = kRenderThrottleFrames;
+    // 261018 重推送节流 300→3000ms：推送段含融合云全量下载＋仓库整包（真机
+    // 2400 万点实测 330-720ms/次）——300ms 门控下消费线程被打成 ~8fps，激光
+    // 块池干涸（取块超时 13.5 万次/会话）＝流水线 10fps 根因。3s 门控＝重活
+    // 占空 ~20%，消费回到帧级节奏；激光云单调增长、显示滞后 3s 无感
+    cd.renderThrottleMinMs = 3000;
     cd.highPrecisionGlobalIds = hpGlobalIds_.empty() ? nullptr : &hpGlobalIds_;
     consumer_ = std::make_unique<FuseConsumer>(cd);
 
