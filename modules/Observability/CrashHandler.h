@@ -21,4 +21,9 @@ namespace Scanner::service::crash {
 bool install(const std::string& dumpDir);       // SetUnhandledExceptionFilter → dump+标记
 bool detectResidualDump(std::string& outPath);  // 检测残留（有则 true + 最旧 .dmp 路径）
 
+/// 261018 按需全线程转储（非崩溃路径诊断）：看门狗 lane 卡死（1610）等场景
+/// 抓全线程栈 minidump——文件名 hang_<tag>_<tick>.dmp（不写 crash_pending 标记
+/// ——非崩溃，不触发排障包联动）。需先 install；失败返 false
+bool writeDiagnosticDump(const char* tag);
+
 } // namespace Scanner::service::crash

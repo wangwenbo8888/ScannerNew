@@ -10,6 +10,9 @@
 // ============================================================================
 #include "CrashHandler.h"
 
+#include <spdlog/spdlog.h>
+#include "jmw_logging.h"   // 261018 writeDiagnosticDump 完成回执
+
 #include <windows.h>
 #include <dbghelp.h>
 
@@ -131,6 +134,42 @@ bool detectResidualDump(std::string& outPath) {
     if (oldest.empty()) return false;
     outPath = oldest.string();
     return true;
+}
+
+bool writeDiagnosticDump(const char* tag) {
+    if (!g_installed || !tag) return false;
+
+    wchar_t filePath[kPathCap];
+    wchar_t* p = appendStr(filePath, g_dumpDirW);
+    p = appendStr(p, L"hang_");
+    for (const char* t = tag; *t && p - filePath < kPathCap - 32; ++t)
+        *p++ = static_cast<wchar_t>(*t);   // 纯 ASCII tag（诊断用窄字符足够）
+    p = appendStr(p, L"_");
+    p = appendTick(p, GetTickCount());
+    p = appendStr(p, L".dmp");
+    *p = L'\0';
+
+    HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+    // 无异常上下文（非崩溃）——MiniDumpNormal 即含全线程栈＋模块表，
+    // WithThreadInfo 补线程时间（判 lane 停摆时刻）
+    const BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+                                      static_cast<MINIDUMP_TYPE>(MiniDumpNormal |
+                                                                 MiniDumpWithDataSegs |
+                                                                 MiniDumpWithThreadInfo),
+                                      nullptr, nullptr, nullptr);
+    CloseHandle(hFile);
+    if (ok) {
+        // 宽→窄回显路径（日志用；文件名 ASCII 安全）
+        char narrow[kPathCap];
+        int i = 0;
+        for (const wchar_t* w = filePath; *w && i < kPathCap - 1; ++w)
+            narrow[i++] = static_cast<char>(*w);
+        narrow[i] = '\0';
+        JMW_LOG_WARN("10-Crash", "[CrashHandler] 诊断转储完成（全线程栈）: {}", narrow);
+    }
+    return ok == TRUE;
 }
 
 } // namespace Scanner::service::crash

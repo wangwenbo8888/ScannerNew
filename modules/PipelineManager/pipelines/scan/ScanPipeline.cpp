@@ -333,9 +333,13 @@ void ScanPipeline::syncState() const {
         JMW_LOG_ERROR("07-ScanPipeline",
             "[ScanPipeline] 看门狗检出 lane 心跳超时→Faulted（1610）: "
             "已处理={} 钩子异常={}", st.processed, st.finalizeFails);
+        // 261018 降级 Fault→Warning（用户裁定"都上"配套）：单 lane 卡死不该全局
+        // 停机——S7 只留给致命故障；本会话 Faulted 由用户关会话重开自愈（免
+        // 重启软件）。诊断件：FaultHandler 收 1610 当场抓全线程栈 minidump
         if (sink_) {
-            sink_->report(Scanner::QualityFlag::Fault, kEvtLaneHang,
-                          "C 扫描 lane 心跳超时（看门狗）；可尝试 recover() 原地恢复");
+            sink_->report(Scanner::QualityFlag::Warning, kEvtLaneHang,
+                          "C 扫描 lane 心跳超时（看门狗，已降级 Warning）——本会话停止，"
+                          "关会话后重新开扫即恢复");
         }
         return;
     }
@@ -380,13 +384,16 @@ Scanner::Result ScanPipeline::configure(const PipelineDeps& deps) {
 
     sink_ = makeSink(deps);
 
-    // 看门狗接线：runtime 检出 lane 心跳超时 → Fault(1610)（watchdog 线程调）。
-    // runtime 自身已 requestStop；此处仅上报（syncState 的 hang 分支随后收敛 Faulted）
+    // 看门狗接线：runtime 检出 lane 心跳超时 → Warning(1610)（watchdog 线程调）。
+    // runtime 自身已 requestStop；此处仅上报（syncState 的 hang 分支随后收敛 Faulted）。
+    // 261018 降级 Fault→Warning：单 lane 卡死不拉 S7 全局停机（关会话重开自愈）；
+    // FaultHandler 侧配诊断转储（全线程栈当场抓——卡死点直接可见）
     runtime_.onHang = [this](int laneIdx, int64_t staleMs) {
         if (sink_) {
-            sink_->report(Scanner::QualityFlag::Fault, kEvtLaneHang,
+            sink_->report(Scanner::QualityFlag::Warning, kEvtLaneHang,
                           "C 扫描 lane " + std::to_string(laneIdx) + " 心跳静默 " +
-                              std::to_string(staleMs) + "ms（看门狗检出）");
+                              std::to_string(staleMs) +
+                              "ms（看门狗检出，已降级 Warning）");
         }
     };
 

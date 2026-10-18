@@ -1,7 +1,9 @@
 #include "FaultHandler.h"
 #include "StateMachine.h"
 #include "base/EventBus.h"
+#include "CrashHandler.h"   // 261018 1610 诊断转储（writeDiagnosticDump）
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
@@ -83,6 +85,20 @@ void FaultHandler::start() {
                         "external fault, source=" + std::to_string(evt.sourceId) +
                             " code=" + std::to_string(evt.param2),
                         /*viaBus=*/true);
+            // 261018 看门狗 lane 卡死（1610）诊断件：当场抓全线程栈 minidump——
+            // 卡死线程栈直接可见（复发性 lane 冻结定位），60s 节流防看门狗连环
+            // 触发时刷盘
+            if (evt.param2 == 1610) {
+                static std::atomic<int64_t> s_lastDumpTick{0};
+                const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                const int64_t prev = s_lastDumpTick.load(std::memory_order_acquire);
+                int64_t expected = prev;
+                if (now - prev >= 60000 &&
+                    s_lastDumpTick.compare_exchange_strong(expected, now)) {
+                    crash::writeDiagnosticDump("lane1610");
+                }
+            }
         });
     started_ = true;
     JMW_LOG_INFO("10-FaultHandler", "[FaultHandler] 已启动");
