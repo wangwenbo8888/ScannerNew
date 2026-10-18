@@ -2329,10 +2329,14 @@ bool OSGWidget::loadMesh(const QString& filepath)
         if (lf) { fprintf(lf, "  importMesh failed\n"); fclose(lf); }
         return false;
     }
-    // 261017 三角面计数（索引网格＝indices/3；非索引＝顶点数/3）
+    // 261017 三角面计数（索引网格＝indices/3；非索引＝顶点数/3）＋诊断日志
+    // （排障：真机首测显示 (0)——扩展名大小写拒载？路径异常？一次日志定位）
     m_lastMeshTriangles = mesh.indices.empty()
         ? mesh.vertices.size() / 3
         : mesh.indices.size() / 3;
+    JMW_LOG_INFO("03-OSGWidget",
+        "[loadMesh] 解析成功: 顶点={} 索引={} → 三角面={}（{}）",
+        mesh.vertices.size(), mesh.indices.size(), m_lastMeshTriangles, spath);
 
     if (lf) { fprintf(lf, "  verts=%zu indices=%zu\n", mesh.vertices.size(), mesh.indices.size()); fclose(lf); }
 

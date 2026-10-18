@@ -5,6 +5,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <algorithm>   // 261017 importMesh 扩展名小写化
+#include <cctype>
 
 namespace Scanner::data::fileio {
 
@@ -253,6 +255,9 @@ bool importMesh(std::string filepath, MeshData& mesh)
 {
     size_t dotPos = filepath.find_last_of('.');
     auto ext = (dotPos != std::string::npos) ? filepath.substr(dotPos + 1) : std::string();
+    // 261017 大小写不敏感（Windows 导出对话框常见 .STL/.OBJ——原小写比对拒载）
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (ext == "stl") return importSTL(filepath, mesh);
     if (ext == "obj") return importOBJ(filepath, mesh);
     return false;
