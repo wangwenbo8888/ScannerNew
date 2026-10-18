@@ -59,6 +59,10 @@ struct SelfCheckCollector::Native {
     PDH_HCOUNTER pdhCpu{nullptr};
     bool         pdhSeeded{false};   // 首次基线样本已采（本实例首调 collect 返 -1 口径）
 
+    // PDH（261018 CUDA 引擎利用率——任务管理器同源 WDDM 计数器，多进程实例求和）
+    PDH_HQUERY   pdhGpuQuery{nullptr};
+    PDH_HCOUNTER pdhGpuCuda{nullptr};
+
     // NVML（GPU）
     bool       nvmlTried{false};     // LoadLibraryA 只试一次，失败不再重试
     HMODULE    nvmlLib{nullptr};
@@ -71,6 +75,7 @@ struct SelfCheckCollector::Native {
 
     ~Native() {
         if (pdhQuery) PdhCloseQuery(pdhQuery);
+        if (pdhGpuQuery) PdhCloseQuery(pdhGpuQuery);
         if (nvmlLib) FreeLibrary(nvmlLib);
     }
 };
@@ -117,6 +122,48 @@ double SelfCheckCollector::cpuPercentNative(Native& n) {
     if (v < 0.0) v = 0.0;     // _Total 偶见微溢出，钳回 [0,100]
     if (v > 100.0) v = 100.0;
     return v;
+}
+
+// 261018 CUDA 引擎利用率（WDDM 口径＝任务管理器同源）：PDH 通配计数器
+// \GPU Engine(*engtype_Cuda)\Utilization Percentage，多进程实例求和（每实例
+// 0-100，任务管理器显示的就是各实例合计）。任一步败（旧系统无 GPU 计数器/
+// 首次无实例）返 -1——上层回退 NVML SM 口径
+double SelfCheckCollector::cudaEnginePercentNative(Native& n) {
+    if (!n.pdhGpuQuery) {
+        if (PdhOpenQueryA(nullptr, 0, &n.pdhGpuQuery) != ERROR_SUCCESS) {
+            n.pdhGpuQuery = nullptr;
+            return -1.0;
+        }
+        if (PdhAddEnglishCounterA(n.pdhGpuQuery,
+                                  "\\GPU Engine(*engtype_Cuda)\\Utilization Percentage",
+                                  0, &n.pdhGpuCuda) != ERROR_SUCCESS) {
+            PdhCloseQuery(n.pdhGpuQuery);
+            n.pdhGpuQuery = nullptr;
+            n.pdhGpuCuda = nullptr;
+            return -1.0;
+        }
+    }
+    if (PdhCollectQueryData(n.pdhGpuQuery) != ERROR_SUCCESS) return -1.0;
+    // 数组取值：两次调用模式（先探体积再取）；实例集随进程启停变化
+    DWORD bufBytes = 0, itemCount = 0;
+    auto st = PdhGetFormattedCounterArrayW(n.pdhGpuCuda, PDH_FMT_DOUBLE,
+                                           &bufBytes, &itemCount, nullptr);
+    if (st != PDH_MORE_DATA || bufBytes == 0) return -1.0;
+    std::vector<unsigned char> buf(bufBytes);
+    st = PdhGetFormattedCounterArrayW(n.pdhGpuCuda, PDH_FMT_DOUBLE,
+                                      &bufBytes, &itemCount,
+                                      reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data()));
+    if (st != ERROR_SUCCESS || itemCount == 0) return -1.0;
+    const auto* items = reinterpret_cast<const PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+    double sum = 0.0;
+    int valid = 0;
+    for (DWORD i = 0; i < itemCount; ++i) {
+        const double v = items[i].FmtValue.doubleValue;
+        if (v >= 0.0 && v <= 100.0) { sum += v; ++valid; }
+    }
+    if (valid == 0) return -1.0;
+    if (sum > 100.0) sum = 100.0;   // 多实例合计理论可超（多引擎）——钳到满载
+    return sum;
 }
 
 // GPU：lazy 加载一次；任一步败对应字段留 -1
@@ -205,7 +252,12 @@ Scanner::HealthMetrics SelfCheckCollector::collect(int64_t nowMs) const {
     m.diskFreeGB  = diskProbe_ ? diskProbe_(diskPath_) : win32DiskFreeGB(diskPath_);
     m.cpuPercent  = cpuPercentNative(*native_);
     m.cpuTempC    = -1.0;      // WMI 温度降级不采（口径钉死，见文件头）
-    gpuProbeNative(*native_, m.gpuTempC, m.gpuMemPercent, m.gpuUtilPercent);
+    double nvmlUtil = -1.0;
+    gpuProbeNative(*native_, m.gpuTempC, m.gpuMemPercent, nvmlUtil);
+    // 261018 CUDA 利用率口径（用户裁定）：优先 WDDM Cuda 引擎（任务管理器同源），
+    // 拿不到回退 NVML SM 忙时率
+    m.gpuUtilPercent = cudaEnginePercentNative(*native_);
+    if (m.gpuUtilPercent < 0.0) m.gpuUtilPercent = nvmlUtil;
 
     // 帧率三件套（captureFps/processFps/dropRate）归 HardwareMonitor 填——留 -1
     m.timestampMs = nowMs;

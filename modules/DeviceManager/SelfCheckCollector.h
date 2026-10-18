@@ -66,6 +66,7 @@ private:
     static double cpuPercentNative(Native& n);
     static void   gpuProbeNative(Native& n, double& tempC, double& memPercent,
                                  double& utilPercent);   // 261018 增出参：SM 利用率
+    static double cudaEnginePercentNative(Native& n);   // 261018 WDDM Cuda 引擎（任务管理器同源）
 
     mutable std::mutex hbMutex_;          // beat 被各业务线程并发调，map 读写互斥
     std::map<std::string, Heartbeat> heartbeats_;

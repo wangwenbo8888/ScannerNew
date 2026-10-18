@@ -1041,7 +1041,7 @@ void MainWindow::showCameraMonitor() {
                 return v < 0.0 ? QStringLiteral("--")
                                : QStringLiteral("%1%2").arg(v, 0, 'f', 0).arg(unit);
             };
-            m_camGpuLabel->setText(QStringLiteral("GPU 利用率 %1 · 显存 %2 · 温度 %3")
+            m_camGpuLabel->setText(QStringLiteral("CUDA 利用率 %1 · 显存 %2 · 温度 %3")
                                        .arg(fmt(m.gpuUtilPercent, "%"),
                                             fmt(m.gpuMemPercent, "%"),
                                             fmt(m.gpuTempC, "°C")));
