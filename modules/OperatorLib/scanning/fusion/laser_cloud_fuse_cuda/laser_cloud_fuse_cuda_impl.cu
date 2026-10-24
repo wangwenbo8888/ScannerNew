@@ -17,6 +17,8 @@ constexpr int64_t  VOXEL_BIAS  = (int64_t)1 << 20;
 constexpr int      VOXEL_BITS  = 21;
 constexpr uint64_t AXIS_MASK   = ((uint64_t)1 << VOXEL_BITS) - 1;
 constexpr int      BLOCK_SIZE  = 256;
+// 【2601021 扩容改造】负载因子阈值（>70% 触发固定增量扩容）
+constexpr double   LOAD_FACTOR = 0.7;
 
 // ============================================================
 // Device 辅助函数
@@ -56,6 +58,41 @@ __global__ void clearKeysKernel(unsigned long long* d_keys, size_t count) {
 }
 
 // ============================================================
+// 【2601021 扩容改造】rehashMoveKernel — 旧表条目原子搬入新表
+// ============================================================
+// 旧表每槽 key 唯一，但多条目可能探测到新表同一槽 → atomicCAS 抢占。
+// 搬移内容：key（key+1 编码）＋ fusedIdx ＋ counts（饱和计数保全）。
+__global__ void rehashMoveKernel(
+    const unsigned long long* __restrict__ oldKeys,
+    const unsigned int*       __restrict__ oldIdx,
+    const unsigned int*       __restrict__ oldCnt,
+    size_t oldCapacity,
+    unsigned long long* __restrict__ newKeys,
+    unsigned int*       __restrict__ newIdx,
+    unsigned int*       __restrict__ newCnt,
+    unsigned long long newCapacity)
+{
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= oldCapacity) return;
+    unsigned long long storedKey = oldKeys[i];
+    if (storedKey == 0ULL) return;                 // 空槽不搬
+
+    uint64_t h = hash64Device(storedKey - 1);      // 还原 packed key 再哈希
+    unsigned long long idx = h % newCapacity;
+    while (true) {
+        unsigned long long old = atomicCAS(
+            (unsigned long long*)&newKeys[idx], 0ULL, storedKey);
+        if (old == 0ULL) {                         // 抢到槽 → 写负载
+            newIdx[idx] = oldIdx[i];
+            newCnt[idx] = oldCnt[i];
+            return;
+        }
+        if (old == storedKey) return;              // 不可能（key 唯一），保底
+        if (++idx >= newCapacity) idx = 0;
+    }
+}
+
+// ============================================================
 // fuseKernel — 核心融合 kernel
 // ============================================================
 
@@ -69,7 +106,7 @@ __global__ void fuseKernel(
     unsigned long long* __restrict__ d_keys,
     unsigned int* __restrict__       d_fusedIdx,
     unsigned int* __restrict__       d_counts,
-    unsigned long long               mask,
+    unsigned long long               capacity,
     // --- 融合点缓冲 ---
     float* __restrict__              d_fusedXyz,
     unsigned int                     maxFusedPoints,
@@ -108,9 +145,9 @@ __global__ void fuseKernel(
 
     uint64_t storedKey = key + 1; // 0 保留为空槽
 
-    // 4. 哈希 + atomicCAS 探测
+    // 4. 哈希 + atomicCAS 探测（取余定位——容量非 2 的幂也可用）
     uint64_t h = hash64Device(key);
-    unsigned long long idx = h & mask;
+    unsigned long long idx = h % capacity;
 
     int probes = 0;
     while (probes < 4096) {
@@ -146,8 +183,8 @@ __global__ void fuseKernel(
             }
             return;
         }
-        // 碰撞 — 线性探测
-        idx = (idx + 1) & mask;
+        // 碰撞 — 线性探测（回绕）
+        if (++idx >= capacity) idx = 0;
         probes++;
     }
 
@@ -172,11 +209,8 @@ static void safeCudaFree(T*& ptr) {
 LaserCloudFuseCuda::Impl::Impl(const LaserCloudFuseCUDAParams& p) : params_(p) {
     params_.validate();
 
-    size_t slots = params_.reserveVoxelCount;
-    // 向上取 2 的幂
-    size_t pow2 = 64;
-    while (pow2 < slots) pow2 <<= 1;
-    slots = pow2;
+    // 【2601021 扩容改造】容量取任意正整数（取余探测，无 2 的幂约束）
+    size_t slots = params_.reserveVoxelCount > 64 ? params_.reserveVoxelCount : 64;
 
     allocateHash(slots);
     allocatePoints(slots); // 点数上限 = 哈希槽数
@@ -197,14 +231,12 @@ LaserCloudFuseCuda::Impl::~Impl() {
 // ============================================================
 
 void LaserCloudFuseCuda::Impl::allocateHash(size_t voxelCount) {
-    size_t pow2 = 64;
-    while (pow2 < voxelCount) pow2 <<= 1;
-    if (pow2 <= capacity_) return; // 不缩容
+    size_t want = voxelCount > 64 ? voxelCount : 64;
+    if (want <= capacity_) return; // 不缩容
 
     freeAll();
 
-    capacity_ = pow2;
-    mask_     = pow2 - 1;
+    capacity_ = want;
 
     cudaMalloc(&d_keys_,     capacity_ * sizeof(unsigned long long));
     cudaMalloc(&d_fusedIdx_, capacity_ * sizeof(unsigned int));
@@ -254,11 +286,74 @@ void LaserCloudFuseCuda::Impl::freeAll() {
     safeCudaFree(d_survivingFlags_);
     safeCudaFree(d_statsBuffer_);
     capacity_ = 0;
-    mask_ = 0;
     maxFusedPoints_ = 0;
     lastInputCount_ = 0;
     h_fusedPointCount_ = 0;
     h_voxelCount_ = 0;
+}
+
+// ============================================================
+// 【2601021 扩容改造】Impl::rehashGrow — 非破坏性固定增量扩容
+// ============================================================
+// 负载 >70% 触发：容量 += growSlotCount（默认 1000 万，2601021 人工裁定，
+// laser_fuse_stress 压测验证），保留全部已累积数据（对比 Reserve() 清空重来）。
+// 步骤：① 新表分配清零 → ② 内核搬移旧槽（key/idx/counts）→
+//       ③ 点/法线缓冲扩容（D2D 拷贝保数据）→ ④ 释放旧资源切换指针。
+// 计时：全程 wall-clock，末尾 stream 同步后入账 rehashEvents_。
+void LaserCloudFuseCuda::Impl::rehashGrow(cudaStream_t stream) {
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    const size_t oldCap = capacity_;
+    const size_t newCap = oldCap + params_.growSlotCount;
+
+    // ① 新哈希表三数组（keys 清零即空槽；idx/cnts 由搬移覆写）
+    unsigned long long* nKeys = nullptr;
+    unsigned int*       nIdx  = nullptr;
+    unsigned int*       nCnt  = nullptr;
+    cudaMalloc(&nKeys, newCap * sizeof(unsigned long long));
+    cudaMalloc(&nIdx,  newCap * sizeof(unsigned int));
+    cudaMalloc(&nCnt,  newCap * sizeof(unsigned int));
+    cudaMemsetAsync(nKeys, 0, newCap * sizeof(unsigned long long), stream);
+    cudaMemsetAsync(nIdx,  0, newCap * sizeof(unsigned int), stream);
+    cudaMemsetAsync(nCnt,  0, newCap * sizeof(unsigned int), stream);
+
+    // ② 旧表条目搬入新表（取余定位）
+    const unsigned long long newCapacity = (unsigned long long)newCap;
+    size_t grid = (oldCap + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    rehashMoveKernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+        d_keys_, d_fusedIdx_, d_counts_, oldCap,
+        nKeys, nIdx, nCnt, newCapacity);
+
+    // ③ 点/法线缓冲扩到 newCap（保数据：旧 maxFusedPoints_ 区段 D2D 拷贝）
+    float* nXyz = nullptr;
+    float* nNorm = nullptr;
+    cudaMalloc(&nXyz,  newCap * 3 * sizeof(float));
+    cudaMalloc(&nNorm, newCap * 3 * sizeof(float));
+    const size_t oldPtsBytes = maxFusedPoints_ * 3 * sizeof(float);
+    cudaMemcpyAsync(nXyz,  d_fusedXyz_,    oldPtsBytes, cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpyAsync(nNorm, d_fusedNormal_, oldPtsBytes, cudaMemcpyDeviceToDevice, stream);
+
+    // ④ 同步收尾 → 释放旧资源 → 切换
+    cudaStreamSynchronize(stream);
+    cudaFree(d_keys_);        d_keys_      = nKeys;
+    cudaFree(d_fusedIdx_);    d_fusedIdx_  = nIdx;
+    cudaFree(d_counts_);      d_counts_    = nCnt;
+    cudaFree(d_fusedXyz_);    d_fusedXyz_  = nXyz;
+    cudaFree(d_fusedNormal_); d_fusedNormal_ = nNorm;
+    capacity_       = newCap;
+    maxFusedPoints_ = newCap;
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    RehashEvent ev;
+    ev.triggerVoxelCount = h_fusedPointCount_;
+    ev.oldCapacity = oldCap;
+    ev.newCapacity = newCap;
+    ev.timeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    rehashEvents_.push_back(ev);
+
+    CALIB_LOG_INFO("rehashGrow: voxels={} cap {}->{} took {:.3f}ms",
+                   ev.triggerVoxelCount, ev.oldCapacity, ev.newCapacity, ev.timeMs);
 }
 
 // ============================================================
@@ -306,7 +401,7 @@ LaserCloudFuseCudaResult LaserCloudFuseCuda::Impl::fuseImpl(
         d_input, inputCount,
         rt,
         invVoxelSize, threshold,
-        d_keys_, d_fusedIdx_, d_counts_, mask_,
+        d_keys_, d_fusedIdx_, d_counts_, (unsigned long long)capacity_,
         d_fusedXyz_, static_cast<unsigned int>(maxFusedPoints_), d_fusedPointCount_,
         d_survivingFlags_,
         &d_statsBuffer_[0],   // newVoxelCount
@@ -332,6 +427,16 @@ LaserCloudFuseCudaResult LaserCloudFuseCuda::Impl::fuseImpl(
     result.deletedCount  = h_statsBuffer_[2];
     result.totalVoxelCount = static_cast<int>(h_fusedPointCount_);
     result.totalTimeMs   = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
+
+    // 【2601021 扩容改造】负载 >70% → 非破坏性固定增量扩容（耗时单独入账，
+    // 不计入融合耗时；laser_fuse_stress 压测：1000 万槽搬移约 17.7ms）
+    result.hashCapacity = capacity_;
+    if ((double)h_fusedPointCount_ > LOAD_FACTOR * (double)capacity_) {
+        rehashGrow(s);
+        result.rehashHappened = true;
+        result.rehashTimeMs   = rehashEvents_.back().timeMs;
+        result.hashCapacity   = capacity_;
+    }
 
     double keepRatio = inputCount > 0
         ? static_cast<double>(result.survivingCount) / inputCount : 0.0;

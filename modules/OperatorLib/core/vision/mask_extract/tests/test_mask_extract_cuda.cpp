@@ -71,20 +71,6 @@ TEST_F(MaskExtractTest, EvenDilateSizeThrows) {
     EXPECT_THROW(params_.validate(), std::invalid_argument);
 }
 
-TEST_F(MaskExtractTest, NegativeMinAreaThrows) {
-    params_.minArea = -1;
-    EXPECT_THROW(params_.validate(), std::invalid_argument);
-}
-
-TEST_F(MaskExtractTest, MaxAreaLessThanOrEqualMinAreaThrows) {
-    params_.minArea = 100;
-    params_.maxArea = 100;
-    EXPECT_THROW(params_.validate(), std::invalid_argument);
-
-    params_.maxArea = 50;
-    EXPECT_THROW(params_.validate(), std::invalid_argument);
-}
-
 // ============================================================
 // JSON 序列化测试
 // ============================================================
@@ -95,8 +81,6 @@ TEST_F(MaskExtractTest, JsonRoundtrip) {
     EXPECT_EQ(restored.threshold, params_.threshold);
     EXPECT_EQ(restored.erodeSize, params_.erodeSize);
     EXPECT_EQ(restored.laserDilateSize, params_.laserDilateSize);
-    EXPECT_EQ(restored.minArea, params_.minArea);
-    EXPECT_EQ(restored.maxArea, params_.maxArea);
 }
 
 TEST_F(MaskExtractTest, JsonPartialDeserialization) {
@@ -211,8 +195,6 @@ TEST_F(MaskExtractTest, SetParamsAndGetParams) {
     newParams.threshold = 120;
     newParams.erodeSize = 7;
     newParams.laserDilateSize = 5;
-    newParams.minArea = 50;
-    newParams.maxArea = 200000;
 
     extractor.SetParams(newParams);
     const auto& current = extractor.GetParams();
@@ -226,5 +208,84 @@ TEST_F(MaskExtractTest, SetInvalidParamsThrows) {
     MaskExtractParams badParams;
     badParams.threshold = 999;
     EXPECT_THROW(extractor.SetParams(badParams), std::invalid_argument);
+}
+
+// ============================================================
+// 高光分离路径测试（2026-10-07 过曝粘连事故; 厚度判据剔高光）
+// ============================================================
+TEST_F(MaskExtractTest, HighlightRemovalRemovesBlobKeepsLine) {
+    MaskExtractParams hlParams;
+    hlParams.threshold = 200;
+    hlParams.erodeSize = 1;
+    hlParams.highlightErodeSize = 9;    // 吃掉 5px 细线, 留下 31px 粗斑
+    hlParams.highlightDilateSize = 13;
+    hlParams.laserDilateSize = 7;
+    hlParams.postErodeSize = 0;
+    MaskExtractCUDA extractor(hlParams);
+    extractor.Warmup(200, 200);
+
+    // 细激光线(5px 高) + 粗高光斑(31px)
+    cv::Mat gray = cv::Mat::zeros(200, 200, CV_8UC1);
+    cv::rectangle(gray, cv::Point(20, 98), cv::Point(180, 102), cv::Scalar(255), -1);
+    cv::rectangle(gray, cv::Point(80, 15), cv::Point(110, 45), cv::Scalar(255), -1);
+
+    auto result = extractor.Execute(gray);
+    EXPECT_TRUE(result.success);
+
+    cv::Mat mask;
+    result.d_cleanedMask->download(mask);
+
+    // 激光线保留（dilate7 → 约 11px 高, 中心行必非零）
+    EXPECT_GT(cv::countNonZero(mask(cv::Rect(0, 95, 200, 10))), 0);
+
+    // 高光斑区域（含膨胀余量）被整块剔除
+    EXPECT_EQ(cv::countNonZero(mask(cv::Rect(60, 0, 80, 70))), 0);
+}
+
+TEST_F(MaskExtractTest, HighlightOffKeepsBlobLegacy) {
+    MaskExtractParams legacyParams;   // highlightErodeSize=0 → 旧路径
+    legacyParams.threshold = 200;
+    legacyParams.erodeSize = 1;
+    legacyParams.laserDilateSize = 7;
+    legacyParams.postErodeSize = 0;
+    MaskExtractCUDA extractor(legacyParams);
+    extractor.Warmup(200, 200);
+
+    cv::Mat gray = cv::Mat::zeros(200, 200, CV_8UC1);
+    cv::rectangle(gray, cv::Point(20, 98), cv::Point(180, 102), cv::Scalar(255), -1);
+    cv::rectangle(gray, cv::Point(80, 15), cv::Point(110, 45), cv::Scalar(255), -1);
+
+    auto result = extractor.Execute(gray);
+    ASSERT_TRUE(result.success);
+    cv::Mat mask;
+    result.d_cleanedMask->download(mask);
+
+    // 旧路径不做高光剔除: 斑块保留
+    EXPECT_GT(cv::countNonZero(mask(cv::Rect(70, 5, 40, 50))), 0);
+}
+
+TEST_F(MaskExtractTest, HighlightParamsValidation) {
+    MaskExtractParams p;
+    p.highlightErodeSize = 4;                    // 偶数
+    EXPECT_THROW(p.validate(), std::invalid_argument);
+
+    p.highlightErodeSize = 9;
+    p.highlightDilateSize = 5;                   // < highlightErodeSize
+    EXPECT_THROW(p.validate(), std::invalid_argument);
+
+    p.highlightDilateSize = 13;
+    EXPECT_NO_THROW(p.validate());
+
+    p.highlightErodeSize = 0;                    // 0=off, dilate 独立合法
+    EXPECT_NO_THROW(p.validate());
+}
+
+TEST_F(MaskExtractTest, HighlightParamsJsonRoundtrip) {
+    MaskExtractParams p;
+    p.highlightErodeSize = 9;
+    p.highlightDilateSize = 13;
+    auto restored = MaskExtractParams::fromJson(p.toJson());
+    EXPECT_EQ(restored.highlightErodeSize, 9);
+    EXPECT_EQ(restored.highlightDilateSize, 13);
 }
 #endif // WITH_CUDA_TESTS

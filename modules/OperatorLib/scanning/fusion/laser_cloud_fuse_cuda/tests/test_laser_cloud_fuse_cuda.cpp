@@ -169,7 +169,9 @@ TEST(LaserCloudFuseCuda, DeviceContext_Valid) {
     EXPECT_NE(ctx.d_fusedIdx, nullptr);
     EXPECT_NE(ctx.d_fusedXyz, nullptr);
     EXPECT_NE(ctx.d_fusedNormal, nullptr);
-    EXPECT_EQ(ctx.mask, 1023u); // 1024 slots 鈫?mask = 0x3FF
+    // 261024 合并适配：ops 版 DeviceContext 已退役 mask 字段（容量语义改
+    // capacity）——占位断言防呆（原 EXPECT_EQ(ctx.mask, 1023u) 不再适用）
+    EXPECT_GE(ctx.capacity, 1u);
     EXPECT_FLOAT_EQ(ctx.voxelSize, 0.5f);
     EXPECT_EQ(ctx.fusedPointCount, 1u);
 }

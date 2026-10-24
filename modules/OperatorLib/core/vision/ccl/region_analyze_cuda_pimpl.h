@@ -36,6 +36,7 @@ struct GPUComponentResult {
     int bbox_y;
     int bbox_w;
     int bbox_h;
+    int area;
 };
 
 static_assert(sizeof(GPUComponentResult) == sizeof(ComponentStats),
@@ -60,6 +61,8 @@ struct RegionAnalyzerCUDA::Impl {
     int*                d_max_y_     = nullptr;
     int*                d_remap_     = nullptr;  // 稀疏->稠密标签映射表
     int*                d_num_valid_ = nullptr;  // 过滤后有效连通域计数
+    int*                d_valid_areas_ = nullptr;  // topX 用：有效域面积紧凑缓冲
+    int*                d_valid_count_ = nullptr;  // topX 用：有效域面积计数
     GPUComponentResult* d_compact_   = nullptr;  // 压缩后的统计结果
 
     // ── Pinned host memory（降低 D2H 延迟）──
@@ -69,14 +72,12 @@ struct RegionAnalyzerCUDA::Impl {
     int stats_capacity_ = 0;           // 当前已分配的 max_label+1 容量
     static constexpr int COMPACT_MAX = 65536;  // d_compact_ 最大条目
 
-    // 261018：Step1 connectedComponents 走 legacy 默认流的完成事件（非阻塞
-    // 调用流适配——默认流不再隐式等调用流，排序经事件栅栏显式接回）
-    cudaEvent_t ev_legacy_done_ = nullptr;
-
     bool warmed_up_ = false;
     int warmup_rows_ = 0;
     int warmup_cols_ = 0;
     int old_device_id = 0;
+    cudaEvent_t ev_legacy_done_ = nullptr;   // 261024 合并回补（261018 栅栏）：Step1
+                                             //   CC legacy 尾事件（非阻塞调用流保序）
 
 #ifndef NDEBUG
     std::atomic<bool> inProcess_{false};

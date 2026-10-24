@@ -38,24 +38,27 @@ __device__ __forceinline__ uint64_t packVoxelKeyDevice(int ix, int iy, int iz) {
 }
 
 /// 只读哈希查找 — 返回邻居代表点的 xyz 指针，未找到返回 nullptr
+/// 261024 合并适配：探测方案对齐 ops 版 fuse（h % capacity 线性探测，4096 上限）
 __device__ __forceinline__ const float* lookupVoxelDevice(
     uint64_t key,
     const unsigned long long* d_keys,
     const unsigned int* d_fusedIdx,
     const float* d_fusedXyz,
-    unsigned long long mask)
+    unsigned long long capacity)
 {
+    if (capacity == 0ULL) return nullptr;
     uint64_t storedKey = key + 1;
+    // 与 ops fuse kernel 完全一致：h = hash64(key)（非 storedKey），h % capacity
     uint64_t h = hash64Device(key);
-    unsigned long long idx = h & mask;
+    unsigned long long idx = h % capacity;
     int probes = 0;
-    while (probes < 1024) {
+    while (probes < 4096) {
         unsigned long long existing = d_keys[idx];
         if (existing == 0ULL) return nullptr;
         if (existing == storedKey) {
             return &d_fusedXyz[(size_t)d_fusedIdx[idx] * 3];
         }
-        idx = (idx + 1) & mask;
+        if (++idx >= capacity) idx = 0;
         probes++;
     }
     return nullptr;
@@ -241,7 +244,8 @@ LaserCloudNormalCudaResult LaserCloudNormalCuda::Impl::computeImpl(
 
     computeNormalsKernel<<<grid, BLOCK_SIZE, 0, s>>>(
         ctx.d_keys, ctx.d_fusedIdx, ctx.d_fusedXyz, ctx.d_fusedNormal,
-        ctx.mask, ctx.invVoxelSize,
+        ctx.capacity,   // 261024 合并适配：探测对齐 ops fuse（h % capacity）
+        ctx.invVoxelSize,
         static_cast<unsigned int>(beginIdx),
         static_cast<unsigned int>(endIdx),
         params_.minNeighbors,

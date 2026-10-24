@@ -59,8 +59,32 @@ static cv::Mat createEllipseImage(int rows, int cols, cv::Point2d center,
 // ============================================================
 // 参数校验测试
 // ============================================================
-TEST_F(ZernikeEdgeCPUTest, DefaultParamsAreValid) {
-    EXPECT_NO_THROW(params_.validate());
+// 合成已知直径圆斑（高斯模糊边缘）→ 量测输出椭圆轴径/中心 vs 真值，
+// 验证估计式是否存在系统性"向亮侧内缩"偏差（l=z20/mag 未定标假说）
+TEST_F(ZernikeEdgeCPUTest, SyntheticCircleBiasProbe) {
+    cv::Mat img(240, 240, CV_8UC1, cv::Scalar(30));
+    cv::circle(img, cv::Point(120, 120), 40, cv::Scalar(220), -1);   // 真值 d=80px
+    cv::GaussianBlur(img, img, cv::Size(5, 5), 1.0);                 // 模拟边缘渐变
+
+    ZernikeEdgeCPU op;                                                // 默认参数（生产同款）
+    auto r = op.Execute(img);
+    ASSERT_TRUE(r.success) << r.message;
+    ASSERT_GE(r.edgeCount, 50);
+
+    std::vector<cv::Point2f> pts;
+    pts.reserve(r.edgePoints.size());
+    for (const auto& p : r.edgePoints)
+        pts.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y));
+    auto ell = cv::fitEllipse(pts);
+    std::cout << "  true d=80px, fitted axes = " << ell.size.width << " x "
+              << ell.size.height << ", center=(" << ell.center.x << ","
+              << ell.center.y << ")" << std::endl;
+    // 记录性断言（宽容差防 flaky）：只锁数量级，具体偏差值看 stdout
+    EXPECT_NEAR(ell.center.x, 120.0, 2.0);
+    EXPECT_NEAR(ell.center.y, 120.0, 2.0);
+}
+
+TEST_F(ZernikeEdgeCPUTest, DefaultParamsAreValid) {    EXPECT_NO_THROW(params_.validate());
     EXPECT_EQ(params_.templateSize, 5);
     EXPECT_DOUBLE_EQ(params_.cannyLowThreshold, 50.0);
     EXPECT_DOUBLE_EQ(params_.cannyHighThreshold, 150.0);
@@ -209,9 +233,12 @@ TEST_F(ZernikeEdgeCPUTest, WarmupWithConfig) {
 // extract() 正常处理测试
 // ============================================================
 TEST_F(ZernikeEdgeCPUTest, ExtractStepEdge) {
+    // 【N1】cannyEdgeImage 现默认跳过（活链路无消费者）；本用例显式开启后复原
+    _putenv_s("JMW_Z6_CANNYIMG", "1");
     ZernikeEdgeCPU op(params_);
     cv::Mat img = createStepEdgeImage(100, 100, 50);
     auto result = op.Execute(img);
+    _putenv_s("JMW_Z6_CANNYIMG", "");
 
     EXPECT_TRUE(result.success);
     EXPECT_GT(result.edgeCount, 0);

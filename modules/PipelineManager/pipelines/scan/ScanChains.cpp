@@ -164,7 +164,7 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
         // 分离模式（还账后 2026-09-01）：B=线点分离形态学（默认 threshold 80）；
         // A=纯点图模式（spotThreshold=100 直接阈值化——算法在算子内，07 只传模式）
         calib::LaserMarkingSeparationParams sepParams;
-        if (!cfg_.enableLaser) sepParams.spotThreshold = 100;
+            if (!cfg_.enableLaser) sepParams.threshold = 100;   // 261024 合并适配：ops 版参数更名 spotThreshold→threshold
         else sepParams.threshold = 150;  // 2026-09-06 定值：原始图激光>150（宽
                                            // 13px 可测）；Gaussian 模糊后中心约
                                            // 170-180，阈值 180 恰在边缘部分帧
@@ -448,19 +448,11 @@ ScanChains::Hooks ScanChains::assemble() {
         //    C++ 异常，try/catch 兜不住——逐级查空，空即跳出。
         auto laserStatus = [&]() -> int {
             try {
-                // 261002 消双重上传：sep 已上传设备灰度图（结果 d_gray 流序回传）
-                // ——steger 直接复用；旧路径再传 grayL/R＝每帧多 6MB PCIe。
-                // 复用条件：sep 结果带 d_gray；否则回退原上传（兼容老算子/测试桩）
-                if (sepL.d_gray && !sepL.d_gray->empty()) {
-                    ops.d_grayL = *sepL.d_gray;
-                } else {
-                    ops.d_grayL.upload(frame->grayL, stream);
-                }
-                if (sepR.d_gray && !sepR.d_gray->empty()) {
-                    ops.d_grayR = *sepR.d_gray;
-                } else {
-                    ops.d_grayR.upload(frame->grayR, stream);
-                }
+                // 261024 合并适配：ops 版 sep 结果不再回传 d_gray（设备灰度直通
+                // 口退役）——回退直传（每帧多 6MB PCIe，Phase 2 五链执行器整体
+                // 替换时消；旧 d_gray 快路径删除）
+                ops.d_grayL.upload(frame->grayL, stream);
+                ops.d_grayR.upload(frame->grayR, stream);
 
                 auto hasPts = [](const std::shared_ptr<cv::cuda::GpuMat>& m) {
                     return m && !m->empty();

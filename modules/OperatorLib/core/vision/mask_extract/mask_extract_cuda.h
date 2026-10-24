@@ -28,14 +28,30 @@ struct WarmupConfig;
 /**
  * @brief 激光掩膜提取参�? */
 struct MaskExtractParams {
-    int threshold = 80;          ///< 二值化阈�?[0, 255]
+    int threshold = 80;          ///< 二值化阈值 [0, 255]
     int erodeSize = 5;           ///< 腐蚀核大小（奇数，去噪）
     int laserDilateSize = 3;     ///< 激光膨胀核大小（奇数，恢复形状）
-    int minArea = 100;           ///< 最小区域面积阈值
-    int maxArea = 100000;        ///< 最大区域面积阈值
+    /// 膨胀后二次腐蚀核大小（奇数; 0=关闭）。目的: 强膨胀连通相邻碎段后,
+    /// 收缩掩膜外形回归亮带实际宽度, 抑制大膨胀带来的跨线粘连/外形虚胖。
+    /// 典型用法: e3 + d19 + post13 (等效闭操作连通 + 开操作收边)
+    int postErodeSize = 0;
+    /// 大核形态学加速: 1=膨胀/二次腐蚀用横竖两趟线核近似（Minkowski 和为矩形,
+    /// 比 2D 椭圆核快数倍; 掩膜对角方向外形略有差异, 需下游 A/B 验证）;
+    /// 0=精确 2D 椭圆核（默认）。erodeSize<=1 时首腐蚀恒等跳过（不受此开关影响）
+    int morphApprox = 0;
+    /// 高光分离: 厚度判据剔除过曝高光斑（2026-10-07 laser261006-1668 粘连事故）。
+    /// >0（奇数）启用新路径: mask2 再腐蚀本核 → 仅剩粗高光斑(细激光线被吃掉),
+    /// 膨胀 highlightDilateSize 回扩为"高光模板", 从 mask2 减去后再走
+    /// dilate(postErode) 闭运算。0=关闭（legacy 单路形态学）。
+    /// 需 highlightErodeSize > 激光线宽 且 < 高光斑厚度（本机: 线~5px/斑>18px, 取 9）
+    int highlightErodeSize = 0;
+    /// 高光模板回膨胀核大小（奇数; 仅 highlightErodeSize>0 时生效）。
+    /// 需 ≥ highlightErodeSize 以覆盖被腐蚀掉的高光原边界（取 13）
+    int highlightDilateSize = 13;
     /**
-    * @brief 参数合法性校�? 
-    * @throws std::invalid_argument 参数不合�?     */
+    * @brief 参数合法性校验
+    * @throws std::invalid_argument 参数不合法
+    */
     void validate() const {
         if (threshold < 0 || threshold > 255)
             throw std::invalid_argument("MaskExtractParams::threshold must be [0, 255]");
@@ -43,10 +59,16 @@ struct MaskExtractParams {
             throw std::invalid_argument("MaskExtractParams::erodeSize must be positive odd");
         if (laserDilateSize < 1 || laserDilateSize % 2 == 0)
             throw std::invalid_argument("MaskExtractParams::laserDilateSize must be positive odd");
-        if (minArea < 0)
-            throw std::invalid_argument("MaskExtractParams::minArea must be >= 0");
-        if (maxArea <= minArea)
-            throw std::invalid_argument("MaskExtractParams::maxArea must be > minArea");
+        if (postErodeSize < 0 || (postErodeSize > 0 && postErodeSize % 2 == 0))
+            throw std::invalid_argument("MaskExtractParams::postErodeSize must be positive odd or 0 (off)");
+        if (morphApprox != 0 && morphApprox != 1)
+            throw std::invalid_argument("MaskExtractParams::morphApprox must be 0 or 1");
+        if (highlightErodeSize < 0 || (highlightErodeSize > 0 && highlightErodeSize % 2 == 0))
+            throw std::invalid_argument("MaskExtractParams::highlightErodeSize must be positive odd or 0 (off)");
+        if (highlightDilateSize < 1 || highlightDilateSize % 2 == 0)
+            throw std::invalid_argument("MaskExtractParams::highlightDilateSize must be positive odd");
+        if (highlightErodeSize > 0 && highlightDilateSize < highlightErodeSize)
+            throw std::invalid_argument("MaskExtractParams::highlightDilateSize must be >= highlightErodeSize");
     }
 
     /**
@@ -57,26 +79,30 @@ struct MaskExtractParams {
             {"threshold", threshold},
             {"erodeSize", erodeSize},
             {"laserDilateSize", laserDilateSize},
-            {"minArea", minArea},
-            {"maxArea", maxArea}
+            {"postErodeSize", postErodeSize},
+            {"morphApprox", morphApprox},
+            {"highlightErodeSize", highlightErodeSize},
+            {"highlightDilateSize", highlightDilateSize}
         };
     }
 
     /**
-     * @brief �?JSON 反序列化
-     * @throws std::invalid_argument 参数不合�?     */
+     * @brief 从 JSON 反序列化
+     * @throws std::invalid_argument 参数不合法
+     */
     static MaskExtractParams fromJson(const nlohmann::json& j) {
         MaskExtractParams p;
         if (j.contains("threshold")) p.threshold = j.at("threshold").get<int>();
         if (j.contains("erodeSize")) p.erodeSize = j.at("erodeSize").get<int>();
         if (j.contains("laserDilateSize")) p.laserDilateSize = j.at("laserDilateSize").get<int>();
-        if (j.contains("minArea")) p.minArea = j.at("minArea").get<int>();
-        if (j.contains("maxArea")) p.maxArea = j.at("maxArea").get<int>();
+        if (j.contains("postErodeSize")) p.postErodeSize = j.at("postErodeSize").get<int>();
+        if (j.contains("morphApprox")) p.morphApprox = j.at("morphApprox").get<int>();
+        if (j.contains("highlightErodeSize")) p.highlightErodeSize = j.at("highlightErodeSize").get<int>();
+        if (j.contains("highlightDilateSize")) p.highlightDilateSize = j.at("highlightDilateSize").get<int>();
         p.validate();
         return p;
     }
 };
-
 /**
  * @brief 激光掩膜提取结�? * 
  * 结果结构体包含：

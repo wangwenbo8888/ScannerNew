@@ -24,11 +24,12 @@ LaserMarkingSeparationCUDA::LaserMarkingSeparationCUDA(
     const LaserMarkingSeparationParams& params)
     : pImpl_(std::make_unique<Impl>(params))
 {
-    CALIB_LOG_INFO("LaserMarkingSeparationCUDA initialized: gaussianSize={}, threshold={}, "
-                   "step2_erode={}, step3_erode={}, step4_dilate={}, step6_dilate={}",
-                   params.gaussianSize, params.threshold,
-                   params.step2_erodeSize, params.step3_erodeSize,
-                   params.step4_dilateSize, params.step6_dilateSize);
+    CALIB_LOG_INFO("LaserMarkingSeparationCUDA initialized: threshold={}, "
+                   "noiseErode={}, laserKill={}, markerKill={}, "
+                   "laserEdgeDilate={}, markingEdgeDilate={}",
+                   params.threshold, params.noiseErodeSize, params.laserKillSize,
+                   params.markerKillSize, params.laserEdgeDilateSize,
+                   params.markingEdgeDilateSize);
 }
 
 LaserMarkingSeparationCUDA::~LaserMarkingSeparationCUDA() = default;
@@ -56,12 +57,6 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Execute(
         return result;
     }
 
-    // 纯点图模式（spotThreshold>0，A 模式纯补光图——还账 2026-09-01：直接
-    // 阈值化出标记点掩膜，跳过线点共存形态学（该模式下失效）；激光掩膜空）
-    if (pImpl_->spotThreshold() > 0) {
-        return pImpl_->binarizeSpot(grayImage, stream);
-    }
-
     return pImpl_->separate(grayImage, stream);
 }
 
@@ -70,6 +65,25 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Execute(
 {
     static thread_local cv::cuda::Stream defaultStream;
     return Execute(grayImage, defaultStream);
+}
+
+LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Execute(
+    const cv::cuda::GpuMat& d_grayImage, cv::cuda::Stream& stream)
+{
+    // 【速度优化】设备直输——免每帧二次 H2D（与 steger 同源帧）
+    if (d_grayImage.empty()) {
+        LaserMarkingSeparationResult result;
+        result.success = false;
+        result.message = "Device input image is empty";
+        return result;
+    }
+    if (d_grayImage.type() != CV_8UC1) {
+        LaserMarkingSeparationResult result;
+        result.success = false;
+        result.message = "Device input must be CV_8UC1 grayscale image";
+        return result;
+    }
+    return pImpl_->separateDev(d_grayImage, stream);
 }
 
 void LaserMarkingSeparationCUDA::Destroy() {
@@ -91,8 +105,8 @@ void LaserMarkingSeparationCUDA::Warmup(const calib::WarmupConfig& config) {
 void LaserMarkingSeparationCUDA::SetParams(
     const LaserMarkingSeparationParams& params)
 {
-    CALIB_LOG_INFO("SetParams() called: threshold={}, step2_erode={}, step3_erode={}",
-                   params.threshold, params.step2_erodeSize, params.step3_erodeSize);
+    CALIB_LOG_INFO("SetParams() called: threshold={}, noiseErode={}, laserKill={}",
+                   params.threshold, params.noiseErodeSize, params.laserKillSize);
     pImpl_->setParams(params);
 }
 

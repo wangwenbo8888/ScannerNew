@@ -1,18 +1,22 @@
 /**
  * @file laser_markingpoint_mask_separation_cuda.h
  * @brief 激光线与标记点掩膜分离算子 - 公开头文件（�?C++，不�?CUDA 类型�? *
- * 功能：从灰度图像中分离激光线掩膜和标记点掩膜
+ * 功能：同帧掩膜分离——激光线（细，真实宽 4-7px）与标记点（宽，真实 ~35px）
+ * 按宽度域分离，两路二值掩膜输出。
  *
- * 算法流程�? 步）�? * 1. 全局高斯模糊 + 二值化 �?基础掩膜
- * 2. 去除小噪点：腐蚀→膨胀（Open 操作），去除比提取物小的噪点
- * 3. 去除大噪点：�?step2 掩膜上腐蚀→膨胀（更大核），去除提取物，
- *    然后 step2 掩膜减去 step3 掩膜 �?两个提取物的掩膜
- * 4. 获取大提取物（激光线）：�?step3 掩膜上腐蚀→膨胀（更大核），
- *    去除小提取物 �?大提取物掩膜
- * 5. 获取小提取物（标记点）：step3 掩膜减去 step4 掩膜 �?小提取物掩膜
- * 6. 小提取物膨胀：膨胀标记点掩膜，恢复边缘渐变区域
+ * 算法流程（细激光形态 v2，2026-10-04 重设计）：
+ * 1. 固定 5x5 高斯＋二值化（threshold）
+ * 2. 腐蚀(noiseErodeSize)：去小噪点，得全量结构图 X（各结构 -1px/边）
+ * 3. 腐蚀(laserKillSize) → 融合[膨胀(kill+2)+减法]：
+ *    laserRaw = X − 还原幸存者（激光线死透落入）；survivor = 标记点+中/大噪点
+ *    （还原核=kill+2 恰好补平第 2 步的 -2px，第 4 步阈值语义 = 真实宽度）
+ * 4. 腐蚀(markerKillSize) → 融合[膨胀(kill+2)+减法]：
+ *    markingRaw = survivor − 还原幸存者（标记点死透落入）；大噪点幸存 → 丢弃
+ * 5. 边缘保留膨胀：laser = dilate(laserEdgeDilateSize)、
+ *    marking = dilate(markingEdgeDilateSize)（供下游亚像素边缘提取）
  *
- * 前提：两个提取物（激光线和标记点）宽度有明显差异
+ * 减法 = top-hat（掩膜 − 膨胀(腐蚀(掩膜))）：还原膨胀是必要组成，
+ * 纯腐蚀相减会残留幸存者边缘环污染输出。
  */
 
 #pragma once
@@ -37,75 +41,84 @@ struct WarmupConfig;
  * @brief 激光线与标记点掩膜分离参数
  */
 struct LaserMarkingSeparationParams {
-    int gaussianSize = 5;
-    int threshold = 80;
-    int spotThreshold = 0;            ///< 纯点图模式阈值（0=关闭走线点分离形态学；
-                                      ///<  >0=A 模式纯补光图直接阈值化出标记点掩膜
-                                      ///<  ——激光掩膜空。2026-09-01 还账收编）
+    int threshold = 80;              ///< 二值化阈值 [0,255]（高斯平滑后灰度标度）
 
-    int step2_erodeSize = 3;       ///< �?步腐蚀核大小（奇数，去小噪点）
-    int step2_dilateSize = 3;      ///< �?步膨胀核大小（奇数，同腐蚀核）
+    int noiseErodeSize = 3;          ///< 去小噪点腐蚀核（杀真宽 < 本值）
+    int laserKillSize = 9;           ///< 杀激光线腐蚀核（激光真实 4-7px）
+    int markerKillSize = 37;         ///< 杀标记点腐蚀核（标记点真实 ~35px，余量 2px；
+                                     ///<  >=37px 结构视为大噪点丢弃）
 
-    int step3_erodeSize = 5;
-    int step3_dilateSize = 7;
-    int step4_erodeSize = 5;
-    int step4_dilateSize = 9;
+    int laserEdgeDilateSize = 9;     ///< 激光掩膜边缘保留膨胀（净外扩 ~3px/边）
+    int markingEdgeDilateSize = 7;   ///< 标记点掩膜边缘保留膨胀（净外扩 ~3px/边）
 
-    int step6_dilateSize = 5;      ///< �?步小提取物膨胀核大小（奇数，恢复边缘）
+    int kernelShape = 1;             ///< 0=方形核 1=圆形磁盘核（默认圆形——圆斑宽度
+                                     ///<  语义精确：杀/留判定＝结构宽 vs 核宽；方形核对
+                                     ///<  圆斑实际杀宽＝核宽×√2，分档语义畸变）
 
-    /**
-    * @brief 参数合法性校�? 
-    * @throws std::invalid_argument 参数不合�?     */
+    /// 调试开关：结果额外携带分步中间掩膜（GPU 克隆；生产保持 false）
+    bool dumpAllSteps = false;
+
     void validate() const {
-        auto checkOdd = [](int v, const char* name) {
-            if (v < 1 || v % 2 == 0)
-                throw std::invalid_argument(
-                    std::string("LaserMarkingSeparationParams::") + name +
-                    " must be positive odd, got " + std::to_string(v));
-        };
-        checkOdd(gaussianSize, "gaussianSize");
         if (threshold < 0 || threshold > 255)
-            throw std::invalid_argument("threshold must be [0, 255]");
-        checkOdd(step2_erodeSize, "step2_erodeSize");
-        checkOdd(step2_dilateSize, "step2_dilateSize");
-        checkOdd(step3_erodeSize, "step3_erodeSize");
-        checkOdd(step3_dilateSize, "step3_dilateSize");
-        checkOdd(step4_erodeSize, "step4_erodeSize");
-        checkOdd(step4_dilateSize, "step4_dilateSize");
-        checkOdd(step6_dilateSize, "step6_dilateSize");
-        if (step3_erodeSize <= step2_erodeSize)
             throw std::invalid_argument(
-                "step3_erodeSize must be > step2_erodeSize for larger noise removal");
-        if (step4_dilateSize <= step3_dilateSize)
+                "LaserMarkingSeparationParams::threshold must be [0, 255], got "
+                + std::to_string(threshold));
+        constexpr int kMaxKernel = 63;   // CUDA kernel 模板上限 KHALF=31
+        auto checkKernel = [&](int v, const char* name) {
+            if (v < 1 || v % 2 == 0 || v > kMaxKernel)
+                throw std::invalid_argument(
+                    std::string("LaserMarkingSeparationParams::") + name
+                    + " must be positive odd <= 63, got " + std::to_string(v));
+        };
+        checkKernel(noiseErodeSize, "noiseErodeSize");
+        // laserKill/markerKill 内部还原核 = +2，不得超模板上限 → 上限 61
+        auto checkKill = [&](int v, const char* name) {
+            if (v < 1 || v % 2 == 0 || v > 61)
+                throw std::invalid_argument(
+                    std::string("LaserMarkingSeparationParams::") + name
+                    + " must be positive odd <= 61 (restore kernel = +2 vs "
+                      "template limit 63), got " + std::to_string(v));
+        };
+        checkKill(laserKillSize, "laserKillSize");
+        checkKill(markerKillSize, "markerKillSize");
+        checkKernel(laserEdgeDilateSize, "laserEdgeDilateSize");
+        checkKernel(markingEdgeDilateSize, "markingEdgeDilateSize");
+        if (kernelShape != 0 && kernelShape != 1)
             throw std::invalid_argument(
-                "step4_dilateSize must be > step3_dilateSize to include edge gradients");
+                "LaserMarkingSeparationParams::kernelShape must be 0 or 1, got "
+                + std::to_string(kernelShape));
+        // 注：laserKill 允许 <= noiseErode（laserKill 作用在 ② 压过的域上，
+        // 原始宽度激光带 = [noiseErode, laserKill + noiseErode - 1)——下限抬升式
+        // 编码合法，如 ②=7/③=5 ＝ 原始带宽 [7,11)）
+        if (markerKillSize <= laserKillSize)
+            throw std::invalid_argument(
+                "LaserMarkingSeparationParams::markerKillSize must be > "
+                "laserKillSize");
     }
 
     nlohmann::json toJson() const {
         return {
-            {"gaussianSize", gaussianSize},
             {"threshold", threshold},
-            {"step2_erodeSize", step2_erodeSize},
-            {"step2_dilateSize", step2_dilateSize},
-            {"step3_erodeSize", step3_erodeSize},
-            {"step3_dilateSize", step3_dilateSize},
-            {"step4_erodeSize", step4_erodeSize},
-            {"step4_dilateSize", step4_dilateSize},
-            {"step6_dilateSize", step6_dilateSize}
+            {"noiseErodeSize", noiseErodeSize},
+            {"laserKillSize", laserKillSize},
+            {"markerKillSize", markerKillSize},
+            {"laserEdgeDilateSize", laserEdgeDilateSize},
+            {"markingEdgeDilateSize", markingEdgeDilateSize},
+            {"kernelShape", kernelShape},
+            {"dumpAllSteps", dumpAllSteps}
         };
     }
 
     static LaserMarkingSeparationParams fromJson(const nlohmann::json& j) {
         LaserMarkingSeparationParams p;
-        if (j.contains("gaussianSize"))    p.gaussianSize    = j.at("gaussianSize").get<int>();
-        if (j.contains("threshold"))       p.threshold       = j.at("threshold").get<int>();
-        if (j.contains("step2_erodeSize")) p.step2_erodeSize = j.at("step2_erodeSize").get<int>();
-        if (j.contains("step2_dilateSize"))p.step2_dilateSize= j.at("step2_dilateSize").get<int>();
-        if (j.contains("step3_erodeSize")) p.step3_erodeSize = j.at("step3_erodeSize").get<int>();
-        if (j.contains("step3_dilateSize"))p.step3_dilateSize= j.at("step3_dilateSize").get<int>();
-        if (j.contains("step4_erodeSize")) p.step4_erodeSize = j.at("step4_erodeSize").get<int>();
-        if (j.contains("step4_dilateSize"))p.step4_dilateSize= j.at("step4_dilateSize").get<int>();
-        if (j.contains("step6_dilateSize"))p.step6_dilateSize= j.at("step6_dilateSize").get<int>();
+        if (j.contains("threshold"))              p.threshold              = j.at("threshold").get<int>();
+        if (j.contains("noiseErodeSize"))         p.noiseErodeSize         = j.at("noiseErodeSize").get<int>();
+        if (j.contains("laserKillSize"))          p.laserKillSize          = j.at("laserKillSize").get<int>();
+        if (j.contains("markerKillSize"))         p.markerKillSize         = j.at("markerKillSize").get<int>();
+        if (j.contains("laserEdgeDilateSize"))    p.laserEdgeDilateSize    = j.at("laserEdgeDilateSize").get<int>();
+        if (j.contains("markingEdgeDilateSize"))  p.markingEdgeDilateSize  = j.at("markingEdgeDilateSize").get<int>();
+        if (j.contains("kernelShape"))            p.kernelShape            = j.at("kernelShape").get<int>();
+        if (j.contains("dumpAllSteps"))           p.dumpAllSteps           = j.at("dumpAllSteps").get<bool>();
         p.validate();
         return p;
     }
@@ -116,11 +129,10 @@ struct LaserMarkingSeparationParams {
  */
 struct MaskSeparationTimings {
     double step1_gaussian_threshold_ms = 0.0;
-    double step2_remove_small_noise_ms = 0.0;
-    double step3_remove_large_noise_ms = 0.0;
-    double step4_extract_laser_ms = 0.0;
-    double step5_extract_marking_ms = 0.0;
-    double step6_dilate_marking_ms = 0.0;
+    double step2_noise_erode_ms = 0.0;
+    double step3_laser_extract_ms = 0.0;    // 腐蚀 kill + 融合膨胀还原+减法
+    double step4_marking_extract_ms = 0.0;  // 同上（标记点级）
+    double step5_edge_dilate_ms = 0.0;      // 双掩膜边缘保留膨胀
     double total_pipeline_ms = 0.0;
     double upload_ms = 0.0;
 };
@@ -130,12 +142,16 @@ struct LaserMarkingSeparationResult {
     std::string message;
     QualityFlag qualityFlag = QualityFlag::Normal;
 
-    std::shared_ptr<cv::cuda::GpuMat> d_laserMask;       ///< 激光线（大提取物）掩膜
-    std::shared_ptr<cv::cuda::GpuMat> d_markingPointMask; ///< 标记点（小提取物）掩膜
-    std::shared_ptr<cv::cuda::GpuMat> d_combinedMask;     ///< 两者合并掩膜（step3 输出）
-    std::shared_ptr<cv::cuda::GpuMat> d_gray;             ///< 设备端灰度图（261002：
-                                                          ///< 流序拷贝回传，下游激光链
-                                                          ///< 复用免二次上传）
+    std::shared_ptr<cv::cuda::GpuMat> d_laserMask;       ///< 激光线掩膜
+    std::shared_ptr<cv::cuda::GpuMat> d_markingPointMask; ///< 标记点掩膜
+    std::shared_ptr<cv::cuda::GpuMat> d_combinedMask;     ///< 全量结构图（步骤②输出 X，去小噪点后全部结构）
+    // —— 分步中间掩膜：d_step1_binary 常驻（harness 产物消费）；其余 4 张仅
+    //    params.dumpAllSteps=true 时填充（GPU 克隆；生产保持 false）——
+    std::shared_ptr<cv::cuda::GpuMat> d_step1_binary;    ///< ① 高斯+阈值二值图（未分割）
+    std::shared_ptr<cv::cuda::GpuMat> d_structuresMask;  ///< ② 全量结构图 X（=d_combinedMask 同源）
+    std::shared_ptr<cv::cuda::GpuMat> d_laserRaw;        ///< ③ 激光原始掩膜（膨胀前）
+    std::shared_ptr<cv::cuda::GpuMat> d_survivorMask;    ///< ③ 幸存支（标记点+中/大噪点）
+    std::shared_ptr<cv::cuda::GpuMat> d_markingRaw;      ///< ④ 标记点原始掩膜（膨胀前）
     MaskSeparationTimings timings;
 
     LaserMarkingSeparationResult() = default;
@@ -177,6 +193,11 @@ public:
                                           cv::cuda::Stream& stream);
 
     LaserMarkingSeparationResult Execute(const cv::Mat& grayImage);
+
+    /// 【速度优化】GpuMat 直输：输入帧已在显存（与 steger 同源）——免每帧二次
+    /// H2D 上传；逐内核序列与 Host 版一致 → 结果逐位一致
+    LaserMarkingSeparationResult Execute(const cv::cuda::GpuMat& d_grayImage,
+                                         cv::cuda::Stream& stream);
 
     void Destroy();
 

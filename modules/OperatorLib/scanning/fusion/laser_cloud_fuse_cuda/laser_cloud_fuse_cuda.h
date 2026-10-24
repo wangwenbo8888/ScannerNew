@@ -19,12 +19,23 @@ namespace calib {
 struct WarmupConfig;
 
 // ============================================================
+// 【2601021 扩容改造·压力测试验证】哈希表扩容事件（非破坏性固定增量）
+// ============================================================
+struct RehashEvent {
+    size_t triggerVoxelCount = 0;  // 触发时的体素数（负载 > 70%）
+    size_t oldCapacity = 0;        // 扩容前槽位数
+    size_t newCapacity = 0;        // 扩容后槽位数（+growSlotCount）
+    double timeMs = 0.0;           // 扩容全程耗时（分配+搬移+同步）
+};
+
+// ============================================================
 // 参数
 // ============================================================
 struct LaserCloudFuseCUDAParams {
     float  voxelSize          = 0.5f;
     int    saturationThreshold = 5;
-    size_t reserveVoxelCount  = static_cast<size_t>(1) << 21; // 2M slots
+    size_t reserveVoxelCount  = 50000000;   // 初始槽位（实际扫描场景口径，2601021 裁定）
+    size_t growSlotCount      = 10000000;   // 每次扩容固定增量（负载>70% 触发）
     bool   collectStatistics  = true;
 
     void validate() const;
@@ -46,6 +57,11 @@ struct LaserCloudFuseCudaResult {
     int totalVoxelCount = 0;
     double totalTimeMs  = 0.0;
 
+    // 【2601021 扩容改造】本帧扩容信息
+    bool    rehashHappened = false;   // 本帧执行后是否触发扩容
+    double  rehashTimeMs   = 0.0;     // 本帧扩容耗时（未发生=0）
+    size_t  hashCapacity   = 0;       // 本帧结束时的哈希表容量
+
     LaserCloudFuseCudaResult() = default;
     ~LaserCloudFuseCudaResult() = default;
     LaserCloudFuseCudaResult(LaserCloudFuseCudaResult&&) = default;
@@ -62,7 +78,8 @@ struct LaserCloudFuseDeviceContext {
     const unsigned int*       d_fusedIdx    = nullptr;
     const float*              d_fusedXyz    = nullptr;
     float*                    d_fusedNormal = nullptr;
-    unsigned long long        mask          = 0;
+    /// 哈希表槽位数（取余探测——2601021 起容量可为任意正整数，非 2 的幂）
+    unsigned long long        capacity      = 0;
     float                     voxelSize     = 0.5f;
     float                     invVoxelSize  = 2.0f;
     size_t                    fusedPointCount = 0;
@@ -119,6 +136,10 @@ public:
     size_t GetVoxelCount() const noexcept;
     size_t GetFusedPointCount() const noexcept;
     LaserCloudFuseDeviceContext GetDeviceContext() const;
+
+    // 【2601021 扩容改造】扩容事件账本与当前容量
+    std::vector<RehashEvent> GetRehashEvents() const;
+    size_t GetHashCapacity() const noexcept;
 
     void SetParams(const LaserCloudFuseCUDAParams& params);
     const LaserCloudFuseCUDAParams& GetParams() const;

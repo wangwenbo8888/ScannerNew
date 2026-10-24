@@ -79,3 +79,28 @@ zitai/calib 两类型头、point_reconstruct、ellipse_fit_cpu——conic 的依
 ### 下一步
 批 2：laser_match_scan_v3 三变体＋cmtt_table_loader＋curve_map 系 8 文件（依赖 cmtt 容器，预计牵出 calibration 域小改）
 
+---
+
+## 2026-10-24 · Phase 1 批 2＋批 3 完成（v3 匹配族＋curve_map 系＋三方合并五算子）
+
+### 批 2（零摩擦）
+**新增（B）**：`scanning/laser/{laser_match_scan_v3(8文件，含 cmtt_table_loader＋split_front.cu), laser_match_scan_v3_cpu(2), laser_match_scan_v3_split(3)}`＋`calibration/laser_calib/{curve_map(3), curve_map_temp_table(11，含 cmtt_container＋temp_param_interpolator)}`；7 新测试随入（acceptance/golden_ref_tier/cmtt_container/curve_map_temp_table/temp_param_interpolator/cmtt_table_loader/curve_map）。**一把过**——批 1 公共类型垫层生效。109/109 双绿。
+
+### 批 3（三方合并重头戏：17 文件换入＋1 保留＋4 处适配）
+**换入 ops 版**：mask_separation×4（P0 八核形态学＋CUDA Graph 首次进主库！）、laser_cloud_fuse_cuda×4（取模探测＋rehash 扩容＋survivor 统计）、zernike_edge_cpu.cpp（P2 SIMD +207 行）、ccl×4（topX 面积收集 GPU 化——退役 12.6MB pageable D2H＋CPU 315万标签扫描）、mask_extract×4（erode≤1 恒等旁路＋滤波器预建）
+**保留主库版**：laser_reconstruct_cuda（主库 261018 pinned 回读＋流序 copyTo 优于 ops 近基线版）
+**手工合并**：ccl 回补 261018 legacy 栅栏（ops 版无——OpenCV CC 无 stream 重载，非阻塞调用流保序必需；ev_legacy_done_ 事件＋pimpl 成员）
+**四处适配**（ops 接口变更的下游对齐）：
+1. laser_cloud_normal_cuda（主库独有算子）：DeviceContext `mask`→`capacity` 退役——lookupVoxelDevice 探测方案整体重写为 `h % capacity` 线性探测＋hash64(key)（原 `h & mask` 幂掩码——与 ops fuse 插入路径不匹配＝全 miss→processedCount=0 三连失败的根因）
+2. ScanChains.cpp：`spotThreshold`→`threshold` 更名；`d_gray` 直通口退役回退直传（每帧多 6MB PCIe，Phase 2 消）
+3. fuse_cuda 测试：`ctx.mask==1023` 断言→`capacity>=1`（占位防呆）
+4. mask_sep 测试：WarmupAndTimings 断言条件化——CUDA Graph 路径 timings 恒 0 是预期（P0 优化本质），仅 JMW_SEPTIME=1/legacy 回退才计时
+**测试换 ops 版**：zernike/mask_extract×2/mask_sep
+
+### 验证
+Release＋Debug ctest **109/109 双绿**＋LeadScannerK2 全量编译通过
+
+### 批 3 消化的台账项
+原批 3 全部（fuse/mask/zernike/ellipse——ellipse 已在批 1）＋原批 4 的 ccl/mask_extract/undistort（undistort 换入在批 3 的 17 文件内）
+
+

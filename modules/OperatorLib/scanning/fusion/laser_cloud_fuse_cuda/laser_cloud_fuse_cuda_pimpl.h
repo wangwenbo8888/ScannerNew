@@ -2,6 +2,7 @@
 
 #include "laser_cloud_fuse_cuda.h"
 #include <cuda_runtime.h>
+#include <vector>
 
 namespace calib {
 
@@ -16,9 +17,7 @@ struct LaserCloudFuseCuda::Impl {
     unsigned long long* d_keys_      = nullptr;  // voxel key + 1（0 = 空槽）
     unsigned int*       d_fusedIdx_  = nullptr;  // → d_fusedXyz_ 索引
     unsigned int*       d_counts_    = nullptr;  // 饱和计数
-    size_t              capacity_    = 0;
-    unsigned long long  mask_        = 0;
-
+    size_t              capacity_    = 0;        // 槽位数（任意正整数，取余探测）
     // --- 融合点缓冲（常驻显存） ---
     float*        d_fusedXyz_        = nullptr;  // maxFusedPoints_ × 3
     float*        d_fusedNormal_     = nullptr;  // maxFusedPoints_ × 3（法线算子写入）
@@ -28,6 +27,10 @@ struct LaserCloudFuseCuda::Impl {
     // --- Host 镜像 ---
     unsigned int h_fusedPointCount_  = 0;
     size_t       h_voxelCount_       = 0;
+
+    // --- 【2601021 扩容改造】非破坏性扩容（负载>70% 固定增量 +growSlotCount） ---
+    std::vector<RehashEvent> rehashEvents_;   // 扩容事件账本（含耗时）
+    void rehashGrow(cudaStream_t stream);     // 分配新表搬移旧槽＋点缓冲扩容
 
     // --- 每帧临时缓冲（复用） ---
     int* d_survivingFlags_ = nullptr;   // inputCount

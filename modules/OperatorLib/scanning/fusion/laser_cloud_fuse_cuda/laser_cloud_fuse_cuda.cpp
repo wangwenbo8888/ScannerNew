@@ -27,6 +27,8 @@ void LaserCloudFuseCUDAParams::validate() const {
         throw std::invalid_argument("saturationThreshold must be >= 1");
     if (reserveVoxelCount < 64)
         throw std::invalid_argument("reserveVoxelCount must be >= 64");
+    if (growSlotCount < 1)
+        throw std::invalid_argument("growSlotCount must be >= 1");
 }
 
 nlohmann::json LaserCloudFuseCUDAParams::toJson() const {
@@ -34,6 +36,7 @@ nlohmann::json LaserCloudFuseCUDAParams::toJson() const {
     j["voxelSize"] = voxelSize;
     j["saturationThreshold"] = saturationThreshold;
     j["reserveVoxelCount"] = reserveVoxelCount;
+    j["growSlotCount"] = growSlotCount;
     j["collectStatistics"] = collectStatistics;
     return j;
 }
@@ -43,6 +46,7 @@ LaserCloudFuseCUDAParams LaserCloudFuseCUDAParams::fromJson(const nlohmann::json
     if (j.contains("voxelSize")) p.voxelSize = j.at("voxelSize").get<float>();
     if (j.contains("saturationThreshold")) p.saturationThreshold = j.at("saturationThreshold").get<int>();
     if (j.contains("reserveVoxelCount")) p.reserveVoxelCount = j.at("reserveVoxelCount").get<size_t>();
+    if (j.contains("growSlotCount")) p.growSlotCount = j.at("growSlotCount").get<size_t>();
     if (j.contains("collectStatistics")) p.collectStatistics = j.at("collectStatistics").get<bool>();
     return p;
 }
@@ -142,11 +146,23 @@ LaserCloudFuseDeviceContext LaserCloudFuseCuda::GetDeviceContext() const {
     ctx.d_fusedIdx    = pImpl_->d_fusedIdx_;
     ctx.d_fusedXyz    = pImpl_->d_fusedXyz_;
     ctx.d_fusedNormal = pImpl_->d_fusedNormal_;
-    ctx.mask          = pImpl_->mask_;
+    ctx.capacity      = (unsigned long long)pImpl_->capacity_;
     ctx.voxelSize     = pImpl_->params_.voxelSize;
     ctx.invVoxelSize  = 1.0f / pImpl_->params_.voxelSize;
     ctx.fusedPointCount = pImpl_->h_fusedPointCount_;
     return ctx;
+}
+
+// ============================================================
+// 【2601021 扩容改造】扩容事件账本 / 当前容量
+// ============================================================
+
+std::vector<RehashEvent> LaserCloudFuseCuda::GetRehashEvents() const {
+    return pImpl_->rehashEvents_;
+}
+
+size_t LaserCloudFuseCuda::GetHashCapacity() const noexcept {
+    return pImpl_->capacity_;
 }
 
 // ============================================================
@@ -204,6 +220,8 @@ void LaserCloudFuseCuda::Warmup(const calib::WarmupConfig&) {}
 size_t LaserCloudFuseCuda::GetVoxelCount() const noexcept { return 0; }
 size_t LaserCloudFuseCuda::GetFusedPointCount() const noexcept { return 0; }
 LaserCloudFuseDeviceContext LaserCloudFuseCuda::GetDeviceContext() const { return {}; }
+std::vector<RehashEvent> LaserCloudFuseCuda::GetRehashEvents() const { return {}; }
+size_t LaserCloudFuseCuda::GetHashCapacity() const noexcept { return 0; }
 ResultStatus LaserCloudFuseCuda::removePoints(const std::vector<uint32_t>&, cv::cuda::Stream&) {
     return ResultStatus::fail("BUILD_CUDA is OFF");
 }

@@ -3,13 +3,22 @@
  * @brief 激光连通域分析算子 CUDA 实现 — 全 GPU 精简管线（仅包围盒）
  *
  * 算法步骤（全部在 GPU 上完成）:
- *   Step 1: GPU CCL               cv::cuda::connectedComponents (conn=8)
- *   Step 2: GPU initStatsKernel    初始化统计缓冲 (5 数组)
- *   Step 3: GPU computeStatsKernel 逐像素 atomic 统计 (5 原子, 无质心)
- *   Step 4: GPU buildRemapKernel   面积过滤 + 稠密重编号
- *   Step 5: GPU relabelKernel      生成重编号掩膜
- *   Step 6: GPU compactStatsKernel 压缩包围盒结果
- *   Step 7: D2H download (pinned memory, 2 次小传输)
+ *   Step 1:  GPU CCL               cv::cuda::connectedComponents (conn=8)
+ *   Step 2:  GPU initStatsKernel    初始化统计缓冲 (5 数组)
+ *   Step 3:  GPU computeStatsKernel 逐像素 atomic 统计 (5 原子, 无质心)
+ *   Step 4:  GPU buildRemapKernel   面积过滤 + 稠密重编号
+ *   Step 5:  GPU relabelKernel      生成重编号掩膜
+ *   Step 6:  GPU compactStatsKernel 压缩包围盒结果
+ *   Step 7:  同步 + D2H (pinned memory, 小传输)
+ *
+ * 性能要点（2026-08 优化）:
+ *   - topX 面积收集 GPU 化：collectValidAreasKernel 把有效域面积压缩到紧凑
+ *     缓冲（实测 ~30-100 个 int）再小传输 D2H，替代旧版整张 12.6MB 面积表
+ *     pageable D2H + CPU 扫 315 万标签（旧版隐藏开销 ~10ms/帧）。
+ *   - Execute 首次调用自动完成缓冲分配（自预热），同尺寸后续调用不再重复进入。
+ *   - 注意：BKE 输出标签稀疏（真实 2048x1536 掩膜 max_label 实测达 ~3.1M，
+ *     接近像素总数），统计数组必须按像素总数分配，不能用 max_label 缩小扫描。
+ *   - 计时口径：事件区间 1~7 为 GPU 步骤分解；WALL 为整函数墙钟（含 topX/copyTo）。
  *
  * 对比旧版优化点:
  *   - 删除 minMaxLoc (~2.3ms → 0ms): 不需要提前知道 max_label
@@ -22,11 +31,13 @@
 #include "common/calib_logging.h"
 #include <cuda_runtime.h>
 #include <opencv2/cudaimgproc.hpp>
-#include <opencv2/core/cuda_stream_accessor.hpp>   // 261002：内核/事件挂调用流
-#include <atomic>
+#include <opencv2/core/cuda_stream_accessor.hpp>   // 261024 栅栏回补需 StreamAccessor
+#include <chrono>
 #include <stdexcept>
 #include <algorithm>
+#include <functional>
 #include <memory>
+#include <vector>
 
 using namespace calib;
 
@@ -36,6 +47,27 @@ CALIB_DEFINE_LOG_TAG(07, RegionAnalyzerCUDA);
 // ============================================================
 // CUDA Kernels
 // ============================================================
+
+/// topX 前置收集：把有效域面积压缩到紧凑缓冲（替代旧版 12.6MB 面积表整表 D2H + CPU 全量扫描）
+/// 注意：BKE 标签空间稀疏（max_label 可达像素总数），无法用 max_label 缩小扫描范围，
+///       只能把"传输与 CPU 计算"压缩到有效域数量级（实测 ~30-100 个）。
+__global__ void collectValidAreasKernel(
+    const int* __restrict__ areas,
+    int scan_range,
+    int min_area, int max_area,
+    int* __restrict__ out_areas,
+    int* __restrict__ out_count,
+    int out_cap)
+{
+    int label = blockIdx.x * blockDim.x + threadIdx.x + 1;  // skip background=0
+    if (label >= scan_range) return;
+
+    int a = areas[label];
+    if (a >= min_area && a <= max_area && a > 0) {
+        int slot = atomicAdd(out_count, 1);
+        if (slot < out_cap) out_areas[slot] = a;
+    }
+}
 
 /// 初始化统计缓冲（5 个数组 + remap + num_valid）
 __global__ void initStatsKernel(
@@ -115,8 +147,9 @@ __global__ void relabelKernel(
     relabeled[y * step_elem + x] = (label > 0) ? remap[label] : 0;
 }
 
-/// 压缩统计：遍历标签空间，将有效标签的包围盒写入紧凑数组
+/// 压缩统计：遍历标签空间，将有效标签的包围盒+面积写入紧凑数组
 __global__ void compactStatsKernel(
+    const int* __restrict__ areas,
     const int* __restrict__ min_x, const int* __restrict__ max_x,
     const int* __restrict__ min_y, const int* __restrict__ max_y,
     const int* __restrict__ remap,
@@ -134,6 +167,7 @@ __global__ void compactStatsKernel(
     results[new_id - 1].bbox_y = min_y[label];
     results[new_id - 1].bbox_w = max_x[label] - min_x[label] + 1;
     results[new_id - 1].bbox_h = max_y[label] - min_y[label] + 1;
+    results[new_id - 1].area   = areas[label];
 }
 
 // ============================================================
@@ -173,8 +207,10 @@ void RegionAnalyzerCUDA::Impl::allocateStatsBuffers(int max_labels) {
     err = cudaMalloc(&d_max_x_, bytes_int);     if (err) goto fail;
     err = cudaMalloc(&d_min_y_, bytes_int);     if (err) goto fail;
     err = cudaMalloc(&d_max_y_, bytes_int);     if (err) goto fail;
-    err = cudaMalloc(&d_remap_, bytes_int);     if (err) goto fail;
+    err = cudaMalloc(&d_remap_, bytes_int);      if (err) goto fail;
     err = cudaMalloc(&d_num_valid_, sizeof(int)); if (err) goto fail;
+    err = cudaMalloc(&d_valid_count_, sizeof(int)); if (err) goto fail;
+    err = cudaMalloc(&d_valid_areas_, (size_t)COMPACT_MAX * sizeof(int)); if (err) goto fail;
     err = cudaMalloc(&d_compact_, (size_t)COMPACT_MAX * sizeof(GPUComponentResult)); if (err) goto fail;
 
     // Pinned host memory
@@ -201,10 +237,11 @@ void RegionAnalyzerCUDA::Impl::freeStatsBuffers() {
     if (d_max_y_)     { cudaFree(d_max_y_);     d_max_y_     = nullptr; }
     if (d_remap_)     { cudaFree(d_remap_);     d_remap_     = nullptr; }
     if (d_num_valid_) { cudaFree(d_num_valid_); d_num_valid_ = nullptr; }
+    if (d_valid_count_) { cudaFree(d_valid_count_); d_valid_count_ = nullptr; }
+    if (d_valid_areas_) { cudaFree(d_valid_areas_); d_valid_areas_ = nullptr; }
     if (d_compact_)   { cudaFree(d_compact_);   d_compact_   = nullptr; }
     if (h_pinned_count_)   { cudaFreeHost(h_pinned_count_);   h_pinned_count_   = nullptr; }
     if (h_pinned_compact_) { cudaFreeHost(h_pinned_compact_); h_pinned_compact_ = nullptr; }
-    if (ev_legacy_done_)   { cudaEventDestroy(ev_legacy_done_); ev_legacy_done_ = nullptr; }  // 261018 随缓冲一并释放
     stats_capacity_ = 0;
 }
 
@@ -217,6 +254,7 @@ void RegionAnalyzerCUDA::Impl::Warmup(int rows, int cols) {
     d_labels_.create(rows, cols, CV_32SC1);
     d_relabeled_.create(rows, cols, CV_32SC1);
 
+    // BKE 标签空间稀疏（max_label 可达像素总数），统计数组必须按像素总数分配
     int step_elem = static_cast<int>(d_labels_.step / sizeof(int));
     int max_labels = step_elem * rows + 1;
     allocateStatsBuffers(max_labels);
@@ -305,22 +343,16 @@ RegionAnalysisResult RegionAnalyzerCUDA::Impl::Execute(
     RegionAnalysisResult result;
 
     try {
+        const auto wall_t0 = std::chrono::steady_clock::now();
         int rows = d_inputBinaryMask.rows;
         int cols = d_inputBinaryMask.cols;
 
-        // ── 逐步骤计时（261002 采样化 1/300：原逐次建事件＋全设备同步＋日志，
-        //    多 lane 并发下互相闸死异步链——lane 统计 gpu 段 100% 瓶颈主因）──
+        // ── 逐步骤计时（ev0..ev7，7 个区间）＋整函数墙钟 ──
         cudaEvent_t ev0, ev1, ev2, ev3, ev4, ev5, ev6, ev7;
-        static std::atomic<uint64_t> s_cclTimingCnt{0};
-        const bool sampleTiming = (s_cclTimingCnt.fetch_add(1) % 300 == 0);
-        if (sampleTiming) {
-            cudaEventCreate(&ev0); cudaEventCreate(&ev1);
-            cudaEventCreate(&ev2); cudaEventCreate(&ev3);
-            cudaEventCreate(&ev4); cudaEventCreate(&ev5);
-            cudaEventCreate(&ev6); cudaEventCreate(&ev7);
-        }
-        // 261002：全部内核/事件改挂调用流（原默认流＝与所有流互斥的隐式串行器）
-        const auto cs = cv::cuda::StreamAccessor::getStream(stream);
+        cudaEventCreate(&ev0); cudaEventCreate(&ev1);
+        cudaEventCreate(&ev2); cudaEventCreate(&ev3);
+        cudaEventCreate(&ev4); cudaEventCreate(&ev5);
+        cudaEventCreate(&ev6); cudaEventCreate(&ev7);
 
         if (!warmed_up_ || warmup_rows_ != rows || warmup_cols_ != cols) {
             CALIB_LOG_WARN("GPU buffer (re)allocation during analyze() - "
@@ -328,101 +360,181 @@ RegionAnalysisResult RegionAnalyzerCUDA::Impl::Execute(
             d_labels_.create(rows, cols, CV_32SC1);
             d_relabeled_.create(rows, cols, CV_32SC1);
             int step_elem = static_cast<int>(d_labels_.step / sizeof(int));
-            int max_labels = step_elem * rows + 1;
-            if (max_labels > stats_capacity_) {
-                allocateStatsBuffers(max_labels);
+            // BKE 标签稀疏，容量必须覆盖像素总数（与 Warmup 一致）
+            int want = step_elem * rows + 1;
+            if (want > stats_capacity_) {
+                allocateStatsBuffers(want);
             }
             warmup_rows_ = rows;
             warmup_cols_ = cols;
+            warmed_up_ = true;  // 自预热：同尺寸后续调用不再进入本分支
         }
 
-        int scan_range = stats_capacity_;  // 扫描范围 = 已分配容量
+        int scan_range = stats_capacity_;  // 扫描范围 = 已分配容量（BKE 标签稀疏，无法缩小）
 
-        // === Step 1: GPU CCL ===（OpenCV 4.13 此重载无 stream 参——走默认流；
-        // 其余步骤已全部挂调用流 cs，默认流交互仅此一处）
-        // 261018 非阻塞调用流适配：默认流不再隐式等待调用流（阻塞式互斥随
-        // GpuSlotService 非阻塞化解除）——调用流先显式排空（上游掩膜写入
-        // 落定），CC 完成经 legacy 尾事件接回调用流
-        if (sampleTiming) cudaEventRecord(ev0, cs);
-        if (!ev_legacy_done_) {
-            cudaEventCreateWithFlags(&ev_legacy_done_, cudaEventDisableTiming);
+        // === Step 1: GPU CCL ===
+        cudaEventRecord(ev0);
+        // 261024 合并回补（主库 261018 栅栏，ops 版无此）：OpenCV 4.13 的
+        // connectedComponents 无 stream 重载——落在 legacy 默认流。非阻塞调用流
+        // （GpuSlotService NonBlocking 化后）不再隐式等调用流：先排空调用流
+        // （上游掩膜写入落定），CC 完成经 legacy 尾事件接回调用流（保序）
+        {
+            const cudaStream_t cs = cv::cuda::StreamAccessor::getStream(stream);
+            if (!ev_legacy_done_) {
+                cudaEventCreateWithFlags(&ev_legacy_done_, cudaEventDisableTiming);
+            }
+            cudaStreamSynchronize(cs);
+            cudaEventRecord(ev_legacy_done_, nullptr);   // nullptr = legacy 默认流尾
+            cudaStreamWaitEvent(cs, ev_legacy_done_, 0);
         }
-        cudaStreamSynchronize(cs);
         cv::cuda::connectedComponents(d_inputBinaryMask, d_labels_, 8, CV_32SC1);
-        cudaEventRecord(ev_legacy_done_, nullptr);       // nullptr = legacy 默认流尾
-        cudaStreamWaitEvent(cs, ev_legacy_done_, 0);
-        if (sampleTiming) cudaEventRecord(ev1, cs);
+        cudaEventRecord(ev1);
 
         // === Step 2: GPU initStats (5 数组 + remap + num_valid) ===
         {
             int threads = 256;
             int blocks = (scan_range + threads - 1) / threads;
-            initStatsKernel<<<blocks, threads, 0, cs>>>(
+            initStatsKernel<<<blocks, threads>>>(
                 d_areas_,
                 d_min_x_, d_max_x_, d_min_y_, d_max_y_,
                 d_remap_, d_num_valid_, scan_range);
         }
-        if (sampleTiming) cudaEventRecord(ev2, cs);
+        cudaEventRecord(ev2);
 
         // === Step 3: GPU computeStats (5 原子: area + bbox, 无质心) ===
         {
             int step_elem = static_cast<int>(d_labels_.step / sizeof(int));
             dim3 block2d(32, 8);
             dim3 grid2d((cols + 31) / 32, (rows + 7) / 8);
-            computeStatsKernel<<<grid2d, block2d, 0, cs>>>(
+            computeStatsKernel<<<grid2d, block2d>>>(
                 d_labels_.ptr<int>(), rows, cols, step_elem,
                 d_areas_,
                 d_min_x_, d_max_x_, d_min_y_, d_max_y_);
         }
-        if (sampleTiming) cudaEventRecord(ev3, cs);
+        cudaEventRecord(ev3);
 
         // === Step 4: GPU buildRemap (面积过滤 + 稠密编号) ===
         {
             int threads = 256;
             int blocks = (scan_range + threads - 1) / threads;
-            buildRemapKernel<<<blocks, threads, 0, cs>>>(
+            buildRemapKernel<<<blocks, threads>>>(
                 d_areas_, d_remap_, d_num_valid_,
                 params_.minArea, params_.maxArea,
                 scan_range, COMPACT_MAX);
         }
-        if (sampleTiming) cudaEventRecord(ev4, cs);
+        cudaEventRecord(ev4);
 
         // === Step 5: GPU relabel ===
         {
             int step_elem = static_cast<int>(d_labels_.step / sizeof(int));
             dim3 block2d(32, 8);
             dim3 grid2d((cols + 31) / 32, (rows + 7) / 8);
-            relabelKernel<<<grid2d, block2d, 0, cs>>>(
+            relabelKernel<<<grid2d, block2d>>>(
                 d_labels_.ptr<int>(), d_relabeled_.ptr<int>(),
                 rows, cols, step_elem, d_remap_);
         }
-        if (sampleTiming) cudaEventRecord(ev5, cs);
+        cudaEventRecord(ev5);
 
         // === Step 6: GPU compactStats ===
         {
             int threads = 256;
             int blocks = (scan_range + threads - 1) / threads;
-            compactStatsKernel<<<blocks, threads, 0, cs>>>(
-                d_min_x_, d_max_x_, d_min_y_, d_max_y_,
+            compactStatsKernel<<<blocks, threads>>>(
+                d_areas_, d_min_x_, d_max_x_, d_min_y_, d_max_y_,
                 d_remap_, scan_range, d_compact_);
         }
-        if (sampleTiming) cudaEventRecord(ev6, cs);
+        cudaEventRecord(ev6);
 
-        // === Step 7: 流序 D2H (pinned) ===（261002：原 cudaDeviceSynchronize
-        //     全设备同步——多 lane 并发下互相闸死；改 MemcpyAsync＋本流同步）
-        if (sampleTiming) cudaEventRecord(ev7, cs);
+        // === Step 7: 同步 + D2H (pinned memory) ===
+        cudaDeviceSynchronize();
+        cudaEventRecord(ev7);
+
         int num_valid = 0;
-        cudaMemcpyAsync(h_pinned_count_, d_num_valid_, sizeof(int),
-                        cudaMemcpyDeviceToHost, cs);
-        cudaStreamSynchronize(cs);
+        cudaMemcpy(h_pinned_count_, d_num_valid_, sizeof(int), cudaMemcpyDeviceToHost);
         num_valid = *h_pinned_count_;
+
+        // === Step 7b: topX 二次筛选（可选; 只保留面积最大的前 X 个域）===
+        // 条件: topXCount>0 且首遍有效域数超限。实现: GPU 把有效域面积压缩到
+        // 紧凑缓冲（仅几十~几百个 int）→ 小传输 D2H → CPU nth_element 求阈值
+        // → 提高下界重跑 buildRemap/relabel/compactStats。
+        // （旧版拉整张 12.6MB 面积表 pageable D2H + CPU 扫 315 万标签，~10ms/帧）
+        // 边界并列（面积==阈值）全部保留 → 结果域数可能 >= X。
+        int truncated_from = 0;
+        if (params_.topXCount > 0 && num_valid > params_.topXCount) {
+            cudaMemsetAsync(d_valid_count_, 0, sizeof(int));
+            {
+                int threads = 256;
+                int blocks = (scan_range + threads - 1) / threads;
+                collectValidAreasKernel<<<blocks, threads>>>(
+                    d_areas_, scan_range,
+                    params_.minArea, params_.maxArea,
+                    d_valid_areas_, d_valid_count_, COMPACT_MAX);
+            }
+
+            int valid_pairs = 0;
+            cudaMemcpy(&valid_pairs, d_valid_count_, sizeof(int),
+                       cudaMemcpyDeviceToHost);
+            if (valid_pairs > COMPACT_MAX) valid_pairs = COMPACT_MAX;
+
+            std::vector<int> validAreas(static_cast<size_t>(valid_pairs));
+            if (valid_pairs > 0) {
+                cudaMemcpy(validAreas.data(), d_valid_areas_,
+                           static_cast<size_t>(valid_pairs) * sizeof(int),
+                           cudaMemcpyDeviceToHost);
+            }
+
+            if (validAreas.size() > static_cast<size_t>(params_.topXCount)) {
+                const size_t k = static_cast<size_t>(params_.topXCount) - 1;
+                std::nth_element(validAreas.begin(), validAreas.begin() + k,
+                                 validAreas.end(), std::greater<int>());
+                const int threshold = validAreas[k];
+                const int newMin = std::max(params_.minArea, threshold);
+                truncated_from = num_valid;
+
+                // 只清 remap/num_valid（勿用 initStatsKernel——它会把 areas 一并清零）
+                cudaMemsetAsync(d_remap_, 0,
+                                static_cast<size_t>(scan_range) * sizeof(int));
+                cudaMemsetAsync(d_num_valid_, 0, sizeof(int));
+                {
+                    int threads = 256;
+                    int blocks = (scan_range + threads - 1) / threads;
+                    buildRemapKernel<<<blocks, threads>>>(
+                        d_areas_, d_remap_, d_num_valid_,
+                        newMin, params_.maxArea,
+                        scan_range, COMPACT_MAX);
+                }
+                {
+                    int step_elem = static_cast<int>(d_labels_.step / sizeof(int));
+                    dim3 block2d(32, 8);
+                    dim3 grid2d((cols + 31) / 32, (rows + 7) / 8);
+                    relabelKernel<<<grid2d, block2d>>>(
+                        d_labels_.ptr<int>(), d_relabeled_.ptr<int>(),
+                        rows, cols, step_elem, d_remap_);
+                }
+                {
+                    int threads = 256;
+                    int blocks = (scan_range + threads - 1) / threads;
+                    compactStatsKernel<<<blocks, threads>>>(
+                        d_areas_, d_min_x_, d_max_x_, d_min_y_, d_max_y_,
+                        d_remap_, scan_range, d_compact_);
+                }
+                cudaDeviceSynchronize();
+
+                cudaMemcpy(h_pinned_count_, d_num_valid_, sizeof(int),
+                           cudaMemcpyDeviceToHost);
+                num_valid = *h_pinned_count_;
+                CALIB_LOG_INFO("topX filter: kept {} of {} components "
+                               "(topXCount={}, area threshold={})",
+                               num_valid, truncated_from,
+                               params_.topXCount, threshold);
+            }
+        }
 
         if (num_valid > 0) {
             int copy_count = (num_valid < COMPACT_MAX) ? num_valid : COMPACT_MAX;
-            cudaMemcpyAsync(h_pinned_compact_, d_compact_,
-                            (size_t)copy_count * sizeof(GPUComponentResult),
-                            cudaMemcpyDeviceToHost, cs);
-            cudaStreamSynchronize(cs);
+            cudaMemcpy(h_pinned_compact_, d_compact_,
+                       (size_t)copy_count * sizeof(GPUComponentResult),
+                       cudaMemcpyDeviceToHost);
             result.components.resize(num_valid);
             memcpy(result.components.data(), h_pinned_compact_,
                    (size_t)copy_count * sizeof(GPUComponentResult));
@@ -434,8 +546,7 @@ RegionAnalysisResult RegionAnalyzerCUDA::Impl::Execute(
         d_relabeled_.copyTo(*d_out, stream);
         result.d_labeledMask = d_out;
 
-        // ── 输出逐步骤计时（仅采样轮：等待/计算/日志/销毁）──
-        if (sampleTiming) {
+        // ── 输出逐步骤计时（事件区间=GPU 步骤分解；WALL=整函数墙钟，含 topX/copyTo）──
         cudaEventSynchronize(ev7);
         float ms1, ms2, ms3, ms4, ms5, ms6, ms7;
         cudaEventElapsedTime(&ms1, ev0, ev1);  // CCL
@@ -446,8 +557,11 @@ RegionAnalysisResult RegionAnalyzerCUDA::Impl::Execute(
         cudaEventElapsedTime(&ms6, ev5, ev6);  // compactStats
         cudaEventElapsedTime(&ms7, ev6, ev7);  // sync + D2H
         float total = ms1 + ms2 + ms3 + ms4 + ms5 + ms6 + ms7;
+        const double wall_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - wall_t0).count();
 
-        CALIB_LOG_INFO(
+        CALIB_LOG_DEBUG(
             "=== analyze() per-step timing ===\n"
             "  Step 1: GPU CCL          {:>8.3f} ms  ({:>5.1f}%)\n"
             "  Step 2: initStats        {:>8.3f} ms  ({:>5.1f}%)\n"
@@ -457,8 +571,9 @@ RegionAnalysisResult RegionAnalyzerCUDA::Impl::Execute(
             "  Step 6: compactStats     {:>8.3f} ms  ({:>5.1f}%)\n"
             "  Step 7: sync+D2H(pinned) {:>8.3f} ms  ({:>5.1f}%)\n"
             "  -----------------------------------------\n"
-            "  TOTAL                    {:>8.3f} ms\n"
-            "  components={}, image={}x{}",
+            "  TOTAL(GPU steps)         {:>8.3f} ms\n"
+            "  WALL(含topX+copyTo)      {:>8.3f} ms\n"
+            "  components={}, image={}x{}, scan_range={}",
             ms1, ms1/total*100,
             ms2, ms2/total*100,
             ms3, ms3/total*100,
@@ -466,14 +581,13 @@ RegionAnalysisResult RegionAnalyzerCUDA::Impl::Execute(
             ms5, ms5/total*100,
             ms6, ms6/total*100,
             ms7, ms7/total*100,
-            total,
-            num_valid, rows, cols);
+            total, wall_ms,
+            num_valid, rows, cols, scan_range);
 
         cudaEventDestroy(ev0); cudaEventDestroy(ev1);
         cudaEventDestroy(ev2); cudaEventDestroy(ev3);
         cudaEventDestroy(ev4); cudaEventDestroy(ev5);
         cudaEventDestroy(ev6); cudaEventDestroy(ev7);
-        }   // ← sampleTiming 计时段收口（261002）
 
         // === 质量标记 ===
         result.success = true;
