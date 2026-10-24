@@ -1,0 +1,12 @@
+﻿out/
+build*/
+
+
+# 261024 产线集成纳管：数据/产物不入库（golden 与数据集留磁盘原位，见接力.md §3）
+归档/实测数据/
+compare/
+date_in/
+golden/
+out*/
+*.ply
+*.exe
