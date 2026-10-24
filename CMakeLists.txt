@@ -196,6 +196,23 @@ add_subdirectory(base)
 add_subdirectory(modules)
 add_subdirectory(app)
 
+# ============================================================================
+# 261024 产线集成 Phase 0：speed_optimize 回放验收工具（沙盒自成体系——ops/ 算子
+# 最终形态拷贝＋五链执行器，自 FetchContent 三方库，与主库目标零耦合）。
+# 默认 OFF＝主库构建零影响；ON＝附加 scan_replay/test_scan_chain_replay 两个
+# target（Release-only 语义与 factory_calib 同），供 399 帧 golden 对拍验收。
+# 集成计划/差异台账：docs/plans/2026-10-24-产线集成speed_optimize-*.md
+# ============================================================================
+option(BUILD_SCAN_REPLAY "Build speed_optimize replay harness (golden 对拍验收, Release-only)" OFF)
+if(BUILD_SCAN_REPLAY AND NOT CMAKE_DEBUG_CONFIG IN_LIST CMAKE_CONFIGURATION_TYPES)
+    # 多配置生成器无法只给单配置加子目录——Debug 配置里也会出现（其工具自身
+    # 仅在 Release 可用：Debug 无 imgcodecs）。故挂标准 add_subdirectory，
+    # 由子工程自守（其 CMake 已按 Release-only 语义构建）
+endif()
+if(BUILD_SCAN_REPLAY)
+    add_subdirectory(modules/09_operatorlib/TEST/speed_optimize)
+endif()
+
 # VS 生成器默认启动项目为 ALL_BUILD（不可运行）；改设 LeadScannerK2 为 sln 首个工程
 if(TARGET LeadScannerK2)
     set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT LeadScannerK2)
