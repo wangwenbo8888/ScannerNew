@@ -144,7 +144,14 @@ Scanner::Result CameraChain::run(const PostureSessionData& in,
         ci.fx = KL.at<double>(0, 0);  ci.fy = KL.at<double>(1, 1);
         ci.cx = KL.at<double>(0, 2);  ci.cy = KL.at<double>(1, 2);
         ci.referenceTemp = 25.0;
-        calib::IntrinsicCompensateCPU icOp(calib::IntrinsicCompensateCPUParams{});
+        // 261024 合并适配：ops 版 IntrinsicCompensate 默认温度表口径改 0.5/-15..15
+        // （产品定版）；01 标定链维持自己的表口径（0.2/-10..10=101 条，测试/查表
+        // 口径依赖）——显式传参覆盖默认
+        calib::IntrinsicCompensateCPUParams icp;
+        icp.tempStep = 0.2;
+        icp.tempRangeMin = -10.0;
+        icp.tempRangeMax = 10.0;
+        calib::IntrinsicCompensateCPU icOp(icp);
         out.intrinsicTempTable = icOp.Execute(ci);
         if (!out.intrinsicTempTable.success)
             return Scanner::Result::fail("5-1: " + out.intrinsicTempTable.message);
@@ -173,7 +180,13 @@ Scanner::Result CameraChain::run(const PostureSessionData& in,
         for (int i = 0; i < 9; ++i) ce.R[i] = R.at<double>(i / 3, i % 3);
         for (int i = 0; i < 3; ++i) ce.T[i] = T.at<double>(i);
         ce.referenceTemp = 25.0;
-        calib::ExtrinsicCompensateCPU ecOp(calib::ExtrinsicCompensateCPUParams{});
+        // 261024 合并适配：同 5-1——ops 默认温度表口径已改 0.5/-15..15，
+        // 01 标定链显式保持 0.2/-10..10（101 条，查表/测试口径依赖）
+        calib::ExtrinsicCompensateCPUParams ecp;
+        ecp.tempStep = 0.2;
+        ecp.tempRangeMin = -10.0;
+        ecp.tempRangeMax = 10.0;
+        calib::ExtrinsicCompensateCPU ecOp(ecp);
         out.extrinsicTempTable = ecOp.Execute(ce);
         if (!out.extrinsicTempTable.success)
             return Scanner::Result::fail("5-2: " + out.extrinsicTempTable.message);
@@ -216,7 +229,12 @@ Scanner::Result CameraChain::run(const PostureSessionData& in,
         tp.cameraMatrixL = KL; tp.distCoeffsL = DL;
         tp.cameraMatrixR = KR; tp.distCoeffsR = DR;
         tp.imageSize = init.imageSize;
-        tp.R = R; tp.T = T;             // 温度参数取算子默认（25℃/23.6e-6/0.2 步距/±10℃）
+        tp.R = R; tp.T = T;             // 温度参数取默认（25℃/23.6e-6）
+        // 261024 合并适配：ops 版默认温度表口径改 0.5/-15..15——01 标定链显式
+        // 保持 0.2/-10..10（101 条，与 5-1/5-2 同参，查表/测试口径依赖）
+        tp.tempStep = 0.2;
+        tp.tempRangeMin = -10.0;
+        tp.tempRangeMax = 10.0;
         tp.flags = cv::CALIB_ZERO_DISPARITY;   // 同 3-4：默认 flags=1 过不了 validate
         calib::StereoRectifyTempTableCpu tempTableOp(tp);
         out.rectifyTempTable = tempTableOp.Execute();

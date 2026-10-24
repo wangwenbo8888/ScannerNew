@@ -260,6 +260,7 @@ std::shared_ptr<ScanLaneOps> ScanChains::makeOps() const {
     // 波动常超 15°（帧间匹配恒 0~1 对<3 → 配准失败 → markers 空 → 无点显示）
     calib::MarkerOpticalFlowFuseCPUParams ofp;
     ofp.normalAngleThresh = 45.0;
+    ofp.useNormalWeight = true;   // 261024 合并适配：ops 版新增校验 normalAngleThresh>=30 须 useNormalWeight=true
     ops->flowFuse  = std::make_unique<calib::MarkerOpticalFlowFuseCPU>(ofp);
         ops->frameFuse = std::make_unique<calib::FrameFuseCPU>();
     } catch (const std::exception& e) {

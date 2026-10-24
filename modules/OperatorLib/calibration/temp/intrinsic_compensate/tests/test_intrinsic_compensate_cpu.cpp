@@ -56,9 +56,9 @@ TEST(IntrinsicCompensateCPUParamsTest, DefaultValuesAreValid) {
     IntrinsicCompensateCPUParams params;
     EXPECT_NO_THROW(params.validate());
     EXPECT_DOUBLE_EQ(params.cte, 23.6e-6);
-    EXPECT_DOUBLE_EQ(params.tempStep, 0.2);
-    EXPECT_DOUBLE_EQ(params.tempRangeMin, -10.0);
-    EXPECT_DOUBLE_EQ(params.tempRangeMax, 10.0);
+    EXPECT_DOUBLE_EQ(params.tempStep, 0.5);
+    EXPECT_DOUBLE_EQ(params.tempRangeMin, -15.0);
+    EXPECT_DOUBLE_EQ(params.tempRangeMax, 15.0);
 }
 
 TEST(IntrinsicCompensateCPUParamsTest, ValidateRejectsZeroStep) {

@@ -169,3 +169,45 @@ TEST_F(StereoRectifyTempTableCpuTest, QMatrixDriftsWithTemperature) {
     double qDiff = cv::norm(entryN.Q - entry0.Q);
     EXPECT_GT(qDiff, 0.0);
 }
+
+TEST_F(StereoRectifyTempTableCpuTest, FromJsonMissingKeysFallBackToStructDefaults) {
+    nlohmann::json j = params_.toJson();
+    j.erase("tempStep");
+    j.erase("tempRangeMin");
+    j.erase("tempRangeMax");
+
+    StereoRectifyTempTableParams defaults;
+    auto p = StereoRectifyTempTableParams::fromJson(j);
+
+    EXPECT_DOUBLE_EQ(p.tempStep, defaults.tempStep);
+    EXPECT_DOUBLE_EQ(p.tempRangeMin, defaults.tempRangeMin);
+    EXPECT_DOUBLE_EQ(p.tempRangeMax, defaults.tempRangeMax);
+    EXPECT_DOUBLE_EQ(p.tempStep, 0.5);
+    EXPECT_DOUBLE_EQ(p.tempRangeMin, -15.0);
+    EXPECT_DOUBLE_EQ(p.tempRangeMax, 15.0);
+    EXPECT_EQ(p.imageSize.width, params_.imageSize.width);
+    EXPECT_EQ(p.imageSize.height, params_.imageSize.height);
+}
+
+TEST_F(StereoRectifyTempTableCpuTest, FromJsonRoundTripKeepsCustomRange) {
+    nlohmann::json j = params_.toJson();
+    auto p = StereoRectifyTempTableParams::fromJson(j);
+
+    EXPECT_DOUBLE_EQ(p.tempStep, 1.0);
+    EXPECT_DOUBLE_EQ(p.tempRangeMin, -5.0);
+    EXPECT_DOUBLE_EQ(p.tempRangeMax, 5.0);
+    EXPECT_DOUBLE_EQ(p.T.at<double>(0, 0), params_.T.at<double>(0, 0));
+    EXPECT_DOUBLE_EQ(p.T.at<double>(1, 0), params_.T.at<double>(1, 0));
+    EXPECT_DOUBLE_EQ(p.T.at<double>(2, 0), params_.T.at<double>(2, 0));
+}
+
+TEST_F(StereoRectifyTempTableCpuTest, FromJsonAcceptsFlatTArray) {
+    nlohmann::json j = params_.toJson();
+    j["T"] = { 120.0, 0.0, 0.0 };
+
+    auto p = StereoRectifyTempTableParams::fromJson(j);
+
+    EXPECT_DOUBLE_EQ(p.T.at<double>(0, 0), 120.0);
+    EXPECT_DOUBLE_EQ(p.T.at<double>(1, 0), 0.0);
+    EXPECT_DOUBLE_EQ(p.T.at<double>(2, 0), 0.0);
+}

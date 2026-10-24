@@ -24,6 +24,10 @@
 #include <thrust/sort.h>
 #include <thrust/fill.h>
 #include <thrust/reduce.h>
+#include <cmath>
+#include <map>
+#include <utility>
+#include <vector>
 #include <stdexcept>
 
 using namespace calib;
@@ -40,12 +44,12 @@ __global__ void InitScanBuffersKernel(
     int* d_label_ids,
     int* d_map_table,
     int num_labels,
-    int img_rows)
+    int sentinel)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_labels) return;
 
-    d_min_y_coords[idx] = img_rows;
+    d_min_y_coords[idx] = sentinel;
     d_label_ids[idx] = idx;
     d_map_table[idx] = 0;
 }
@@ -71,17 +75,38 @@ __global__ void ScanCenterColumnKernel(
     }
 }
 
+// 横切: 扫描中心行, 取每个标签最小 X (scanDirection=1)
+__global__ void ScanCenterRowKernel(
+    const int* d_labels,
+    int* d_min_x_coords,
+    int img_cols,
+    size_t labels_step,
+    int center_y,
+    int max_label)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    if (x >= img_cols) return;
+
+    const int* row = reinterpret_cast<const int*>(
+        reinterpret_cast<const char*>(d_labels) + center_y * labels_step);
+    int label = row[x];
+
+    if (label > 0 && label < max_label) {
+        atomicMin(&d_min_x_coords[label], x);
+    }
+}
+
 __global__ void BuildMapTableKernel(
     const int* d_label_ids,
     const int* d_min_y_coords,
     int* d_map_table,
     int num_entries,
-    int img_rows)
+    int sentinel)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_entries) return;
 
-    if (d_min_y_coords[idx] >= img_rows) return;
+    if (d_min_y_coords[idx] >= sentinel) return;
 
     int old_label = d_label_ids[idx];
     if (old_label > 0 && old_label < num_entries) {
@@ -113,6 +138,26 @@ __global__ void RelabelKernel(
     } else {
         out_row[x] = 0;
     }
+}
+
+// 拆分粘连标签: 同一标签 x >= split_x 的像素改为 new_label (仅该行上下所有像素,
+// 因为粘连发生在整域, 用 x 阈值切整个域)
+__global__ void SplitMergedLabelKernel(
+    int* d_labels,
+    int rows, int cols,
+    size_t step,
+    int old_label,
+    int split_x,
+    int new_label)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= cols || y >= rows) return;
+
+    int* row = reinterpret_cast<int*>(
+        reinterpret_cast<char*>(d_labels) + y * step);
+    if (row[x] == old_label && x >= split_x)
+        row[x] = new_label;
 }
 
 // ============================================================================
@@ -257,11 +302,18 @@ LaserLabelResult LaserLabelerCUDA::Impl::Execute(
             return result;
         }
 
-        // === Step 2: Calculate center column ===
+        // === Step 2: 计算扫描线坐标（竖切: 中心列 / 横切: 中心行） ===
+        bool horizontal = (params_.scanDirection == 1);
         int center_x = cols / 2 + params_.centerColOffset;
-        if (center_x < 0 || center_x >= cols) {
+        int center_y = rows / 2 + params_.centerRowOffset;
+        if (!horizontal && (center_x < 0 || center_x >= cols)) {
             result.success = false;
             result.message = "Center column out of bounds: " + std::to_string(center_x);
+            return result;
+        }
+        if (horizontal && (center_y < 0 || center_y >= rows)) {
+            result.success = false;
+            result.message = "Center row out of bounds: " + std::to_string(center_y);
             return result;
         }
 
@@ -293,16 +345,131 @@ LaserLabelResult LaserLabelerCUDA::Impl::Execute(
 
         int actual_max_label = max_label_host + 1;
 
-        // === Step 4: Init scan buffers ===
+        // === Step 3.5: 扫描行/列游程分解 → 门禁测量(原始游程) + 粘连拆分 ===
+        // 膨胀/高光过曝致相邻平行线连通域粘连时, 同一标签在扫描线上呈
+        // 多个不连续游程段(splitMergedRuns 可拆)或单条异常宽游程(拆分无从
+        // 下手, 由 maxRunWidth 门禁整帧拒绝, 防编号错位毒化下游)。
+        struct GateRun { int label, a0, a1; };
+        auto runWidthGate = [&](const std::map<int, std::vector<GateRun>>& byLabel) {
+            if (params_.maxRunWidth <= 0) return;
+            int worst_label = 0, worst_extent = 0;
+            for (const auto& [lab, v] : byLabel) {
+                if (v.empty()) continue;
+                // 展布 = 末游程末端 - 首游程起点(含游程间隙, 覆盖
+                // "单条宽游程"与"同标签多游程"两种粘连形态)
+                const int extent = v.back().a1 - v.front().a0;
+                if (extent > worst_extent) { worst_extent = extent; worst_label = lab; }
+            }
+            if (worst_extent > params_.maxRunWidth) {
+                result.frameRejected = true;
+                if (!result.rejectReason.empty()) result.rejectReason += "; ";
+                result.rejectReason += "runWidth=" + std::to_string(worst_extent)
+                    + ">maxRunWidth(" + std::to_string(params_.maxRunWidth)
+                    + ") label=" + std::to_string(worst_label);
+                CALIB_LOG_WARN("gate: merged laser lines suspected, label {} cut extent "
+                               "{}px > maxRunWidth {}px -> frame rejected",
+                               worst_label, worst_extent, params_.maxRunWidth);
+            }
+        };
+
+        if (horizontal) {
+            // 下载扫描行
+            std::vector<int> scanline(cols);
+            cudaMemcpyAsync(scanline.data(),
+                            reinterpret_cast<const int*>(
+                                reinterpret_cast<const char*>(d_labels_buf_.ptr<int>())
+                                + (size_t)center_y * d_labels_buf_.step),
+                            cols * sizeof(int), cudaMemcpyDeviceToHost, cuda_stream);
+            cudaStreamSynchronize(cuda_stream);
+
+            // 游程分解: (label, runStart, runEnd) 仅记录长度>=1 的段
+            std::vector<GateRun> runs;
+            int x = 0;
+            while (x < cols) {
+                if (scanline[x] > 0 && scanline[x] < actual_max_label) {
+                    int lab = scanline[x];
+                    int x0 = x;
+                    while (x < cols && scanline[x] == lab) ++x;
+                    runs.push_back({lab, x0, x});
+                } else ++x;
+            }
+            std::map<int, std::vector<GateRun>> byLabel;
+            for (auto& r : runs) byLabel[r.label].push_back(r);
+
+            // ---- 门禁 2: maxRunWidth(split 前测量原始游程展布) ----
+            runWidthGate(byLabel);
+
+            // ---- 粘连拆分(splitMergedRuns, 原逻辑): 同标签 >=2 游程段时拆分 ----
+            if (params_.splitMergedRuns) {
+                int next_label = actual_max_label;
+                bool changed = false;
+                for (auto& [lab, v] : byLabel) {
+                    if (v.size() < 2) continue;
+                    // 保留首游程为原标签, 其余每游程拆出新标签
+                    for (size_t k = 1; k < v.size(); ++k) {
+                        // 拆分阈值: 前一段结束与本段开始的中点
+                        int split_x = (v[k - 1].a1 + v[k].a0) / 2;
+                        if (next_label > params_.maxLabels) break;
+                        dim3 blk(16, 16);
+                        dim3 grd((cols + 15) / 16, (rows + 15) / 16);
+                        SplitMergedLabelKernel<<<grd, blk, 0, cuda_stream>>>(
+                            d_labels_buf_.ptr<int>(), rows, cols, d_labels_buf_.step,
+                            lab, split_x, next_label);
+                        ++next_label;
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    cudaStreamSynchronize(cuda_stream);
+                    op_err = cudaGetLastError();
+                    if (op_err != cudaSuccess) {
+                        result.success = false;
+                        result.message = std::string("SplitMergedLabelKernel failed: ")
+                                       + cudaGetErrorString(op_err);
+                        return result;
+                    }
+                    actual_max_label = next_label;
+                    CALIB_LOG_INFO("split merged runs: {} labels after split",
+                                   actual_max_label - 1);
+                }
+            }
+        } else if (params_.maxRunWidth > 0) {
+            // 竖切门禁: 下载中心列, 同口径游程分解 + 展布检查(无拆分逻辑)
+            std::vector<int> scancol(rows);
+            cudaMemcpy2DAsync(scancol.data(), sizeof(int),
+                              reinterpret_cast<const int*>(
+                                  reinterpret_cast<const char*>(d_labels_buf_.ptr<int>())
+                                  + (size_t)center_x * sizeof(int)),
+                              d_labels_buf_.step, sizeof(int), rows,
+                              cudaMemcpyDeviceToHost, cuda_stream);
+            cudaStreamSynchronize(cuda_stream);
+
+            std::vector<GateRun> runs;
+            int y = 0;
+            while (y < rows) {
+                if (scancol[y] > 0 && scancol[y] < actual_max_label) {
+                    int lab = scancol[y];
+                    int y0 = y;
+                    while (y < rows && scancol[y] == lab) ++y;
+                    runs.push_back({lab, y0, y});
+                } else ++y;
+            }
+            std::map<int, std::vector<GateRun>> byLabel;
+            for (auto& r : runs) byLabel[r.label].push_back(r);
+            runWidthGate(byLabel);
+        }
+
+        // === Step 4: Init scan buffers（哨兵值: 竖切=rows, 横切=cols） ===
         int block_size_1d = 256;
         int grid_init = (actual_max_label + block_size_1d - 1) / block_size_1d;
+        int sentinel = horizontal ? cols : rows;
 
         InitScanBuffersKernel<<<grid_init, block_size_1d, 0, cuda_stream>>>(
             thrust::raw_pointer_cast(d_min_y_coords_.data()),
             thrust::raw_pointer_cast(d_label_ids_.data()),
             thrust::raw_pointer_cast(d_map_table_.data()),
             actual_max_label,
-            rows
+            sentinel
         );
 
         op_err = cudaGetLastError();
@@ -312,23 +479,34 @@ LaserLabelResult LaserLabelerCUDA::Impl::Execute(
             return result;
         }
 
-        // === Step 5: Scan center column ===
-        int grid_scan = (rows + block_size_1d - 1) / block_size_1d;
-
-        ScanCenterColumnKernel<<<grid_scan, block_size_1d, 0, cuda_stream>>>(
-            d_labels_buf_.ptr<int>(),
-            thrust::raw_pointer_cast(d_min_y_coords_.data()),
-            rows,
-            cols,
-            d_labels_buf_.step,
-            center_x,
-            actual_max_label
-        );
+        // === Step 5: 扫描扫描线（竖切: 中心列取minY / 横切: 中心行取minX） ===
+        if (horizontal) {
+            int grid_scan = (cols + block_size_1d - 1) / block_size_1d;
+            ScanCenterRowKernel<<<grid_scan, block_size_1d, 0, cuda_stream>>>(
+                d_labels_buf_.ptr<int>(),
+                thrust::raw_pointer_cast(d_min_y_coords_.data()),
+                cols,
+                d_labels_buf_.step,
+                center_y,
+                actual_max_label
+            );
+        } else {
+            int grid_scan = (rows + block_size_1d - 1) / block_size_1d;
+            ScanCenterColumnKernel<<<grid_scan, block_size_1d, 0, cuda_stream>>>(
+                d_labels_buf_.ptr<int>(),
+                thrust::raw_pointer_cast(d_min_y_coords_.data()),
+                rows,
+                cols,
+                d_labels_buf_.step,
+                center_x,
+                actual_max_label
+            );
+        }
 
         op_err = cudaGetLastError();
         if (op_err != cudaSuccess) {
             result.success = false;
-            result.message = std::string("ScanCenterColumnKernel failed: ") + cudaGetErrorString(op_err);
+            result.message = std::string("ScanCenterLine kernel failed: ") + cudaGetErrorString(op_err);
             return result;
         }
 
@@ -339,13 +517,71 @@ LaserLabelResult LaserLabelerCUDA::Impl::Execute(
             d_label_ids_.begin()
         );
 
-        // === Step 7: Build mapping table ===
+        // === Step 6.5: 真激光线甄别（可选, realLineTolerance>0 启用） ===
+        // 局部等距判据: 排序后交点序列 p[0..n-1], 若 |p[i]-p[i-1] - (p[i+1]-p[i])| <= tol
+        // → p[i] 为真线; 真线的左右紧邻域也判真(端点传播)。被剔域映射置 0。
+        // host 侧判别（序列 <= maxLabels, 零 GPU 开销），直接构建映射表替代 Step 7。
+        bool map_built_on_host = false;
+        int rejected_count = 0;
+        if (params_.realLineTolerance > 0) {
+            thrust::host_vector<int> h_coords(
+                d_min_y_coords_.begin(), d_min_y_coords_.begin() + actual_max_label);
+            thrust::host_vector<int> h_labels(
+                d_label_ids_.begin(), d_label_ids_.begin() + actual_max_label);
+
+            // 有效交点序列（越过哨兵=未与扫描线相交, 与 BuildMapTableKernel 同口径）
+            std::vector<std::pair<int, int>> seq;   // (坐标, 旧标签), 已按坐标升序
+            seq.reserve(actual_max_label);
+            for (int i = 0; i < actual_max_label; ++i) {
+                if (h_coords[i] < sentinel && h_labels[i] > 0)
+                    seq.emplace_back(h_coords[i], h_labels[i]);
+            }
+
+            if (seq.size() >= 3) {
+                const int tol = params_.realLineTolerance;
+                std::vector<char> isReal(seq.size(), 0);
+                for (size_t i = 1; i + 1 < seq.size(); ++i) {
+                    const int dL = seq[i].first - seq[i - 1].first;
+                    const int dR = seq[i + 1].first - seq[i].first;
+                    if (std::abs(dL - dR) <= tol) isReal[i] = 1;
+                }
+                std::vector<char> keep(isReal);
+                for (size_t i = 0; i < isReal.size(); ++i) {
+                    if (!isReal[i]) continue;
+                    if (i > 0) keep[i - 1] = 1;
+                    if (i + 1 < keep.size()) keep[i + 1] = 1;
+                }
+
+                thrust::host_vector<int> h_map(actual_max_label, 0);
+                int newId = 0;
+                for (size_t i = 0; i < seq.size(); ++i) {
+                    if (keep[i]) h_map[static_cast<size_t>(seq[i].second)] = ++newId;
+                }
+                rejected_count = static_cast<int>(seq.size()) - newId;
+
+                cudaMemcpyAsync(thrust::raw_pointer_cast(d_map_table_.data()),
+                                h_map.data(),
+                                static_cast<size_t>(actual_max_label) * sizeof(int),
+                                cudaMemcpyHostToDevice, cuda_stream);
+                map_built_on_host = true;
+
+                CALIB_LOG_INFO("realLine filter: kept {} of {} intersections "
+                               "(tolerance={} px, rejected {})",
+                               newId, seq.size(), tol, rejected_count);
+            } else {
+                CALIB_LOG_INFO("realLine filter skipped: {} intersections (< 3)",
+                               seq.size());
+            }
+        }
+
+        // === Step 7: Build mapping table（Step 6.5 未启用时走 kernel） ===
+        if (!map_built_on_host) {
         BuildMapTableKernel<<<grid_init, block_size_1d, 0, cuda_stream>>>(
             thrust::raw_pointer_cast(d_label_ids_.data()),
             thrust::raw_pointer_cast(d_min_y_coords_.data()),
             thrust::raw_pointer_cast(d_map_table_.data()),
             actual_max_label,
-            rows
+            sentinel
         );
 
         op_err = cudaGetLastError();
@@ -353,6 +589,7 @@ LaserLabelResult LaserLabelerCUDA::Impl::Execute(
             result.success = false;
             result.message = std::string("BuildMapTableKernel failed: ") + cudaGetErrorString(op_err);
             return result;
+        }
         }
 
         // === Step 8: Apply relabeling ===
@@ -398,7 +635,18 @@ LaserLabelResult LaserLabelerCUDA::Impl::Execute(
 
         result.d_labeledMask = d_output;
         result.componentCount = component_count;
+        result.lineCount = component_count;
         result.success = true;
+
+        // ---- 门禁 1: expectedLineCount(编号后有效线数必须等于期望值) ----
+        if (params_.expectedLineCount > 0 && component_count != params_.expectedLineCount) {
+            result.frameRejected = true;
+            if (!result.rejectReason.empty()) result.rejectReason += "; ";
+            result.rejectReason += "lineCount=" + std::to_string(component_count)
+                + "!=expectedLineCount(" + std::to_string(params_.expectedLineCount) + ")";
+            CALIB_LOG_WARN("gate: line count {} != expected {} -> frame rejected",
+                           component_count, params_.expectedLineCount);
+        }
 
         if (component_count == 0) {
             result.qualityFlag = calib::QualityFlag::Warning;
@@ -408,7 +656,16 @@ LaserLabelResult LaserLabelerCUDA::Impl::Execute(
             result.message = "Abnormal component count: " + std::to_string(component_count);
         } else {
             result.qualityFlag = calib::QualityFlag::Normal;
-            result.message = "Labeling successful";
+            result.message = rejected_count > 0
+                ? "Labeling successful (realLine filter rejected "
+                  + std::to_string(rejected_count) + " components)"
+                : "Labeling successful";
+        }
+
+        // 门禁拒绝时改写消息与质量标志(执行成功, 数据质量不过关)
+        if (result.frameRejected) {
+            result.qualityFlag = calib::QualityFlag::Degraded;
+            result.message = "Frame gate rejected: " + result.rejectReason;
         }
 
         CALIB_LOG_DEBUG("label() completed: {} components, qualityFlag={}",

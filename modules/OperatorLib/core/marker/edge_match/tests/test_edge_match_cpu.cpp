@@ -82,12 +82,47 @@ TEST_F(EdgeMatchParamTest, ZeroMaxMatchPairsThrows) {
 // JSON 序列化
 // ============================================================
 TEST_F(EdgeMatchParamTest, JsonRoundtrip) {
+    defaultParams_.minChordPx = 2.0f;
     auto j = defaultParams_.toJson();
     auto restored = EdgeMatchCPUParams::fromJson(j);
     EXPECT_NO_THROW(restored.validate());
     EXPECT_FLOAT_EQ(restored.yTolerance, defaultParams_.yTolerance);
     EXPECT_FLOAT_EQ(restored.disparityMaxDiff, defaultParams_.disparityMaxDiff);
     EXPECT_EQ(restored.maxMatchPairs, defaultParams_.maxMatchPairs);
+    EXPECT_FLOAT_EQ(restored.minChordPx, defaultParams_.minChordPx);
+}
+
+// ============================================================
+// 弦长闸：minChordPx>0 时尖部病态行整行弃配
+// ============================================================
+TEST_F(EdgeMatchParamTest, MinChordPxGateDropsTinyChordRows) {
+    // 左右同构圆（直径 24，step 0.5）：正常行弦长大；最尖 1~2 行弦长 <2px
+    auto mk = [](double cx) { return makeCircleIntersect(cx, 100.0, 24.0, 0.5); };
+    std::vector<EllipseIntersectResult> L, R;
+    pushBack(L, mk(200.0));
+    pushBack(R, mk(100.0));          // 视差恒 100，无错配干扰
+    std::vector<int> cm = {0};
+
+    // 关（默认 0）：全部行照配
+    EdgeMatchCPU off;
+    auto rOff = off.Execute(L, R, cm);
+    ASSERT_TRUE(rOff.success);
+    ASSERT_EQ(rOff.ellipseResults.size(), 1u);
+    const int nOff = static_cast<int>(rOff.ellipseResults[0].matchedPairs.size());
+    EXPECT_GT(nOff, 0);
+
+    // 开（2px）：尖部行被剪，配对数不多于关闭时
+    EdgeMatchCPUParams p;
+    p.minChordPx = 2.0f;
+    EdgeMatchCPU on(p);
+    auto rOn = on.Execute(L, R, cm);
+    ASSERT_TRUE(rOn.success);
+    ASSERT_EQ(rOn.ellipseResults.size(), 1u);
+    const int nOn = static_cast<int>(rOn.ellipseResults[0].matchedPairs.size());
+    EXPECT_LE(nOn, nOff);
+    // 剩余配对同行恒同高（y=k*step 格点）
+    for (const auto& pr : rOn.ellipseResults[0].matchedPairs)
+        EXPECT_NEAR(pr.leftY, pr.rightY, 1e-9);
 }
 
 TEST_F(EdgeMatchParamTest, JsonEmptyObjectGivesDefaults) {

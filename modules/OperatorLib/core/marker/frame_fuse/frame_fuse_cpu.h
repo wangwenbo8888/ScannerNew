@@ -50,6 +50,26 @@ struct FrameFuseCPUParams {
     bool collectStatistics = true;
     size_t maxPointCount = 10000;
 
+    // —— 匹配模式（2026-10-14 新增，tests/frame_fuse_opt 优化专题）——
+    // 0=PFH 指纹（默认；适用法线分布有各向性的表面点集）
+    // 1=三角形边长匹配（稀疏＋共面＋法线近平行的标记点阵——PFH 在此形态先天
+    //   无区分度；三角形穷举 C(n,3)² 组合，边长一致→三点闭式解→全体验证）
+    int matchMode = 0;
+    double triangleSideTolMm = 1.0;    // 模式1：三边长度差容差（绝对项 mm）
+    double triangleSideTolRatio = 0.02; // 模式1：边长容差相对项（容差=max(绝对, 相对×边长)）
+    double triangleVerifyGateMm = 1.0; // 模式1：验证门基线（近距口径；实际按 Z 深度自适应
+                                       // 放大——见 triangleVerifyGateRatio）。2026-10-15 批1 定标
+                                       // 2.0→1.0：金样真值残差 ≤0.17mm（6 倍余量）；跨面风险带
+                                       // 缩半。已知边界：孪生布点＋法线翻转时折中混合解几何
+                                       // 不可证伪——批2 法线合理性门从上游拦截
+    double triangleVerifyGateRatio = 0.002; // 模式1：验证门 Z 深度自适应系数
+                                            // 有效门 = max(基线, min(2.0, ratio × Z 中位))
+                                            // Z=330→1.0（不变）；Z=1000→2.0（远距噪声放大）
+                                            // 2026-10-15 批3 落地（预审批1 F10 定参版）
+    double triangleNormalMaxAngleDeg = 60.0; // 模式1：终审法线同向门（有向夹角上限；镜像解杀手）
+    int triangleMaxPoints = 16;        // 模式1：单侧点数上限（超限回退 PFH——复杂度守门）
+    int triangleMaxCandidatePairs = 20000; // 模式1：SVD+验证工作量封顶（次数制，非墙钟——保确定性）
+
     void validate() const {
         if (knnK < 3)
             throw std::invalid_argument("knnK must be >= 3");
@@ -75,6 +95,20 @@ struct FrameFuseCPUParams {
             throw std::invalid_argument("refineConvergeRatio must be > 0");
         if (maxPointCount == 0)
             throw std::invalid_argument("maxPointCount must be > 0");
+        if (matchMode != 0 && matchMode != 1)
+            throw std::invalid_argument("matchMode must be 0 (PFH) or 1 (triangle)");
+        if (triangleSideTolMm <= 0.0)
+            throw std::invalid_argument("triangleSideTolMm must be > 0");
+        if (triangleSideTolRatio < 0.0 || triangleSideTolRatio >= 0.5)
+            throw std::invalid_argument("triangleSideTolRatio must be in [0, 0.5)");
+        if (triangleVerifyGateMm <= 0.0)
+            throw std::invalid_argument("triangleVerifyGateMm must be > 0");
+        if (triangleNormalMaxAngleDeg <= 0.0 || triangleNormalMaxAngleDeg >= 180.0)
+            throw std::invalid_argument("triangleNormalMaxAngleDeg must be in (0, 180)");
+        if (triangleMaxPoints < 6)
+            throw std::invalid_argument("triangleMaxPoints must be >= 6");
+        if (triangleMaxCandidatePairs < 1000)
+            throw std::invalid_argument("triangleMaxCandidatePairs must be >= 1000");
     }
 
     nlohmann::json toJson() const {
@@ -92,6 +126,14 @@ struct FrameFuseCPUParams {
         j["refineConvergeRatio"] = refineConvergeRatio;
         j["collectStatistics"] = collectStatistics;
         j["maxPointCount"] = maxPointCount;
+        j["matchMode"] = matchMode;
+        j["triangleSideTolMm"] = triangleSideTolMm;
+        j["triangleSideTolRatio"] = triangleSideTolRatio;
+        j["triangleVerifyGateMm"] = triangleVerifyGateMm;
+        j["triangleVerifyGateRatio"] = triangleVerifyGateRatio;
+        j["triangleNormalMaxAngleDeg"] = triangleNormalMaxAngleDeg;
+        j["triangleMaxPoints"] = triangleMaxPoints;
+        j["triangleMaxCandidatePairs"] = triangleMaxCandidatePairs;
         return j;
     }
 
@@ -110,6 +152,14 @@ struct FrameFuseCPUParams {
         if (j.contains("refineConvergeRatio")) p.refineConvergeRatio = j.at("refineConvergeRatio").get<double>();
         if (j.contains("collectStatistics")) p.collectStatistics = j.at("collectStatistics").get<bool>();
         if (j.contains("maxPointCount")) p.maxPointCount = j.at("maxPointCount").get<size_t>();
+        if (j.contains("matchMode")) p.matchMode = j.at("matchMode").get<int>();
+        if (j.contains("triangleSideTolMm")) p.triangleSideTolMm = j.at("triangleSideTolMm").get<double>();
+        if (j.contains("triangleSideTolRatio")) p.triangleSideTolRatio = j.at("triangleSideTolRatio").get<double>();
+        if (j.contains("triangleVerifyGateMm")) p.triangleVerifyGateMm = j.at("triangleVerifyGateMm").get<double>();
+        if (j.contains("triangleVerifyGateRatio")) p.triangleVerifyGateRatio = j.at("triangleVerifyGateRatio").get<double>();
+        if (j.contains("triangleNormalMaxAngleDeg")) p.triangleNormalMaxAngleDeg = j.at("triangleNormalMaxAngleDeg").get<double>();
+        if (j.contains("triangleMaxPoints")) p.triangleMaxPoints = j.at("triangleMaxPoints").get<int>();
+        if (j.contains("triangleMaxCandidatePairs")) p.triangleMaxCandidatePairs = j.at("triangleMaxCandidatePairs").get<int>();
         return p;
     }
 };
@@ -149,6 +199,21 @@ struct FrameFuseStats {
     double adaptiveDistThreshFine = 0.0;
     double initialRMSE = 0.0;
     double finalRMSE = 0.0;
+    // —— 三角形模式诊断（2026-10-15 批1 埋点）——
+    int solutionMargin = -1;             // 胜出解 vs 最强竞争解边际（独占对数差；<2 已弃权）
+    bool triangleCapped = false;         // 工作量封顶触发（结果可能不完整）
+    int zeroNormalCount = 0;             // 零法线静默替换计数（上游质量信号）
+    double winnerPairDistMaxMm = -1.0;   // 胜出解最大配对距离（残差分布锚点）
+    // —— 三角形模式分项计时（2026-10-15 提速步①：定位热点，单位 ms）——
+    double triCollectMs = 0.0;           // 三角形枚举预处理（两侧 C(n,3)+退化剔除）
+    double triScanMs = 0.0;              // 边长门扫描（ta×tb 组合比较，扣除解算后的净扫描）
+    double triEvalMs = 0.0;              // 候选解算（SVD 三点解＋全点复核）
+    double triSvdMs = 0.0;               // 解算内部：三点闭式解 svd3Point
+    double triVerifyMs = 0.0;            // 解算内部：全点复核 triVerify
+    double triJudgeMs = 0.0;             // 裁决（解账本扫描＋独占边际）
+    long long triPairChecks = 0;         // 组合比较次数（ta×tb 迭代数）
+    long long triEvalCount = 0;          // 过门组合数
+    long long triSvdCount = 0;           // 实际 SVD+复核调用数（含排列展开）
 };
 
 // ============================================================

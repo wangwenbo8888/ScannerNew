@@ -58,6 +58,8 @@ float computeConfidence(double leftY, double rightY, float yTolerance,
                         float disparity,
                         const std::vector<float>& neighborDisparities,
                         float disparityMaxDiff) {
+    // 注：本算子配对发生在同一极线行（同格点 y=k*step），|leftY−rightY| 恒 0，
+    // y 分恒满分——评分实际由视差一致分主导；yTolerance 仅历史保留
     float yDist = static_cast<float>(std::abs(leftY - rightY));
     if (yDist > yTolerance) return 0.0f;
     float yConf = 1.0f - yDist / yTolerance;
@@ -207,6 +209,23 @@ struct EdgeMatchCPU::Impl {
 
                 const auto& leftPtsIdx = kv.second.indices;
                 const auto& rightPtsIdx = rightIt->second.indices;
+
+                // 行点数不等（2vs1/1vs2）→ 整行弃配（防御性：当前求交实现下
+                // 单点行几乎不出现，此闸防步距/实现变化）
+                if (leftPtsIdx.size() != rightPtsIdx.size()) continue;
+
+                // 弦长闸（minChordPx>0 时）：任一侧交点弦长过短＝椭圆尖部病态行，
+                // 交点 x 对参数抖动极敏感 → 整行弃配
+                if (params_.minChordPx > 0.0f && leftPtsIdx.size() == 2) {
+                    const auto& l0 = leftE.intersectPts[leftPtsIdx[0]];
+                    const auto& l1 = leftE.intersectPts[leftPtsIdx[1]];
+                    const auto& r0 = rightE.intersectPts[rightPtsIdx[0]];
+                    const auto& r1 = rightE.intersectPts[rightPtsIdx[1]];
+                    const float chordL = static_cast<float>(std::abs(l1.x - l0.x));
+                    const float chordR = static_cast<float>(std::abs(r1.x - r0.x));
+                    if (chordL < params_.minChordPx || chordR < params_.minChordPx)
+                        continue;
+                }
 
                 size_t matchCount = std::min(leftPtsIdx.size(), rightPtsIdx.size());
 

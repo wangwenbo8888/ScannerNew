@@ -70,13 +70,19 @@ __global__ void UndistortRectifyKernel(
     }
 
     // Step 3: 旋转矫正
-    // [x'', y''] = R * [xu, yu, 1]^T (取前两行)
+    // [x'', y'', z''] = R * [xu, yu, 1]^T （齐次，保留第三行）
     float xr = d_R[0] * xu + d_R[1] * yu + d_R[2];
     float yr = d_R[3] * xu + d_R[4] * yu + d_R[5];
+    float zr = d_R[6] * xu + d_R[7] * yu + d_R[8];
 
-    // Step 4: 投影到矫正后像素坐标
-    float u_out = fx_p * xr + cx_p + tx_p;
-    float v_out = fy_p * yr + cy_p;
+    // Step 4: 投影到矫正后像素坐标（齐次归一化后加主点）
+    // 归一化坐标经 R 旋转后 zr != 1（R1/R2 含绕 x/y 分量, zr≈0.88~1.08）。
+    // 与 cv::undistortPoints 一致的公式: u' = fx'·(xr/zr) + cx'
+    // （方向项除以 zr 归一化, 主点/平移项不参与除法）。
+    // 缺失 zr 归一化会在图像边缘引入 ~10% (>100px) 系统偏差, 立体重建呈拱面。
+    float inv_z = 1.0f / zr;
+    float u_out = fx_p * (xr * inv_z) + cx_p + tx_p;
+    float v_out = fy_p * (yr * inv_z) + cy_p;
 
     d_dst[tid] = make_float2(u_out, v_out);
 }
@@ -211,14 +217,17 @@ UndistortPointsResult UndistortPointsCuda::Impl::Execute(
     try {
         int pointCount = d_points.rows * d_points.cols;
 
-        if (!warmed_up_ || d_output_.rows * d_output_.cols < pointCount) {
-            CALIB_LOG_WARN("Execute(): auto-allocating GPU buffers for {} points", pointCount);
-            d_output_.create(1, pointCount, CV_32FC2);
-
+        // 【速度优化】容量式持久缓冲：只在不够时扩容；R 矩阵只上传一次
+        //（显式流）——原先 warmed_up_ 恒假导致每圈重复上传 R（默认流隐式同步）
+        if (d_R_.empty()) {
             float h_R[9];
             for (int i = 0; i < 9; ++i) h_R[i] = R_[i];
-            d_R_.create(1, 9, CV_32FC1);
-            d_R_.upload(cv::Mat(1, 9, CV_32FC1, h_R));
+            d_R_.upload(cv::Mat(1, 9, CV_32FC1, h_R), stream);
+            CALIB_LOG_INFO("Execute(): R matrix uploaded once (persistent)");
+        }
+        if (d_output_.cols < pointCount) {
+            d_output_.create(1, pointCount, CV_32FC2);
+            CALIB_LOG_INFO("Execute(): output buffer grown to {} points", pointCount);
         }
 
         cudaStream_t cuda_stream = cv::cuda::StreamAccessor::getStream(stream);
@@ -258,14 +267,13 @@ UndistortPointsResult UndistortPointsCuda::Impl::Execute(
 
         result.success = true;
         result.message = "Success";
-        // 261018 流序拷贝退役 .clone()：clone 走 legacy 默认流（与调用流互斥＝
-        // 多 lane 下隐式全局串行化）——copyTo(stream) 保持在调用流内异步有序
-        result.d_rectifiedPoints = std::make_shared<cv::cuda::GpuMat>();
-        d_output_.colRange(0, pointCount).copyTo(*result.d_rectifiedPoints, stream);
+        // 【速度优化】返回持久缓冲的 ROI 视图（有效期至下一次 Execute/SetParams/
+        // Destroy，v3 同款契约）——原 clone() 每圈 cudaMalloc＋D2D 拷贝 ×2
+        result.d_rectifiedPoints = std::make_shared<cv::cuda::GpuMat>(
+            d_output_.colRange(0, pointCount));
 
         if (!d_line_ids.empty()) {
-            result.d_line_ids = std::make_shared<cv::cuda::GpuMat>();
-            d_line_ids.copyTo(*result.d_line_ids, stream);
+            result.d_line_ids = std::make_shared<cv::cuda::GpuMat>(d_line_ids);
         }
 
     } catch (const std::exception& e) {
@@ -308,15 +316,9 @@ void UndistortPointsCuda::Impl::SetParams(const UndistortPointsParams& params) {
         cudaSetDevice(params_.deviceId);
     }
 
-    // 热身分配仅依赖 deviceId（点数缓冲与 K/D/R/P 矩阵值无关）——设备不变不
-    // 作废（260919 性能修复：ScanChains 每帧 SetParams（温补快照矩阵）曾致
-    // warmup 逐帧重置=每帧 auto-alloc cudaMalloc（千条告警/分钟），GPU 链被
-    // 拖至 ~7fps）
-    if (deviceChanged) {
-        warmed_up_ = false;
-        warmup_pointCount_ = 0;
-    }
+    warmed_up_ = false;
+    warmup_pointCount_ = 0;
+    d_R_.release();   // 【速度优化】参数可能改 R → 下次 Execute 重传一次
 
-    CALIB_LOG_INFO("SetParams(): params updated{}",
-                   deviceChanged ? " (device changed, warmup reset)" : "");
+    CALIB_LOG_INFO("SetParams(): params updated, warmup reset");
 }

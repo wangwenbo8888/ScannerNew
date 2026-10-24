@@ -307,7 +307,13 @@ LaserOps makeRealLaserOps() {
                 v2r.T[i] = t;
             }
             v2r.referenceTemp = 25.0;
-            calib::LaserExtrinsicCompensateCPU op;     // 默认参数（±10℃/0.2/23.6e-6）
+            // 261024 合并适配：ops 版默认温度表口径改 0.5/-15..15——标定链显式
+            // 保持 0.2/-10..10（101 条，与 CameraChain 5-1/5-2/3-5 同参）
+            calib::LaserExtrinsicCompensateCPUParams lecp;
+            lecp.tempStep = 0.2;
+            lecp.tempRangeMin = -10.0;
+            lecp.tempRangeMax = 10.0;
+            calib::LaserExtrinsicCompensateCPU op(lecp);
             auto r = op.Execute(v2l, v2r);
             if (!r.success) return Scanner::Result::fail(r.message);
             out = std::move(r);

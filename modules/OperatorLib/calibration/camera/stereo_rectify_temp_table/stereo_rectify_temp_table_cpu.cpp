@@ -1,11 +1,9 @@
 #include "stereo_rectify_temp_table_cpu.h"
 #include "common/json_utils.h"
 #include <opencv2/calib3d.hpp>
-#include "common/calib_logging.h"
+#include <spdlog/spdlog.h>
 #include <cmath>
 #include <chrono>
-
-CALIB_DEFINE_LOG_TAG(0, StereoRectifyTempTable);
 
 using namespace calib;
 
@@ -101,8 +99,10 @@ StereoRectifyTempTableParams StereoRectifyTempTableParams::fromJson(const nlohma
 
     auto tArr = calib::getRequired<nlohmann::json>(j, "T", ctx);
     p.T = cv::Mat(3, 1, CV_64F);
-    for (int i = 0; i < 3; ++i)
-        p.T.at<double>(i, 0) = tArr[i].get<double>();
+    for (int i = 0; i < 3; ++i) {
+        const auto& el = tArr[i];
+        p.T.at<double>(i, 0) = el.is_array() ? el[0].get<double>() : el.get<double>();
+    }
 
     p.imageSize = cv::Size(
         calib::getRequired<int>(j, "imageWidth", ctx),
@@ -110,9 +110,9 @@ StereoRectifyTempTableParams StereoRectifyTempTableParams::fromJson(const nlohma
 
     p.referenceTemp = j.contains("referenceTemp") ? j.at("referenceTemp").get<double>() : 25.0;
     p.cte = j.contains("cte") ? j.at("cte").get<double>() : 23.6e-6;
-    p.tempStep = j.contains("tempStep") ? j.at("tempStep").get<double>() : 0.2;
-    p.tempRangeMin = j.contains("tempRangeMin") ? j.at("tempRangeMin").get<double>() : -10.0;
-    p.tempRangeMax = j.contains("tempRangeMax") ? j.at("tempRangeMax").get<double>() : 10.0;
+    if (j.contains("tempStep")) p.tempStep = j.at("tempStep").get<double>();
+    if (j.contains("tempRangeMin")) p.tempRangeMin = j.at("tempRangeMin").get<double>();
+    if (j.contains("tempRangeMax")) p.tempRangeMax = j.at("tempRangeMax").get<double>();
     p.alpha = j.contains("alpha") ? j.at("alpha").get<double>() : 0.0;
     p.flags = j.contains("flags") ? j.at("flags").get<int>() : 1;
 
@@ -220,19 +220,19 @@ StereoRectifyTempTableResult StereoRectifyTempTableCpu::Execute() {
                 double dt_rectify = std::chrono::duration<double, std::micro>(t4 - t3).count();
                 total_rectify_us += dt_rectify;
 
-                CALIB_LOG_INFO("{} STEP[{:>3d}] temp={:>7.2f} deltaT={:>7.2f} "
+                spdlog::info("{} STEP[{:>3d}] temp={:>7.2f} deltaT={:>7.2f} "
                              "compensate={:>8.1f}us stereoRectify={:>8.1f}us",
                              kLogTag, stepIdx, temp, deltaT, dt_compensate, dt_rectify);
 
                 if (entry.validRoiLeft.area() == 0 || entry.validRoiRight.area() == 0) {
                     warnCount++;
-                    CALIB_LOG_WARN("{} WARN: temp={:.1f} validRoi zero area",
+                    spdlog::warn("{} WARN: temp={:.1f} validRoi zero area",
                                  kLogTag, temp);
                 }
             }
             catch (const cv::Exception& e) {
                 failCount++;
-                CALIB_LOG_WARN("{} STEP[{:>3d}] temp={:>7.2f} stereoRectify FAILED: {}",
+                spdlog::warn("{} STEP[{:>3d}] temp={:>7.2f} stereoRectify FAILED: {}",
                              kLogTag, stepIdx, temp, e.what());
                 stepIdx++;
                 continue;
@@ -258,21 +258,21 @@ StereoRectifyTempTableResult StereoRectifyTempTableCpu::Execute() {
                              + std::to_string(warnCount) + " points have zero validRoi";
         }
 
-        CALIB_LOG_INFO("{} ====== TIMING SUMMARY ======", kLogTag);
-        CALIB_LOG_INFO("{} Total entries: {}", kLogTag, result.table.size());
-        CALIB_LOG_INFO("{} Total compensate:    {:>10.1f} us  (avg {:.1f} us/step)",
+        spdlog::info("{} ====== TIMING SUMMARY ======", kLogTag);
+        spdlog::info("{} Total entries: {}", kLogTag, result.table.size());
+        spdlog::info("{} Total compensate:    {:>10.1f} us  (avg {:.1f} us/step)",
                      kLogTag, total_compensate_us,
                      total_compensate_us / std::max(1.0, (double)result.table.size()));
-        CALIB_LOG_INFO("{} Total stereoRectify: {:>10.1f} us  (avg {:.1f} us/step)",
+        spdlog::info("{} Total stereoRectify: {:>10.1f} us  (avg {:.1f} us/step)",
                      kLogTag, total_rectify_us,
                      total_rectify_us / std::max(1.0, (double)result.table.size()));
-        CALIB_LOG_INFO("{} Total compute:       {:>10.2f} ms", kLogTag, dt_total_ms);
-        CALIB_LOG_INFO("{} Failures: {}  Warnings: {}", kLogTag, failCount, warnCount);
+        spdlog::info("{} Total compute:       {:>10.2f} ms", kLogTag, dt_total_ms);
+        spdlog::info("{} Failures: {}  Warnings: {}", kLogTag, failCount, warnCount);
     }
     catch (const std::exception& e) {
         result.success = false;
         result.message = e.what();
-        CALIB_LOG_ERROR("{} ERROR: {}", kLogTag, e.what());
+        spdlog::error("{} ERROR: {}", kLogTag, e.what());
     }
 
     return result;

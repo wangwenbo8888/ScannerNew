@@ -38,6 +38,10 @@ struct EdgeMatchCPUParams {
     float disparityMaxDiff = 10.0f;
     bool collectStatistics = true;
     size_t maxMatchPairs = 100000;
+    /// 弦长闸（px，0=关闭）：共享极线行上任一侧交点弦长 |x0−x1| 小于此值 → 整行弃配。
+    /// 椭圆尖部行弦长趋 0，交点 x 对参数抖动极敏感（dx/dy→∞），是视差噪声源；
+    /// 建议标记点场景 2.0（腰部弦长 ~20px，只剪尖部病态行）
+    float minChordPx = 0.0f;
 
     void validate() const {
         if (yTolerance <= 0.0f)
@@ -46,6 +50,8 @@ struct EdgeMatchCPUParams {
             throw std::invalid_argument("disparityMaxDiff must be > 0");
         if (maxMatchPairs == 0)
             throw std::invalid_argument("maxMatchPairs must be > 0");
+        if (minChordPx < 0.0f)
+            throw std::invalid_argument("minChordPx must be >= 0 (0=off)");
     }
 
     nlohmann::json toJson() const {
@@ -53,7 +59,8 @@ struct EdgeMatchCPUParams {
             {"yTolerance", yTolerance},
             {"disparityMaxDiff", disparityMaxDiff},
             {"collectStatistics", collectStatistics},
-            {"maxMatchPairs", maxMatchPairs}
+            {"maxMatchPairs", maxMatchPairs},
+            {"minChordPx", minChordPx}
         };
     }
 
@@ -63,6 +70,7 @@ struct EdgeMatchCPUParams {
         if (j.contains("disparityMaxDiff")) p.disparityMaxDiff = j.at("disparityMaxDiff").get<float>();
         if (j.contains("collectStatistics")) p.collectStatistics = j.at("collectStatistics").get<bool>();
         if (j.contains("maxMatchPairs")) p.maxMatchPairs = j.at("maxMatchPairs").get<size_t>();
+        if (j.contains("minChordPx")) p.minChordPx = j.at("minChordPx").get<float>();
         return p;
     }
 };

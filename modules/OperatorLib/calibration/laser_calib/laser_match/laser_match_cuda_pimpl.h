@@ -23,9 +23,10 @@ namespace calib {
 struct LaserMatchCuda::Impl {
     LaserMatchParams params_;
 
-    cv::cuda::GpuMat d_hash_keys_;
-    cv::cuda::GpuMat d_hash_vals_;
-    int hash_capacity_ = 0;
+    // 确定性匹配结构（2026-09-04 重写, 见 impl 文件头）: 排序键 (复合键<<32)|左点下标
+    // （CV_32SC2 复用为 8B/元素）; d_sort_alt_ 为 CUB 排序输出缓冲
+    cv::cuda::GpuMat d_sort_keys_;
+    cv::cuda::GpuMat d_sort_alt_;
 
     cv::cuda::GpuMat d_left_rowidx_;
     cv::cuda::GpuMat d_right_rowidx_;
@@ -66,8 +67,6 @@ struct LaserMatchCuda::Impl {
     const LaserMatchParams& GetParams() const { return params_; }
 
     bool allocateBuffers(int leftCount, int rightCount);
-
-    static int nextPowerOf2(int v);
 };
 
 } // namespace calib

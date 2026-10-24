@@ -103,4 +103,24 @@ Release＋Debug ctest **109/109 双绿**＋LeadScannerK2 全量编译通过
 ### 批 3 消化的台账项
 原批 3 全部（fuse/mask/zernike/ellipse——ellipse 已在批 1）＋原批 4 的 ccl/mask_extract/undistort（undistort 换入在批 3 的 17 文件内）
 
+---
+
+## 2026-10-24 · Phase 1 批 4 完成（剩余异文件清账＋标定链温度表口径适配）
+
+### 换入 ops 版（25 文件＋6 测试）
+stereo_rectify_temp_table×2、laser_label×3、laser_match(calib)×2、projector_joint_calib×2、temp 三补偿×6、calib_result_types、undistort_cuda、edge_match×2、frame_fuse×2、marker_match、optical_flow_fuse×2、prev_frame_state.h；测试换 ops：laser_label/edge_match/frame_fuse/marker_match/optical_flow_fuse/stereo_rectify_temp_table/intrinsic_compensate 等随源
+
+### 下游适配（四处）
+1. **ScanChains**：`useNormalWeight=true` 显式置位（ops 新校验 normalAngleThresh≥30 须 useNormalWeight——否则 lane 算子集构造即抛）
+2. **温度表口径**（ops 默认 0.5/-15..15 → 01 标定链显式保持 0.2/-10..10=101 条）：CameraChain 5-1 Intrinsic/5-2 Extrinsic/3-5 StereoRectifyTempTable＋LaserChain 5-3 LaserExtrinsic 四处显式传参（查表/测试口径依赖 101 条；ops 新默认保留给运行时扫描端）
+3. **frame_fuse 测试**：addNoise sigma=0 → 钳 1e-12（MSVC Debug normal_distribution 断言 sigma>0，沙盒只跑 Release 未踩）
+4. **调试插曲**：laser_label "expectedLineCount must be [0,maxLabels]" 幽灵异常＝**陈旧 .obj**（tlog 依赖失灵）——`build/modules` 全 obj 清除重编即愈；此坑已两次踩（批 3 mask_sep 同病），规程化：**头文件改动后必须清 obj 或 touch 全部相关源**
+
+### 验证
+Release＋Debug ctest **109/109 双绿**＋LeadScannerK2 编译通过
+
+### Phase 1 收官状态
+ops→主库差异清零（除刻意保留项：laser_reconstruct×2 主库 261018 版、plane_map 系/旧 steger/laser_match v1/fusion CPU+normal 件 D3 保留、example_usage 不入构建）。**台账 49 异文件全部处置完毕**。
+
+
 

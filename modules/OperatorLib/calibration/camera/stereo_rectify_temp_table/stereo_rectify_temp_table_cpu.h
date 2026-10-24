@@ -40,9 +40,9 @@ struct StereoRectifyTempTableParams {
 
     double referenceTemp = 25.0;
     double cte = 23.6e-6;
-    double tempStep = 0.2;
-    double tempRangeMin = -10.0;
-    double tempRangeMax = 10.0;
+    double tempStep = 0.5;
+    double tempRangeMin = -15.0;
+    double tempRangeMax = 15.0;
 
     double alpha = 0.0;
     int flags = 1;
