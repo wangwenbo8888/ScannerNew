@@ -347,6 +347,14 @@ struct PointReconstructCPU::Impl {
                 matricesCached_ = true;
             } else {
                 params_.validate();
+                // 防静默错算：输入点若在矫正坐标系（扫描链即如此）而走默认
+                // K/R/T 路径，坐标系错位是系统性的——R≠I/T≠0 时大声告警
+                const bool nonIdentity = cv::norm(params_.R - cv::Matx33d::eye()) > 1e-9 ||
+                                         cv::norm(params_.T) > 1e-9;
+                if (nonIdentity)
+                    CALIB_LOG_WARN("using default K/R/T projection path (no "
+                                   "SetProjectionMatrices called); 若输入为矫正系"
+                                   "坐标将产生系统性偏差");
                 buildProjectionMatrices(params_, P1_, P2_);
                 matricesCached_ = true;
             }
@@ -459,9 +467,44 @@ struct PointReconstructCPU::Impl {
                     mr.normalX = mr.planeFit.nx;
                     mr.normalY = mr.planeFit.ny;
                     mr.normalZ = mr.planeFit.nz;
+                    // 法线定向：统一翻向相机侧（三角化在左相机系，相机位于原点，
+                    // n·center < 0 即朝向相机；SVD 列符号原本任意，跨帧可能翻转）
+                    if (mr.normalX * mr.centerX + mr.normalY * mr.centerY +
+                        mr.normalZ * mr.centerZ > 0.0) {
+                        mr.normalX = -mr.normalX;
+                        mr.normalY = -mr.normalY;
+                        mr.normalZ = -mr.normalZ;
+                    }
                 }
                 auto tCircleEnd = std::chrono::high_resolution_clock::now();
                 stats_.circleFitTimeMs += std::chrono::duration<double, std::milli>(tCircleEnd - tCircleStart).count();
+            }
+
+            // —— 整组质量闸（默认 0=关闭；不达标整标记点判废，防污染配准）——
+            if (mr.validPlane && params_.maxPlaneFitError > 0.0 &&
+                mr.planeFit.fitError > params_.maxPlaneFitError) {
+                mr.validPlane = false;
+                mr.validCircle = false;
+                mr.message = "gated: plane fitError";
+            }
+            if (mr.validPlane && params_.minPlaneSingularRatio > 0.0) {
+                const double l3 = mr.planeFit.singularValues[2];
+                const double l2 = mr.planeFit.singularValues[1];
+                if (l3 < 1e-15 || l2 / l3 < params_.minPlaneSingularRatio) {
+                    mr.validPlane = false;
+                    mr.validCircle = false;
+                    mr.message = "gated: plane singular ratio (near-frontal)";
+                }
+            }
+            if (mr.validCircle && params_.minRadiusMm > 0.0 &&
+                mr.circleFit.radius < params_.minRadiusMm) {
+                mr.validCircle = false;
+                mr.message = "gated: radius below min";
+            }
+            if (mr.validCircle && params_.maxRadiusMm > 0.0 &&
+                mr.circleFit.radius > params_.maxRadiusMm) {
+                mr.validCircle = false;
+                mr.message = "gated: radius above max";
             }
 
             result.markerResults.push_back(std::move(mr));

@@ -45,6 +45,11 @@ struct PointReconstructCPUParams {
     double maxReprojError = 2.0;
     bool collectStatistics = true;
     size_t maxMarkerCount = 1000;
+    // —— 整组质量闸（默认 0=关闭；开启后不达标该标记点判废，防坏标记污染配准）——
+    double maxPlaneFitError = 0.0;   ///< 平面拟合 RMS 残差上限（mm；0=关）
+    double minPlaneSingularRatio = 0.0;  ///< λ2/λ3 下限（正对病态防护；0=关）
+    double minRadiusMm = 0.0;        ///< 圆拟合半径下限（mm；0=关）
+    double maxRadiusMm = 0.0;        ///< 圆拟合半径上限（mm；0=关）
 
     void validate() const {
         if (fxLeft <= 0.0) throw std::invalid_argument("fxLeft must be > 0");
@@ -59,6 +64,14 @@ struct PointReconstructCPUParams {
             throw std::invalid_argument("maxReprojError must be > 0");
         if (maxMarkerCount == 0)
             throw std::invalid_argument("maxMarkerCount must be > 0");
+        if (maxPlaneFitError < 0.0)
+            throw std::invalid_argument("maxPlaneFitError must be >= 0 (0=off)");
+        if (minPlaneSingularRatio < 0.0)
+            throw std::invalid_argument("minPlaneSingularRatio must be >= 0 (0=off)");
+        if (minRadiusMm < 0.0 || maxRadiusMm < 0.0)
+            throw std::invalid_argument("radius bounds must be >= 0 (0=off)");
+        if (minRadiusMm > 0.0 && maxRadiusMm > 0.0 && minRadiusMm >= maxRadiusMm)
+            throw std::invalid_argument("minRadiusMm must be < maxRadiusMm");
         double det = cv::determinant(R);
         if (std::abs(std::abs(det) - 1.0) > 1e-3)
             throw std::invalid_argument("R must be a valid rotation matrix (|det| ~ 1)");
@@ -87,6 +100,10 @@ struct PointReconstructCPUParams {
         j["maxReprojError"] = maxReprojError;
         j["collectStatistics"] = collectStatistics;
         j["maxMarkerCount"] = maxMarkerCount;
+        j["maxPlaneFitError"] = maxPlaneFitError;
+        j["minPlaneSingularRatio"] = minPlaneSingularRatio;
+        j["minRadiusMm"] = minRadiusMm;
+        j["maxRadiusMm"] = maxRadiusMm;
         return j;
     }
 
@@ -125,6 +142,12 @@ struct PointReconstructCPUParams {
             p.collectStatistics = j.at("collectStatistics").get<bool>();
         if (j.contains("maxMarkerCount"))
             p.maxMarkerCount = j.at("maxMarkerCount").get<size_t>();
+        if (j.contains("maxPlaneFitError"))
+            p.maxPlaneFitError = j.at("maxPlaneFitError").get<double>();
+        if (j.contains("minPlaneSingularRatio"))
+            p.minPlaneSingularRatio = j.at("minPlaneSingularRatio").get<double>();
+        if (j.contains("minRadiusMm")) p.minRadiusMm = j.at("minRadiusMm").get<double>();
+        if (j.contains("maxRadiusMm")) p.maxRadiusMm = j.at("maxRadiusMm").get<double>();
         return p;
     }
 };

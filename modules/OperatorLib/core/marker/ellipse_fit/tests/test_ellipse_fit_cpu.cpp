@@ -111,10 +111,35 @@ TEST_F(EllipseFitCPUParamTest, EarlyStopRatioAboveOneThrows) {
     EXPECT_THROW(p.validate(), std::invalid_argument);
 }
 
+TEST_F(EllipseFitCPUParamTest, NegativeMinLongAxisThrows) {
+    auto p = defaultParams_; p.minLongAxis = -1.0;
+    EXPECT_THROW(p.validate(), std::invalid_argument);
+}
+
+TEST_F(EllipseFitCPUParamTest, NegativeMaxLongAxisThrows) {
+    auto p = defaultParams_; p.maxLongAxis = -1.0;
+    EXPECT_THROW(p.validate(), std::invalid_argument);
+}
+
+TEST_F(EllipseFitCPUParamTest, MinRoundnessAboveOneThrows) {
+    auto p = defaultParams_; p.minRoundness = 1.1;
+    EXPECT_THROW(p.validate(), std::invalid_argument);
+}
+
+TEST_F(EllipseFitCPUParamTest, MinLongAxisExceedsMaxLongAxisThrows) {
+    auto p = defaultParams_; p.minLongAxis = 30.0; p.maxLongAxis = 20.0;
+    EXPECT_THROW(p.validate(), std::invalid_argument);
+}
+
 // ============================================================
 // JSON 序列化
 // ============================================================
 TEST_F(EllipseFitCPUParamTest, JsonRoundtrip) {
+    defaultParams_.minInlierRatio = 0.6;
+    defaultParams_.outputInliersOnly = true;
+    defaultParams_.minLongAxis = 20.0;
+    defaultParams_.maxLongAxis = 30.0;
+    defaultParams_.minRoundness = 0.7;
     auto j = defaultParams_.toJson();
     auto restored = EllipseFitCPUParams::fromJson(j);
     EXPECT_NO_THROW(restored.validate());
@@ -125,6 +150,11 @@ TEST_F(EllipseFitCPUParamTest, JsonRoundtrip) {
     EXPECT_EQ(restored.minInliers, defaultParams_.minInliers);
     EXPECT_DOUBLE_EQ(restored.earlyStopRatio, defaultParams_.earlyStopRatio);
     EXPECT_EQ(restored.useAMS, defaultParams_.useAMS);
+    EXPECT_DOUBLE_EQ(restored.minInlierRatio, defaultParams_.minInlierRatio);
+    EXPECT_EQ(restored.outputInliersOnly, defaultParams_.outputInliersOnly);
+    EXPECT_DOUBLE_EQ(restored.minLongAxis, defaultParams_.minLongAxis);
+    EXPECT_DOUBLE_EQ(restored.maxLongAxis, defaultParams_.maxLongAxis);
+    EXPECT_DOUBLE_EQ(restored.minRoundness, defaultParams_.minRoundness);
 }
 
 TEST_F(EllipseFitCPUParamTest, JsonEmptyObjectGivesDefaults) {
@@ -132,6 +162,9 @@ TEST_F(EllipseFitCPUParamTest, JsonEmptyObjectGivesDefaults) {
     EXPECT_EQ(restored.ransacIterations, 100);
     EXPECT_DOUBLE_EQ(restored.ransacThreshold, 0.5);
     EXPECT_TRUE(restored.useAMS);
+    EXPECT_DOUBLE_EQ(restored.minLongAxis, 0.0);
+    EXPECT_DOUBLE_EQ(restored.maxLongAxis, 0.0);
+    EXPECT_DOUBLE_EQ(restored.minRoundness, 0.0);
 }
 
 TEST_F(EllipseFitCPUParamTest, JsonUnknownFieldsIgnored) {
@@ -226,6 +259,35 @@ TEST_F(EllipseFitCPUFitTest, PerfectCircle) {
     EXPECT_NEAR(result.minorAxis, 30.0, 2.0);
 }
 
+// 可选输出过滤：outputInliersOnly=true 时交付点全部贴最终椭圆（带外点全删）
+TEST_F(EllipseFitCPUFitTest, OutputInliersOnlyFiltersOutsiders) {
+    auto pts = generateEllipsePoints(100.0f, 100.0f, 15.0f, 15.0f, 0.0f, 60);
+    pts.push_back({5.0f, 5.0f});      // 远离椭圆的野点×4
+    pts.push_back({250.0f, 60.0f});
+    pts.push_back({60.0f, 250.0f});
+    pts.push_back({190.0f, 190.0f});
+    EllipseFitCPUParams p = params_;
+    p.outputInliersOnly = true;
+    EllipseFitCPU op(p);
+    auto result = op.Execute(pts);
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_LT(result.inlierCount, static_cast<int>(pts.size()));   // 野点被删
+    EXPECT_GE(result.inlierCount, 55);                             // 椭圆点保留
+    // 全部输出点均满足 |x²/a²+y²/b²−1| < ransacThreshold（用拟合结果验证）
+    const float a = static_cast<float>(result.majorAxis) / 2.0f;
+    const float b = static_cast<float>(result.minorAxis) / 2.0f;
+    const float rad = static_cast<float>(result.angle) * CV_PI / 180.0f;
+    const float cs = std::cos(rad), sn = std::sin(rad);
+    for (const auto& pt : result.inlierPoints) {
+        const float dx = pt.x - static_cast<float>(result.centerX);
+        const float dy = pt.y - static_cast<float>(result.centerY);
+        const float xr = dx * cs + dy * sn;
+        const float yr = -dx * sn + dy * cs;
+        EXPECT_LT(std::abs((xr * xr) / (a * a) + (yr * yr) / (b * b) - 1.0f),
+                  static_cast<float>(p.ransacThreshold));
+    }
+}
+
 TEST_F(EllipseFitCPUFitTest, EllipseWithRotation) {
     auto pts = generateEllipsePoints(200.0f, 150.0f, 20.0f, 10.0f, 30.0f, 80);
     EllipseFitCPU op(params_);
@@ -312,6 +374,57 @@ TEST_F(EllipseFitCPUFitTest, SmallEllipse) {
     ASSERT_TRUE(result.success);
     EXPECT_NEAR(result.centerX, 50.0, 1.0);
     EXPECT_NEAR(result.centerY, 50.0, 1.0);
+}
+
+// ============================================================
+// 形状闸：长轴上/下限＋椭圆度（0=不启用）
+// ============================================================
+TEST_F(EllipseFitCPUFitTest, LongAxisAboveMaxRejected) {
+    auto pts = generateEllipsePoints(400.0f, 400.0f, 40.0f, 40.0f, 0.0f, 120);   // 直径 80px
+    EllipseFitCPUParams p = params_;
+    p.maxLongAxis = 30.0;
+    EllipseFitCPU op(p);
+    auto result = op.Execute(pts);
+    EXPECT_FALSE(result.success);
+}
+
+TEST_F(EllipseFitCPUFitTest, LongAxisBelowMinRejected) {
+    auto pts = generateEllipsePoints(200.0f, 200.0f, 8.0f, 8.0f, 0.0f, 40);      // 直径 16px
+    EllipseFitCPUParams p = params_;
+    p.minLongAxis = 20.0;
+    EllipseFitCPU op(p);
+    auto result = op.Execute(pts);
+    EXPECT_FALSE(result.success);
+}
+
+TEST_F(EllipseFitCPUFitTest, RoundnessBelowMinRejected) {
+    auto pts = generateEllipsePoints(300.0f, 300.0f, 25.0f, 10.0f, 0.0f, 100);   // 圆度 0.4
+    EllipseFitCPUParams p = params_;
+    p.minRoundness = 0.7;
+    EllipseFitCPU op(p);
+    auto result = op.Execute(pts);
+    EXPECT_FALSE(result.success);
+}
+
+TEST_F(EllipseFitCPUFitTest, ShapeLimitsDisabledByDefault) {
+    auto big = generateEllipsePoints(400.0f, 400.0f, 40.0f, 40.0f, 0.0f, 120);
+    auto flat = generateEllipsePoints(300.0f, 300.0f, 25.0f, 10.0f, 0.0f, 100);
+    EllipseFitCPU op(params_);                                                    // 默认 0=全关
+    EXPECT_TRUE(op.Execute(big).success);
+    EXPECT_TRUE(op.Execute(flat).success);
+}
+
+TEST_F(EllipseFitCPUFitTest, ShapeLimitsAcceptNormalMarker) {
+    auto pts = generateEllipsePoints(150.0f, 150.0f, 12.0f, 11.5f, 30.0f, 100);  // 长轴 24px 圆度 0.96
+    EllipseFitCPUParams p = params_;
+    p.minLongAxis = 20.0;
+    p.maxLongAxis = 30.0;
+    p.minRoundness = 0.7;
+    EllipseFitCPU op(p);
+    auto result = op.Execute(pts);
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_NEAR(result.centerX, 150.0, 0.5);
+    EXPECT_NEAR(result.centerY, 150.0, 0.5);
 }
 
 // ============================================================

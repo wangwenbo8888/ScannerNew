@@ -42,6 +42,20 @@ struct EllipseFitCPUParams {
     int minInliers = 5;
     double earlyStopRatio = 0.8;
     bool useAMS = true;
+    /// 内点率复检：贴近最终椭圆的点 / 该组总点数 < 此值 → 判失败丢弃
+    /// （防"少数点凑出的假共识"——如粘连弧线只罩住零星点）
+    double minInlierRatio = 0.5;
+
+    /// 形状闸（0=不启用）：长轴=max(长,短) 小于此值 → 判失败丢弃（剔噪声小点）
+    double minLongAxis = 0.0;
+    /// 形状闸（0=不启用）：长轴大于此值 → 判失败丢弃（剔光晕环等大异常）
+    double maxLongAxis = 0.0;
+    /// 形状闸（0=不启用）：椭圆度=短轴/长轴 小于此值 → 判失败丢弃（剔粘连扁弧）
+    double minRoundness = 0.0;
+
+    /// 可选输出过滤：true=合格椭圆的 inlierPoints 只保留贴最终椭圆的亚像素点
+    /// （|x²/a²+y²/b²−1| < ransacThreshold 的点），带外点全部剔除
+    bool outputInliersOnly = false;
 
     void validate() const {
         if (ransacIterations <= 0)
@@ -56,6 +70,16 @@ struct EllipseFitCPUParams {
             throw std::invalid_argument("minInliers must be >= 5");
         if (earlyStopRatio <= 0.0 || earlyStopRatio > 1.0)
             throw std::invalid_argument("earlyStopRatio must be in (0, 1]");
+        if (minInlierRatio <= 0.0 || minInlierRatio > 1.0)
+            throw std::invalid_argument("minInlierRatio must be in (0, 1]");
+        if (minLongAxis < 0.0)
+            throw std::invalid_argument("minLongAxis must be >= 0");
+        if (maxLongAxis < 0.0)
+            throw std::invalid_argument("maxLongAxis must be >= 0");
+        if (minRoundness < 0.0 || minRoundness > 1.0)
+            throw std::invalid_argument("minRoundness must be in [0, 1]");
+        if (minLongAxis > 0.0 && maxLongAxis > 0.0 && minLongAxis > maxLongAxis)
+            throw std::invalid_argument("minLongAxis must be <= maxLongAxis when both enabled");
     }
 
     nlohmann::json toJson() const {
@@ -66,7 +90,12 @@ struct EllipseFitCPUParams {
             {"maxAxisRatio", maxAxisRatio},
             {"minInliers", minInliers},
             {"earlyStopRatio", earlyStopRatio},
-            {"useAMS", useAMS}
+            {"useAMS", useAMS},
+            {"minInlierRatio", minInlierRatio},
+            {"minLongAxis", minLongAxis},
+            {"maxLongAxis", maxLongAxis},
+            {"minRoundness", minRoundness},
+            {"outputInliersOnly", outputInliersOnly}
         };
     }
 
@@ -79,6 +108,11 @@ struct EllipseFitCPUParams {
         if (j.contains("minInliers")) p.minInliers = j.at("minInliers").get<int>();
         if (j.contains("earlyStopRatio")) p.earlyStopRatio = j.at("earlyStopRatio").get<double>();
         if (j.contains("useAMS")) p.useAMS = j.at("useAMS").get<bool>();
+        if (j.contains("minInlierRatio")) p.minInlierRatio = j.at("minInlierRatio").get<double>();
+        if (j.contains("minLongAxis")) p.minLongAxis = j.at("minLongAxis").get<double>();
+        if (j.contains("maxLongAxis")) p.maxLongAxis = j.at("maxLongAxis").get<double>();
+        if (j.contains("minRoundness")) p.minRoundness = j.at("minRoundness").get<double>();
+        if (j.contains("outputInliersOnly")) p.outputInliersOnly = j.at("outputInliersOnly").get<bool>();
         return p;
     }
 };

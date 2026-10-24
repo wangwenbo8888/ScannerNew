@@ -24,6 +24,10 @@ struct EllipseFitCPUResult {
     std::string message;
     QualityFlag qualityFlag = QualityFlag::Normal;
 
+    /// 源组编号（调用方填入：ccl 组件序 / merge groupIds；拟合器自身不感知，
+    /// -1=未标注）。失败组被跳过后靠它仍可追溯源组件，不受数组压缩错位影响
+    int groupId = -1;
+
     double centerX = 0.0;
     double centerY = 0.0;
     double majorAxis = 0.0;
@@ -205,6 +209,7 @@ struct MarkerReconstructResult {
     double normalZ = 0.0;
     bool validPlane = false;
     bool validCircle = false;
+    std::string message;   ///< 质量/闸门说明（空=正常；"gated: ..."=被质量闸判废原因）
 
     MarkerReconstructResult() = default;
     ~MarkerReconstructResult() = default;

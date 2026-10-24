@@ -26,97 +26,18 @@
 
 namespace cv { namespace cuda { class GpuMat; class Stream; } }
 
+// ============================================================================
+// 261024 产线集成·ODR 修复：GroupMode/StegerParams/StegerResult 三类型与
+// steger_fast/flat_center 等四处定义重复（链接器 COMDAT 折叠致新算子拿到旧
+// validate——maxLabels=0 幽灵异常根因）。沙盒最终形态已定 steger_types.h 为
+// 唯一驻扎（超集：多 maxLineWidth/dedupMode）；本头退役本地定义改引公共：
+// ============================================================================
+#include "common/steger_types.h"   // GroupMode/StegerParams/StegerResult（唯一驻扎）
+
 namespace calib {
 
 
 struct WarmupConfig;
-
-// ============================================================================
-// GroupMode
-// ============================================================================
-
-enum class GroupMode {
-    ByLabel,
-    Flat
-};
-
-// ============================================================================
-// StegerParams
-// ============================================================================
-
-struct StegerParams {
-    float sigma = 1.5f;
-    int kernelSize = 0;
-    float lowThreshold = 2.0f;
-    float highThreshold = 0.0f;
-    int maxLabels = 256;
-    int deviceId = 0;
-
-    void validate() const {
-        if (sigma < 0.5f || sigma > 10.0f)
-            throw std::invalid_argument("StegerParams::sigma must be [0.5, 10.0]");
-        if (kernelSize != 0 && kernelSize != 3 && kernelSize != 5
-            && kernelSize != 7 && kernelSize != 9)
-            throw std::invalid_argument("StegerParams::kernelSize must be 0 (auto), 3, 5, 7, or 9");
-        if (lowThreshold < 0.0f)
-            throw std::invalid_argument("StegerParams::lowThreshold must be >= 0");
-        if (highThreshold < 0.0f)
-            throw std::invalid_argument("StegerParams::highThreshold must be >= 0");
-        if (maxLabels < 1 || maxLabels > 4096)
-            throw std::invalid_argument("StegerParams::maxLabels must be [1, 4096]");
-        if (deviceId < 0)
-            throw std::invalid_argument("StegerParams::deviceId must be >= 0");
-    }
-
-    nlohmann::json toJson() const {
-        return {
-            {"sigma", sigma},
-            {"kernelSize", kernelSize},
-            {"lowThreshold", lowThreshold},
-            {"highThreshold", highThreshold},
-            {"maxLabels", maxLabels},
-            {"deviceId", deviceId}
-        };
-    }
-
-    static StegerParams fromJson(const nlohmann::json& j) {
-        StegerParams p;
-        if (j.contains("sigma")) p.sigma = j.at("sigma").get<float>();
-        if (j.contains("kernelSize")) p.kernelSize = j.at("kernelSize").get<int>();
-        if (j.contains("lowThreshold")) p.lowThreshold = j.at("lowThreshold").get<float>();
-        if (j.contains("highThreshold")) p.highThreshold = j.at("highThreshold").get<float>();
-        if (j.contains("maxLabels")) p.maxLabels = j.at("maxLabels").get<int>();
-        if (j.contains("deviceId")) p.deviceId = j.at("deviceId").get<int>();
-        p.validate();
-        return p;
-    }
-};
-
-// ============================================================================
-// StegerResult
-// ============================================================================
-
-struct StegerResult {
-    bool success = false;
-    std::string message;
-    QualityFlag qualityFlag = QualityFlag::Normal;
-
-    std::map<int, std::vector<cv::Point2f>> centerPoints;
-    int totalPointCount = 0;
-    int lineCount = 0;
-
-    std::shared_ptr<cv::cuda::GpuMat> d_centerPoints;
-    std::shared_ptr<cv::cuda::GpuMat> d_line_ids;
-
-    StegerResult() = default;
-    ~StegerResult() = default;
-
-    StegerResult(StegerResult&&) = default;
-    StegerResult& operator=(StegerResult&&) = default;
-
-    StegerResult(const StegerResult&) = delete;
-    StegerResult& operator=(const StegerResult&) = delete;
-};
 
 // ============================================================================
 // StegerExtractorCUDA

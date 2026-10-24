@@ -54,3 +54,28 @@ build-so\bin\Release\speed_replay.exe --config <config_flat.json> --dump-dir <ou
 ## 下一步（Phase 1 · 算子合入，5 批）
 
 按台账分批：①core/laser 新件＋SIMD ②v3 匹配族＋curve_map ③fuse/mask/zernike/ellipse 三方合并 ④其余异文件 ⑤调度类型。每批验收＝单测＋399 帧 0 diffs＋主库 ctest 100/100。
+
+---
+
+## 2026-10-24 · Phase 1 批 1 完成（core/laser 新件＋marker 类型增量＋ODR 修复）
+
+### 换入清单（ops → modules/OperatorLib）
+**新增算子（B）**：`core/laser/steger_fast`（4 文件＋test）、`core/laser/flat_center`（4＋test 同名 flat 相关在 72 用例内）、`core/laser/epipolar_interp_dual`（4）、`core/marker/conic_reconstruct`（2＋test）、`core/marker/ellipse_fit/ellipse_fit_{simd,vendor}.{h,cpp}`、`core/laser/laser_reconstruct/laser_reconstruct_cpu.{h,cpp}`、`core/common/{steger_types.h,epipolar_types.h}`、`core/common/testutil/marker_synth.{h,cpp}`
+**整文件替换（A-增量）**：`core/common/zitai_result_types.h`（+EllipseFitCPUResult::groupId、+MarkerReconstructResult::message）、`core/common/calib_result_types.h`（注释更新）、`core/marker/point_reconstruct/point_reconstruct_cpu.{h,cpp}`（+整组质量闸 4 参数）、`core/marker/ellipse_fit/ellipse_fit_cpu.{h,cpp}`（+内点率复检/形状闸/输出过滤）；两组件 tests 同步换 ops 版
+
+### ODR 修复（本批最大收获）
+- **现象**：steger_fast 四个 Smoke 测试抛 `StegerParams::maxLabels must be [1,4096]`（maxLabels=0 幽灵值）
+- **根因**：`StegerParams/GroupMode/StegerResult` 三类型在旧 `steger/steger_extract_cuda.h` 与新 `common/steger_types.h` **双定义**——链接器 COMDAT 择一，新算子内联链拿到旧 validate＋旧布局（字段错位读出 0）
+- **修法**：旧 steger 头退役本地三定义改 `#include "common/steger_types.h"`（沙盒最终形态本就如此——ops 已删除旧 steger 算子；主库保留旧算子（07 仍在用，D3 一个周期），但类型单一驻扎）
+- **连带排查记录**：中途 4 起测试失败为**排查插桩自身 bug**（`if(...) fprintf(...); throw...;` 未加花括号→throw 无条件执行）——教训入册：插桩多语句必须花括号；以及 `CMAKE_CUDA_DEPENDENCIES_USE_COMPILER=OFF`（根 CMake 继承沙盒口径）→ **.cu 不跟踪头变更，改头后须 touch 相关 .cu 强制重编**
+
+### 验证（双绿）
+- 主库 Release＋Debug ctest **102/102**（原 100＋新增 test_steger_fast/test_conic_reconstruct_cpu）
+- 混链陈旧二进制坑（DLL 边界头布局变更后部分目标未重编→SEH 崩溃假象）：**头结构变更后必须全量重建**，已记入易踩坑
+
+### 批 1 消化的台账项（原批 3/4 前移）
+zitai/calib 两类型头、point_reconstruct、ellipse_fit_cpu——conic 的依赖链要求，按"沙盒为源"整组换入
+
+### 下一步
+批 2：laser_match_scan_v3 三变体＋cmtt_table_loader＋curve_map 系 8 文件（依赖 cmtt 容器，预计牵出 calibration 域小改）
+

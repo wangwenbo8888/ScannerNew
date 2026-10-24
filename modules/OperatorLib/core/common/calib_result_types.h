@@ -70,7 +70,7 @@ struct LaserPlaneMap {
     //   - xL, yL : 左相机网格点坐标
     //   - uR     : 对应右相机极线预测横坐标
     //   - lineId : 激光线编号（int 存为 float）
-    // 消费者（scanning/LaserMatchScanCuda）经 SetTempTable 注入只读引用。
+    // 消费者（scanning/LaserMatchScanCudaV3）经 SetTempTable 注入只读引用。
     // 注：当前生产者（calibration/PlaneMapTempTable）尚未按此契约产出 leftToRightMap，
     // 仅 JSON 路径（mapData: [[xL,yL,uR,lineId],...]）可用，属待集成的已知缺口。
     cv::Mat leftToRightMap;
