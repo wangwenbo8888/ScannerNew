@@ -479,8 +479,29 @@ struct FiveChainAdapter::RtBridge {
     std::array<Slot, kRing> ring{};
 
     std::shared_ptr<const Scanner::data::EnhancedFrame> cur;   // L/R 对服务缓存
+    cv::Mat cropL_, cropR_;                                    // 裁剪产物宿主（在飞帧消费）
+
+    int algoW_ = 0, algoH_ = 0;        // 算法几何（0=直通不裁剪）
+    std::atomic<uint64_t> cropFrames_{0};   // 裁剪帧计数（诊断）
 
     scr::FrameSourceCompat src;
+
+    /// 居中裁剪到算法几何（与标定表几何一致——K/P/Q/激光表全 1688×1400）。
+    /// 尺寸已符/裁剪关闭＝直通（浅拷）；不符＝居中 ROI 深拷（子矩阵连续性保算子安全）
+    void cropToAlgo(const cv::Mat& src, cv::Mat& dst) {
+        if (algoW_ <= 0 || algoH_ <= 0
+            || (src.cols == algoW_ && src.rows == algoH_)) {
+            dst = src;
+            return;
+        }
+        if (src.cols < algoW_ || src.rows < algoH_) {
+            dst = cv::Mat();       // 采集小于算法几何＝配置错——交上层零帧告警
+            return;
+        }
+        const int x0 = (src.cols - algoW_) / 2;
+        const int y0 = (src.rows - algoH_) / 2;
+        dst = src(cv::Rect(x0, y0, algoW_, algoH_)).clone();
+    }
 
     void wire() {
         src.cycles.fs = &src;
@@ -517,9 +538,21 @@ struct FiveChainAdapter::RtBridge {
                 s.temperature = cur->temperature;
                 s.seq.store(idx, std::memory_order_release);
                 servedFrames.fetch_add(1, std::memory_order_relaxed);
+                // 居中裁剪到算法几何（标定表 1688×1400——采集 2048×1536 差异收口）
+                cropToAlgo(cur->grayL, cropL_);
+                cropToAlgo(cur->grayR, cropR_);
+                if (cropL_.empty() || cropR_.empty()) {
+                    err = "rt bridge: 采集尺寸小于算法几何 ("
+                          + std::to_string(cur->grayL.cols) + "x"
+                          + std::to_string(cur->grayL.rows) + " < "
+                          + std::to_string(algoW_) + "x" + std::to_string(algoH_) + ")";
+                    return false;
+                }
+                if (!(cropL_.data == cur->grayL.data))
+                    cropFrames_.fetch_add(1, std::memory_order_relaxed);
             }
             if (!cur) { err = "rt bridge: R before L"; return false; }
-            out = left ? cur->grayL : cur->grayR;   // 浅拷（槽宿主保活）
+            out = left ? cropL_ : cropR_;      // 裁剪后视图（宿主＝桥成员，在飞安全）
             return true;
         };
     }
@@ -551,8 +584,15 @@ Scanner::Result FiveChainAdapter::startRealtime(
     if (rtActive_.exchange(true)) return Scanner::Result::fail("五链实时链并发启动");
 
     try {
-        // ① 桥
+        // ① 桥（算法几何：默认标定表几何 1688×1400；env JMW_FC_W/H 覆盖，0=直通）
         bridge_ = std::make_unique<RtBridge>(ring, dropThreshold);
+        {
+            int aw = cfg_.algoWidth, ah = cfg_.algoHeight;
+            if (const char* e = getenv("JMW_FC_W")) aw = atoi(e);
+            if (const char* e = getenv("JMW_FC_H")) ah = atoi(e);
+            bridge_->algoW_ = aw;
+            bridge_->algoH_ = ah;
+        }
         bridge_->wire();
 
         // ② harness（算子宿主）——产线口径装配
@@ -562,7 +602,10 @@ Scanner::Result FiveChainAdapter::startRealtime(
         harness_->cfg_.runtime.nominalTemperature = 25.0;  // v1 标称温（逐帧温 TODO）
         harness_->K1_ = rtK1_; harness_->D1_ = rtD1_;
         harness_->K2_ = rtK2_; harness_->D2_ = rtD2_;
-        harness_->imageWidth_ = rtW_; harness_->imageHeight_ = rtH_;
+        // 标定几何口径：K/P/Q/激光表全 1688×1400——undistCpu 边界检查等用算法
+        // 几何（非采集几何；采集 2048×1536 已在桥居中裁剪）
+        harness_->imageWidth_ = bridge_->algoW_ > 0 ? bridge_->algoW_ : rtW_;
+        harness_->imageHeight_ = bridge_->algoH_ > 0 ? bridge_->algoH_ : rtH_;
         harness_->tableOdd_ = rtLaserTable_;               // 产线单表：奇偶共表
         harness_->tableEven_ = rtLaserTable_;
         harness_->sepLaserL_ = sepL_.get();
@@ -609,9 +652,12 @@ Scanner::Result FiveChainAdapter::startRealtime(
 
         JMW_LOG_INFO("07-FiveChain",
             "[FiveChainAdapter] 实时链启动: voxel={}mm graySlots={} markerLanes={} "
-            "maxInflight={} 温表={}",
+            "maxInflight={} 温表=单表(奇偶共表) 算法几何={}x{}（裁剪={}）",
             cfg_.voxelSizeMm, cfg_.graySlots, cfg_.markerLanes,
-            cfg_.maxInflight > 0 ? cfg_.maxInflight : 56, "单表(奇偶共表)");
+            cfg_.maxInflight > 0 ? cfg_.maxInflight : 56,
+            bridge_->algoW_ > 0 ? bridge_->algoW_ : rtW_,
+            bridge_->algoH_ > 0 ? bridge_->algoH_ : rtH_,
+            bridge_->algoW_ > 0 ? "居中裁剪" : "直通");
         return Scanner::Result::ok("fivechain realtime started");
     } catch (const std::exception& e) {
         rtActive_.store(false);
@@ -744,9 +790,10 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
 void FiveChainAdapter::stopRealtime() {
     if (!rtActive_.exchange(false)) return;
     JMW_LOG_INFO("07-FiveChain",
-        "[FiveChainAdapter] 实时链停止: 服务 {} 帧（过载跳帧 {}）/融合云 {} 点",
+        "[FiveChainAdapter] 实时链停止: 服务 {} 帧（过载跳帧 {}/裁剪 {}）/融合云 {} 点",
         bridge_ ? bridge_->servedFrames.load() : 0,
         bridge_ ? bridge_->skippedTotal.load() : 0,
+        bridge_ ? bridge_->cropFrames_.load() : 0,
         fuse_ ? fuse_->GetFusedPointCount() : 0);    if (bridge_) bridge_->stopped.store(true);    // readFrame 速败→墓碑排空
     executor_.reset();                            // stopAll＋内部线程 join＋设备同步
     if (collector_.joinable()) collector_.join();
