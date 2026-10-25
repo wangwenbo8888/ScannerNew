@@ -25,15 +25,19 @@ namespace Scanner::pipeline {
 // ScanConfig — C 扫描配置（单一流水线+开关，不拆两条）
 // ============================================================================
 struct ScanConfig {
-    bool enableLaser = true;                 // A 模式 false：激光链整段跳过
-    float voxelSizeMm = 0.0f;                // P-4 体素密度档值（mm；0=默认 0.25 硬
-                                             //  编码口径——菜单①待机改档下会话生效）
-    bool enableFinalBA = true;               // 恒 true（A/B 均必跑 GBA），保留显式
-    size_t laserCacheBudgetMB = 2048;        // D 重融合激光帧缓存预算（开放项 6 待实测）
-    int hangTimeoutMs = 10000;               // 看门狗：lane 心跳静默阈值（0=关；传递 SchedConfig）
-    std::string checkpointPath;              // 非空=stop() 自动落检查点（崩溃恢复链）
-    // existingMarkers：启动扫描时一次性检测装载（非空且仅标记点才加载）——数据形态：
-    std::vector<calib::MarkerCloudPoint> existingMarkers;   // 已有点（globalId 语义在 obs 层）
+    bool enableLaser = true;                 // A 模式 false＝纯标记点（不发射激光）
+    float voxelSizeMm = 0.0f;                // P-4 体素密度档值（mm）0=默认 0.25 硬
+                                             //   编码值档→会话生效（02 装配时注入）
+    bool enableFinalBA = true;               // 置 true：A/B 结束走 GBA（终局遍正式
+    size_t laserCacheBudgetMB = 2048;        // D 终局遍激光帧缓存预算（最大 6 GB实测）
+    int hangTimeoutMs = 10000;               // 看门狗（lane 心跳超时默认值）0=关（见 SchedConfig）
+    std::string checkpointPath;              // 非空=stop() 自动落盘（崩溃恢复链）
+    // existingMarkers——跨扫描时一次性装配加载（非空且标志点齐全）正常加载（非动态）
+    std::vector<calib::MarkerCloudPoint> existingMarkers;   // 标志点（globalId 继续做 obs 侧）
+
+    // 261025 Phase 2：五链执行器开关（默认 false=走旧 lane 调度；true=走五链）
+    // 环境变量 JMW_FIVECHAIN=1 亦可开启（app 侧经环境变量切换不动 config）
+    bool useFiveChain = false;
 };
 
 #ifdef JMW_BUILD_CUDA

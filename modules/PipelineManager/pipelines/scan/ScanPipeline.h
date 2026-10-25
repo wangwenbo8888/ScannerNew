@@ -200,6 +200,14 @@ private:
     sched::SchedulerRuntime runtime_;
     std::unique_ptr<sched::GrabLatestSource<Scanner::data::EnhancedFrame>> source_;
 
+    // —— 261025 Phase 2：五链执行器（useFiveChain/JMW_FIVECHAIN 时替代 lane 调度）——
+    // 前向声明（Pipeline 命名空间内——避免头依赖 fivechain/ 子目录）
+    class FiveChainAdapter;
+    class FcHarnessCompat;
+    FiveChainAdapter* fcAdapter_ = nullptr;
+    FcHarnessCompat* fcHarness_ = nullptr;
+    bool fcActive_ = false;
+
     std::atomic<int> fakeStreamSeq_{0};                      // 测试模式假流句柄序号
     bool seeded_ = false;                                    // seed 一次性守卫（start 重试不重复 seed）
     uint64_t pauseCounter_ = 0;                              // pause 时消费水位（resume 注入）

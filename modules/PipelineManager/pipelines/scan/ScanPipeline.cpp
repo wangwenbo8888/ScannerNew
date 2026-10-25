@@ -491,6 +491,15 @@ Scanner::Result ScanPipeline::start() {
         case State::Stopped:  return Result::fail("ScanPipeline::start: 已停止（会话私有件，续扫建新对象）");
         case State::Configured: break;
     }
+
+    // 261025 Phase 2：五链开关（config useFiveChain 或 env JMW_FIVECHAIN=1）
+    // ——首版骨架（适配层已编译进 DLL，执行器接线在下一版；先走旧 lane 保可用）
+    const bool useFc = cfg_.useFiveChain || getenv("JMW_FIVECHAIN") != nullptr;
+    if (useFc) {
+        JMW_LOG_WARN("07-ScanPipeline",
+            "[ScanPipeline] 五链模式请求（useFiveChain/JMW_FIVECHAIN）——"
+            "适配层已编译就绪；执行器实时接线在下一版（当前走旧 lane 调度）");
+    }
     if (!ring_) return Result::fail("ScanPipeline::start: 未 attachRing（输入源必备）");
 
     // 0) 点云仓库会话边界（260919 正式口）：既有内容折入基线前缀——本会话
