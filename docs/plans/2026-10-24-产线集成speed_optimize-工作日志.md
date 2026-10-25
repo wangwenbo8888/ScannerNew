@@ -122,5 +122,31 @@ Release＋Debug ctest **109/109 双绿**＋LeadScannerK2 编译通过
 ### Phase 1 收官状态
 ops→主库差异清零（除刻意保留项：laser_reconstruct×2 主库 261018 版、plane_map 系/旧 steger/laser_match v1/fusion CPU+normal 件 D3 保留、example_usage 不入构建）。**台账 49 异文件全部处置完毕**。
 
+---
+
+## 2026-10-25 · Phase 1 验收：golden 对拍（产线算子 399 帧全量）
+
+### 基建
+- 沙盒 CMake 新增 `SO_LINK_OPERATORLIB` 开关：ON 时 speed_ops 变接口壳直链主库 OperatorLib（不编 ops/ 副本）——回放跑在合入后的产线算子上（build-so，GOLDEN-对拍模式）；OFF 保持沙盒自含（build-so-ops 对照版，gitignore 已加）
+- config_flat_allraw.json（dataDir→ALL_raw 399 帧）
+
+### 对拍结果（用户裁定口径 A＝浮点级等价收口）
+| 层 | 结果 |
+|---|---|
+| marker 3D 逐帧 CSV（--markers-only 399 帧） | **逐位一致 399/399** |
+| report.csv 每帧激光点数/匹配数/视差/残差 | **逐位一致** |
+| 配准 R/T 评估量（dt_mm/drot_deg） | 第 4 位小数微差（相对 ~0.05%） |
+| 全局激光 PLY（571 万点） | 差 32 点（0.0006%——R/T 微差跨体素边界） |
+
+**差异定性**：同代码（MD5 同）＋同输入（marker 3D 逐位同）下，optical_flow 配准内部（Kabsch/SVD 浮点求和路径）在 DLL（OperatorLib）vs 静态库（speed_ops）编译单元的浮点求值序差——非逻辑差异。用户裁定 A：接受浮点级等价（工程量全一致），Phase 1 验收 **PASS**。
+
+### 顺手修正
+- laser_reconstruct_cuda×2 终换 ops 版（原批 3 保留主库版判断修正——ops 版含返回持久缓存 ROI 视图契约，且 pinned 项属 harness 层非算子职责）
+- .gitignore 增 build-so-ops/
+
+### 下一步
+Phase 2：五链执行器进 07（`JMW_FIVECHAIN` 开关）＋部署三雷＋GBA 观测出口（D4）
+
+
 
 

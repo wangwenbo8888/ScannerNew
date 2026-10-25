@@ -1309,6 +1309,18 @@ void Harness::runRegistration(CycleProducts& p, bool record) {
             normals.emplace_back(m.normalX, m.normalY, m.normalZ);
         }
         p.regFlow = flowOp_->Execute(centers, normals, prevState_);
+        // 261025 产线对拍探针（JMW_RTDBG=1）：R/T 17 位打印——DLL vs 静态库
+        // 浮点求值序差定位（两 exe 同 harness 代码，探针不影响 golden 产物）
+        if (getenv("JMW_RTDBG") && p.regFlow.success) {
+            std::cerr << "[RTDBG] matched=" << p.regFlow.getMatchedCount()
+                      << " rmse=" << std::setprecision(17)
+                      << p.regFlow.statistics.rmse;
+            for (int i = 0; i < 9; ++i)
+                std::cerr << " R" << i << "=" << p.regFlow.R.val[i];
+            for (int i = 0; i < 3; ++i)
+                std::cerr << " T" << i << "=" << p.regFlow.T.val[i];
+            std::cerr << std::setprecision(6) << std::endl;
+        }
         // 失败原因落盘（summary.json flowDiag 节——断链可诊断：差几对/误差多少/算子原因）
         p.flowMatchedDiag = static_cast<int>(p.regFlow.getMatchedCount());
         p.flowRmseDiag = p.regFlow.statistics.rmse;

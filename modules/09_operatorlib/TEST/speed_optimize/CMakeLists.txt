@@ -127,6 +127,21 @@ foreach(h ${SO_HEADERS})
 endforeach()
 list(REMOVE_DUPLICATES SO_INC_DIRS)
 
+# ============================================================================
+# 261024 产线集成对拍口：SO_LINK_OPERATORLIB=ON 时不编 ops/ 副本，speed_ops 变
+# 接口壳直链主库 OperatorLib——回放跑在「合入后的产线算子」上，golden 对拍验
+# 证 Phase1 合入等价性（与沙盒 ops 副本构建互斥；默认 OFF 保持沙盒自含形态）
+# ============================================================================
+option(SO_LINK_OPERATORLIB "Link replay against production OperatorLib (golden 对拍验收)" OFF)
+
+if(SO_LINK_OPERATORLIB)
+    if(NOT TARGET OperatorLib)
+        message(FATAL_ERROR "SO_LINK_OPERATORLIB requires root-project build (BUILD_SCAN_REPLAY=ON)")
+    endif()
+    add_library(speed_ops INTERFACE)
+    target_link_libraries(speed_ops INTERFACE OperatorLib)
+    message(STATUS "speed_optimize: GOLDEN-对拍模式——回放链产线 OperatorLib（不编 ops/ 副本）")
+else()
 add_library(speed_ops STATIC ${SO_SOURCES})
 target_include_directories(speed_ops PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/ops        # #include "core/common/calib_types.h"
@@ -149,6 +164,7 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:CXX>:/bigobj>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
 endif()
+endif()   # ← SO_LINK_OPERATORLIB else 分支结束（STATIC 版 speed_ops）
 
 # ============================================================================
 # scr_runner_speed — 回放 runner 库（src 除 main.cpp 外全部；.cu 为 GPU 加速件）

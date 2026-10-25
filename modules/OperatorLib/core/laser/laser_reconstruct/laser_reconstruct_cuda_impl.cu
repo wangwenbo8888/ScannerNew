@@ -154,7 +154,6 @@ LaserReconstructCuda::Impl::~Impl() {
     }
 
     safeCudaFree(d_cub_temp_);
-    if (h_pinned_count_) { cudaFreeHost(h_pinned_count_); h_pinned_count_ = nullptr; }
     cub_temp_size_ = 0;
     last_max_count_ = 0;
 }
@@ -354,32 +353,21 @@ LaserReconstructResult LaserReconstructCuda::Impl::Execute(
         }
 #endif
 
-        // 261018 pinned 回读退役 pageable 栈变量：Async 到 pageable 内存退化
-        // 同步暂存拷贝——改 pinned（ccl Step7 同款），等待本身不可免（count
-        // 决定结果 colRange 与 validCount）
-        if (!h_pinned_count_) {
-            cudaError_t perr = cudaMallocHost(&h_pinned_count_, sizeof(int));
-            if (perr != cudaSuccess) {
-                result.success = false;
-                result.message = std::string("pinned count alloc failed: ") + cudaGetErrorString(perr);
-                CALIB_LOG_ERROR("Execute(): {}", result.message);
-                return result;
-            }
-        }
-        cudaMemcpyAsync(h_pinned_count_, d_out_count_.ptr<int>(), sizeof(int),
+        int h_count = 0;
+        cudaMemcpyAsync(&h_count, d_out_count_.ptr<int>(), sizeof(int),
                         cudaMemcpyDeviceToHost, cuda_stream);
         cudaStreamSynchronize(cuda_stream);
-        const int h_count = *h_pinned_count_;
 
         result.success = true;
         result.message = "Success";
         result.validCount = h_count;
         result.totalInput = count;
-        // 261018 流序拷贝退役 .clone()（legacy 默认流＝跨 lane 隐式串行化）
-        result.d_points3d = std::make_shared<cv::cuda::GpuMat>();
-        d_out_points3d_.colRange(0, h_count).copyTo(*result.d_points3d, stream);
-        result.d_valid_line_ids = std::make_shared<cv::cuda::GpuMat>();
-        d_out_fids_.colRange(0, h_count).copyTo(*result.d_valid_line_ids, stream);
+        // 【速度优化】返回持久缓冲 ROI 视图（有效期至下一次 Execute/SetParams/
+        // Destroy，v3 同款契约）——原 clone() 每圈 cudaMalloc＋D2D 拷贝 ×2
+        result.d_points3d = std::make_shared<cv::cuda::GpuMat>(
+            d_out_points3d_.colRange(0, h_count));
+        result.d_valid_line_ids = std::make_shared<cv::cuda::GpuMat>(
+            d_out_fids_.colRange(0, h_count));
 
     } catch (const std::exception& e) {
         result.success = false;
@@ -426,10 +414,6 @@ void LaserReconstructCuda::Impl::Destroy() {
     if (d_cub_temp_) {
         cudaFree(d_cub_temp_);
         d_cub_temp_ = nullptr;
-    }
-    if (h_pinned_count_) {
-        cudaFreeHost(h_pinned_count_);
-        h_pinned_count_ = nullptr;
     }
     cub_temp_size_ = 0;
     d_disparity_.release();
