@@ -45,6 +45,8 @@
 #include "core/marker/point_reconstruct/point_reconstruct_cpu.h"
 #include "core/marker/conic_reconstruct/conic_reconstruct_cpu.h"
 #include "core/marker/optical_flow_fuse/marker_optical_flow_fuse_cpu.h"
+#include "core/marker/frame_fuse/frame_fuse_cpu.h"
+#include "core/scheduler/prev_frame_state.h"
 
 namespace scr {
 
@@ -92,6 +94,10 @@ struct CycleProductsCompat {
     calib::LaserReconstructResult recon;
     calib::RegionAnalysisResult cclL, cclR;
     calib::ImageSplitCPUResult splitL, splitR;
+    std::vector<calib::ZernikeEdgeCPUResult> zernL, zernR;
+    calib::ImageMergeCPUResult mergeL, mergeR;
+    calib::StereoUndistortResult undistCpu;
+    std::vector<calib::EllipseFitCPUResult> ellL, ellR;
     calib::MarkerMatchCPUResult mm;
     calib::ConicReconstructCPUResult conic;
     calib::MarkerOpticalFlowFuseCPUResult regFlow;
@@ -105,6 +111,16 @@ struct CycleProductsCompat {
     int laserPoints3D = 0;
     double rowResidMedPx = 0.0;
     double dispMedPx = 0.0;
+    int markersDetected = 0;
+    int markersValid = 0;
+    int regMatched = 0;
+    // 步骤状态
+    std::map<std::string, bool> stepSuccess_;
+    std::map<std::string, std::string> stepError_;
+    // 配准诊断
+    int flowMatchedDiag = -1;
+    double flowRmseDiag = -1.0;
+    std::string flowMessageDiag;
 };
 } // namespace scr
 

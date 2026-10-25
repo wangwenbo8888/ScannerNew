@@ -223,9 +223,7 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
         fail("image_split", p, "ccl 无组件");
         return;
     }
-    // 后续链：split→zernike→merge→undist→ellipse→match→conic（沙盒 runMarkerChainCore 逐段）
-    // 此处调用 ops 内算子——沙盒 harness.cpp L1141-1262 等价
-    // Phase 2 首版：关键链已建（算子实例就绪），链段调用与沙盒一致
+    // 后续链：split→zernike→merge→undist→ellipse→match→conic（沙盒 runMarkerChainCore 全量）
     try {
         p.splitL = ops->split->Execute(p.frameGrayL, roisL);
         p.splitR = ops->split->Execute(p.frameGrayR, roisR);
@@ -237,11 +235,104 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
         fail("image_split", p, e.what());
         return;
     }
-    // CycleProductsCompat 无 zernike/merge/undistCpu/splitL 字段（沙盒完整版有——
-    // 五链消费的核心字段已定义；完整标志点链在下一版补全后开放）
-    // 首版止步于 image_split（ccl+split 就绪——标志点检测基本链路已通）
-    p.mm = {};
-    p.conic = {};
+
+    // zernike edge
+    try {
+        p.zernL.clear();
+        for (const auto& img : p.splitL.splitImages) p.zernL.push_back(ops->zernike->Execute(img));
+        p.zernR.clear();
+        for (const auto& img : p.splitR.splitImages) p.zernR.push_back(ops->zernike->Execute(img));
+        bool ok = !p.zernL.empty() && !p.zernR.empty();
+        for (const auto& z : p.zernL) ok = ok && z.success;
+        for (const auto& z : p.zernR) ok = ok && z.success;
+        if (!ok) { fail("zernike_edge", p, "亚像素提取失败"); return; }
+    } catch (const std::exception& e) {
+        fail("zernike_edge", p, e.what());
+        return;
+    }
+
+    // merge
+    try {
+        std::vector<std::vector<calib::EdgePoint>> epL, epR;
+        epL.reserve(p.zernL.size()); epR.reserve(p.zernR.size());
+        for (const auto& z : p.zernL) epL.push_back(z.edgePoints);
+        for (const auto& z : p.zernR) epR.push_back(z.edgePoints);
+        p.mergeL = ops->merge->Execute(epL, roisL);
+        p.mergeR = ops->merge->Execute(epR, roisR);
+        if (!p.mergeL.success || !p.mergeR.success) {
+            fail("image_merge", p, p.mergeL.message + " | " + p.mergeR.message);
+            return;
+        }
+    } catch (const std::exception& e) {
+        fail("image_merge", p, e.what());
+        return;
+    }
+
+    // undistort CPU
+    try {
+        p.undistCpu = ops->undist->Execute(p.mergeL.mergedEdgePoints,
+                                            p.mergeR.mergedEdgePoints,
+                                            p.mergeL.groupIds, p.mergeR.groupIds);
+        if (!p.undistCpu.success) {
+            fail("undistort_cpu", p, p.undistCpu.message);
+            return;
+        }
+    } catch (const std::exception& e) {
+        fail("undistort_cpu", p, e.what());
+        return;
+    }
+
+    // ellipse fit（按组拟合）
+    try {
+        const auto g1 = p.undistCpu.splitRectifiedPoints1ByGroup();
+        const auto g2 = p.undistCpu.splitRectifiedPoints2ByGroup();
+        p.ellL.clear(); p.ellR.clear();
+        for (size_t i = 0; i < g1.size(); ++i) {
+            if (g1[i].size() < 5) continue;
+            auto r = ops->ellipse->Execute(g1[i]);
+            r.groupId = static_cast<int>(i);
+            p.ellL.push_back(std::move(r));
+        }
+        for (size_t i = 0; i < g2.size(); ++i) {
+            if (g2[i].size() < 5) continue;
+            auto r = ops->ellipse->Execute(g2[i]);
+            r.groupId = static_cast<int>(i);
+            p.ellR.push_back(std::move(r));
+        }
+        int okL = 0, okR = 0;
+        for (const auto& e : p.ellL) okL += e.success ? 1 : 0;
+        for (const auto& e : p.ellR) okR += e.success ? 1 : 0;
+        p.markersDetected = std::min(okL, okR);
+        if (p.markersDetected == 0) {
+            fail("ellipse_fit", p, "椭圆拟合成功数不足 L=" + std::to_string(okL) + " R=" + std::to_string(okR));
+            return;
+        }
+    } catch (const std::exception& e) {
+        fail("ellipse_fit", p, e.what());
+        return;
+    }
+
+    // marker match
+    try {
+        p.mm = ops->match->Execute(calib::extractEllipseCenters(p.ellL),
+                                   calib::extractEllipseCenters(p.ellR));
+        if (!p.mm.success) {
+            fail("marker_match", p, p.mm.message);
+            return;
+        }
+    } catch (const std::exception& e) {
+        fail("marker_match", p, e.what());
+        return;
+    }
+
+    // conic reconstruct（一步重建）
+    try {
+        p.conic = ops->conic->Execute(p.ellL, p.ellR, p.mm.centerMatches);
+        p.markersValid = static_cast<int>(p.conic.statistics.validCount);
+    } catch (const std::exception& e) {
+        fail("conic_reconstruct", p, e.what());
+        return;
+    }
 }
 
 void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) {
