@@ -91,6 +91,7 @@ struct CycleProductsCompat {
     calib::LaserMatchScanResultV3 matchV3;
     calib::LaserReconstructResult recon;
     calib::RegionAnalysisResult cclL, cclR;
+    calib::ImageSplitCPUResult splitL, splitR;
     calib::MarkerMatchCPUResult mm;
     calib::ConicReconstructCPUResult conic;
     calib::MarkerOpticalFlowFuseCPUResult regFlow;
@@ -202,8 +203,8 @@ public:
     LaserOps laserOps_;
 
     // 沙盒激光链前段提交/收尾（v3 前段延迟执行；签名＝沙盒 6 参数全）
-    bool submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p, bool record,
-                          bool tubeOdd, int slot, cv::cuda::Stream& s);
+    int submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p, bool record,
+                          bool tubeOdd, int laneIdx, cv::cuda::Stream& ls);
     void finishLaserFront(LaserOps& L, scr::CycleProductsCompat& p, bool record,
                           int frontKind);
 
@@ -213,9 +214,16 @@ public:
                            const std::vector<int>& rleL, int nL,
                            const std::vector<int>& rleR, int nR,
                            int cols, int rows);
+    void runMarkerChainCore(scr::CycleProductsCompat& p,
+                            std::unique_ptr<MarkerOps>& ops);
 
     // 配准（沙盒 runRegistration——2 参签名）
     void runRegistration(scr::CycleProductsCompat& p, bool record);
+
+    // prevState（光流链帧间状态——fc_executor/配准共用）
+    calib::PrevFrameState prevState_;
+    // 光流配准算子（runRegistration 消费——构造期创建）
+    std::unique_ptr<calib::MarkerOpticalFlowFuseCPU> flowOp_;
 
     // 轨迹/计数
     std::vector<std::array<double,3>> trajT_;
