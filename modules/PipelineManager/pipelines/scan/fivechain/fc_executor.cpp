@@ -249,7 +249,9 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles)
     // 【E7】按实拷窗口：钳 [64, rleCap_]；kRleCapOverride 注入小 cap 时窗口随缩
     //（min-cap=8 → 窗口 64 仍 >cap → 每帧补拷＝欠预测天然压测臂）
     rleWin_ = std::max(64, std::min(h.cfg_.fivechain.rleWindow, rleCap_));
-    rleNAll_.reserve(static_cast<size_t>(std::max(1, totalCycles_)));
+    // 261025 实时适配：totalCycles=INT_MAX 哨兵（无界实时会话）时钳 reserve
+    rleNAll_.reserve(static_cast<size_t>(
+        std::max(1, std::min(totalCycles_, 65536))));
     dRleRingL_.resize(static_cast<size_t>(rleSlots_));
     dRleRingR_.resize(static_cast<size_t>(rleSlots_));
     evRleRing_.resize(static_cast<size_t>(rleSlots_));
@@ -297,7 +299,11 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles)
                   && getenv("JMW_FCBUSY")[0] != '0');   // 【R3-低8】默认关；=0 显式关（全仓约定）
     if (const char* e = getenv("JMW_FCDBG")) dbgInterval_ = atoi(e);
     if (dbgInterval_ <= 0) dbgInterval_ = 0;
-    if (totalCycles_ > 0) recs_.reset(new FcFrameRec[static_cast<size_t>(totalCycles_)]);
+    // 261025 实时适配：INT_MAX 哨兵＝无界会话——不建逐帧指标数组（各记录点
+    // 已有 recs_ 空判护栏；writeMetricsCsv_ 同）
+    constexpr int kFcUnbounded = 0x7fffffff;
+    if (totalCycles_ > 0 && totalCycles_ != kFcUnbounded)
+        recs_.reset(new FcFrameRec[static_cast<size_t>(totalCycles_)]);
     if (busyProbe_) {
         evBusy1aA_.resize(static_cast<size_t>(busyRing_ + 1));   // 环容量=回看距+1（防槽自碰）
         evBusy1aB_.resize(static_cast<size_t>(busyRing_ + 1));
@@ -456,6 +462,9 @@ void FiveChainExecutor::readerLoop() {
         } else {
             job->prod.frameGrayL = gl;
             job->prod.frameGrayR = gr;
+            // 261025 实时适配：帧元数据注入钩子（07 桥填 frameId/温补快照；
+            // 沙盒对拍路径钩子为空＝行为不变）
+            if (h_.onFrameMeta) h_.onFrameMeta(idx, job->prod);
         }
         chRead_.push(job);
         chCount_[0].fetch_add(1);
@@ -1108,7 +1117,11 @@ void FiveChainExecutor::chain2Loop() {
                 j->eCount = calib::LaserReconstructCpu::ReconstructInto(
                     ml, mr,
                     cr.matched_line_ids.ptr<int>(),
-                    cr.matchedCount, h_.calib_.Q,
+                    cr.matchedCount,
+                    // 261025 实时适配：Q 每帧随帧温快照（沙盒路径 metaValid=false
+                    // 回退 harness 构造期静态 Q——对拍行为不变）
+                    j->prod.metaValid && !j->prod.snapQ.empty()
+                        ? j->prod.snapQ : h_.calib_.Q,
                     reconP_.minDepth, reconP_.maxDepth,
                     eBlocks_[static_cast<size_t>(s)], idsScratch.data(), eCapPts_);
                 if (cr.matchedCount > eCapPts_)

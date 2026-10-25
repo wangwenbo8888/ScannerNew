@@ -9,15 +9,23 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <thread>
+#include <deque>
 
 #include "pipelines/scan/ScanTypes.h"
 #include "pipelines/scan/FrameObsAccumulator.h"
+#include "core/common/calib_result_types.h"   // calib::LaserPlaneMapTempTable（struct 真身——防 class 误前置致名修饰分裂）
 
-namespace Scanner::data { class ICloudWarehouse; }
+namespace Scanner::data {
+class ICloudWarehouse;
+template<typename T> class SlotRing;
+struct EnhancedFrame;
+}
 
 namespace calib {
 class LaserMarkingSeparationCUDA;
@@ -25,6 +33,8 @@ class LaserCloudFuseCuda;
 class LaserMatchScanSplitGpuV3;
 class LaserReconstructCPU;
 }
+
+namespace scr { namespace fc { class FiveChainExecutor; } }
 
 namespace Scanner::pipeline {
 
@@ -68,7 +78,7 @@ public:
                     FrameObsAccumulator& obs,
                     Scanner::data::ICloudWarehouse* warehouse,
                     ISceneFeed* sceneFeed);
-    ~FiveChainAdapter();
+    ~FiveChainAdapter();   // 安全网：stopRealtime()
 
     Scanner::Result start();
     void stop();
@@ -91,7 +101,32 @@ public:
                      const std::vector<MarkerObs>& markers,
                      const std::vector<float>& laserXyz);
 
+    // ========================================================================
+    // 261025 实时链（Phase 2 收尾）：SlotRing→五链执行器→obs/仓库/渲染
+    // ========================================================================
+    /// 标定注入（ScanPipeline configure 期调用；温表=生产 laserTable 单表）
+    void attachCalib(const cv::Mat& K1, const cv::Mat& D1, const cv::Mat& K2,
+                     const cv::Mat& D2, int imageWidth, int imageHeight,
+                     std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable);
+
+    /// 实时启动：桥接 SlotRing（Overwrite 抓最新面孔）→ 五链执行器（INT_MAX
+    /// 无界哨兵）→ 收割线程（obs 落账＋节流渲染推送＋仓库直写）
+    Scanner::Result startRealtime(Scanner::data::SlotRing<Scanner::data::EnhancedFrame>& ring,
+                                  size_t dropThreshold);
+
+    /// 实时停止：桥停→执行器排水析构→收割线程 join→终局全量推送
+    void stopRealtime();
+
+    bool realtimeActive() const { return rtActive_.load(); }
+
 private:
+    /// 实时桥：fc readFrame/cycleAt ← SlotRing 抓最新；逐帧元数据环形表
+    struct RtBridge;
+    /// 收割线程：collect 逐帧→obs/notifyLaserCount/节流渲染
+    void collectorLoop();
+    /// 渲染推送（时间门 ≥3s；forceFull＝终局全量——仓库+UI 收口）
+    void renderPushIfDue(bool forceFull);
+
     FiveChainConfig cfg_;
     FrameObsAccumulator& obs_;
     Scanner::data::ICloudWarehouse* warehouse_;
@@ -101,6 +136,23 @@ private:
     std::unique_ptr<calib::LaserMarkingSeparationCUDA> sepL_, sepR_;
     std::unique_ptr<calib::LaserCloudFuseCuda> fuse_;
     std::vector<cv::cuda::GpuMat> grayLanesL_, grayLanesR_;
+
+    // —— 实时链组件（startRealtime 建/stopRealtime 拆）——
+    cv::Mat rtK1_, rtD1_, rtK2_, rtD2_;
+    int rtW_ = 0, rtH_ = 0;
+    std::shared_ptr<const calib::LaserPlaneMapTempTable> rtLaserTable_;
+    std::unique_ptr<RtBridge> bridge_;
+    class FcHarnessCompat* harness_ = nullptr;              // 五链 harness（自有）
+    std::unique_ptr<scr::fc::FiveChainExecutor> executor_;  // 五链执行器（INT_MAX 无界）
+    std::thread collector_;
+    std::atomic<bool> rtActive_{false};
+
+    // 渲染节流/推送状态（collector 线程私有——镜像 FuseConsumer 口径）
+    std::chrono::steady_clock::time_point lastRenderPush_{};
+    size_t lastPushedLaserPts_ = 0;
+    uint64_t pushSeq_ = 0;
+    std::vector<float> renderKeep_;                          // CloudViewHandle 指针宿主（活到下次推送）
+    cv::cuda::Stream dlStream_;                              // 融合云 D2H 下载流
 };
 
 } // namespace Scanner::pipeline

@@ -11,6 +11,7 @@
 //   - pause 不动 consumer：融合/obs/pool 累积全保留；resume 走 runtime restart
 // ============================================================================
 #include "pipelines/scan/ScanPipeline.h"
+#include "pipelines/scan/fivechain/FiveChainAdapter.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -272,7 +273,11 @@ ScanPipeline::ScanPipeline(ScanConfig cfg)
         hpGlobalIds_.push_back(static_cast<int>(i));
 }
 
-ScanPipeline::~ScanPipeline() { stop(); }        // 安全网：幂等
+ScanPipeline::~ScanPipeline() {
+    stop();                                        // 安全网：幂等
+    delete fcAdapter_;                             // 五链适配器释放（stop 已收尾会话）
+    fcAdapter_ = nullptr;
+}
 
 void ScanPipeline::attachRing(Scanner::data::SlotRing<Scanner::data::EnhancedFrame>& ring,
                               size_t dropThreshold) {
@@ -465,6 +470,7 @@ Scanner::Result ScanPipeline::configure(const PipelineDeps& deps) {
     cd.cloudWarehouse = deps.cloudWarehouse;   // 260919 正式口：融合线程直写仓库
     cd.obs = &obs_;
     cloudWarehouse_ = deps.cloudWarehouse;       // start() 会话边界用
+    sceneFeed_ = deps.sceneFeed;                 // 261025 五链实时链渲染推送用
     cd.sink = sink_.get();
     cd.renderThrottleFrames = kRenderThrottleFrames;
     // 261018 重推送节流 300→3000ms：推送段含融合云全量下载＋仓库整包（真机
@@ -492,13 +498,40 @@ Scanner::Result ScanPipeline::start() {
         case State::Configured: break;
     }
 
-    // 261025 Phase 2：五链开关（config useFiveChain 或 env JMW_FIVECHAIN=1）
-    // ——首版骨架（适配层已编译进 DLL，执行器接线在下一版；先走旧 lane 保可用）
+    // 261025 Phase 2：五链实时链开关（config useFiveChain 或 env JMW_FIVECHAIN=1）
+    // ——适配层＋执行器＋收割线程全量接线（SlotRing→五链→obs/仓库/渲染）
     const bool useFc = cfg_.useFiveChain || getenv("JMW_FIVECHAIN") != nullptr;
     if (useFc) {
-        JMW_LOG_WARN("07-ScanPipeline",
-            "[ScanPipeline] 五链模式请求（useFiveChain/JMW_FIVECHAIN）——"
-            "适配层已编译就绪；执行器实时接线在下一版（当前走旧 lane 调度）");
+        if (!ring_) return Result::fail("ScanPipeline::start: 未 attachRing（输入源必备）");
+        if (!cfg_.enableLaser)
+            return Result::fail("ScanPipeline::start: 五链 v1 需激光链（A 模式不支持）");
+        if (testHooksSet_)
+            return Result::fail("ScanPipeline::start: 五链模式不支持测试钩子注入");
+        if (!fcAdapter_) {
+            // 惰性装配（首 start 建；标定=configure 期注入值）
+            FiveChainConfig fcCfg;              // 沙盒 config_flat.json 值域默认
+            if (cfg_.voxelSizeMm > 0) fcCfg.voxelSizeMm = cfg_.voxelSizeMm;
+            fcAdapter_ = new FiveChainAdapter(fcCfg, obs_, cloudWarehouse_,
+                                              sceneFeed_);
+            fcAdapter_->attachCalib(K1_, D1_, K2_, D2_, imageWidth_, imageHeight_,
+                                    laserTable_);
+        }
+        // 会话边界（旧路径 0) 同款）：既有内容折入基线前缀
+        if (cloudWarehouse_) cloudWarehouse_->beginCloudSession();
+        auto rs = fcAdapter_->startRealtime(*ring_, dropThreshold_);
+        if (!rs.success) {
+            delete fcAdapter_;
+            fcAdapter_ = nullptr;
+            return Result::fail("ScanPipeline::start: 五链实时链启动失败: " + rs.message);
+        }
+        fcActive_ = true;
+        state_ = State::Running;
+        JMW_LOG_INFO("07-ScanPipeline",
+            "[ScanPipeline] 五链会话启动: voxel={}mm dropThreshold={} "
+            "seedMarkers={}（v1 限制：不支持 pause/检查点/marker 编辑账本）",
+            cfg_.voxelSizeMm > 0 ? cfg_.voxelSizeMm : 0.25, dropThreshold_,
+            cfg_.existingMarkers.size());
+        return Result::ok();
     }
     if (!ring_) return Result::fail("ScanPipeline::start: 未 attachRing（输入源必备）");
 
@@ -561,6 +594,18 @@ Scanner::Result ScanPipeline::start() {
 void ScanPipeline::stop() {
     if (state_ == State::Idle) return;            // 未配置：无物可停（保持 Idle 可装配）
     syncState();                                  // Faulted 一次性上报后再收尾
+    // 261025 五链会话收尾：桥停→执行器排水→收割 join→终局全量推送→清环
+    if (fcActive_) {
+        if (fcAdapter_) fcAdapter_->stopRealtime();
+        fcActive_ = false;
+        if (state_ != State::Stopped) {
+            JMW_LOG_INFO("07-ScanPipeline", "[ScanPipeline] 五链会话结束: 态={}",
+                         static_cast<int>(state_));
+        }
+        state_ = State::Stopped;
+        if (ring_) ring_->resetForNewSession();   // 旧路径尾部同款：下会话从 0 抓
+        return;
+    }
     runtime_.requestStop();                       // 幂等；未 start 过也安全
     {
         // 261018 收尾分段打点：drain＝无限时 join（冻结 lane 会阻塞任意久——
@@ -622,6 +667,14 @@ void ScanPipeline::pause() {
         JMW_LOG_WARN("07-ScanPipeline", "[ScanPipeline] pause: 非运行态（忽略）");
         return;
     }
+    if (fcActive_) {
+        // v1 限制：五链执行器为无界单会话（prevState/融合云内存续）——暂停即停
+        // （续扫走新会话）；旧路径暂停水位机制不适用。stop() 保留全部已融合数据
+        JMW_LOG_WARN("07-ScanPipeline",
+            "[ScanPipeline] pause: 五链 v1 不支持暂停（转为停止——已融合数据保留）");
+        stop();
+        return;
+    }
     runtime_.requestStop();
     runtime_.drainAndShutdown();                 // lane 停抓新帧；在飞帧输出已入队列
     pauseCounter_ = runtime_.lastCounter();      // 记消费水位（resume 注入，防已消费帧重扫）
@@ -633,6 +686,8 @@ void ScanPipeline::pause() {
 
 Scanner::Result ScanPipeline::resume() {
     if (state_ != State::Paused) return Result::fail("ScanPipeline::resume: 非暂停态");
+    if (fcActive_ || (!fcAdapter_ && getenv("JMW_FIVECHAIN") != nullptr))
+        return Result::fail("ScanPipeline::resume: 五链 v1 无暂停态（续扫请新会话 start）");
     // restart 语义：GpuService 每周期重建（流工厂已注入续用；T8 用例 8 验证）；
     // startCounter=暂停前水位——GrabLatest 语义"下一待读帧号"，跳过已消费帧
     Hooks hooks = testHooksSet_ ? testHooks_ : chains_->assemble();

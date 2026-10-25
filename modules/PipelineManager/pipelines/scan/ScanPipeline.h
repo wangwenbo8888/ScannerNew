@@ -60,6 +60,9 @@ namespace Scanner::pipeline {
 
 class SimScanSource;                           // 中段模拟提取源（调试件；attachSimSource）
 
+// 261025 Phase 2：五链实时适配器前向声明（fivechain/ 目录，同 Scanner::pipeline）
+class FiveChainAdapter;
+
 /// 可 seed 的标记点融合窄接口（真适配器透传 09 MarkerCloudFuseCPU::seed；
 /// 测试假实现记录 seed/fuse 时序）。生产/测试统一经此注入 FuseConsumer。
 struct ISeedableMarkerFuse : IMarkerFuse {
@@ -201,12 +204,9 @@ private:
     std::unique_ptr<sched::GrabLatestSource<Scanner::data::EnhancedFrame>> source_;
 
     // —— 261025 Phase 2：五链执行器（useFiveChain/JMW_FIVECHAIN 时替代 lane 调度）——
-    // 前向声明（Pipeline 命名空间内——避免头依赖 fivechain/ 子目录）
-    class FiveChainAdapter;
-    class FcHarnessCompat;
-    FiveChainAdapter* fcAdapter_ = nullptr;
-    FcHarnessCompat* fcHarness_ = nullptr;
-    bool fcActive_ = false;
+    FiveChainAdapter* fcAdapter_ = nullptr;        // 五链实时适配器（start 惰性建）
+    bool fcActive_ = false;                        // 五链会话激活（stop/pause 分路）
+    ISceneFeed* sceneFeed_ = nullptr;              // configure 存（五链渲染推送用）
 
     std::atomic<int> fakeStreamSeq_{0};                      // 测试模式假流句柄序号
     bool seeded_ = false;                                    // seed 一次性守卫（start 重试不重复 seed）

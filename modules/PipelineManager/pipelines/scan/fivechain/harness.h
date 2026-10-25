@@ -75,7 +75,21 @@ struct FrameCycleInfo {
 };
 
 struct FrameSourceCompat {
-    std::vector<FrameCycleInfo> cycles;
+    /// 沙盒静态周期表（对拍路径预填）——实时路径走 cycleAt 动态求值
+    std::vector<FrameCycleInfo> cyclesStatic;
+    /// 07 实时桥：idx→周期信息动态求值（帧元数据在 readFrame 时才知）。
+    /// fc_executor 三处消费（reader/chain1/chain1b 线程）——桥实现须线程安全
+    std::function<FrameCycleInfo(size_t idx)> cycleAt;
+    /// cycles[idx] 兼容代理（沙盒源码 h_.src_->cycles[idx] 直下标——双路径分发）
+    struct CyclesProxy {
+        FrameSourceCompat* fs = nullptr;
+        FrameCycleInfo operator[](size_t i) const {
+            if (fs == nullptr) return FrameCycleInfo{};
+            if (fs->cycleAt) return fs->cycleAt(i);
+            return i < fs->cyclesStatic.size() ? fs->cyclesStatic[i] : FrameCycleInfo{};
+        }
+    };
+    CyclesProxy cycles;   // 构造后由拥有方置 cycles.fs = this
     /// readFrame：07 侧由外部逐帧注入（五链适配器桥接 SlotRing→GpuMat）
     std::function<bool(int idx, bool left, cv::Mat& out, std::string& err)> readFrame;
 };
@@ -116,11 +130,19 @@ struct CycleProductsCompat {
     int regMatched = 0;
     // 步骤状态
     std::map<std::string, bool> stepSuccess_;
-    std::map<std::string, std::string> stepError_;
+    std::map<std::string, std:: string> stepError_;
     // 配准诊断
     int flowMatchedDiag = -1;
     double flowRmseDiag = -1.0;
     std::string flowMessageDiag;
+
+    // —— 261025 实时桥帧元数据（07 桥经 onFrameMeta 钩子填；沙盒对拍路径不填）——
+    uint64_t metaFrameId = 0;                   // 真实帧号（fc idx≠ring 帧号）
+    cv::Matx33d snapR1 = cv::Matx33d::eye(), snapR2 = cv::Matx33d::eye();
+    cv::Matx34d snapP1 = cv::Matx34d::eye(), snapP2 = cv::Matx34d::eye();
+    cv::Mat snapQ;                              // 4×4 CV_64F（chain2 ReconstructInto 消费）
+    double temperature = 0.0;
+    bool metaValid = false;                     // false=沙盒路径（算子用构造期标定）
 };
 } // namespace scr
 
@@ -143,6 +165,13 @@ public:
     scr::ScrConfigCompat cfg_;           // fc_executor.cpp 用 h_.cfg_.fivechain.xxx
     scr::ScrConfigCompat cfg;            // 兼容双名（沙盒源码混用）
     scr::FrameSourceCompat* src_ = nullptr;
+
+    /// 261025 实时桥：读帧成功后逐帧元数据注入钩子（readerLoop 调；沙盒路径空）
+    std::function<void(int idx, scr::CycleProductsCompat&)> onFrameMeta;
+
+    // 07 侧标定注入（适配器装配期填——undistG/undistCpu 每帧参数用）
+    cv::Mat K1_, D1_, K2_, D2_;
+    int imageWidth_ = 0, imageHeight_ = 0;
 
     // 算子（适配器自持实例）
     calib::LaserMarkingSeparationCUDA* sepLaserL_ = nullptr;
@@ -173,12 +202,38 @@ public:
     std::vector<std::unique_ptr<MarkerOps>> markerLanes_;
     std::unique_ptr<MarkerOps> makeMarkerOps() {
         auto ops = std::make_unique<MarkerOps>();
-        ops->split = std::make_unique<calib::ImageSplitCPU>();
+        // 261025 产线口径（ScanChains L220-257 同源）：split 越界裁剪＋undistCpu
+        // K/D 构造校验＋match 放宽 y 容差 6px/上限 300（真机实测口径）
+        calib::ImageSplitCPUParams sp;
+        sp.enableBoundaryCheck = true;
+        ops->split = std::make_unique<calib::ImageSplitCPU>(sp);
         ops->zernike = std::make_unique<calib::ZernikeEdgeCPU>();
         ops->merge = std::make_unique<calib::ImageMergeCPU>();
-        ops->undist = std::make_unique<calib::MarkerUndistortCPU>();
+        if (!K1_.empty() && !K2_.empty()) {
+            calib::MarkerUndistortCPUParams mp;
+            auto atOr = [](const cv::Mat& m, int i) {
+                return m.total() > static_cast<size_t>(i)
+                    ? m.at<double>(i) : 0.0;
+            };
+            mp.fx1 = K1_.at<double>(0, 0); mp.fy1 = K1_.at<double>(1, 1);
+            mp.cx1 = K1_.at<double>(0, 2); mp.cy1 = K1_.at<double>(1, 2);
+            mp.fx2 = K2_.at<double>(0, 0); mp.fy2 = K2_.at<double>(1, 1);
+            mp.cx2 = K2_.at<double>(0, 2); mp.cy2 = K2_.at<double>(1, 2);
+            mp.k1_1 = atOr(D1_, 0); mp.k2_1 = atOr(D1_, 1);
+            mp.p1_1 = atOr(D1_, 2); mp.p2_1 = atOr(D1_, 3); mp.k3_1 = atOr(D1_, 4);
+            mp.k1_2 = atOr(D2_, 0); mp.k2_2 = atOr(D2_, 1);
+            mp.p1_2 = atOr(D2_, 2); mp.p2_2 = atOr(D2_, 3); mp.k3_2 = atOr(D2_, 4);
+            mp.imageWidth = imageWidth_;
+            mp.imageHeight = imageHeight_;
+            ops->undist = std::make_unique<calib::MarkerUndistortCPU>(mp);
+        } else {
+            ops->undist = std::make_unique<calib::MarkerUndistortCPU>();
+        }
         ops->ellipse = std::make_unique<calib::EllipseFitCPU>();
-        ops->match = std::make_unique<calib::MarkerMatchCPU>();
+        calib::MarkerMatchCPUParams mmp;
+        mmp.y_tolerance = 6.0f;
+        mmp.max_points = 300;
+        ops->match = std::make_unique<calib::MarkerMatchCPU>(mmp);
         ops->epi = std::make_unique<calib::EpipolarIntersectCPU>();
         ops->edge = std::make_unique<calib::EdgeMatchCPU>();
         ops->recon = std::make_unique<calib::PointReconstructCPU>();
