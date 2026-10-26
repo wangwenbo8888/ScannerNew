@@ -12,6 +12,7 @@
 // ============================================================================
 #include "pipelines/scan/ScanPipeline.h"
 #include "pipelines/scan/fivechain/FiveChainAdapter.h"
+#include "scanning/laser/laser_match_scan_v3/cmtt_table_loader.h"   // 五链 v3 CMTT 曲线表装载
 
 #include <algorithm>
 #include <cstdint>
@@ -513,8 +514,32 @@ Scanner::Result ScanPipeline::start() {
             if (cfg_.voxelSizeMm > 0) fcCfg.voxelSizeMm = cfg_.voxelSizeMm;
             fcAdapter_ = new FiveChainAdapter(fcCfg, obs_, cloudWarehouse_,
                                               sceneFeed_);
+            // 261026 在线链关键件：v3 真表匹配需 CMTT 曲线表（leftToRightMap）。
+            // 生产 laser_calib.json planeMapTempTable 无此数据（Phase 3 curve_map
+            // 换血未做）——CMTT sidecar 部署于 config/curve_map_temp_table.bin
+            //（标定产物 180MB 不入 git；env JMW_FC_CMTT 可指定路径）。缺表回退
+            // 生产表＝v3 无表可查（真机激光匹配失效，WARN 提示）
+            std::shared_ptr<const calib::LaserPlaneMapTempTable> fcTable;
+            {
+                const std::string cmttPath = getenv("JMW_FC_CMTT") != nullptr
+                    ? std::string(getenv("JMW_FC_CMTT"))
+                    : "config/curve_map_temp_table.bin";
+                std::string lerr;
+                auto t = calib::LoadTempTableFromCmtt(cmttPath, 22.5, lerr);
+                if (t) {
+                    fcTable = t;
+                    JMW_LOG_INFO("07-ScanPipeline",
+                        "[ScanPipeline] 五链 CMTT 曲线表装载: {}（referenceTemp={:.1f}℃）",
+                        cmttPath, t->referenceTemperature);
+                } else {
+                    JMW_LOG_WARN("07-ScanPipeline",
+                        "[ScanPipeline] 五链 CMTT 曲线表缺失（{}: {}）——回退生产 "
+                        "planeMap 表（无 leftToRightMap，v3 激光匹配将无表可查！）",
+                        cmttPath, lerr);
+                }
+            }
             fcAdapter_->attachCalib(K1_, D1_, K2_, D2_, imageWidth_, imageHeight_,
-                                    laserTable_);
+                                    fcTable ? fcTable : laserTable_);
         }
         // 会话边界（旧路径 0) 同款）：既有内容折入基线前缀
         if (cloudWarehouse_) cloudWarehouse_->beginCloudSession();

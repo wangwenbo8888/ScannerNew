@@ -1035,7 +1035,8 @@ Scanner::Result FiveChainAdapter::startRealtime(
         harness_ = new FcHarnessCompat(*this, bridge_->src);
         harness_->cfg_.fivechain = cfg_;
         harness_->cfg.fivechain = cfg_;                    // 双名兼容
-        harness_->cfg_.runtime.nominalTemperature = 25.0;  // v1 标称温（逐帧温 TODO）
+        harness_->cfg_.runtime.nominalTemperature =
+            rtLaserTable_ ? rtLaserTable_->referenceTemperature : 25.0;   // 表参考温（离线 golden 同口径 22.5）
         harness_->K1_ = rtK1_; harness_->D1_ = rtD1_;
         harness_->K2_ = rtK2_; harness_->D2_ = rtD2_;
         // 标定几何口径：K/P/Q/激光表全 1688×1400——undistCpu 边界检查等用算法
