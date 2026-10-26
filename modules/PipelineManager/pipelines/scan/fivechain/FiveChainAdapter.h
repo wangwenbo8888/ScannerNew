@@ -20,6 +20,7 @@
 #include "pipelines/scan/ScanTypes.h"
 #include "pipelines/scan/FrameObsAccumulator.h"
 #include "core/common/calib_result_types.h"   // calib::LaserPlaneMapTempTable（struct 真身——防 class 误前置致名修饰分裂）
+#include <nlohmann/json.hpp>
 
 namespace Scanner::data {
 class ICloudWarehouse;
@@ -79,10 +80,13 @@ struct FiveChainConfig {
 /// 五链适配器——fc_executor 的算子宿主＋07 观测/融合/推送桥
 class FiveChainAdapter {
 public:
+    /// opJson 非空＝沙盒对拍口径（算子参数从 config operators 节构造——
+    /// mask_separation/fuse 等；空＝产线默认参）
     FiveChainAdapter(const FiveChainConfig& cfg,
                     FrameObsAccumulator& obs,
                     Scanner::data::ICloudWarehouse* warehouse,
-                    ISceneFeed* sceneFeed);
+                    ISceneFeed* sceneFeed,
+                    const nlohmann::json* opJson = nullptr);
     ~FiveChainAdapter();   // 安全网：stopRealtime()
 
     Scanner::Result start();

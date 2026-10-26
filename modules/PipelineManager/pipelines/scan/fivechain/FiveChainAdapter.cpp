@@ -25,17 +25,32 @@ namespace Scanner::pipeline {
 FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
                                    FrameObsAccumulator& obs,
                                    Scanner::data::ICloudWarehouse* warehouse,
-                                   ISceneFeed* sceneFeed)
+                                   ISceneFeed* sceneFeed,
+                                   const nlohmann::json* opJson)
     : cfg_(cfg), obs_(obs), warehouse_(warehouse), sceneFeed_(sceneFeed) {
-    sepL_ = std::make_unique<calib::LaserMarkingSeparationCUDA>();
-    sepR_ = std::make_unique<calib::LaserMarkingSeparationCUDA>();
+    // 算子参数：opJson 非空＝沙盒对拍口径（同参对拍）；空＝算子默认（产线）
+    calib::LaserMarkingSeparationParams sepParams;
+    if (opJson != nullptr && opJson->contains("mask_separation")) {
+        try {
+            sepParams = calib::LaserMarkingSeparationParams::fromJson(
+                (*opJson)["mask_separation"]);
+        } catch (const std::exception& e) {
+            JMW_LOG_WARN("07-FiveChain",
+                "[FiveChainAdapter] mask_separation 参数解析失败（用默认）: {}", e.what());
+        }
+    }
+    sepL_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
+    sepR_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
     calib::LaserCloudFuseCUDAParams fp;
     fp.voxelSize = static_cast<float>(cfg_.voxelSizeMm);
     fp.reserveVoxelCount = static_cast<size_t>(cfg_.voxelReserve);
+    fp.growSlotCount = static_cast<size_t>(cfg_.voxelGrowSlots);   // 沙盒 L533 同款
+    fp.collectStatistics = true;
     fuse_ = std::make_unique<calib::LaserCloudFuseCuda>(fp);
     JMW_LOG_INFO("07-FiveChain",
-        "[FiveChainAdapter] 构造: voxel={}mm reserve={}M graySlots={}",
-        cfg_.voxelSizeMm, cfg_.voxelReserve / 1000000, cfg_.graySlots);
+        "[FiveChainAdapter] 构造: voxel={}mm reserve={}M graySlots={} opJson={}",
+        cfg_.voxelSizeMm, cfg_.voxelReserve / 1000000, cfg_.graySlots,
+        opJson != nullptr ? "沙盒对拍参" : "产线默认");
 }
 
 FiveChainAdapter::~FiveChainAdapter() {
@@ -89,23 +104,24 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
     try {
         timeBegin();
         bool deferred = false;
-        if (L.flatCenter && L.stegerFast) {
-            // flat 路径（沙盒 config extractor=flat）：延迟提交——双眼连续入队
-            // 不同步（stats 28B D2H 在飞，完成段排水）
-            p.stegerL = L.flatCenter->ExecuteDeferred(gL, *p.sepL.d_laserMask, ls);
-            p.stegerR = L.flatCenter->ExecuteDeferred(gR, *p.sepR.d_laserMask, ls);
+        if (L.flatL_ && L.flatR_) {
+            // flat 路径（沙盒 extractor=flat）：延迟提交——双眼连续入队
+            // 不同步（stats 28B D2H 在飞，完成段排水）。分眼实例（计数器私有）
+            p.stegerL = L.flatL_->ExecuteDeferred(gL, *p.sepL.d_laserMask, ls);
+            p.stegerR = L.flatR_->ExecuteDeferred(gR, *p.sepR.d_laserMask, ls);
             deferred = true;
             if (!p.stegerL.success || !p.stegerR.success) {
                 fail("steger_fast", p, p.stegerL.message + " | " + p.stegerR.message);
                 return 0;
             }
-        } else if (L.stegerFast) {
-            // steger_fast legacy 路径
-            L.stegerFast->SetCollectHostPoints(false);
-            p.stegerL = L.stegerFast->Execute(gL, *p.sepL.d_laserMask, ls,
-                                              calib::GroupMode::Flat);
-            p.stegerR = L.stegerFast->Execute(gR, *p.sepR.d_laserMask, ls,
-                                              calib::GroupMode::Flat);
+        } else if (L.stegerL_ && L.stegerR_) {
+            // steger_fast legacy 路径（分眼实例）
+            L.stegerL_->SetCollectHostPoints(false);
+            L.stegerR_->SetCollectHostPoints(false);
+            p.stegerL = L.stegerL_->Execute(gL, *p.sepL.d_laserMask, ls,
+                                            calib::GroupMode::Flat);
+            p.stegerR = L.stegerR_->Execute(gR, *p.sepR.d_laserMask, ls,
+                                            calib::GroupMode::Flat);
             if (!p.stegerL.success || !p.stegerR.success) {
                 fail("steger_fast", p, p.stegerL.message + " | " + p.stegerR.message);
                 return 0;
@@ -117,15 +133,15 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
                 return 0;
             }
         } else {
-            fail("steger_fast", p, "LaserOps 未装配（flatCenter/stegerFast 均空）");
+            fail("steger_fast", p, "LaserOps 未装配（flat/steger 均空）");
             return 0;
         }
 
         // undistort（延迟模式＝容量宽视图；legacy＝精确视图）
-        // 261025 实时链：L/R 各按帧温快照 SetParams（SetParams 仅存宿主参数，
-        // Execute 时消费——在飞安全；沙盒对拍路径 metaValid=false 用构造期参数）
+        // 双实例（沙盒 undistCudaL_/R_ 语义）：实时＝每帧温补快照 SetParams；
+        // 离线对拍（metaValid=false）＝构造期沙盒标定参直用
         timeBegin();
-        if (L.undistG) {
+        if (L.undistGL_ && L.undistGR_) {
             if (p.metaValid) {
                 calib::UndistortPointsParams ul, ur;
                 ul.cameraMatrix = K1_;  ul.distCoeffs = D1_;
@@ -137,18 +153,13 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
                 ur.P = cv::Mat(p.snapP2).clone();
                 if (ur.P.rows > 0 && ur.P.cols > 3)
                     ur.P.at<double>(0, 3) = 0.0;
-                L.undistG->SetParams(ul);
-                p.undistCudaL = L.undistG->Execute(*p.stegerL.d_centerPoints,
-                                                    *p.stegerL.d_line_ids, ls);
-                L.undistG->SetParams(ur);
-                p.undistCudaR = L.undistG->Execute(*p.stegerR.d_centerPoints,
-                                                    *p.stegerR.d_line_ids, ls);
-            } else {
-                p.undistCudaL = L.undistG->Execute(*p.stegerL.d_centerPoints,
-                                                    *p.stegerL.d_line_ids, ls);
-                p.undistCudaR = L.undistG->Execute(*p.stegerR.d_centerPoints,
-                                                    *p.stegerR.d_line_ids, ls);
+                L.undistGL_->SetParams(ul);
+                L.undistGR_->SetParams(ur);
             }
+            p.undistCudaL = L.undistGL_->Execute(*p.stegerL.d_centerPoints,
+                                                 *p.stegerL.d_line_ids, ls);
+            p.undistCudaR = L.undistGR_->Execute(*p.stegerR.d_centerPoints,
+                                                 *p.stegerR.d_line_ids, ls);
         }
         if (!p.undistCudaL.success || !p.undistCudaR.success) {
             fail("undistort_cuda", p,
@@ -156,15 +167,15 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
             return deferred ? 1 : 0;
         }
 
-        // interp（延迟模式＝设备计数驱动；legacy＝直接）
+        // interp（延迟模式＝flat 分眼设备计数驱动；legacy＝直接）
         timeBegin();
-        if (deferred && L.flatCenter) {
+        if (deferred && L.flatL_ && L.flatR_) {
             p.interpL = L.interpL_->ExecuteDeferred(
                 *p.undistCudaL.d_rectifiedPoints, *p.undistCudaL.d_line_ids,
-                L.flatCenter->GetDeviceCountPtr(), ls);
+                L.flatL_->GetDeviceCountPtr(), ls);
             p.interpR = L.interpR_->ExecuteDeferred(
                 *p.undistCudaR.d_rectifiedPoints, *p.undistCudaR.d_line_ids,
-                L.flatCenter->GetDeviceCountPtr(), ls);
+                L.flatR_->GetDeviceCountPtr(), ls);
             if (!p.interpL.success || !p.interpR.success) {
                 fail("epipolar_interp_dual", p,
                      p.interpL.message + " | " + p.interpR.message);
@@ -193,9 +204,9 @@ void FcHarnessCompat::finishLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
     (void)record;
     if (kind == 0) return;
     const bool deferred = (kind == 1);
-    if (deferred && L.flatCenter) {
-        L.flatCenter->FinishDeferred(p.stegerL);
-        L.flatCenter->FinishDeferred(p.stegerR);
+    if (deferred && L.flatL_ && L.flatR_) {
+        L.flatL_->FinishDeferred(p.stegerL);
+        L.flatR_->FinishDeferred(p.stegerR);
         if (!p.stegerL.success || !p.stegerR.success) {
             fail("steger_fast", p, p.stegerL.message + " | " + p.stegerR.message);
         }
@@ -228,8 +239,11 @@ void FcHarnessCompat::runMarkerChainRuns(scr::CycleProductsCompat& p, bool recor
     (void)record;
     if (!ops) return;
     try {
-        p.cclL = scr::runCclCpuFromRuns(runsL, nL, cols, rows, 80, 20000, 120);
-        p.cclR = scr::runCclCpuFromRuns(runsR, nR, cols, rows, 80, 20000, 120);
+        // CCL 门限＝harness 成员（沙盒 config ccl 节默认 800/30000/0——对拍同参）
+        p.cclL = scr::runCclCpuFromRuns(runsL, nL, cols, rows,
+                                        cclMinArea_, cclMaxArea_, cclTopX_);
+        p.cclR = scr::runCclCpuFromRuns(runsR, nR, cols, rows,
+                                        cclMinArea_, cclMaxArea_, cclTopX_);
         if (!p.cclL.success || !p.cclR.success) {
             fail("ccl", p, "runCclCpuFromRuns 失败");
             return;
@@ -386,22 +400,75 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
     }
 }
 
+// ============================================================================
+// 配准（三级降级：光流 → frame_fuse 兜底【matched≥门 且 rmse<门】→ 沿用）
+// —— 沙盒 harness.cpp L1269-1548 全量对齐（261025 对拍补全）
+// ============================================================================
+namespace {
+/// 规则网格板检测（沙盒 L276-302）：最近邻距离变异系数 < cvTol 判网格
+/// （平移对称＝原理性不可分辨——裁决硬拒）
+bool fcDetectRegularGrid(const std::vector<cv::Point3d>& pts, double cvTol = 0.012) {
+    const size_t n = pts.size();
+    if (n < 8) return false;
+    std::vector<double> nn(n);
+    for (size_t i = 0; i < n; ++i) {
+        double best = std::numeric_limits<double>::max();
+        for (size_t j = 0; j < n; ++j) {
+            if (i == j) continue;
+            const double dx = pts[i].x - pts[j].x;
+            const double dy = pts[i].y - pts[j].y;
+            const double dz = pts[i].z - pts[j].z;
+            const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d < best) best = d;
+        }
+        if (best <= 0.0) return true;   // 重合点＝病态网格
+        nn[i] = best;
+    }
+    double mean = 0.0;
+    for (double v : nn) mean += v;
+    mean /= static_cast<double>(n);
+    if (mean <= 0.0) return false;
+    double var = 0.0;
+    for (double v : nn) var += (v - mean) * (v - mean);
+    var /= static_cast<double>(n);
+    const double cv = std::sqrt(var) / mean;
+    return cv < cvTol;
+}
+} // namespace
+
 void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) {
     (void)record;
-    // 基线：先置上帧 R/T
+    // 基线：先置上帧 R/T（hold 路径即保留此值）
     if (!prevState_.empty()) {
         for (int i = 0; i < 9; ++i) p.R[i] = prevState_.R.val[i];
         for (int i = 0; i < 3; ++i) p.T[i] = prevState_.T.val[i];
     }
-    if (!p.conic.success || p.conic.markers.empty()) {
+
+    if (!p.conic.success || p.markersValid == 0) {
         p.regSource = "skip";
         return;
     }
-    if (!flowOp_) {
+
+    // 规则网格板检测（硬拒锁存直至会话结束）
+    if (!gridBoardRejected_) {
+        std::vector<cv::Point3d> probe;
+        for (const auto& m : p.conic.markers) {
+            if (m.validCircle) probe.emplace_back(m.centerX, m.centerY, m.centerZ);
+        }
+        if (fcDetectRegularGrid(probe)) {
+            gridBoardRejected_ = true;
+            JMW_LOG_WARN("07-FiveChain",
+                "[fivechain] 规则阵列标记点板：平移对称不可分辨，配准拒绝");
+        }
+    }
+    if (gridBoardRejected_) {
+        fail("registration", p, "规则阵列标记点板：配准拒绝");
         p.regSource = "hold";
         return;
     }
+
     try {
+        // 有效圆（validCircle）center/normal → 光流（成功语义 matched≥3）
         std::vector<cv::Point3d> centers;
         std::vector<cv::Vec3d> normals;
         for (const auto& m : p.conic.markers) {
@@ -410,29 +477,386 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
             normals.emplace_back(m.normalX, m.normalY, m.normalZ);
         }
         p.regFlow = flowOp_->Execute(centers, normals, prevState_);
-        const bool flowOk = p.regFlow.success
+        p.flowMatchedDiag = static_cast<int>(p.regFlow.getMatchedCount());
+        p.flowRmseDiag = p.regFlow.statistics.rmse;
+        p.flowMessageDiag = p.regFlow.message;
+        // 误差趋势门：超"开局基线中位×倍率"判失败（专抓温漂/斜视角全体慢变）
+        const double driftRatio = cfg_.runtime.flowRmseDriftRatio;
+        bool driftRejected = false;
+        if (driftRatio > 0.0 && p.regFlow.success) {
+            if (flowRmseBaselineMed_ < 0.0) {
+                flowRmseBaseline_.push_back(p.regFlow.statistics.rmse);
+                if (flowRmseBaseline_.size() >= 50) {
+                    auto s = flowRmseBaseline_;
+                    std::sort(s.begin(), s.end());
+                    flowRmseBaselineMed_ = s[s.size() / 2];
+                }
+            } else if (p.regFlow.statistics.rmse > driftRatio * flowRmseBaselineMed_) {
+                driftRejected = true;
+                p.flowMessageDiag += " [drift-gate: rmse>"
+                                     + std::to_string(driftRatio * flowRmseBaselineMed_)
+                                     + " = " + std::to_string(driftRatio) + "x baseline]";
+            }
+        }
+        const bool flowOk = !driftRejected && p.regFlow.success
                             && static_cast<int>(p.regFlow.getMatchedCount()) >= 3;
         if (flowOk) {
             p.regSource = prevState_.empty() ? "first" : "flow";
-            for (int i = 0; i < 9; ++i) p.R[i] = p.regFlow.R.val[i];
-            for (int i = 0; i < 3; ++i) p.T[i] = p.regFlow.T.val[i];
-            prevState_.R = p.regFlow.R;
-            prevState_.T = p.regFlow.T;
-            prevState_.rawPositions.clear();
-            prevState_.rawNormals.clear();
-            prevState_.globalIds.clear();
-            for (auto& m : p.regFlow.markers) {
-                prevState_.rawPositions.push_back(m.rawPosition);
-                prevState_.rawNormals.push_back(m.rawNormal);
-                prevState_.globalIds.push_back(m.globalId);
+            p.regMatched = static_cast<int>(p.regFlow.getMatchedCount());
+            adoptRegistration(p.regFlow, p);
+        } else if (!prevState_.empty() && !globalSet_.empty()) {
+            // —— frame_fuse 兜底：快路径视野捞点 → 慢路径三角索引全库投票 ——
+            calib::MarkerPointSet cur;
+            for (const auto& m : p.conic.markers) {
+                if (!m.validCircle) continue;
+                cur.positions.emplace_back(m.centerX, m.centerY, m.centerZ);
+                cur.normals.emplace_back(m.normalX, m.normalY, m.normalZ);
             }
+            // 法线合理性门：双峰法线（正反混合）拒走兜底（折中解不如拒绝）
+            lastNormalOpposeRatio_ = checkNormalPlausibility(cur.normals);
+            if (lastNormalOpposeRatio_ > 0.25) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[fivechain] 法线双峰（反对占比 {:.1f}%>25%）——拒走兜底",
+                    lastNormalOpposeRatio_ * 100.0);
+                p.regSource = "hold";
+            } else {
+                p.usedFrameFuse = true;
+                // 子集尺寸与算子上限解绑（防误配）
+                const int libMax = std::max(6, std::min(64,
+                    std::min(fuseParams_.triangleMaxPoints,
+                             cfg_.runtime.fuseSubsetMax)));
+                std::vector<int> sel;
+                if (holdStreak_ <= 15) {
+                    sel = cullByView(cur, libMax);
+                    if (sel.size() >= 3)
+                        p.regFuse = fuseExecute(cur, sel);
+                }
+                bool fuseOk = acceptFuse(p.regFuse);
+                bool fromSlow = false;      // 本帧胜出解是否来自慢路径
+                std::vector<int> sel2;      // 慢路径子集（胜出时译下标）
+                const bool slowPathTurn = holdStreak_ <= 15 || (holdStreak_ % 3) == 0;
+                if (!fuseOk && slowPathTurn) {
+                    // 索引重建节流（≥5 帧才重建；旧索引仍可查）
+                    if (libIndexVersion_ != libVersion_
+                        && (lastIndexRebuildCycle_ < 0
+                            || cycleCount_ - lastIndexRebuildCycle_ >= 5)) {
+                        if (!libIndex_) libIndex_ = std::make_unique<scr::TriangleLibraryIndex>();
+                        libIndex_->rebuild(globalSet_.positions, globalSet_.normals);
+                        libIndexVersion_ = libVersion_;
+                        lastIndexRebuildCycle_ = cycleCount_;
+                    }
+                    if (libIndex_ && !libIndex_->empty()) {
+                        sel2 = libIndex_->query(cur.positions, libMax);
+                        if (sel2.size() >= 3 && sel2 != sel) {
+                            p.regFuse = fuseExecute(cur, sel2);
+                            fromSlow = true;
+                            fuseOk = acceptFuse(p.regFuse);
+                        }
+                    }
+                }
+                p.fuseSlowPath = fromSlow && fuseOk;
+                // 跳变门：大跳且支持不足且未经慢路径复核 → 拒
+                if (fuseOk) {
+                    const cv::Matx33d dR = cv::Matx33d(p.regFuse.R) * cv::Matx33d(prevState_.R).t();
+                    const double tr = dR(0, 0) + dR(1, 1) + dR(2, 2);
+                    const double dAng = std::acos(std::min(1.0,
+                        std::max(-1.0, (tr - 1.0) * 0.5))) * 180.0 / CV_PI;
+                    const double dTmm = cv::norm(cv::Vec3d(p.regFuse.T) - cv::Vec3d(prevState_.T));
+                    if ((dTmm > 500.0 || dAng > 60.0)
+                        && p.regFuse.matchedCount < 7 && !fromSlow) {
+                        fuseOk = false;
+                        p.regFuse.message = "jump gate: 大跳且支持不足且未经慢路径复核，判 hold";
+                    }
+                }
+                if (fuseOk) {
+                    p.regSource = "fuse";
+                    p.regMatched = static_cast<int>(p.regFuse.matchedCount);
+                    for (int i = 0; i < 9; ++i) p.R[i] = p.regFuse.R.val[i];
+                    for (int i = 0; i < 3; ++i) p.T[i] = p.regFuse.T.val[i];
+                    // 子集局部下标 → 库下标（快/慢路径按胜出来源译码）
+                    const bool slowWon = fromSlow && !sel2.empty();
+                    const std::vector<int>& usedSel = slowWon ? sel2 : sel;
+                    std::vector<int> libIdxOfPair(usedSel.size(), -1);
+                    for (size_t j = 0; j < usedSel.size(); ++j)
+                        libIdxOfPair[j] = usedSel[j];
+                    std::vector<int> gidByIndex(globalSet_.positions.size(), -1);
+                    for (const auto& kv : globalIndexById_)
+                        if (kv.second < gidByIndex.size()) gidByIndex[kv.first] = kv.second;
+                    prevState_.rawPositions.clear();
+                    prevState_.rawNormals.clear();
+                    prevState_.globalIds.clear();
+                    prevState_.R = p.regFuse.R;
+                    prevState_.T = p.regFuse.T;
+                    constexpr double kMergeRadiusMm = 2.0;   // 与 verifyGate 同口径
+                    int gi = 0;
+                    for (const auto& m : p.conic.markers) {
+                        if (!m.validCircle) continue;
+                        int gid = -1;
+                        for (const auto& co : p.regFuse.correspondences)
+                            if (co.first == gi
+                                && co.second >= 0
+                                && co.second < static_cast<int>(libIdxOfPair.size())) {
+                                const int libIdx = libIdxOfPair[static_cast<size_t>(co.second)];
+                                if (libIdx >= 0 && libIdx < static_cast<int>(gidByIndex.size())
+                                    && gidByIndex[libIdx] >= 0)
+                                    gid = gidByIndex[libIdx];
+                                break;
+                            }
+                        const cv::Point3d c(m.centerX, m.centerY, m.centerZ);
+                        const cv::Vec3d n(m.normalX, m.normalY, m.normalZ);
+                        const auto& Rf = p.regFuse.R;
+                        const auto& Tf = p.regFuse.T;
+                        const cv::Point3d gpos(Rf(0,0)*c.x + Rf(0,1)*c.y + Rf(0,2)*c.z + Tf(0),
+                                               Rf(1,0)*c.x + Rf(1,1)*c.y + Rf(1,2)*c.z + Tf(1),
+                                               Rf(2,0)*c.x + Rf(2,1)*c.y + Rf(2,2)*c.z + Tf(2));
+                        const cv::Vec3d gnorm(Rf(0,0)*n(0) + Rf(0,1)*n(1) + Rf(0,2)*n(2),
+                                              Rf(1,0)*n(0) + Rf(1,1)*n(1) + Rf(1,2)*n(2),
+                                              Rf(2,0)*n(0) + Rf(2,1)*n(1) + Rf(2,2)*n(2));
+                        if (gid < 0) {
+                            // 未匹配点：合并半径内归并旧号（须过有向法线门），
+                            // 否则会话计数器发新号入图
+                            double bestD = 1e30;
+                            int nearLib = -1;
+                            for (size_t li = 0; li < globalSet_.positions.size(); ++li) {
+                                const double dx = gpos.x - globalSet_.positions[li].x;
+                                const double dy = gpos.y - globalSet_.positions[li].y;
+                                const double dz = gpos.z - globalSet_.positions[li].z;
+                                const double d = std::sqrt(dx*dx + dy*dy + dz*dz);
+                                if (d < bestD) { bestD = d; nearLib = static_cast<int>(li); }
+                            }
+                            const double mergeNormalMinCos = std::cos(
+                                fuseParams_.triangleNormalMaxAngleDeg * CV_PI / 180.0);
+                            if (nearLib >= 0 && bestD < kMergeRadiusMm
+                                && gidByIndex[nearLib] >= 0
+                                && gnorm.dot(globalSet_.normals[static_cast<size_t>(nearLib)])
+                                       >= mergeNormalMinCos)
+                                gid = gidByIndex[nearLib];
+                            else
+                                gid = nextGid_++;
+                        }
+                        // 写库体检：非有限值不入库（NaN 毒点致索引静默弃组）
+                        const bool finiteOk = std::isfinite(gpos.x) && std::isfinite(gpos.y)
+                            && std::isfinite(gpos.z) && std::isfinite(gnorm(0))
+                            && std::isfinite(gnorm(1)) && std::isfinite(gnorm(2));
+                        if (!finiteOk) {
+                            JMW_LOG_WARN("07-FiveChain",
+                                "[fivechain] frame_fuse: 写库拒绝非有限值点（gid={} 跳过）", gid);
+                            prevState_.rawPositions.push_back(c);
+                            prevState_.rawNormals.push_back(n);
+                            prevState_.globalIds.push_back(gid);
+                            ++gi;
+                            continue;
+                        }
+                        const auto it = globalIndexById_.find(gid);
+                        if (it == globalIndexById_.end()) {
+                            globalIndexById_[gid] = globalSet_.positions.size();
+                            globalSet_.positions.push_back(gpos);
+                            globalSet_.normals.push_back(gnorm);
+                        } else {
+                            globalSet_.positions[it->second] = gpos;
+                            globalSet_.normals[it->second] = gnorm;
+                        }
+                        prevState_.rawPositions.push_back(c);
+                        prevState_.rawNormals.push_back(n);
+                        prevState_.globalIds.push_back(gid);
+                        ++gi;
+                    }
+                    ++libVersion_;   // 库已写 → 索引脏
+                } else {
+                    p.regSource = "hold";
+                }
+            }   // 法线合理性通过分支闭合
         } else {
             p.regSource = "hold";
         }
+        // hold 连击记账（捞点半径自适应＋停手门）；非 hold 即清零
+        if (p.regSource == "hold") ++holdStreak_;
+        else holdStreak_ = 0;
     } catch (const std::exception& e) {
         fail("registration", p, e.what());
         p.regSource = "hold";
     }
+    // hold/skip：保留基线上帧 R/T（prevState 停在上一次成功帧）
+}
+
+// ---------------------------------------------------------------------------
+// adoptRegistration — 收编光流成功结果：置 R/T、重建 prevState（含新点发号
+// 入图/查重/候选池）、维护全局地图（沙盒 L1556-1666 对齐）
+// ---------------------------------------------------------------------------
+void FcHarnessCompat::adoptRegistration(calib::MarkerOpticalFlowFuseCPUResult& res,
+                                        scr::CycleProductsCompat& p) {
+    for (int i = 0; i < 9; ++i) p.R[i] = res.R.val[i];
+    for (int i = 0; i < 3; ++i) p.T[i] = res.T.val[i];
+    prevState_.rawPositions.clear();
+    prevState_.rawNormals.clear();
+    prevState_.globalIds.clear();
+    prevState_.R = res.R;
+    prevState_.T = res.T;
+    // 发号查重用：地图下标 → 编号反查表
+    std::vector<int> gidByIndex(globalSet_.positions.size(), -1);
+    for (const auto& kv : globalIndexById_)
+        if (kv.second < gidByIndex.size()) gidByIndex[kv.second] = kv.first;
+    for (auto& m : res.markers) {
+        // 新点发号前查重：全局系最近条目命中查重半径内沿用旧号（须过法线同向门）
+        if (m.globalId < 0) {
+            int nearGid = -1;
+            double best = cfg_.runtime.mintDedupRadiusMm;
+            for (size_t k = 0; k < globalSet_.positions.size(); ++k) {
+                const double dx = m.transformedPosition.x - globalSet_.positions[k].x;
+                const double dy = m.transformedPosition.y - globalSet_.positions[k].y;
+                const double dz = m.transformedPosition.z - globalSet_.positions[k].z;
+                const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (d < best && gidByIndex[k] >= 0) {
+                    if (!mergeNormalCompatible(m.transformedNormal,
+                                               globalSet_.normals[k]))
+                        continue;
+                    best = d;
+                    nearGid = gidByIndex[k];
+                }
+            }
+            if (nearGid >= 0) {
+                m.globalId = nearGid;
+            } else {
+                // 候选期：新点连续 3 次重观测一致才转正入图（防瞬态假点）
+                bool promoted = false;
+                for (auto& cand : candidates_) {
+                    const double dx = m.transformedPosition.x - cand.position.x;
+                    const double dy = m.transformedPosition.y - cand.position.y;
+                    const double dz = m.transformedPosition.z - cand.position.z;
+                    const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (d < kCandidateMergeMm) {
+                        ++cand.count;
+                        cand.position = m.transformedPosition;   // 最新坐标
+                        cand.normal = m.transformedNormal;
+                        if (cand.count >= kPromoteThreshold) {
+                            m.globalId = nextGid_++;
+                            promoted = true;
+                        }
+                        break;
+                    }
+                }
+                if (!promoted && m.globalId < 0) {
+                    candidates_.push_back({m.transformedPosition,
+                                           m.transformedNormal, 1});
+                    m.globalId = -1;   // 候选中——prevState 记录但入图
+                }
+            }
+        } else {
+            nextGid_ = std::max(nextGid_, m.globalId + 1);
+        }
+        prevState_.rawPositions.push_back(m.rawPosition);
+        prevState_.rawNormals.push_back(m.rawNormal);
+        prevState_.globalIds.push_back(m.globalId);
+        // 写库体检：非有限值不入图
+        const auto& tp = m.transformedPosition;
+        const auto& tn = m.transformedNormal;
+        const bool finiteOk = std::isfinite(tp.x) && std::isfinite(tp.y)
+            && std::isfinite(tp.z) && std::isfinite(tn(0)) && std::isfinite(tn(1))
+            && std::isfinite(tn(2));
+        if (!finiteOk) {
+            JMW_LOG_WARN("07-FiveChain",
+                "[fivechain] adoptRegistration: 写库拒绝非有限值点（gid={} 跳过入图）",
+                m.globalId);
+            continue;
+        }
+        // 地图维护：新号追加、旧号最新覆盖；候选（-1）不入图
+        if (m.globalId < 0) continue;
+        const auto it = globalIndexById_.find(m.globalId);
+        if (it == globalIndexById_.end()) {
+            globalIndexById_[m.globalId] = globalSet_.positions.size();
+            globalSet_.positions.push_back(m.transformedPosition);
+            globalSet_.normals.push_back(m.transformedNormal);
+        } else {
+            globalSet_.positions[it->second] = m.transformedPosition;
+            globalSet_.normals[it->second] = m.transformedNormal;
+        }
+    }
+    ++libVersion_;   // 库已写 → 三角索引脏
+    // 候选池过期清理：超 30 帧未转正（count<2）视为瞬态误检丢弃
+    if (candidates_.size() > 4) {
+        candidates_.erase(
+            std::remove_if(candidates_.begin(), candidates_.end(),
+                           [](const CandidateEntry& c) { return c.count < 2; }),
+            candidates_.end());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// frame_fuse 兜底三助手（沙盒 L1672-1726 对齐）
+// ---------------------------------------------------------------------------
+std::vector<int> FcHarnessCompat::cullByView(const calib::MarkerPointSet& cur,
+                                             int maxCount) const {
+    std::vector<int> out;
+    if (cur.empty() || globalSet_.positions.empty() || maxCount < 3) return out;
+    cv::Vec3d c(0, 0, 0);
+    for (const auto& q : cur.positions)
+        c += cv::Vec3d(q.x, q.y, q.z);
+    c /= static_cast<double>(cur.size());
+    // 库点经上帧 R/T 逆变换到当前帧系；半径自适应 150+30×hold 连击（封顶 600）
+    const double radius = std::min(600.0, 150.0 + 30.0 * static_cast<double>(holdStreak_));
+    std::vector<std::pair<double, int>> byDist;
+    byDist.reserve(globalSet_.positions.size());
+    const auto& Rp = prevState_.R;
+    const auto& Tp = prevState_.T;
+    for (size_t i = 0; i < globalSet_.positions.size(); ++i) {
+        const auto& g = globalSet_.positions[i];
+        const double gx = g.x - Tp(0), gy = g.y - Tp(1), gz = g.z - Tp(2);
+        const cv::Vec3d pc(Rp(0, 0) * gx + Rp(1, 0) * gy + Rp(2, 0) * gz,
+                           Rp(0, 1) * gx + Rp(1, 1) * gy + Rp(2, 1) * gz,
+                           Rp(0, 2) * gx + Rp(1, 2) * gy + Rp(2, 2) * gz);
+        byDist.emplace_back(cv::norm(pc - c), static_cast<int>(i));
+    }
+    std::sort(byDist.begin(), byDist.end());
+    for (const auto& kv : byDist) {
+        if (static_cast<int>(out.size()) >= maxCount) break;
+        if (kv.first <= radius) out.push_back(kv.second);
+    }
+    if (out.size() < 3) {   // 半径内不足：退取全库最近（终审兜底）
+        out.clear();
+        for (size_t i = 0; i < byDist.size() && static_cast<int>(out.size()) < maxCount; ++i)
+            out.push_back(byDist[i].second);
+    }
+    std::sort(out.begin(), out.end());   // 库下标序＝确定性
+    return out;
+}
+
+calib::FrameFuseCPUResult FcHarnessCompat::fuseExecute(
+    const calib::MarkerPointSet& cur, const std::vector<int>& libIdx) const {
+    calib::MarkerPointSet gms;   // 子集装配（契约：绝不传全库）
+    gms.positions.reserve(libIdx.size());
+    gms.normals.reserve(libIdx.size());
+    for (int li : libIdx) {
+        gms.positions.push_back(globalSet_.positions[static_cast<size_t>(li)]);
+        gms.normals.push_back(globalSet_.normals[static_cast<size_t>(li)]);
+    }
+    return fuseOp_->Execute(cur, gms);
+}
+
+bool FcHarnessCompat::acceptFuse(const calib::FrameFuseCPUResult& r) const {
+    return r.success
+           && static_cast<int>(r.matchedCount) >= cfg_.runtime.fuseMinMatched
+           && r.rmse < cfg_.runtime.fuseMaxRmseMm;
+}
+
+double FcHarnessCompat::checkNormalPlausibility(
+    const std::vector<cv::Vec3d>& normals) const {
+    if (normals.size() < 4) return 0.0;
+    cv::Vec3d median(0, 0, 0);
+    for (const auto& n : normals) median += n;
+    const double len = std::sqrt(median.dot(median));
+    if (len < 1e-12) return 1.0;   // 全互相抵消＝极端双峰
+    median /= len;
+    int oppose = 0;
+    for (const auto& n : normals)
+        if (n.dot(median) < 0.0) ++oppose;
+    return static_cast<double>(oppose) / static_cast<double>(normals.size());
+}
+
+bool FcHarnessCompat::mergeNormalCompatible(const cv::Vec3d& a,
+                                            const cv::Vec3d& b) const {
+    const double minCos = std::cos(
+        fuseParams_.triangleNormalMaxAngleDeg * CV_PI / 180.0);
+    return a.dot(b) >= minCos;
 }
 
 // ============================================================================
@@ -625,26 +1049,49 @@ Scanner::Result FiveChainAdapter::startRealtime(
             (void)idx;
         };
 
-        // ③ 激光链前段算子（沙盒 makeLaserOps 产线版：默认参数＋强制 Scan 模式）
+        // ③ 激光链前段算子（沙盒 makeLaserOps 产线版：分眼实例＋默认参数＋
+        // 强制 Scan 模式；undist 双实例——每帧 SetParams 温补快照）
         auto& L = harness_->laserOps_;
-        L.stegerFast = std::make_unique<calib::StegerExtractorFast>(
-            calib::StegerParams::fromJson(harness_->cfg_.opParams("steger_fast")));
-        L.flatCenter = std::make_unique<calib::FlatCenterExtractor>(
-            calib::FlatCenterParams::fromJson(harness_->cfg_.opParams("flat_center")));
-        L.undistG = std::make_unique<calib::UndistortPointsCuda>();   // 参数每帧 SetParams
-        auto ip = calib::EpipolarInterpDualParams::fromJson(
+        {
+            const auto stg = calib::StegerParams::fromJson(
+                harness_->cfg_.opParams("steger_fast"));
+            L.stegerL_ = std::make_unique<calib::StegerExtractorFast>(stg);
+            L.stegerR_ = std::make_unique<calib::StegerExtractorFast>(stg);
+            const auto fp = calib::FlatCenterParams::fromJson(
+                harness_->cfg_.opParams("flat_center"));
+            L.flatL_ = std::make_unique<calib::FlatCenterExtractor>(fp);
+            L.flatR_ = std::make_unique<calib::FlatCenterExtractor>(fp);
+        }
+        L.undistGL_ = std::make_unique<calib::UndistortPointsCuda>();   // 参数每帧 SetParams
+        L.undistGR_ = std::make_unique<calib::UndistortPointsCuda>();
+        calib::EpipolarInterpDualParams ip = calib::EpipolarInterpDualParams::fromJson(
             harness_->cfg_.opParams("epipolar_interp_dual"));
         ip.mode = calib::InterpMode::Scan;                 // 沙盒口径：强制扫描模式
         L.interpL_ = std::make_unique<calib::EpipolarInterpDualCuda>(ip);
         L.interpR_ = std::make_unique<calib::EpipolarInterpDualCuda>(ip);
 
-        // ④ 配准算子（生产调参口径——ScanChains L261-264 同源）
+        // ④ 配准算子（生产调参口径——ScanChains L261-264 同源）＋兜底算子
+        // （frame_fuse 默认参——断链自愈；operators json 有 frame_fuse 节时用之）
         calib::MarkerOpticalFlowFuseCPUParams ofp;
         ofp.normalAngleThresh = 45.0;
         ofp.useNormalWeight = true;
         harness_->flowOp_ = std::make_unique<calib::MarkerOpticalFlowFuseCPU>(ofp);
+        harness_->fuseParams_ = calib::FrameFuseCPUParams::fromJson(
+            harness_->cfg_.opParams("frame_fuse"));
+        harness_->fuseOp_ = std::make_unique<calib::FrameFuseCPU>(
+            harness_->fuseParams_);
 
         // ⑤ 执行器（INT_MAX＝无界实时会话——reader 由桥停信号终止）
+        //    前置 Warmup：sep 算子首 Execute 走 CUDA Graph 捕获路径，内部缓冲
+        //    未预分配会在捕获中 allocate（illegal during capture）——沙盒靠
+        //    serialHead 3 帧串行预热，07 直起执行器须显式 Warmup（ScanChains
+        //    L214 同款）
+        {
+            const int fw = bridge_->algoW_ > 0 ? bridge_->algoW_ : rtW_;
+            const int fh = bridge_->algoH_ > 0 ? bridge_->algoH_ : rtH_;
+            sepL_->Warmup(fh, fw);
+            sepR_->Warmup(fh, fw);
+        }
         executor_ = std::make_unique<scr::fc::FiveChainExecutor>(*harness_, 0, 0x7fffffff);
 
         // ⑥ 收割线程

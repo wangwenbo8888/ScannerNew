@@ -22,6 +22,7 @@
 #include "pipelines/scan/fivechain/FiveChainAdapter.h"
 #include "pipelines/scan/ScanTypes.h"
 #include "pipelines/scan/FrameObsAccumulator.h"
+#include "pipelines/scan/fivechain/triangle_index.h"
 
 // 沙盒算子（Phase 1 已合入主库——同 namespace calib）
 #include "scanning/preprocess/mask_separation/laser_markingpoint_mask_separation_cuda.h"
@@ -59,6 +60,12 @@ struct ScrConfigCompat {
         int maxCycles = 0;
         double nominalTemperature = 25.0;
         bool markerOnly = false;
+        // 配准链 runtime 参数（沙盒 config runtime 节默认值——对拍同参必需）
+        double flowRmseDriftRatio = 10.0;   // 光流误差趋势门倍率（0=关）
+        double mintDedupRadiusMm = 5.0;     // 新点发号查重半径（累积漂移口径）
+        int fuseSubsetMax = 16;             // 兜底子集装配上限（min 算子上限）
+        int fuseMinMatched = 4;             // 兜底验收门 matched≥
+        double fuseMaxRmseMm = 2.0;         // 兜底验收门 rmse<
     } runtime;
     nlohmann::json operators;   // 算子参数覆盖（opParams）
 
@@ -118,6 +125,10 @@ struct CycleProductsCompat {
     std::string regSource;
     double R[9] = {1,0,0,0,1,0,0,0,1};
     double T[3] = {0,0,0};
+    // 配准兜底（沙盒 harness.h L91-93 同款）
+    bool usedFrameFuse = false;
+    bool fuseSlowPath = false;   // 配准兜底 5 帧胜出解来自慢路径（预测失效频率）
+    calib::FrameFuseCPUResult regFuse;
     // 【E3】fivechain：1b/chain1 流已排空标记——RLE 帧宿主可见拷出免事件同步
     bool gpuDrained = false;
     // 统计/报告（沙盒 report.csv 字段——fc_executor 的 fuseLoop 写）
@@ -202,14 +213,45 @@ public:
     std::vector<std::unique_ptr<MarkerOps>> markerLanes_;
     std::unique_ptr<MarkerOps> makeMarkerOps() {
         auto ops = std::make_unique<MarkerOps>();
-        // 261025 产线口径（ScanChains L220-257 同源）：split 越界裁剪＋undistCpu
-        // K/D 构造校验＋match 放宽 y 容差 6px/上限 300（真机实测口径）
-        calib::ImageSplitCPUParams sp;
-        sp.enableBoundaryCheck = true;
-        ops->split = std::make_unique<calib::ImageSplitCPU>(sp);
-        ops->zernike = std::make_unique<calib::ZernikeEdgeCPU>();
-        ops->merge = std::make_unique<calib::ImageMergeCPU>();
-        if (!K1_.empty() && !K2_.empty()) {
+        // 双模式（261025 对拍口径）：operators json 非空＝沙盒配方（fromJson 全
+        // 参＋构造期矫正系/投影注入——对拍同参）；空＝产线配方（K/D 构造校验＋
+        // 真机调参 y_tolerance 6.0/max_points 300）
+        const bool sj = !cfg_.operators.empty();
+        if (sj) {
+            ops->split = std::make_unique<calib::ImageSplitCPU>(
+                calib::ImageSplitCPUParams::fromJson(cfg_.opParams("image_split")));
+            ops->zernike = std::make_unique<calib::ZernikeEdgeCPU>(
+                calib::ZernikeEdgeCPUParams::fromJson(cfg_.opParams("zernike_edge")));
+            ops->merge = std::make_unique<calib::ImageMergeCPU>(
+                calib::ImageMergeCPUParams::fromJson(cfg_.opParams("image_merge")));
+        } else {
+            calib::ImageSplitCPUParams sp;
+            sp.enableBoundaryCheck = true;
+            ops->split = std::make_unique<calib::ImageSplitCPU>(sp);
+            ops->zernike = std::make_unique<calib::ZernikeEdgeCPU>();
+            ops->merge = std::make_unique<calib::ImageMergeCPU>();
+        }
+        if (!calib_.K1c.empty() && !calib_.Rext.empty()) {
+            // 沙盒配方：fillMarkerUndistortParams(K1c/D1/K2c/D2/Rext/Tcomp/W/H)
+            // ＋构造期 SetRectifyMatrices（R1/R2/P1/P2/Q 名义温档）
+            calib::MarkerUndistortCPUParams up;
+            up.fx1 = calib_.K1c.at<double>(0, 0); up.fy1 = calib_.K1c.at<double>(1, 1);
+            up.cx1 = calib_.K1c.at<double>(0, 2); up.cy1 = calib_.K1c.at<double>(1, 2);
+            up.fx2 = calib_.K2c.at<double>(0, 0); up.fy2 = calib_.K2c.at<double>(1, 1);
+            up.cx2 = calib_.K2c.at<double>(0, 2); up.cy2 = calib_.K2c.at<double>(1, 2);
+            const double* d1v = calib_.D1.ptr<double>(0);
+            const double* d2v = calib_.D2.ptr<double>(0);
+            up.k1_1 = d1v[0]; up.k2_1 = d1v[1]; up.p1_1 = d1v[2]; up.p2_1 = d1v[3]; up.k3_1 = d1v[4];
+            up.k1_2 = d2v[0]; up.k2_2 = d2v[1]; up.p1_2 = d2v[2]; up.p2_2 = d2v[3]; up.k3_2 = d2v[4];
+            for (int i = 0; i < 9; ++i) up.R[i] = calib_.Rext.at<double>(i / 3, i % 3);
+            for (int i = 0; i < 3; ++i) up.T[i] = calib_.Tcomp.at<double>(i, 0);
+            up.imageWidth = imageWidth_;
+            up.imageHeight = imageHeight_;
+            ops->undist = std::make_unique<calib::MarkerUndistortCPU>(up);
+            ops->undist->SetRectifyMatrices(calib_.R1, calib_.R2, calib_.P1, calib_.P2,
+                                            calib_.Q);
+        } else if (!K1_.empty() && !K2_.empty()) {
+            // 产线配方：K/D 构造（矫正系每帧 SetRectifyMatrices 注入）
             calib::MarkerUndistortCPUParams mp;
             auto atOr = [](const cv::Mat& m, int i) {
                 return m.total() > static_cast<size_t>(i)
@@ -229,15 +271,39 @@ public:
         } else {
             ops->undist = std::make_unique<calib::MarkerUndistortCPU>();
         }
-        ops->ellipse = std::make_unique<calib::EllipseFitCPU>();
-        calib::MarkerMatchCPUParams mmp;
-        mmp.y_tolerance = 6.0f;
-        mmp.max_points = 300;
-        ops->match = std::make_unique<calib::MarkerMatchCPU>(mmp);
+        if (sj) {
+            ops->ellipse = std::make_unique<calib::EllipseFitCPU>(
+                calib::EllipseFitCPUParams::fromJson(cfg_.opParams("ellipse_fit")));
+            ops->match = std::make_unique<calib::MarkerMatchCPU>(
+                calib::MarkerMatchCPUParams::fromJson(cfg_.opParams("marker_match")));
+        } else {
+            ops->ellipse = std::make_unique<calib::EllipseFitCPU>();
+            calib::MarkerMatchCPUParams mmp;
+            mmp.y_tolerance = 6.0f;
+            mmp.max_points = 300;
+            ops->match = std::make_unique<calib::MarkerMatchCPU>(mmp);
+        }
         ops->epi = std::make_unique<calib::EpipolarIntersectCPU>();
         ops->edge = std::make_unique<calib::EdgeMatchCPU>();
         ops->recon = std::make_unique<calib::PointReconstructCPU>();
-        ops->conic = std::make_unique<calib::ConicReconstructCPU>();
+        ops->conic = std::make_unique<calib::ConicReconstructCPU>(
+            sj ? calib::ConicReconstructCPUParams::fromJson(
+                     cfg_.opParams("conic_reconstruct"))
+               : calib::ConicReconstructCPUParams{});
+        if (!calib_.P1.empty() && !calib_.P2.empty()) {
+            // 沙盒口径：构造期投影注入（K1=P1 左 3×3/K2=P2 左 3×3/C2=−K2⁻¹·t2）
+            // ——实时路径每帧 SetProjectionMatrices 覆盖（metaValid 时）
+            cv::Matx33d cK1 = cv::Matx33d::eye(), cK2 = cv::Matx33d::eye();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    cK1(r, c) = calib_.P1.at<double>(r, c);
+                    cK2(r, c) = calib_.P2.at<double>(r, c);
+                }
+            const cv::Vec3d cT2(calib_.P2.at<double>(0, 3), calib_.P2.at<double>(1, 3),
+                                calib_.P2.at<double>(2, 3));
+            const cv::Vec3d cC2 = -(cK2.inv() * cT2);
+            ops->conic->SetProjectionMatrices(cK1, cK2, cC2);
+        }
         return ops;
     }
 
@@ -264,10 +330,17 @@ public:
     }
 
     // 激光链算子集（fc_executor 直接访问 h_.laserOps_——沙盒 Harness 同名）
+    // 分眼实例（沙盒 stegerL_/stegerR_/flatL_/flatR_ 语义——flat 延迟模式的
+    // 设备计数器是实例私有，两眼共用会混计数→interp 计数虚高→v3 匹配崩塌）
     struct LaserOps {
-        std::unique_ptr<calib::StegerExtractorFast> stegerFast;
-        std::unique_ptr<calib::FlatCenterExtractor> flatCenter;
-        std::unique_ptr<calib::UndistortPointsCuda> undistG;
+        std::unique_ptr<calib::StegerExtractorFast> stegerL_;
+        std::unique_ptr<calib::StegerExtractorFast> stegerR_;
+        std::unique_ptr<calib::FlatCenterExtractor> flatL_;
+        std::unique_ptr<calib::FlatCenterExtractor> flatR_;
+        // 双实例（沙盒 undistCudaL_/undistCudaR_ 语义）：离线＝构造期 L/R 参；
+        // 实时＝每帧 SetParams（metaValid 分支）
+        std::unique_ptr<calib::UndistortPointsCuda> undistGL_;
+        std::unique_ptr<calib::UndistortPointsCuda> undistGR_;
         std::unique_ptr<calib::EpipolarInterpDualCuda> interpL_;
         std::unique_ptr<calib::EpipolarInterpDualCuda> interpR_;
     };
@@ -296,13 +369,58 @@ public:
     // 光流配准算子（runRegistration 消费——构造期创建）
     std::unique_ptr<calib::MarkerOpticalFlowFuseCPU> flowOp_;
 
+    // ========================================================================
+    // 261025 对拍补全：配准三级降级状态机（沙盒 harness.h L317-348 同款——
+    // 光流 → frame_fuse 兜底【快路径视野捞点/慢路径三角索引全库投票】→ hold）
+    // ========================================================================
+    calib::GlobalMarkerSet globalSet_;          // 全局标志点地图（transform 累积，globalId 去重）
+    std::map<int, size_t> globalIndexById_;     // gid → 库下标
+    int nextGid_ = 0;                           // 会话新点发号计数（光流/兜底共用）
+    bool gridBoardRejected_ = false;            // 规则网格板检测锁存（裁决硬拒）
+    std::vector<double> flowRmseBaseline_;      // 光流误差趋势门基线（前 50 成功帧）
+    double flowRmseBaselineMed_ = -1.0;
+    int holdStreak_ = 0;                        // 连续 hold 帧数（捞点半径自适应＋停手门）
+    size_t libVersion_ = 1;                     // 库写入递增版本（索引脏标记）
+    std::unique_ptr<scr::TriangleLibraryIndex> libIndex_;   // 慢路径全库三角索引
+    size_t libIndexVersion_ = 0;                // 索引对应库版本
+    int lastIndexRebuildCycle_ = -1;            // 上次索引重建帧号
+    double lastNormalOpposeRatio_ = 0.0;        // 上帧法线反对占比（诊断）
+    // 候选池（新点先观察，连续 3 次重观测一致才转正入图——防瞬态假点）
+    struct CandidateEntry {
+        cv::Point3d position;
+        cv::Vec3d normal;
+        int count = 1;
+    };
+    std::vector<CandidateEntry> candidates_;
+    static constexpr int kPromoteThreshold = 3;         // 转正发号计数 ≥3 次
+    static constexpr double kCandidateMergeMm = 2.0;    // 候选匹配半径（同合并半径）
+    // 兜底算子＋参数（frame_fuse——json 装配；生产实时亦建兜底＝断链自愈）
+    calib::FrameFuseCPUParams fuseParams_;
+    std::unique_ptr<calib::FrameFuseCPU> fuseOp_;
+    // CCL 门限（沙盒 config ccl 节默认：800/30000/0——runMarkerChainRuns 消费）
+    int cclMinArea_ = 800, cclMaxArea_ = 30000, cclTopX_ = 0;
+
+    // 配准链方法（沙盒 harness.cpp L1269-1726 逐段对齐）
+    void adoptRegistration(calib::MarkerOpticalFlowFuseCPUResult& res,
+                           scr::CycleProductsCompat& p);
+    std::vector<int> cullByView(const calib::MarkerPointSet& cur, int maxCount) const;
+    calib::FrameFuseCPUResult fuseExecute(const calib::MarkerPointSet& cur,
+                                          const std::vector<int>& libIdx) const;
+    bool acceptFuse(const calib::FrameFuseCPUResult& r) const;
+    double checkNormalPlausibility(const std::vector<cv::Vec3d>& normals) const;
+    bool mergeNormalCompatible(const cv::Vec3d& a, const cv::Vec3d& b) const;
+
     // 轨迹/计数
     std::vector<std::array<double,3>> trajT_;
     std::atomic<uint64_t> cycleCount_{0};
 
-    // 标定数据（沙盒 Harness.calib_——Q 矩阵供 CPU 重建消费）
+    // 标定数据（沙盒 Harness.calib_——Q 供 CPU 重建消费；其余＝对拍补全的
+    // 沙盒装配件：undistCpu 每帧 SetRectifyMatrices 基线＋Rext/Tcomp 构造参数）
     struct CalibDataCompat {
         cv::Mat Q;
+        cv::Mat R1, R2, P1, P2;        // 名义温档矫正系（沙盒模式构造期注入）
+        cv::Mat K1c, K2c, D1, D2;      // 补偿内参（沙盒模式 undistCpu 构造）
+        cv::Mat Rext, Tcomp;           // 外参（沙盒 fillMarkerUndistortParams）
     };
     CalibDataCompat calib_;
 
