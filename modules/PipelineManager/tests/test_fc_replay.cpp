@@ -27,6 +27,7 @@
 
 #include <nlohmann/json.hpp>
 #include <opencv2/core.hpp>
+#include <cuda_runtime.h>   // cudaMemGetInfo（连续吞吐显存采样）
 
 #include "pipelines/scan/fivechain/FiveChainAdapter.h"
 #include "pipelines/scan/fivechain/harness.h"
@@ -325,15 +326,37 @@ TEST(FcReplay, All399ReportParity) {
     h->outDir_ = outDir.string();
     auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, rig.total);
 
-    // —— 收割＋report.csv / rt17.csv 落盘 ——
+    // —— 收割＋report.csv / rt17.csv / 逐帧 marker CSV 落盘 ——
     std::vector<std::string> rows;
     std::ostringstream rt17;
+    fs::path mkDir = outDir / "markers";
+    fs::create_directories(mkDir, ec);
     double prevR[9], prevT[3];
     bool havePrev = false;
     for (int c = 0; c < rig.total; ++c) {
         CycleProducts prod;
         std::string cerr;
         ASSERT_TRUE(ex->collect(c, prod, cerr)) << "collect 失败 c=" << c << " " << cerr;
+        // marker 3D CSV（沙盒 markerOnly 同格式——conic 有效圆 6 位小数）
+        {
+            std::ostringstream ns;
+            ns << "cycle_" << std::setw(3) << std::setfill('0') << c << "_markers.csv";
+            std::ofstream ofs(mkDir / ns.str(), std::ios::binary);
+            int n = 0;
+            if (ofs) {
+                ofs << std::fixed << std::setprecision(6);
+                ofs << "marker,centerX_mm,centerY_mm,centerZ_mm,"
+                       "normalX,normalY,normalZ\n";
+                for (size_t i = 0; i < prod.conic.markers.size(); ++i) {
+                    const auto& m = prod.conic.markers[i];
+                    if (!m.validCircle) continue;
+                    ofs << i << ',' << m.centerX << ',' << m.centerY << ',' << m.centerZ
+                        << ',' << m.normalX << ',' << m.normalY << ',' << m.normalZ
+                        << '\n';
+                    ++n;
+                }
+            }
+        }
         double dtMm = -1.0, drotDeg = -1.0;
         if (havePrev) {
             dtMm = std::sqrt((prod.T[0] - prevT[0]) * (prod.T[0] - prevT[0])
@@ -453,19 +476,46 @@ TEST(FcReplay, BenchLoopThroughput) {
 
     using CLK = std::chrono::steady_clock;
     std::vector<double> ctorMs(iters), runMs(iters), dtorMs(iters), fps(iters);
-    int totalLaserPts = 0;
+    // 逐遍产出签名（正确性校验：同输入+会话态复位 ⇒ 各遍应逐位一致——
+    // 不一致＝会话态泄漏或算子跨遍残留）
+    struct IterSig {
+        long laserPts = 0, markersDet = 0, markersValid = 0;
+        long srcFirst = 0, srcFlow = 0, srcFuse = 0, srcHold = 0, srcSkip = 0;
+        double R[9] = {}, T[3] = {};       // 末帧 R/T（17 位口径直接比对）
+        double R0[9] = {}, T0[3] = {};     // 首帧 R/T
+    };
+    std::vector<IterSig> sigs(static_cast<size_t>(iters));
+    // 逐帧完成时间戳（自压测起点）——按秒分桶＝每秒实际处理帧数（含会话间隙）
+    const auto benchStart = CLK::now();
+    std::vector<double> frameTs;
+    frameTs.reserve(static_cast<size_t>(iters) * rig.total);
     for (int it = 0; it < iters; ++it) {
         rig.resetSessionState();          // 新会话语义（配准/融合态归零）
         const auto tC0 = CLK::now();
         auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, rig.total);
         const auto t0 = CLK::now();
         int collected = 0;
+        IterSig& sg = sigs[static_cast<size_t>(it)];
         for (int c = 0; c < rig.total; ++c) {
             CycleProducts prod;
             std::string cerr;
             if (!ex->collect(c, prod, cerr)) break;
             ++collected;
-            if (it == 0) totalLaserPts += prod.laserPoints3D;
+            frameTs.push_back(std::chrono::duration<double>(CLK::now() - benchStart).count());
+            sg.laserPts += prod.laserPoints3D;
+            sg.markersDet += prod.markersDetected;
+            sg.markersValid += prod.markersValid;
+            if (prod.regSource == "first") ++sg.srcFirst;
+            else if (prod.regSource == "flow") ++sg.srcFlow;
+            else if (prod.regSource == "fuse") ++sg.srcFuse;
+            else if (prod.regSource == "hold") ++sg.srcHold;
+            else ++sg.srcSkip;
+            if (c == 0) {
+                for (int i = 0; i < 9; ++i) sg.R0[i] = prod.R[i];
+                for (int i = 0; i < 3; ++i) sg.T0[i] = prod.T[i];
+            }
+            for (int i = 0; i < 9; ++i) sg.R[i] = prod.R[i];
+            for (int i = 0; i < 3; ++i) sg.T[i] = prod.T[i];
         }
         const auto t1 = CLK::now();
         ex.reset();                       // stopAll＋设备同步收尾
@@ -507,6 +557,63 @@ TEST(FcReplay, BenchLoopThroughput) {
     }
     const double steadyMean = sn > 0 ? steady / sn : fMean;
 
+    // —— 正确性校验：各遍签名与第 0 遍逐位一致（同输入+复位 ⇒ 确定；
+    // 不一致＝会话态泄漏/算子跨遍残留）——
+    int sigMismatch = 0;
+    std::ostringstream sm;
+    for (int it = 1; it < iters; ++it) {
+        const IterSig& a = sigs[0];
+        const IterSig& b = sigs[static_cast<size_t>(it)];
+        if (a.laserPts != b.laserPts || a.markersDet != b.markersDet
+            || a.markersValid != b.markersValid || a.srcFirst != b.srcFirst
+            || a.srcFlow != b.srcFlow || a.srcFuse != b.srcFuse
+            || a.srcHold != b.srcHold || a.srcSkip != b.srcSkip) {
+            ++sigMismatch;
+            if (sigMismatch <= 5)
+                sm << "\n  遍 " << it << " 计数签名差: laser " << a.laserPts << "→"
+                   << b.laserPts << " det " << a.markersDet << "→" << b.markersDet
+                   << " valid " << a.markersValid << "→" << b.markersValid
+                   << " [first/flow/fuse/hold/skip] " << a.srcFirst << "/" << a.srcFlow
+                   << "/" << a.srcFuse << "/" << a.srcHold << "/" << a.srcSkip << " → "
+                   << b.srcFirst << "/" << b.srcFlow << "/" << b.srcFuse << "/"
+                   << b.srcHold << "/" << b.srcSkip;
+            continue;
+        }
+        for (int i = 0; i < 9; ++i)
+            if (std::memcmp(&a.R[i], &b.R[i], sizeof(double)) != 0
+                || std::memcmp(&a.R0[i], &b.R0[i], sizeof(double)) != 0) {
+                ++sigMismatch;
+                sm << "\n  遍 " << it << " R 逐位差（帧0或末帧）";
+                break;
+            }
+        for (int i = 0; i < 3; ++i)
+            if (std::memcmp(&a.T[i], &b.T[i], sizeof(double)) != 0
+                || std::memcmp(&a.T0[i], &b.T0[i], sizeof(double)) != 0) {
+                ++sigMismatch;
+                sm << "\n  遍 " << it << " T 逐位差（帧0或末帧）";
+                break;
+            }
+    }
+    EXPECT_EQ(sigMismatch, 0) << "各遍产出签名不一致（会话态泄漏嫌疑）" << sm.str();
+
+    // —— 按秒分桶：每秒实际处理帧数（含会话构造/析构间隙——秒粒度真实口径）——
+    const int nSec = static_cast<int>(std::floor(frameTs.back())) + 1;
+    std::vector<int> perSec(static_cast<size_t>(nSec), 0);
+    for (double t : frameTs) ++perSec[static_cast<size_t>(std::floor(t))];
+    int busySec = 0; long busyFrames = 0;
+    for (int v : perSec)
+        if (v > 0) { ++busySec; busyFrames += v; }
+    std::ostringstream ps;
+    ps << "\n  逐秒帧数（" << nSec << " 秒，含会话间隙；0＝间隙/构造秒）:\n";
+    for (int s = 0; s < nSec; ++s) {
+        if (s % 10 == 0) ps << "    ";
+        ps << std::setw(4) << perSec[static_cast<size_t>(s)];
+        if (s % 10 == 9) ps << "\n";
+    }
+    ps << "\n    活跃秒（>0 帧）=" << busySec << " 活跃秒均帧率="
+       << std::fixed << std::setprecision(1)
+       << static_cast<double>(busyFrames) / busySec << " FPS";
+
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(1);
     ss << "五链压测 " << iters << " 遍 × " << rig.total << " 帧（1688×1400 双目，"
@@ -517,7 +624,268 @@ TEST(FcReplay, BenchLoopThroughput) {
     ss << std::fixed << std::setprecision(0);
     ss << "  会话开销: 执行器构造=" << cMean << "ms 运行=" << rMean
        << "ms 析构收尾=" << dMean << "ms\n";
-    ss << "  首轮激光点累计=" << totalLaserPts << "（产能健康度参考）";
+    ss << "  首遍产出: 激光点=" << sigs[0].laserPts
+       << " 标点det=" << sigs[0].markersDet << " 标点valid=" << sigs[0].markersValid
+       << " 配准路径 first/flow/fuse/hold/skip=" << sigs[0].srcFirst << "/"
+       << sigs[0].srcFlow << "/" << sigs[0].srcFuse << "/" << sigs[0].srcHold
+       << "/" << sigs[0].srcSkip << "\n";
+    ss << "  各遍签名一致: " << (sigMismatch == 0 ? "50/50 逐位同（会话态复位完备）"
+                                                : "存在差异 " + std::to_string(sigMismatch));
+    ss << ps.str();
+    {
+        std::ofstream pf(outDir / "bench_persec.csv");
+        pf << "second,frames\n";
+        for (int s = 0; s < nSec; ++s)
+            pf << s << ',' << perSec[static_cast<size_t>(s)] << "\n";
+    }
     fprintf(stderr, "\n[FCBENCH] %s\n", ss.str().c_str());
+    SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// 连续吞吐公共运行体：循环帧源＋单执行器 INT_MAX 无界连续运行——无会话重建
+// （消除驼峰），逐秒分桶＋每分钟聚合＋显存/融合云/全局地图采样
+// ============================================================================
+namespace {
+
+struct ContRun {
+    long frames = 0, laserPts = 0;
+    double wallSec = 0, meanFps = 0, secMeanFps = 0, cvPct = 0;
+    double firstMinMean = 0, lastMinMean = 0;
+    int nLoops = 0;
+    std::vector<int> perSec;
+    size_t fusedFirst = 0, fusedLast = 0, libFirst = 0, libLast = 0;
+    size_t devFreeFirst = 0, devFreeLast = 0, devTotal = 0;
+};
+
+double contMinuteMean(const std::vector<int>& perSec, int m) {
+    const int s0 = m * 60;
+    const int s1 = std::min(static_cast<int>(perSec.size()), (m + 1) * 60);
+    long sum = 0; int cnt = 0;
+    for (int s = s0; s < s1; ++s)
+        if (perSec[static_cast<size_t>(s)] > 0) { sum += perSec[static_cast<size_t>(s)]; ++cnt; }
+    return cnt > 0 ? static_cast<double>(sum) / cnt : 0.0;
+}
+
+/// 该分钟活跃秒数（判"完整分钟"——尾分钟只含边界溢出帧时不算）
+int contMinuteActiveSecs(const std::vector<int>& perSec, int m) {
+    const int s0 = m * 60;
+    const int s1 = std::min(static_cast<int>(perSec.size()), (m + 1) * 60);
+    int cnt = 0;
+    for (int s = s0; s < s1; ++s)
+        if (perSec[static_cast<size_t>(s)] > 0) ++cnt;
+    return cnt;
+}
+
+ContRun runContinuous(ReplayRig& rig, Scanner::pipeline::FcHarnessCompat* h,
+                      double durationSec, const fs::path& outDir, bool verbose) {
+    using CLK = std::chrono::steady_clock;
+    // 循环帧源：cycleAt 动态求值（idx % N 环回——laserIdx 透传真帧号）
+    const int n = rig.total;
+    rig.src.cycleAt = [&rig, n](size_t i) {
+        scr::FrameCycleInfo ci;
+        const int id = rig.frameIds[i % static_cast<size_t>(n)];
+        ci.laserIdx = id;
+        ci.tubeOdd = (id % 2 == 1);
+        return ci;
+    };
+
+    struct Sample {
+        double t; long frames; size_t fusedPts; size_t libSize;
+        size_t devFree = 0, devTotal = 0;
+    };
+    std::vector<Sample> samples;
+    auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, 0x7fffffff);
+    std::vector<double> ts;
+    ts.reserve(static_cast<size_t>(durationSec) * 320);
+    const auto t0 = CLK::now();
+    double lastSampleT = -10.0;
+    long frames = 0, laserPts = 0;
+    while (true) {
+        const double t = std::chrono::duration<double>(CLK::now() - t0).count();
+        if (t >= durationSec) break;
+        CycleProducts prod;
+        std::string cerr;
+        if (!ex->collect(static_cast<int>(frames), prod, cerr)) break;
+        ts.push_back(std::chrono::duration<double>(CLK::now() - t0).count());
+        laserPts += prod.laserPoints3D;
+        ++frames;
+        if (ts.back() - lastSampleT >= 10.0) {   // 采样（每 10s）
+            lastSampleT = ts.back();
+            Sample s;
+            s.t = ts.back(); s.frames = frames;
+            s.fusedPts = rig.adapter->fuse().GetFusedPointCount();
+            s.libSize = h->globalSet_.positions.size();
+            size_t freeB = 0, totalB = 0;
+            cudaMemGetInfo(&freeB, &totalB);
+            s.devFree = freeB; s.devTotal = totalB;
+            samples.push_back(s);
+            if (verbose)
+                fprintf(stderr,
+                        "[FCCONT] %6.0fs frames=%ld fps=%.1f fused=%zuM lib=%zu devFree=%.1fGB\n",
+                        s.t, s.frames, frames / std::max(1.0, s.t),
+                        s.fusedPts / 1000000, s.libSize,
+                        static_cast<double>(freeB) / 1e9);
+        }
+    }
+    ContRun r;
+    r.wallSec = std::chrono::duration<double>(CLK::now() - t0).count();
+    ex.reset();
+    r.frames = frames;
+    r.laserPts = laserPts;
+    r.nLoops = n > 0 ? static_cast<int>(frames / n) : 0;
+    // 逐秒分桶
+    const int nSec = ts.empty() ? 0 : static_cast<int>(std::floor(ts.back())) + 1;
+    r.perSec.assign(static_cast<size_t>(std::max(1, nSec)), 0);
+    for (double t : ts) ++r.perSec[static_cast<size_t>(std::floor(t))];
+    {
+        std::ofstream pf(outDir / "cont_persec.csv");
+        pf << "second,frames\n";
+        for (int s = 0; s < nSec; ++s)
+            pf << s << ',' << r.perSec[static_cast<size_t>(s)] << "\n";
+    }
+    // 整体统计
+    r.meanFps = static_cast<double>(frames) / std::max(1.0, r.wallSec);
+    double var = 0, secMean = 0; int secCnt = 0;
+    for (int v : r.perSec)
+        if (v > 0) { secMean += v; ++secCnt; }
+    secMean /= std::max(1, secCnt);
+    for (int v : r.perSec)
+        if (v > 0) var += (v - secMean) * (v - secMean);
+    r.secMeanFps = secMean;
+    r.cvPct = std::sqrt(var / std::max(1, secCnt)) / secMean * 100.0;
+    const int nMin = (nSec + 59) / 60;
+    r.firstMinMean = contMinuteMean(r.perSec, 0);
+    // 末分钟＝最后一个完整分钟（活跃秒≥30——240s 边界溢出的尾帧桶不算）
+    r.lastMinMean = r.firstMinMean;
+    for (int m = nMin - 1; m >= 0; --m) {
+        if (contMinuteActiveSecs(r.perSec, m) >= 30) {
+            r.lastMinMean = contMinuteMean(r.perSec, m);
+            break;
+        }
+    }
+    if (!samples.empty()) {
+        const Sample& a = samples.front();
+        const Sample& b = samples.back();
+        r.fusedFirst = a.fusedPts; r.fusedLast = b.fusedPts;
+        r.libFirst = a.libSize; r.libLast = b.libSize;
+        r.devFreeFirst = a.devFree; r.devFreeLast = b.devFree;
+        r.devTotal = b.devTotal;
+    }
+    return r;
+}
+
+std::string contMinuteTable(const std::vector<int>& perSec) {
+    const int nMin = (static_cast<int>(perSec.size()) + 59) / 60;
+    std::ostringstream mm;
+    mm << std::fixed << std::setprecision(1);
+    for (int m = 0; m < nMin; ++m) {
+        const int s0 = m * 60, s1 = std::min(static_cast<int>(perSec.size()), (m + 1) * 60);
+        int mn = 1 << 30, mx = 0; long sum = 0; int cnt = 0;
+        for (int s = s0; s < s1; ++s) {
+            const int v = perSec[static_cast<size_t>(s)];
+            if (v <= 0) continue;
+            mn = std::min(mn, v); mx = std::max(mx, v); sum += v; ++cnt;
+        }
+        if (cnt > 0)
+            mm << "  分 " << std::setw(2) << m << ": mean=" << std::setw(6)
+               << static_cast<double>(sum) / cnt << " min=" << std::setw(4) << mn
+               << " max=" << std::setw(4) << mx << "\n";
+    }
+    return mm.str();
+}
+
+} // namespace
+
+// ============================================================================
+// 连续吞吐（自由时长）：JMW_FC_CONT=<分钟>
+// ============================================================================
+TEST(FcReplay, ContinuousThroughput) {
+    double minutes = 0;
+    if (const char* e = getenv("JMW_FC_CONT")) minutes = atof(e);
+    if (minutes <= 0)
+        GTEST_SKIP() << "JMW_FC_CONT=<分钟> 未设——连续吞吐显式启用";
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty()) << "沙盒根未定位";
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+    auto* h = rig.h.get();
+    std::error_code ec;
+    fs::path outDir = fs::temp_directory_path() / "fc07_cont";
+    fs::create_directories(outDir, ec);
+    h->outDir_ = outDir.string();
+
+    ContRun r = runContinuous(rig, h, minutes * 60.0, outDir, /*verbose=*/true);
+    ASSERT_GT(r.frames, 0) << "零帧收割";
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1);
+    ss << "五链连续吞吐 " << std::setprecision(0) << r.wallSec << "s（" << minutes
+       << " 分钟，" << rig.total << " 组图循环，单执行器无会话重建，全内存零拷）\n";
+    ss << "  总帧数=" << r.frames << "（" << r.nLoops << " 个整环）激光点累计 "
+       << r.laserPts << "\n";
+    ss << std::setprecision(1);
+    ss << "  整体吞吐=" << r.meanFps << " FPS｜逐秒均值=" << r.secMeanFps
+       << " FPS｜逐秒变异系数 CV=" << std::setprecision(2) << r.cvPct << "%\n";
+    ss << std::setprecision(0);
+    ss << "  首/末采样: 融合云 " << r.fusedFirst << " → " << r.fusedLast
+       << " 点｜全局地图 " << r.libFirst << " → " << r.libLast
+       << " 点｜显存空闲 " << static_cast<double>(r.devFreeFirst) / 1e9 << "GB → "
+       << static_cast<double>(r.devFreeLast) / 1e9 << "GB / 共 "
+       << static_cast<double>(r.devTotal) / 1e9 << "GB\n";
+    ss << "  每分钟秒帧率聚合:\n" << contMinuteTable(r.perSec);
+    ss << "  逐秒全序列: " << outDir.string() << "/cont_persec.csv";
+    fprintf(stderr, "\n[FCCONT-SUMMARY] %s\n", ss.str().c_str());
+    SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// 连续吞吐 4 分钟门禁：JMW_FC_CONT4=1——固定 240s，阈值判 PASS/FAIL
+//（261026 实测基线：289 FPS/CV 3.7%/无衰减——阈值留 2 倍余量防异机波动）
+// ============================================================================
+TEST(FcReplay, Continuous4MinStability) {
+    if (getenv("JMW_FC_CONT4") == nullptr)
+        GTEST_SKIP() << "JMW_FC_CONT4=1 未设——4 分钟稳定性门禁显式启用";
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty()) << "沙盒根未定位";
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+    auto* h = rig.h.get();
+    std::error_code ec;
+    fs::path outDir = fs::temp_directory_path() / "fc07_cont4";
+    fs::create_directories(outDir, ec);
+    h->outDir_ = outDir.string();
+
+    constexpr double kDurationSec = 240.0;   // 4 分钟
+    ContRun r = runContinuous(rig, h, kDurationSec, outDir, /*verbose=*/false);
+    ASSERT_GT(r.frames, 0) << "零帧收割";
+
+    // —— 门禁（261026 本机实测 289 FPS/CV 3.7%/显存 10→6GB——阈值含余量）——
+    EXPECT_GE(r.nLoops, 2) << "整环数不足（吞吐异常低）";
+    EXPECT_GE(r.meanFps, 150.0) << "整体吞吐低于门限（实测基线 289）";
+    EXPECT_LE(r.cvPct, 10.0) << "逐秒变异系数超门限（实测基线 3.7%）";
+    EXPECT_GE(r.lastMinMean, 0.8 * r.firstMinMean)
+        << "末分钟吞吐较首分钟衰减超 20%（实测基线无衰减）";
+    EXPECT_GT(r.laserPts, 0) << "零激光点产出";
+    EXPECT_GE(r.devFreeLast, static_cast<size_t>(500) * 1000 * 1000)
+        << "显存空闲 <0.5GB（泄漏/OOM 嫌疑）";
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1);
+    ss << "五链 4 分钟稳定性门禁 PASS: 帧数=" << r.frames << "（" << r.nLoops
+       << " 整环）整体=" << r.meanFps << " FPS 逐秒均值=" << r.secMeanFps
+       << " CV=" << std::setprecision(2) << r.cvPct << "% 首分钟 "
+       << std::setprecision(1) << r.firstMinMean << " → 末分钟 " << r.lastMinMean
+       << " FPS｜融合云 " << r.fusedFirst << "→" << r.fusedLast
+       << " 显存空闲 " << std::setprecision(1)
+       << static_cast<double>(r.devFreeFirst) / 1e9 << "→"
+       << static_cast<double>(r.devFreeLast) / 1e9 << "GB\n每分钟聚合:\n"
+       << contMinuteTable(r.perSec)
+       << "逐秒序列: " << outDir.string() << "/cont_persec.csv";
+    fprintf(stderr, "\n[FCCONT4] %s\n", ss.str().c_str());
     SUCCEED() << ss.str();
 }

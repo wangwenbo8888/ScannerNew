@@ -477,6 +477,18 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
             normals.emplace_back(m.normalX, m.normalY, m.normalZ);
         }
         p.regFlow = flowOp_->Execute(centers, normals, prevState_);
+        // 261026 精度对拍探针（JMW_RTDBG=1）：R/T 17 位打印——与沙盒 harness
+        // L1312-1323 同款同格式（regLoop 处理序＝两边同基準，逐行可比）
+        if (getenv("JMW_RTDBG") && p.regFlow.success) {
+            fprintf(stderr, "[RTDBG] matched=%d rmse=%.17g",
+                    static_cast<int>(p.regFlow.getMatchedCount()),
+                    p.regFlow.statistics.rmse);
+            for (int i = 0; i < 9; ++i)
+                fprintf(stderr, " R%d=%.17g", i, p.regFlow.R.val[i]);
+            for (int i = 0; i < 3; ++i)
+                fprintf(stderr, " T%d=%.17g", i, p.regFlow.T.val[i]);
+            fprintf(stderr, "\n");
+        }
         p.flowMatchedDiag = static_cast<int>(p.regFlow.getMatchedCount());
         p.flowRmseDiag = p.regFlow.statistics.rmse;
         p.flowMessageDiag = p.regFlow.message;
