@@ -1082,15 +1082,15 @@ Scanner::Result FiveChainAdapter::startRealtime(
             harness_->fuseParams_);
 
         // ⑤ 执行器（INT_MAX＝无界实时会话——reader 由桥停信号终止）
-        //    前置 Warmup：sep 算子首 Execute 走 CUDA Graph 捕获路径，内部缓冲
-        //    未预分配会在捕获中 allocate（illegal during capture）——沙盒靠
-        //    serialHead 3 帧串行预热，07 直起执行器须显式 Warmup（ScanChains
-        //    L214 同款）
+        //    前置预热（沙盒靠 serialHead 3 帧串行预热，07 直起执行器须显式）：
+        //    a) sep Warmup——首 Execute CUDA Graph 捕获路径内部缓冲预分配
+        //    b) 灰度环全槽预分配——捕获窗（Global 禁令）内上传线程懒分配会崩
         {
             const int fw = bridge_->algoW_ > 0 ? bridge_->algoW_ : rtW_;
             const int fh = bridge_->algoH_ > 0 ? bridge_->algoH_ : rtH_;
             sepL_->Warmup(fh, fw);
             sepR_->Warmup(fh, fw);
+            harness_->preallocGrayLanes(cfg_.graySlots, fh, fw);
         }
         executor_ = std::make_unique<scr::fc::FiveChainExecutor>(*harness_, 0, 0x7fffffff);
 

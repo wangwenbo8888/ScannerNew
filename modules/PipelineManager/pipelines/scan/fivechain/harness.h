@@ -196,6 +196,18 @@ public:
         d_grayLanesL_.resize(static_cast<size_t>(slots));
         d_grayLanesR_.resize(static_cast<size_t>(slots));
     }
+    /// 预分配全部灰度环槽（执行器线程启动前——sep 帧 0 走 CUDA Graph 全局
+    /// 捕获，期间任何线程 cudaMalloc 非法（capture Global 禁令）；上传线程
+    /// 懒分配后续槽会撞捕获窗——沙盒靠 serialHead 串行头避开，07 直起须显式）
+    void preallocGrayLanes(int slots, int rows, int cols) {
+        ensureGrayLanes(slots);
+        for (int i = 0; i < slots; ++i) {
+            if (d_grayLanesL_[static_cast<size_t>(i)].empty())
+                d_grayLanesL_[static_cast<size_t>(i)].create(rows, cols, CV_8UC1);
+            if (d_grayLanesR_[static_cast<size_t>(i)].empty())
+                d_grayLanesR_[static_cast<size_t>(i)].create(rows, cols, CV_8UC1);
+        }
+    }
 
     // 标志点链 per-lane 算子容器（fc_executor 建 mkLanes_ 份）
     struct MarkerOps {
