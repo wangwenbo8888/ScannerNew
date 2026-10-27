@@ -5,7 +5,8 @@
 
 #include <chrono>
 
-#include "pipelines/scan/FuseConsumer.h"        // IMarkerFuse/CloudViewHandle/ISceneFeed
+#include "pipelines/scan/ScanTypes.h"
+#include "pipelines/ISceneFeed.h"	// IMarkerFuse/CloudViewHandle（261027 迁自 FuseConsumer.h）
 #include "pipelines/scan/FrameObsAccumulator.h"
 #include "pipelines/scan/ScanTypes.h"           // MarkerPoint3D
 

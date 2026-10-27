@@ -66,6 +66,9 @@ struct ScrConfigCompat {
         int fuseSubsetMax = 16;             // 兜底子集装配上限（min 算子上限）
         int fuseMinMatched = 4;             // 兜底验收门 matched≥
         double fuseMaxRmseMm = 2.0;         // 兜底验收门 rmse<
+        // 261027 诊断：hold 帧强制融合（无标志点场景验证激光链——R/T 为上帧
+        // 沿用值，仅诊断用，非测量口径）。env JMW_FC_FUSE_ON_HOLD=1 开
+        bool fuseOnHold = false;
     } runtime;
     nlohmann::json operators;   // 算子参数覆盖（opParams）
 
@@ -411,6 +414,17 @@ public:
     std::unique_ptr<calib::FrameFuseCPU> fuseOp_;
     // CCL 门限（沙盒 config ccl 节默认：800/30000/0——runMarkerChainRuns 消费）
     int cclMinArea_ = 800, cclMaxArea_ = 30000, cclTopX_ = 0;
+
+    // —— 261027 真机诊断：标志点链/配准逐级计数（stopRealtime 汇总日志）——
+    std::atomic<long> diagCclFail_{0};      // CCL 失败/无组件帧
+    std::atomic<long> diagRoisL_{0};        // CCL 组件数累计（L）
+    std::atomic<long> diagSplit_{0};        // split 成功帧
+    std::atomic<long> diagEllipse_{0};     // ellipse 成功帧（detected>0）
+    std::atomic<long> diagMatchPairs_{0};  // 双目匹配对累计
+    std::atomic<long> diagConicValid_{0};  // conic 有效圆累计
+    std::atomic<long> diagRegFirst_{0}, diagRegFlow_{0}, diagRegFuse_{0};
+    std::atomic<long> diagRegHold_{0}, diagRegSkip_{0};
+    std::atomic<long> diagLaserPts_{0};    // 激光重建点累计（chain2 产出）
 
     // 配准链方法（沙盒 harness.cpp L1269-1726 逐段对齐）
     void adoptRegistration(calib::MarkerOpticalFlowFuseCPUResult& res,

@@ -1188,8 +1188,11 @@ void FiveChainExecutor::fuseLoop() {
             pendE_[slot] = nullptr;
             const std::string& rs = j->prod.regSource;
             // 【P5】holdSkip 演练：全部帧按 hold 处理（零上传弃 E 路径验证）
+            // 261027 fuseOnHold 诊断：无标志点场景（补光灯故障期）验证激光链
+            // ——hold 帧沿用上帧 R/T 强制融合（非测量口径）
             const bool fused = h_.cfg_.fivechain.holdSkip == 0
-                               && (rs == "first" || rs == "flow" || rs == "fuse")
+                               && (rs == "first" || rs == "flow" || rs == "fuse"
+                                   || (rs == "hold" && h_.cfg_.runtime.fuseOnHold))
                                && j->eCount > 0 && j->eSlot >= 0;
             if (fused) {
                 const long long t0 = steadyNs();

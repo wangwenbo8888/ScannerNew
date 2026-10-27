@@ -13,7 +13,7 @@
 #include "stubs/laser_calib_workflow.h"   // calibration::LaserCalibInput（激光标定联调口）
 #include "ScanWorkflow.h"       // 02（编辑物理化访问链 markerFuse/obsAccumulator——P4b）
 #include "PostProcessWorkflow.h" // 04（后处理进度回调——P1-1 UI 入口）
-#include "pipelines/scan/FuseConsumer.h"       // 07 IMarkerFuse（removePoints 契约）
+#include "pipelines/scan/ScanTypes.h"           // IMarkerFuse（261027 自 FuseConsumer.h 迁入）
 #include "pipelines/scan/FrameObsAccumulator.h" // 07 obs（excludeMarkerObs 契约）
 #include "file_io.h"
 #include "PerfMonitor.h"   // A-T17：updateInfoSection 内 perfMonitor()->poll() 需完整类型

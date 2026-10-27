@@ -84,6 +84,44 @@ struct SimFrameObs {
 };
 
 // ============================================================================
+// IMarkerFuse / ILaserFuse — 编辑账本窄接口（261027 自 FuseConsumer.h 迁入——
+// 旧消费线程已退役，接口保留给 05 编辑会话/后续五链账本扩展）
+// ============================================================================
+struct IMarkerFuse {
+    virtual ~IMarkerFuse() = default;
+    virtual void fuse(const std::vector<calib::MarkerPoint3D>& markers,
+                      const double R[9], const double T[3]) = 0;
+    virtual const std::vector<calib::MarkerCloudPoint>& fusedPoints() const = 0;
+    /// 编辑账本移除点（05）——默认 fail（由自实现可覆写透传 09 removePoints）
+    virtual calib::ResultStatus removePoints(const std::vector<uint32_t>& indices) {
+        (void)indices;
+        return calib::ResultStatus::fail("IMarkerFuse: removePoints 未实现");
+    }
+};
+
+#ifdef JMW_BUILD_CUDA
+/// 激光融合累积器窄接口（编辑会话作用）
+struct ILaserFuse {
+    virtual ~ILaserFuse() = default;
+    virtual void fuse(const GpuPointCloudBlock& block,
+                      const double R[9], const double T[3]) = 0;
+    virtual size_t fusedPointCount() const { return 0; }
+    virtual std::vector<float> downloadFusedXyz() const { return {}; }
+    virtual std::vector<float> downloadFusedXyzTail(size_t fromPts) const {
+        auto all = downloadFusedXyz();
+        if (fromPts * 3 >= all.size()) return {};
+        all.erase(all.begin(),
+                  all.begin() + static_cast<std::ptrdiff_t>(fromPts * 3));
+        return all;
+    }
+    virtual calib::ResultStatus removePoints(const std::vector<uint32_t>& indices) {
+        (void)indices;
+        return calib::ResultStatus::fail("ILaserFuse: removePoints 未实现");
+    }
+};
+#endif // JMW_BUILD_CUDA
+
+// ============================================================================
 // MarkerObs / FrameObs — GBA 逐帧观测（FrameObsAccumulator 元素）
 // ============================================================================
 struct MarkerObs {

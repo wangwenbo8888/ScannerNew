@@ -27,7 +27,8 @@ FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
                                    Scanner::data::ICloudWarehouse* warehouse,
                                    ISceneFeed* sceneFeed,
                                    const nlohmann::json* opJson)
-    : cfg_(cfg), obs_(obs), warehouse_(warehouse), sceneFeed_(sceneFeed) {
+    : cfg_(cfg), obs_(obs), warehouse_(warehouse), sceneFeed_(sceneFeed),
+      opJson_(opJson) {
     // 算子参数：opJson 非空＝沙盒对拍口径（同参对拍）；空＝算子默认（产线）
     calib::LaserMarkingSeparationParams sepParams;
     if (opJson != nullptr && opJson->contains("mask_separation")) {
@@ -246,10 +247,14 @@ void FcHarnessCompat::runMarkerChainRuns(scr::CycleProductsCompat& p, bool recor
                                         cclMinArea_, cclMaxArea_, cclTopX_);
         if (!p.cclL.success || !p.cclR.success) {
             fail("ccl", p, "runCclCpuFromRuns 失败");
+            diagCclFail_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
+        diagRoisL_.fetch_add(static_cast<long>(p.cclL.components.size()),
+                             std::memory_order_relaxed);
     } catch (const std::exception& e) {
         fail("ccl", p, e.what());
+        diagCclFail_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     runMarkerChainCore(p, ops);
@@ -394,10 +399,18 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
     try {
         p.conic = ops->conic->Execute(p.ellL, p.ellR, p.mm.centerMatches);
         p.markersValid = static_cast<int>(p.conic.statistics.validCount);
+        diagConicValid_.fetch_add(p.markersValid, std::memory_order_relaxed);
     } catch (const std::exception& e) {
         fail("conic_reconstruct", p, e.what());
         return;
     }
+    // 逐级诊断计数（split/ellipse/match 成功帧）
+    if (p.splitL.success && p.splitR.success)
+        diagSplit_.fetch_add(1, std::memory_order_relaxed);
+    if (p.markersDetected > 0)
+        diagEllipse_.fetch_add(1, std::memory_order_relaxed);
+    diagMatchPairs_.fetch_add(static_cast<long>(p.mm.centerMatches.size()),
+                              std::memory_order_relaxed);
 }
 
 // ============================================================================
@@ -446,6 +459,7 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
 
     if (!p.conic.success || p.markersValid == 0) {
         p.regSource = "skip";
+        diagRegSkip_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
@@ -684,9 +698,15 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
         // hold 连击记账（捞点半径自适应＋停手门）；非 hold 即清零
         if (p.regSource == "hold") ++holdStreak_;
         else holdStreak_ = 0;
+        // 诊断计数
+        if (p.regSource == "first") diagRegFirst_.fetch_add(1, std::memory_order_relaxed);
+        else if (p.regSource == "flow") diagRegFlow_.fetch_add(1, std::memory_order_relaxed);
+        else if (p.regSource == "fuse") diagRegFuse_.fetch_add(1, std::memory_order_relaxed);
+        else if (p.regSource == "hold") diagRegHold_.fetch_add(1, std::memory_order_relaxed);
     } catch (const std::exception& e) {
         fail("registration", p, e.what());
         p.regSource = "hold";
+        diagRegHold_.fetch_add(1, std::memory_order_relaxed);
     }
     // hold/skip：保留基线上帧 R/T（prevState 停在上一次成功帧）
 }
@@ -1035,6 +1055,10 @@ Scanner::Result FiveChainAdapter::startRealtime(
         harness_ = new FcHarnessCompat(*this, bridge_->src);
         harness_->cfg_.fivechain = cfg_;
         harness_->cfg.fivechain = cfg_;                    // 双名兼容
+        if (opJson_ != nullptr)
+            harness_->cfg_.operators = *opJson_;           // 算子参数源全链应用（v3/flow/fuse/标志点链）
+        if (getenv("JMW_FC_FUSE_ON_HOLD") != nullptr)
+            harness_->cfg_.runtime.fuseOnHold = true;   // 诊断：hold 帧强制融合（无标志点验激光链）
         harness_->cfg_.runtime.nominalTemperature =
             rtLaserTable_ ? rtLaserTable_->referenceTemperature : 25.0;   // 表参考温（离线 golden 同口径 22.5）
         harness_->K1_ = rtK1_; harness_->D1_ = rtD1_;
@@ -1075,8 +1099,27 @@ Scanner::Result FiveChainAdapter::startRealtime(
             L.flatL_ = std::make_unique<calib::FlatCenterExtractor>(fp);
             L.flatR_ = std::make_unique<calib::FlatCenterExtractor>(fp);
         }
-        L.undistGL_ = std::make_unique<calib::UndistortPointsCuda>();   // 参数每帧 SetParams
-        L.undistGR_ = std::make_unique<calib::UndistortPointsCuda>();
+        L.undistGL_ = std::make_unique<calib::UndistortPointsCuda>([&] {
+            // 261026 真机修复：空参构造被算子校验拒绝（cameraMatrix must not be
+            // empty→五链首启即败）。构造值仅须过校验——在线每帧 SetParams 用
+            // 帧温快照覆写（K/D 真值＋R/P 占位单位阵/零平移）
+            calib::UndistortPointsParams u;
+            u.cameraMatrix = rtK1_;
+            u.distCoeffs = rtD1_;
+            u.R = cv::Mat::eye(3, 3, CV_64F);
+            u.P = cv::Mat::zeros(3, 4, CV_64F);
+            rtK1_.copyTo(u.P(cv::Rect(0, 0, 3, 3)));
+            return u;
+        }());
+        L.undistGR_ = std::make_unique<calib::UndistortPointsCuda>([&] {
+            calib::UndistortPointsParams u;
+            u.cameraMatrix = rtK2_;
+            u.distCoeffs = rtD2_;
+            u.R = cv::Mat::eye(3, 3, CV_64F);
+            u.P = cv::Mat::zeros(3, 4, CV_64F);
+            rtK2_.copyTo(u.P(cv::Rect(0, 0, 3, 3)));
+            return u;
+        }());
         calib::EpipolarInterpDualParams ip = calib::EpipolarInterpDualParams::fromJson(
             harness_->cfg_.opParams("epipolar_interp_dual"));
         ip.mode = calib::InterpMode::Scan;                 // 沙盒口径：强制扫描模式
@@ -1138,6 +1181,8 @@ void FiveChainAdapter::collectorLoop() {
         scr::CycleProductsCompat prod;
         std::string err;
         if (!executor_->collect(idx, prod, err)) break;    // F 关闭且空＝会话终
+        harness_->diagLaserPts_.fetch_add(prod.laserPoints3D,
+                                          std::memory_order_relaxed);
         const uint64_t fid = prod.metaValid ? prod.metaFrameId
                                             : static_cast<uint64_t>(idx);
 
@@ -1249,6 +1294,20 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
 // ---------------------------------------------------------------------------
 void FiveChainAdapter::stopRealtime() {
     if (!rtActive_.exchange(false)) return;
+    // 逐级诊断汇总（真机排障：哪一级断链一眼可见）
+    if (harness_) {
+        JMW_LOG_WARN("07-FiveChain",
+            "[FiveChainAdapter] 链路诊断: CCL失败帧={} CCL组件L累计={} split成功帧={} "
+            "ellipse成功帧={} 匹配对累计={} conic有效圆累计={} | 配准 first/flow/fuse/hold/skip="
+            "{}/{}/{}/{}/{} | 激光重建点累计={} 融合云={} 点",
+            harness_->diagCclFail_.load(), harness_->diagRoisL_.load(),
+            harness_->diagSplit_.load(), harness_->diagEllipse_.load(),
+            harness_->diagMatchPairs_.load(), harness_->diagConicValid_.load(),
+            harness_->diagRegFirst_.load(), harness_->diagRegFlow_.load(),
+            harness_->diagRegFuse_.load(), harness_->diagRegHold_.load(),
+            harness_->diagRegSkip_.load(), harness_->diagLaserPts_.load(),
+            fuse_->GetFusedPointCount());
+    }
     JMW_LOG_INFO("07-FiveChain",
         "[FiveChainAdapter] 实时链停止: 服务 {} 帧（过载跳帧 {}/裁剪 {}）/融合云 {} 点",
         bridge_ ? bridge_->servedFrames.load() : 0,

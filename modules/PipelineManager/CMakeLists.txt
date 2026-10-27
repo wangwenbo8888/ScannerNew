@@ -1,4 +1,6 @@
-# Module PipelineManager — 流水线管理（调度底座 + 五流水线对象）
+# Module PipelineManager — 流水线管理（调度底座 + 流水线对象）
+# 261027：C 扫描旧 lane（ScanChains/FuseConsumer/GpuPointCloudPool）退役删除——
+# 扫描全链＝五链（fivechain/）。SimScanSource 保留为 app 级调试件。
 set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
     pipelines/calibcompute/CalibComputePipeline.cpp
     pipelines/calibcompute/CalibSerialize.cpp
@@ -10,18 +12,15 @@ set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
     pipelines/postprocess/PostProcessPipeline.cpp
     pipelines/postprocess/NormalStage.cpp
     pipelines/scan/FrameObsAccumulator.cpp
-    pipelines/scan/FuseConsumer.cpp
-    pipelines/scan/ScanChains.cpp
     pipelines/scan/ScanPipeline.cpp
-    pipelines/scan/SimScanSource.cpp   # 调试件：FrameResult 出口级模拟源（JMW_SIM_SCAN 链路调试）
-    pipelines/scan/fivechain/FiveChainAdapter.cpp)  # 261025 Phase2：五链适配层
+    pipelines/scan/SimScanSource.cpp   # 调试件：app 级模拟源（五链模式忽略）
+    pipelines/scan/fivechain/FiveChainAdapter.cpp)  # 五链适配层
 if(BUILD_CUDA)
-    list(APPEND JMW_PM_PIPELINE_SRCS pipelines/scan/GpuPointCloudPool.cpp)  # GPU 点云块池（cv::cuda 类型）
     list(APPEND JMW_PM_PIPELINE_SRCS pipelines/scan/fivechain/fc_executor.cpp
          pipelines/scan/fivechain/gpu_accum.cu
          pipelines/scan/fivechain/ccl_cpu.cpp
          pipelines/scan/fivechain/steger_dedup_merge.cpp
-         pipelines/scan/fivechain/triangle_index.cpp)  # 261025 Phase2：五链执行器族
+         pipelines/scan/fivechain/triangle_index.cpp)  # 五链执行器族
 endif()
 if(BUILD_GLOBAL_OPTIM)                                                  # D 全局优化（GBA 依赖 Ceres）
     list(APPEND JMW_PM_PIPELINE_SRCS pipelines/globaloptim/GlobalOptimObject.cpp)

@@ -155,6 +155,7 @@ private:
     std::unique_ptr<scr::fc::FiveChainExecutor> executor_;  // 五链执行器（INT_MAX 无界）
     std::thread collector_;
     std::atomic<bool> rtActive_{false};
+    const nlohmann::json* opJson_ = nullptr;                // 算子参数源（宿主保活——startRealtime 全链应用）
 
     // 渲染节流/推送状态（collector 线程私有——镜像 FuseConsumer 口径）
     std::chrono::steady_clock::time_point lastRenderPush_{};
