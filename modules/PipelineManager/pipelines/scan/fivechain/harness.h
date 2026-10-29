@@ -137,6 +137,10 @@ struct CycleProductsCompat {
     // 统计/报告（沙盒 report.csv 字段——fc_executor 的 fuseLoop 写）
     int laserMatched = 0;
     int laserPoints3D = 0;
+    // 261029 GBA 激光缓存（D 线重放原料）：本帧激光 3D（设备系 host float xyz
+    // 三元组——fuseLoop 在 E 块释放前拷出；空=本帧无激光）。collector 侧转
+    // obs 累加器缓存槽（GBA 优化位姿重融合即 D 线激光重放）
+    std::vector<float> laserXyzHost;
     double rowResidMedPx = 0.0;
     double dispMedPx = 0.0;
     int markersDetected = 0;
@@ -246,7 +250,20 @@ public:
             ops->zernike = std::make_unique<calib::ZernikeEdgeCPU>();
             ops->merge = std::make_unique<calib::ImageMergeCPU>();
         }
-        if (!calib_.K1c.empty() && !calib_.Rext.empty()) {
+            if (!calib_.K1c.empty() && !calib_.Rext.empty()) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[FC-MKOPS] sandbox: K1c.fx={:.4f} cx={:.4f} R1={:.6f} "
+                    "P1.fx={:.4f} P1.cx={:.4f} Rext00={:.6f} Rext01={:.6f} "
+                    "Tc0={:.4f} Tc1={:.4f} Tc2={:.4f} D1k1={:.8f} D1k2={:.8f} "
+                    "K2c.fx={:.4f}（确定性验证）",
+                    calib_.K1c.at<double>(0,0), calib_.K1c.at<double>(0,2),
+                    calib_.R1.at<double>(0,0),
+                    calib_.P1.at<double>(0,0), calib_.P1.at<double>(0,2),
+                    calib_.Rext.at<double>(0,0), calib_.Rext.at<double>(0,1),
+                    calib_.Tcomp.at<double>(0,0), calib_.Tcomp.at<double>(1,0),
+                    calib_.Tcomp.at<double>(2,0),
+                    calib_.D1.at<double>(0), calib_.D1.at<double>(1),
+                    calib_.K2c.at<double>(0,0));
             // 沙盒配方：fillMarkerUndistortParams(K1c/D1/K2c/D2/Rext/Tcomp/W/H)
             // ＋构造期 SetRectifyMatrices（R1/R2/P1/P2/Q 名义温档）
             calib::MarkerUndistortCPUParams up;

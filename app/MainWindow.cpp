@@ -384,8 +384,11 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                           laser.reserve((pts.size() + stride - 1) / stride);
                           for (size_t i = 0; i < pts.size(); i += stride)
                               laser.emplace_back(pts[i].x, pts[i].y, pts[i].z);
-                          m_3dView->loadLaserPoints(laser);
-                          m_laserDispPts = laser.size();   // 261018 增量帽锚（全量路径重置）
+                           m_3dView->loadLaserPoints(laser);
+                           m_laserDispPts = laser.size();   // 261018 增量帽锚（全量路径重置）
+                           // 261029 撤强制 autoFitCamera（LeadScan 斜视角——每次全量推
+                           // 踩掉扫描左相机视角）；取景归 loadLaserPoints→maybeAutoFrame
+                           //（左相机视角＋无标志点时激光包围球回退——261027 原诉求不回退）
                       });
             // 261018 增量追加（用户口径：只渲染增加的点）：消费线程只传尾部新增
             // ——此处按 200 万硬帽对尾段抽稀（超帽时旧段不动、新段降密度；全量
@@ -1133,11 +1136,29 @@ void MainWindow::showCameraMonitor() {
         //    UI 侧全尺寸 QImage 拷贝/QPixmap 缩放改为回调线程一次降采样 1/4
         //    （INTER_AREA 质量更优）——送 UI 载荷 6MB→~200KB，UI 线程像素工作
         //    量降两个量级，拖动主窗/对话框不再与预览互卡
+        // 261027 用户口径：预览显示截取后（流水线实际处理几何 1688×1400 居中
+        // 裁剪——与 07 RtBridge 同参：env JMW_FC_W/H 算法尺寸、JMW_FC_CROP_X/Y
+        // 定点原点；不设＝居中），不显示上位机原尺寸图
+        static const int s_algoW = [] { int w = 1688; if (const char* e = getenv("JMW_FC_W")) w = atoi(e); return w; }();
+        static const int s_algoH = [] { int h = 1400; if (const char* e = getenv("JMW_FC_H")) h = atoi(e); return h; }();
+        static const int s_cropX = [] { int x = -1; if (const char* e = getenv("JMW_FC_CROP_X")) x = atoi(e); return x; }();
+        static const int s_cropY = [] { int y = -1; if (const char* e = getenv("JMW_FC_CROP_Y")) y = atoi(e); return y; }();
+        const auto cropToAlgo = [](const cv::Mat& m) -> cv::Mat {
+            if (m.empty() || s_algoW <= 0 || s_algoH <= 0
+                || (m.cols == s_algoW && m.rows == s_algoH))
+                return m;
+            if (m.cols < s_algoW || m.rows < s_algoH) return m;
+            const int x0 = s_cropX >= 0 ? s_cropX : (m.cols - s_algoW) / 2;
+            const int y0 = s_cropY >= 0 ? s_cropY : (m.rows - s_algoH) / 2;
+            return m(cv::Rect(x0, y0, s_algoW, s_algoH));
+        };
+        const cv::Mat lCrop = cropToAlgo(f.leftGray);
+        const cv::Mat rCrop = cropToAlgo(f.rightGray);
         cv::Mat lSmall, rSmall;
-        if (!f.leftGray.empty())
-            cv::resize(f.leftGray, lSmall, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
-        if (!f.rightGray.empty())
-            cv::resize(f.rightGray, rSmall, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+        if (!lCrop.empty())
+            cv::resize(lCrop, lSmall, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+        if (!rCrop.empty())
+            cv::resize(rCrop, rSmall, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
         const auto fidL = f.frameIdLeft;
         const auto fidR = f.frameIdRight;
         // T/V 激光组判定（260927 时间戳奇偶法，CameraControl 随帧）：预览监视显示

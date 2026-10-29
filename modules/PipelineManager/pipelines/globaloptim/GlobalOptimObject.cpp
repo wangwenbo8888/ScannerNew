@@ -56,8 +56,15 @@ const char* qualityName(Scanner::QualityFlag q) {
 /// 生产激光重放适配器：host xyz → GpuMat 上传 → 新 LaserCloudFuseCuda 融合
 /// （每次 run 新实例=重放语义；法线不随重放重估计——沿 C 线法线语义，如实注明）。
 /// 返回 false=本帧失败/异常（空/畸形输入、上传异常、融合失败——调用方聚合降级）
+/// 261029 体素参数化：与 C 线会话融合同参（Config.laserVoxelSizeMm——02 注入）
 class RealLaserReplayAdapter final : public ILaserReplayFuse {
 public:
+    explicit RealLaserReplayAdapter(float voxelSizeMm)
+        : fuse_([voxelSizeMm] {
+              calib::LaserCloudFuseCUDAParams fp;
+              fp.voxelSize = voxelSizeMm;
+              return fp;
+          }()) {}
     bool fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) override {
         if (xyz.empty() || xyz.size() % 3 != 0) return false;
         try {
@@ -452,7 +459,8 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
         } else {
             if (cb) cb(70, "laser 重融合重放");
             replayLaser_ = laserFactory_ ? laserFactory_()
-                                         : std::make_unique<RealLaserReplayAdapter>();
+                                         : std::make_unique<RealLaserReplayAdapter>(
+                                               cfg_.laserVoxelSizeMm);
             size_t laserFuseFails = 0;              // 融合失败/异常帧聚合（I1）
             for (size_t i = 0; i < snap.obs.size(); ++i) {
                 if (cancel.cancelled()) break;     // 帧间检查点

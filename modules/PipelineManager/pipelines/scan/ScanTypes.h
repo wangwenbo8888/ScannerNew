@@ -6,6 +6,7 @@
 // CUDA 构建下存在；BUILD_CUDA=OFF 时 laser 退化为 int 占位（无 opencv cuda 头依赖）。
 // ============================================================================
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -38,6 +39,11 @@ struct ScanConfig {
     // 261025 Phase 2：五链执行器开关（默认 false=走旧 lane 调度；true=走五链）
     // 环境变量 JMW_FIVECHAIN=1 亦可开启（app 侧经环境变量切换不动 config）
     bool useFiveChain = false;
+
+    // 261029 测试数据回放帧门（app 注入 dm->isCapturing()——测试回放与在线
+    // 帧流同语义：模式键只 arm，设备 M 键启停控制回放起停；空=恒开（离线
+    // 直跑/无设备场景）。在线模式不受影响（帧门本就在 app 帧回调侧）
+    std::function<bool()> testFrameGate;
 };
 
 #ifdef JMW_BUILD_CUDA

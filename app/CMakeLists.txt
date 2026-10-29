@@ -161,6 +161,10 @@ add_custom_target(seed_configs ALL
 # 双配置 LocalDebuggerWorkingDirectory（VS 原生按配置条件生效）
 # ============================================================================
 if(JMW_BUILD_MODULE_DLLS AND CMAKE_GENERATOR MATCHES "Visual Studio")
+    # 261029 测试数据回放改 config 播种（config/fc_testdata.json——seed_config.cmake
+    # 仅缺失时补种，现场 exe 侧改开关不被构建覆盖）。曾用 LocalDebuggerEnvironment
+    # 注入 env JMW_FC_TESTDATA——VS 打开期间不重读外部改写的 .vcxproj.user（F5 用
+    # 内存缓存，保存项目时还可能写回旧值），换启动方式即丢配置，故废弃
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/LeadScannerK2.vcxproj.user" "<?xml version=\"1.0\" encoding=\"utf-8\"?>
 <Project ToolsVersion=\"Current\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">
   <PropertyGroup Condition=\"'\$(Configuration)|\$(Platform)'=='Debug|x64'\">

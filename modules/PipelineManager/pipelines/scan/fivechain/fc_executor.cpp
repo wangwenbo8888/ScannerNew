@@ -659,10 +659,24 @@ void FiveChainExecutor::chain1Loop() {
                             cv::cuda::StreamAccessor::getStream(gS_));
         recordBusySpan_(j->idx, true);
         // ══ 【E4/E5】提交段（零宿主同步）＋槽释放＋唯一排水＋完成段 ══
+        // 261028 安全网：标点模式激光掩膜空/近空时 flat 产 0 点，延迟路径
+        // d_centerPoints 为容量缓冲（非 null）→ 空值护栏不过 → undistort/interp
+        // 在空数据上操作 → 下游崩溃。整体 try-catch：失败帧激光段墓碑、标志
+        // 点链继续（不影响标志点重建）
         int frontKind = 0;
-        if (j->sepDone)
-            frontKind = h_.submitLaserFront(h_.laserOps_, j->prod, j->record,
-                                            tubeOdd, j->idx % graySlots_, gS_);
+        if (j->sepDone) {
+            try {
+                frontKind = h_.submitLaserFront(h_.laserOps_, j->prod, j->record,
+                                                tubeOdd, j->idx % graySlots_, gS_);
+            } catch (const std::exception& e) {
+                h_.fail("steger_fast", j->prod,
+                        std::string("激光前段异常（安全网捕获）: ") + e.what());
+                frontKind = 0;
+            } catch (...) {
+                h_.fail("steger_fast", j->prod, "激光前段未知异常（安全网捕获）");
+                frontKind = 0;
+            }
+        }
         // 【前段提前提交】v3 提交段随提交相位（排水前）——容量视图＋计数尾闸
         //（判据用 interp 结果字段：延迟分支提交段不落 stepOk——那是完成段的事）
         if (frontKind == 1 && j->prod.interpL.success && j->prod.interpR.success)
@@ -678,12 +692,35 @@ void FiveChainExecutor::chain1Loop() {
 
         if (frontKind != 0) {
             gS_.waitForCompletion();   // 唯一排水点（同流单线程——含 RLE D2H）
+            // 261028 CUDA 异步错误防护：标点模式空激光→undistort/interp 在
+            // 容量缓冲垃圾数据上操作→GPU 故障（异步报告于同步点）。此处
+            // 主动检查＋清除 sticky error，防级联崩溃（SEH 不可 catch）
+            {
+                const cudaError_t ce = cudaGetLastError();
+                if (ce != cudaSuccess) {
+                    fprintf(stderr, "[fc:cuda-guard] idx=%d async err after drain: %s"
+                                    "——激光段跳过（标志点链继续）\n",
+                            j->idx, cudaGetErrorString(ce));
+                    h_.fail("steger_fast", j->prod,
+                            std::string("CUDA 异步错误: ") + cudaGetErrorString(ce));
+                    frontKind = 0;   // 视为激光段失败——跳过后续
+                }
+            }
             j->prod.gpuDrained = true;
-            h_.finishLaserFront(h_.laserOps_, j->prod, j->record, frontKind);
-            if (h_.stepOk(j->prod, "steger_fast")
-                && h_.stepOk(j->prod, "undistort_cuda")
-                && h_.stepOk(j->prod, "epipolar_interp_dual"))
-                fcV3Front(j, tubeOdd, gS_);
+            try {
+                if (frontKind != 0) {
+                    h_.finishLaserFront(h_.laserOps_, j->prod, j->record, frontKind);
+                    if (h_.stepOk(j->prod, "steger_fast")
+                        && h_.stepOk(j->prod, "undistort_cuda")
+                        && h_.stepOk(j->prod, "epipolar_interp_dual"))
+                        fcV3Front(j, tubeOdd, gS_);
+                }
+            } catch (const std::exception& e) {
+                h_.fail("steger_fast", j->prod,
+                        std::string("激光完成段异常（安全网）: ") + e.what());
+            } catch (...) {
+                h_.fail("steger_fast", j->prod, "激光完成段未知异常（安全网）");
+            }
         }
 
         // RLE runs 拷出【E3】：正常路径 gpuDrained（flat 排水含 evGate 传递→RLE D2H
@@ -1073,7 +1110,11 @@ void FiveChainExecutor::chain2Loop() {
         const long long t0 = steadyNs();
         chCount_[5].fetch_add(1);
         calib::LaserMatchScanCpuResultV3 cr;
-        if (!j->readFail && j->front.success) {
+        // 261028 安全网：chain2 v3 后段——标点模式空激光→前段垃圾数据→
+        // v3 后段 null 指针崩溃（chain1b 的 catch 接不到——不同线程）
+        const bool laserValid = !j->readFail && j->front.success
+                                && j->front.leftCount > 0;
+        if (laserValid) {
             if (getenv("JMW_FCDIAG")) {
                 fprintf(stderr,
                         "[fc:diag] idx=%d front: L=%d R=%d seg=%d cards=%d "
@@ -1127,6 +1168,7 @@ void FiveChainExecutor::chain2Loop() {
                 if (cr.matchedCount > eCapPts_)
                     eTruncPts_.fetch_add(cr.matchedCount - eCapPts_);
                 j->prod.laserPoints3D = j->eCount;
+                h_.diagLaserPts_.fetch_add(j->eCount, std::memory_order_relaxed);
             }
             h_.setStepOk(j->prod, "laser_reconstruct", true);
             h_.timeEnd("laser_reconstruct", j->prod, j->record, false);
@@ -1156,6 +1198,10 @@ void FiveChainExecutor::chain2Loop() {
 // → F（帧序产出）
 // ============================================================================
 void FiveChainExecutor::fuseLoop() {
+    // 261028 融合诊断——fuseLoop 入口（JMW_LOG 落盘）
+    JMW_LOG_WARN("07-FiveChain",
+        "[FC-FUSE-INIT] fuseOnHold={} holdSkip={} totalCycles={}",
+        h_.cfg_.runtime.fuseOnHold, h_.cfg_.fivechain.holdSkip, totalCycles_);
     // 【H1/H2·fuse 绑核＋优先级·2026-10-24】env JMW_FCPIN_FUSE=N：N=物理核号→
     // 绑该核 LP1＋THREAD_PRIORITY_HIGHEST（fcApplyPin 成对，仿 JMW_FCPIN_CH2
     // 模式；JMW_AFFINITY 设置时仍整体旁路）。针对：H1 优先级倒置（ch2(HIGHEST)
@@ -1187,13 +1233,23 @@ void FiveChainExecutor::fuseLoop() {
             pendC_[slot] = nullptr;
             pendE_[slot] = nullptr;
             const std::string& rs = j->prod.regSource;
-            // 【P5】holdSkip 演练：全部帧按 hold 处理（零上传弃 E 路径验证）
-            // 261027 fuseOnHold 诊断：无标志点场景（补光灯故障期）验证激光链
-            // ——hold 帧沿用上帧 R/T 强制融合（非测量口径）
+            // 261028 核修：无条件融合（fuseOnHold 各种设置方式均不生效——
+            // 直接跳过配准门控，只要有激光点就融合；诊断用）
             const bool fused = h_.cfg_.fivechain.holdSkip == 0
-                               && (rs == "first" || rs == "flow" || rs == "fuse"
-                                   || (rs == "hold" && h_.cfg_.runtime.fuseOnHold))
                                && j->eCount > 0 && j->eSlot >= 0;
+            // 261028 融合逐帧诊断（前 5 帧——JMW_LOG 落盘）
+            {
+                static std::atomic<int> s_fn{0};
+                const int fn = s_fn.fetch_add(1);
+                if (fn < 5) {
+                    JMW_LOG_WARN("07-FiveChain",
+                        "[FC-FUSE] f={} rs={} fuseOnHold={} holdSkip={} "
+                        "eCount={} eSlot={} → fused={}",
+                        j->idx, rs, h_.cfg_.runtime.fuseOnHold,
+                        h_.cfg_.fivechain.holdSkip,
+                        j->eCount, j->eSlot, fused);
+                }
+            }
             if (fused) {
                 const long long t0 = steadyNs();
                 h_.timeBegin();
@@ -1229,6 +1285,15 @@ void FiveChainExecutor::fuseLoop() {
                         .store((steadyNs() - t0) / 1000, std::memory_order_relaxed);   // us
             }
             if (j->eSlot >= 0) {
+                // 261029 GBA 激光缓存填充：E 块（锁页 host）释放前拷出本帧设备系
+                // 激光 3D——D 线重放（GBA 优化位姿重融合）原料。与 C 线融合门控
+                //（hold/skip）无关：重放是终局遍独立路径，逐帧原料有则必缓存
+                if (j->eCount > 0) {
+                    auto& lx = j->prod.laserXyzHost;
+                    lx.resize(static_cast<size_t>(j->eCount) * 3);
+                    std::memcpy(lx.data(), eBlocks_[static_cast<size_t>(j->eSlot)],
+                                lx.size() * sizeof(float));
+                }
                 releaseEBlock(j->eSlot);
                 j->eSlot = -1;
             }

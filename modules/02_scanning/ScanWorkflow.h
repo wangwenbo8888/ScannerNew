@@ -78,6 +78,9 @@ public:
     /// 中段模拟提取源（调试件；start 前设置。空=真机链；非空=每帧标志点/激光
     /// 提取结果由模拟观测替换，配准/融合/渲染走生产代码。生命周期归调用方）
     void setSimSource(Scanner::pipeline::SimScanSource* src) { simSource_ = src; }
+    /// 261029 测试数据回放帧门（start 前设置；app 注入 dm->isCapturing()——
+    /// 测试回放与在线帧流同语义：模式键只 arm，M 键启停控制回放起停。空=恒开）
+    void setFrameGate(std::function<bool()> gate) { frameGate_ = std::move(gate); }
 
     // —— 完成回报钩子（P5-T15 门禁接线，同 01 T14 模式）——
     /// 会话终态回报（stop() 活跃会话终止处调用，bool=ok）。
@@ -172,6 +175,7 @@ private:
     ScanMode scanMode_ = ScanMode::MarkerOnly;
     ScanCalibration calib_;
     Scanner::pipeline::SimScanSource* simSource_ = nullptr;   // 中段模拟提取源（可空）
+    std::function<bool()> frameGate_;                         // 261029 测试回放帧门（可空=恒开）
     std::atomic<WorkflowState> state_{WorkflowState::Idle};
     WorkflowCallback callback_;
     std::function<void(bool)> onFinished_;         // 完成回报（app 注入；可空）

@@ -58,6 +58,10 @@ struct LaserMarkingSeparationParams {
     /// 调试开关：结果额外携带分步中间掩膜（GPU 克隆；生产保持 false）
     bool dumpAllSteps = false;
 
+    /// 261028 确定性开关：禁用 CUDA Graph（走 legacy 逐核路径）。
+    /// CUDA Graph 在多会话场景下捕获不确定（conic 8/帧 vs 0-1/帧）。
+    bool useCudaGraph = true;
+
     void validate() const {
         if (threshold < 0 || threshold > 255)
             throw std::invalid_argument(

@@ -85,6 +85,9 @@ public:
         // ——走既有降级路径（质量 Degraded 如实标注）。激光会话保留批算（帧
         // 数通常较低且收益直接）；帧子采样/关键帧化后可再放开（待办）。
         bool   skipBatchSolve = false;
+        // 261029 D 线激光重放体素（mm）——须与 C 线会话融合同参（否则重放计数/
+        // 精度口径漂移；02 按会话体素档注入，默认五链验证口径 0.25）
+        float  laserVoxelSizeMm = 0.25f;
     };
 
     /// GBA 执行函数（测试注入假 09 适配；空=真 GlobalBundleAdjustmentCPU::Execute）

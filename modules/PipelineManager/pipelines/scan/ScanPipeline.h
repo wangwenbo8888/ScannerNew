@@ -106,7 +106,8 @@ private:
     bool fcOpsLoaded_ = false;
 
     // —— 运行时观测 ——
-    FrameObsAccumulator obs_{1u << 20};            // 五链逐帧 obs 无激光 host 缓存——小预算即可
+    FrameObsAccumulator obs_;    // 激光缓存预算＝cfg.laserCacheBudgetMB（261029 前
+                                 // 1MB 存根——D 线重放接入后 ~3 帧即降级，改接会话配置）
 };
 
 } // namespace Scanner::pipeline

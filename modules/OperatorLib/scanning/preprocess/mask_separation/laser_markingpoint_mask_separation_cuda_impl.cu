@@ -1,4 +1,4 @@
-#include "laser_markingpoint_mask_separation_cuda_pimpl.h"
+﻿#include "laser_markingpoint_mask_separation_cuda_pimpl.h"
 #include "common/calib_types.h"
 #include "common/calib_logging.h"
 #include <cuda_runtime.h>
@@ -894,14 +894,15 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
             }
             memcpy(h_grayPin_, grayImage.data, n);
         }
-        const bool diagMode = getenv("JMW_SEPTIME") != nullptr;
+        const bool diagMode = getenv("JMW_SEPTIME") != nullptr || !params_.useCudaGraph;
         if (!diagMode && graphExec_) {
             // 稳态：整管线一次提交（图内含 H2D 上传——pinned 源地址恒定）
             cudaGraphLaunch(graphExec_, cs);
             goto pipelineDone;   // 【P0 修复】防 fall-through 到 legacy 双执行
         } else if (!diagMode) {
             // 首帧：捕获完整序列（上传＋全部分步核），实例化后立即执行
-            cudaError_t ce = cudaStreamBeginCapture(cs, cudaStreamCaptureModeGlobal);
+            // 【261027 捕获毒化根治】Global→Relaxed（同设备版口径——见下注）
+            cudaError_t ce = cudaStreamBeginCapture(cs, cudaStreamCaptureModeRelaxed);
             if (ce != cudaSuccess) goto legacyPath;
             {
                 const cv::Mat wrap(r, c, CV_8UC1, h_grayPin_);
@@ -991,7 +992,7 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separateDev(
         auto cs = cv::cuda::StreamAccessor::getStream(stream);
         const size_t n = static_cast<size_t>(r) * c;
 
-        const bool diagMode = getenv("JMW_SEPTIME") != nullptr;
+        const bool diagMode = getenv("JMW_SEPTIME") != nullptr || !params_.useCudaGraph;
         if (!diagMode && graphExecDev_) {
             // 稳态：D2D 入驻 + 一次 graphLaunch。
             // ⚠ 必须用 copyTo：源 GpuMat 可能带行距（pitch），按字节裸拷会压扁布局
@@ -1004,7 +1005,12 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separateDev(
             // 【WDDM 边界修复】同流前序图仍在飞时紧接 BeginCapture 会触发驱动
             // 崩溃——捕获仅每实例一次，排空等待代价可忽略
             stream.waitForCompletion();
-            cudaError_t ce = cudaStreamBeginCapture(cs, cudaStreamCaptureModeGlobal);
+            // 【261027 捕获毒化根治】Global→Relaxed：Global 模式下捕获窗内任何
+            // 线程的 cudaMalloc（其它 lane 的 Warmup/懒分配）都是非法——一旦
+            // 撞上，异常从捕获中抛出、流永久滞留捕获态、全进程 CUDA 毒化
+            //（真机 18:44:57 崩溃链实证）。Relaxed 只录本流工作，跨线程分配
+            // 合法；图内容与 Global 逐位一致（对拍不受影响）
+            cudaError_t ce = cudaStreamBeginCapture(cs, cudaStreamCaptureModeRelaxed);
             if (ce == cudaSuccess) {
                 executePipeline(stream, result.timings, /*recordEvents=*/false);
                 if (cudaStreamEndCapture(cs, &graphDev_) != cudaSuccess) graphDev_ = nullptr;

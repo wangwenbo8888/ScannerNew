@@ -16,10 +16,24 @@
 
 namespace Scanner::pipeline {
 
+// —— 261027 名义温档标定装载（camera_calib.json——与产表/离线验证同源）——
+namespace {
+cv::Mat matFromJson22(const nlohmann::json& j, int rows, int cols) {
+    cv::Mat m(rows, cols, CV_64F);
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < cols; ++c)
+            m.at<double>(r, c) = j.at(static_cast<size_t>(r))
+                                     .at(static_cast<size_t>(c)).get<double>();
+    return m;
+}
+} // namespace
+
 // ============================================================================
 // 装配注入
 // ============================================================================
-ScanPipeline::ScanPipeline(ScanConfig cfg) : cfg_(std::move(cfg)) {}
+ScanPipeline::ScanPipeline(ScanConfig cfg)
+    : cfg_(std::move(cfg)),
+      obs_(static_cast<size_t>(cfg_.laserCacheBudgetMB) * (size_t{1} << 20)) {}
 
 ScanPipeline::~ScanPipeline() {
     stop();                                        // 安全网：幂等
@@ -79,7 +93,9 @@ Scanner::Result ScanPipeline::start() {
 
     if (!fcAdapter_) {
         // 惰性装配（首 start 建）
-        FiveChainConfig fcCfg;              // 沙盒 config_flat.json 值域默认
+            FiveChainConfig fcCfg;              // 沙盒 config_flat.json 值域默认
+            fcCfg.laserEnabled = cfg_.enableLaser;   // 标点模式=false：跳过激光链（防崩溃）
+            fcCfg.testFrameGate = cfg_.testFrameGate; // 261029 测试回放帧门（app 注入；可空=恒开）
         // 体素下限 0.25mm（五链验证口径；UI 更细档（如 0.01）爆显存/拖垮融合）
         if (cfg_.voxelSizeMm >= 0.25) {
             fcCfg.voxelSizeMm = cfg_.voxelSizeMm;
@@ -141,6 +157,56 @@ Scanner::Result ScanPipeline::start() {
         }
         fcAdapter_->attachCalib(K1_, D1_, K2_, D2_, imageWidth_, imageHeight_,
                                 fcTable ? fcTable : laserTable_);
+        // 名义温档立体标定（config/camera_calib.json——产表同源；env
+        // JMW_FC_CAMJSON 可指定路径；缺文件回退逐帧快照注入并 WARN）
+        {
+            const std::string camPath = getenv("JMW_FC_CAMJSON") != nullptr
+                ? std::string(getenv("JMW_FC_CAMJSON"))
+                : "config/camera_calib.json";
+            std::ifstream cf(camPath);
+            if (cf) {
+                try {
+                    nlohmann::json j;
+                    cf >> j;
+                    const auto& table = j.at("stereoRectifyTempTable").at("table");
+                    // 就近 22.5℃（标定参考温）——与离线验证同档
+                    const nlohmann::json* tier = nullptr;
+                    double bestT = 0;
+                    for (const auto& t : table) {
+                        if (!t.contains("temperature")) continue;
+                        const double tv = t.at("temperature").get<double>();
+                        if (tier == nullptr
+                            || std::abs(tv - 22.5) < std::abs(bestT - 22.5) - 1e-12) {
+                            tier = &t; bestT = tv;
+                        }
+                    }
+                    if (tier != nullptr) {
+                        fcAdapter_->attachStereoNominal(
+                            matFromJson22(tier->at("R1"), 3, 3),
+                            matFromJson22(tier->at("R2"), 3, 3),
+                            matFromJson22(tier->at("P1"), 3, 4),
+                            matFromJson22(tier->at("P2"), 3, 4),
+                            matFromJson22(tier->at("Q"), 4, 4),
+                            matFromJson22(tier->at("compensatedCameraMatrixL"), 3, 3),
+                            matFromJson22(tier->at("compensatedCameraMatrixR"), 3, 3),
+                            matFromJson22(j.at("intrinsic").at("left").at("dist_coeffs"), 1, 5),
+                            matFromJson22(j.at("intrinsic").at("right").at("dist_coeffs"), 1, 5),
+                            matFromJson22(j.at("extrinsic").at("R"), 3, 3),
+                            matFromJson22(j.at("extrinsic").at("T"), 3, 1));
+                        JMW_LOG_INFO("07-ScanPipeline",
+                            "[ScanPipeline] 五链名义温档标定装载: {}（tier={}℃）",
+                            camPath, bestT);
+                    }
+                } catch (const std::exception& e) {
+                    JMW_LOG_WARN("07-ScanPipeline",
+                        "[ScanPipeline] 名义温档标定解析失败（回退快照注入）: {}", e.what());
+                }
+            } else {
+                JMW_LOG_WARN("07-ScanPipeline",
+                    "[ScanPipeline] camera_calib.json 缺失（{}）——回退逐帧快照注入",
+                    camPath);
+            }
+        }
     }
     // 仓库会话边界：既有内容折入基线前缀
     if (cloudWarehouse_) cloudWarehouse_->beginCloudSession();

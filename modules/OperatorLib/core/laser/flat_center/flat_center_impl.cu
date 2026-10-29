@@ -296,8 +296,11 @@ StegerResult FlatCenterExtractor::Impl::extractFlatSubmit(
         if (useGraph) {
             cudaError_t gerr = cudaSuccess;
             if (!flatGraphExec_) {
-                stream.waitForCompletion();   // 捕获前必须排空本流（WDDM 驱动崩溃防线）
-                gerr = cudaStreamBeginCapture(cs, cudaStreamCaptureModeGlobal);
+                stream.waitForCompletion();   // 排空前序图闭包（WDDM 边界保险）
+                // 【261027 捕获毒化根治】Global→ThreadLocal（对齐 interp/v3 口径）：
+                // Global 捕获窗内任何线程 cudaMalloc 非法——撞上即流滞留捕获态、
+                // 全进程 CUDA 毒化（真机 18:44:57 崩溃链）；ThreadLocal 只录本流工作
+                gerr = cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal);
                 if (gerr == cudaSuccess) {
                     FlatPreSmoothKernel<<<pg, pb, 0, cs>>>(
                         d_grayImage.ptr<unsigned char>(), d_grayImage.step, rows, cols,

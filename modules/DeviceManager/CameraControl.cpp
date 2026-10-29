@@ -540,6 +540,25 @@ Result CameraControl::setResolution(int width, int height) {
             int64_t offYInc = fc->GetIntFeature("OffsetY")->GetInc();
             int64_t offX = ((wMax - width) / 2 / offXInc) * offXInc;
             int64_t offY = ((hMax - height) / 2 / offYInc) * offYInc;
+            // 261027 修复：部分相机 OffsetX/OffsetY max=0（不支持 ROI 偏移）——
+            // 居中偏移被拒导致整个 ROI 设置失败回退全画幅。此机型只能从
+            // 传感器左上角 (0,0) 取 ROI。标定数据即此几何（1688×1400 @ (0,0)）
+            {
+                const int64_t offXMax = fc->GetIntFeature("OffsetX")->GetMax();
+                const int64_t offYMax = fc->GetIntFeature("OffsetY")->GetMax();
+                if (offX > offXMax) {
+                    JMW_LOG_WARN("08-CameraControl",
+                        "[CameraControl] side={} OffsetX={} 超上限 {}——钳到 {}（该相机不支持 ROI 偏移，左上角取景）",
+                        i, offX, offXMax, offXMax);
+                    offX = std::max<int64_t>(0, offXMax);
+                }
+                if (offY > offYMax) {
+                    JMW_LOG_WARN("08-CameraControl",
+                        "[CameraControl] side={} OffsetY={} 超上限 {}——钳到 {}",
+                        i, offY, offYMax, offYMax);
+                    offY = std::max<int64_t>(0, offYMax);
+                }
+            }
 
             fc->GetIntFeature("OffsetX")->SetValue(offX);
             fc->GetIntFeature("OffsetY")->SetValue(offY);

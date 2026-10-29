@@ -1,4 +1,4 @@
-// FiveChainAdapter.cpp — 适配层实现（自持算子宿主＋07 桥）＋FcHarnessCompat 方法实现
+﻿// FiveChainAdapter.cpp — 适配层实现（自持算子宿主＋07 桥）＋FcHarnessCompat 方法实现
 #include "FiveChainAdapter.h"
 #include "harness.h"
 
@@ -6,6 +6,7 @@
 #include "ICloudWarehouse.h"
 #include "scanning/preprocess/mask_separation/laser_markingpoint_mask_separation_cuda.h"
 #include "scanning/fusion/laser_cloud_fuse_cuda/laser_cloud_fuse_cuda.h"
+#include "core/marker/marker_cloud_fuse_cpu/marker_cloud_fuse_cpu.h"
 #include "sched/IFrameSource.h"
 #include "SlotRing.h"
 #include "EnhancedFrame.h"
@@ -13,7 +14,12 @@
 
 #include <cuda_runtime.h>
 #include <opencv2/core/cuda_stream_accessor.hpp>
+#include <opencv2/cudaarithm.hpp>    // cv::cuda::sum（激光掩膜内容检查）
+#include <opencv2/imgcodecs.hpp>    // 诊断帧转储
 #include <chrono>
+#include <cstdio>
+#include <fstream>
+#include <filesystem>
 #include <array>
 
 #include <spdlog/spdlog.h>
@@ -40,6 +46,7 @@ FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
                 "[FiveChainAdapter] mask_separation 参数解析失败（用默认）: {}", e.what());
         }
     }
+    sepParams.useCudaGraph = false;   // 261028 确定性保证（CUDA Graph 多会话捕获不确定——conic 8→0 根因）
     sepL_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
     sepR_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
     calib::LaserCloudFuseCUDAParams fp;
@@ -102,6 +109,16 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
         fail("steger_fast", p, "d_laserMask 为空（本帧激光线未分离出）");
         return 0;
     }
+    // 261028 根修：标点模式激光掩膜非空但全零——在入口拦截（不做任何 GPU
+    // 提交），彻底避免 flat/undistort/interp/v3 在垃圾数据上操作后崩溃。
+    // cv::cuda::sum 是 GPU 归约（~0.1ms，标量回传）——成本可忽略
+    {
+        const cv::Scalar s = cv::cuda::sum(*p.sepL.d_laserMask);
+        if (s[0] < 1.0) {
+            fail("steger_fast", p, "laser mask 全零（标点模式/无激光帧）");
+            return 0;
+        }
+    }
     try {
         timeBegin();
         bool deferred = false;
@@ -114,6 +131,13 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
             if (!p.stegerL.success || !p.stegerR.success) {
                 fail("steger_fast", p, p.stegerL.message + " | " + p.stegerR.message);
                 return 0;
+            }
+            // 261027 零点护栏（延迟路径——标点模式激光掩膜空/近空时 flat 产
+            // 0 点，d_line_ids 可能为 null → undistort 解引用崩溃真机实证）
+            if (!p.stegerL.d_centerPoints || !p.stegerR.d_centerPoints
+                || !p.stegerL.d_line_ids || !p.stegerR.d_line_ids) {
+                fail("undistort_cuda", p, "steger 延迟路径 0 中心点（护护栏）");
+                return deferred ? 1 : 0;   // 延迟：仍须排水（防在飞 GPU 工作悬挂）
             }
         } else if (L.stegerL_ && L.stegerR_) {
             // steger_fast legacy 路径（分眼实例）
@@ -938,13 +962,37 @@ struct FiveChainAdapter::RtBridge {
     cv::Mat cropL_, cropR_;                                    // 裁剪产物宿主（在飞帧消费）
 
     int algoW_ = 0, algoH_ = 0;        // 算法几何（0=直通不裁剪）
+    // 分眼裁剪原点（-1=居中推定）。优先级：分眼 env（JMW_FC_CROPL_X/Y、
+    // JMW_FC_CROPR_X/Y）＞双眼统一（JMW_FC_CROP_X/Y）＞居中。
+    // 261027 求解器实证分眼不对称：L=(180,119) R=(180,68)（左眼 y 低 51px）
+    int cropXL_ = -1, cropYL_ = -1, cropXR_ = -1, cropYR_ = -1;
     std::atomic<uint64_t> cropFrames_{0};   // 裁剪帧计数（诊断）
 
     scr::FrameSourceCompat src;
 
+    /// 诊断帧转储（env JMW_FC_DUMPFRAMES=N——前 N 帧 L/R 原图落盘
+    /// diagnostics/fc_frames/，裁剪前 2048×1536——离线原点求解器原料）
+    int dumpMax_ = 0;
+    int dumpCount_ = 0;
+    bool useSnapshotCalib_ = true;     // false＝名义温档口径（快照注入关闭）
+
+    void maybeDump() {
+        if (dumpCount_ >= dumpMax_ || !cur) return;
+        try {
+            namespace fsd = std::filesystem;
+            const fsd::path dir = "diagnostics/fc_frames";
+            fsd::create_directories(dir);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%06d", dumpCount_);
+            cv::imwrite((dir / ("L_" + std::string(buf) + ".png")).string(), cur->grayL);
+            cv::imwrite((dir / ("R_" + std::string(buf) + ".png")).string(), cur->grayR);
+            ++dumpCount_;
+        } catch (...) { /* 诊断件失败静默 */ }
+    }
+
     /// 居中裁剪到算法几何（与标定表几何一致——K/P/Q/激光表全 1688×1400）。
     /// 尺寸已符/裁剪关闭＝直通（浅拷）；不符＝居中 ROI 深拷（子矩阵连续性保算子安全）
-    void cropToAlgo(const cv::Mat& src, cv::Mat& dst) {
+    void cropToAlgo(const cv::Mat& src, cv::Mat& dst, bool left) {
         if (algoW_ <= 0 || algoH_ <= 0
             || (src.cols == algoW_ && src.rows == algoH_)) {
             dst = src;
@@ -954,13 +1002,17 @@ struct FiveChainAdapter::RtBridge {
             dst = cv::Mat();       // 采集小于算法几何＝配置错——交上层零帧告警
             return;
         }
-        const int x0 = (src.cols - algoW_) / 2;
-        const int y0 = (src.rows - algoH_) / 2;
+        int x0 = (src.cols - algoW_) / 2, y0 = (src.rows - algoH_) / 2;
+        const int fx = left ? cropXL_ : cropXR_;
+        const int fy = left ? cropYL_ : cropYR_;
+        if (fx >= 0) x0 = fx;
+        if (fy >= 0) y0 = fy;
         dst = src(cv::Rect(x0, y0, algoW_, algoH_)).clone();
     }
 
     void wire() {
         src.cycles.fs = &src;
+        if (const char* e = getenv("JMW_FC_DUMPFRAMES")) dumpMax_ = atoi(e);
         src.cycleAt = [this](size_t i) -> scr::FrameCycleInfo {
             scr::FrameCycleInfo ci;
             ci.laserIdx = static_cast<int>(i);   // 桥语义：laserIdx 槽位复用透传 fc idx
@@ -986,6 +1038,7 @@ struct FiveChainAdapter::RtBridge {
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 }
                 cur = std::move(f);
+                maybeDump();   // 诊断：裁剪前原图转储（env JMW_FC_DUMPFRAMES）
                 // 元数据＋帧宿主落槽（release 序——cycleAt/chain 消费方 acquire）
                 Slot& s = ring[static_cast<size_t>(idx) % kRing];
                 s.keep = cur;
@@ -995,8 +1048,8 @@ struct FiveChainAdapter::RtBridge {
                 s.seq.store(idx, std::memory_order_release);
                 servedFrames.fetch_add(1, std::memory_order_relaxed);
                 // 居中裁剪到算法几何（标定表 1688×1400——采集 2048×1536 差异收口）
-                cropToAlgo(cur->grayL, cropL_);
-                cropToAlgo(cur->grayR, cropR_);
+                cropToAlgo(cur->grayL, cropL_, /*left=*/true);
+                cropToAlgo(cur->grayR, cropR_, /*left=*/false);
                 if (cropL_.empty() || cropR_.empty()) {
                     err = "rt bridge: 采集尺寸小于算法几何 ("
                           + std::to_string(cur->grayL.cols) + "x"
@@ -1028,8 +1081,266 @@ void FiveChainAdapter::attachCalib(const cv::Mat& K1, const cv::Mat& D1,
 }
 
 // ---------------------------------------------------------------------------
+// loadTestData — 测试数据回放模式（<帧目录>——raw 优先/PNG 回退）
+// 失败返回 fail（startRealtime 中止——拒绝静默回退在线数据）
+// ---------------------------------------------------------------------------
+Scanner::Result FiveChainAdapter::loadTestData(const std::string& dir) {
+    namespace fsd = std::filesystem;
+    std::vector<cv::Mat> framesL, framesR;
+    std::vector<int> ids;
+    const fsd::path base(dir);
+
+    // ── 261029 优先读 raw 二进制（与离线回放完全一致——消除 PNG 解码差异）──
+    const fsd::path metaPath = base / "meta.json";
+    std::error_code ecRaw;
+    if (fsd::exists(metaPath, ecRaw)) {
+        std::ifstream mf(metaPath);
+        if (mf) {
+            nlohmann::json meta; mf >> meta;
+            const int rw = meta.at("width").get<int>();
+            const int rh = meta.at("height").get<int>();
+            for (int id : meta.at("frames").get<std::vector<int>>()) ids.push_back(id);
+            std::sort(ids.begin(), ids.end());
+            if (!ids.empty() && rw > 0 && rh > 0) {
+                const size_t fb = static_cast<size_t>(rw) * rh;
+                const size_t total = fb * ids.size();
+                // 限制 50 帧（内存）
+                if (ids.size() > 50) ids.resize(50);
+                std::vector<unsigned char> bufL, bufR;
+                {
+                    std::ifstream fl(base / "left.bin", std::ios::binary);
+                    std::ifstream fr(base / "right.bin", std::ios::binary);
+                    if (fl && fr) {
+                        bufL.resize(fb * ids.size());
+                        bufR.resize(fb * ids.size());
+                        fl.read(reinterpret_cast<char*>(bufL.data()), bufL.size());
+                        fr.read(reinterpret_cast<char*>(bufR.data()), bufR.size());
+                    }
+                }
+                if (!bufL.empty()) {
+                    for (size_t i = 0; i < ids.size(); ++i) {
+                        framesL.push_back(cv::Mat(rh, rw, CV_8UC1,
+                            bufL.data() + i * fb).clone());
+                        framesR.push_back(cv::Mat(rh, rw, CV_8UC1,
+                            bufR.data() + i * fb).clone());
+                    }
+                    JMW_LOG_WARN("07-FiveChain",
+                        "[FiveChainAdapter] 测试数据 raw 二进制模式: {} 帧 × {}×{}（离线一致口径）",
+                        ids.size(), rw, rh);
+                }
+            }
+        }
+    }
+
+    // PNG 回退（raw 不可用时）
+    if (framesL.empty()) {
+        const bool sameDirFmt = fsd::exists(base / "L_000000.png");
+        for (int i = 0;; ++i) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%06d", i);
+            fsd::path pl, pr;
+            if (sameDirFmt) {
+                pl = base / ("L_" + std::string(buf) + ".png");
+                pr = base / ("R_" + std::string(buf) + ".png");
+            } else {
+                pl = base / "left" / (std::string(buf) + ".png");
+                pr = base / "right" / (std::string(buf) + ".png");
+            }
+            std::error_code ec;
+            if (!fsd::exists(pl, ec) || !fsd::exists(pr, ec)) break;
+            cv::Mat l = cv::imread(pl.string(), cv::IMREAD_GRAYSCALE);
+            cv::Mat r = cv::imread(pr.string(), cv::IMREAD_GRAYSCALE);
+            if (l.empty() || r.empty()) break;
+            framesL.push_back(std::move(l));
+            framesR.push_back(std::move(r));
+            ids.push_back(i);
+            if (static_cast<int>(framesL.size()) >= 50) break;
+        }
+    }
+    const int n = static_cast<int>(framesL.size());
+    if (n == 0) {
+        JMW_LOG_ERROR("07-FiveChain", "[FiveChainAdapter] 测试数据加载失败: {}", dir);
+        return Scanner::Result::fail("测试数据加载失败（0 帧）: " + dir);
+    }
+    JMW_LOG_INFO("07-FiveChain",
+        "[FiveChainAdapter] 测试数据回放: {} 帧 × {}×{}（{}）",
+        n, framesL[0].cols, framesL[0].rows, dir);
+
+    // （名义标定装载已前移至 startRealtime ①b ensureStereoNominalFromConfig——
+    // 须先于 harness calib_/undistG 装配生效，此处不再重复加载）
+
+    // 覆写桥的 readFrame——从内存数组直读，尺寸已符＝裁剪直通
+    // 261029 像素校验（首帧 sum+首 4 像素值——与离线对拍定位差异）
+    if (n > 0) {
+        cv::Scalar sL = cv::sum(framesL[0]);
+        cv::Scalar sR = cv::sum(framesR[0]);
+        const uchar* pL = framesL[0].ptr<uchar>();
+        const uchar* pR = framesR[0].ptr<uchar>();
+        JMW_LOG_WARN("07-FiveChain",
+            "[FC-PIXEL] L: sum={:.0f} [0]={} [1]={} [2]={} [3]={} {}×{} continuous={}",
+            sL[0], (int)pL[0], (int)pL[1], (int)pL[2], (int)pL[3],
+            framesL[0].cols, framesL[0].rows, framesL[0].isContinuous());
+        JMW_LOG_WARN("07-FiveChain",
+            "[FC-PIXEL] R: sum={:.0f} [0]={} [1]={} [2]={} [3]={}",
+            sR[0], (int)pR[0], (int)pR[1], (int)pR[2], (int)pR[3]);
+    }
+    bridge_->algoW_ = framesL[0].cols;
+    bridge_->algoH_ = framesL[0].rows;
+    // 261029 单遍播放（游标 0..n-1 顺序；播完＝帧源尽——执行器自然收尾）。
+    // 不循环：循环回放同一组帧多遍累积，配准链 R/T 每遍演化＋末帧→首帧跳变
+    // 破坏光流，同一物理标志点带偏移重复入融合云→体素边界分裂成两两靠近的
+    // 副本（真机会话帧不重复，无此形态）。重跑＝重新点模式键 arm（全新会话）
+    auto cur = std::make_shared<int>(0);
+    bridge_->src.readFrame = [this, framesL, framesR, n, cur](int idx, bool left,
+                                                              cv::Mat& out,
+                                                              std::string& e) -> bool {
+        if (left) {
+            // 261029 帧门（app 注入 isCapturing——与在线帧流同语义：模式键只
+            // arm，M 键启停控制回放；门未开＝读帧阻塞等待（在线桥等环帧同
+            // 款），停机令即退。门关再开＝本遍续播（同在线 M 暂停/续采语义）
+            if (cfg_.testFrameGate) {
+                while (!cfg_.testFrameGate()) {
+                    if (bridge_->stopped.load(std::memory_order_acquire)) {
+                        e = "test replay stopped (gate closed)";
+                        return false;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            }
+            if (*cur >= n) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[FiveChainAdapter] 测试回放单遍完成（{} 帧）——帧源已尽；"
+                    "重跑＝重新点模式键 arm（全新会话）", n);
+                return false;   // 帧源尽：执行器排水收尾（离线回放同款终态）
+            }
+            ++(*cur);
+        }
+        const int fi = *cur - 1;
+        if (fi < 0) return false;                    // 防御：右先于左（不发生）
+        out = (left ? framesL : framesR)[static_cast<size_t>(fi)];
+        return true;
+    };
+    // 元数据：frameId=序号，tvKnown 交替（模拟 T/V 管）
+    bridge_->src.cycleAt = [this, n](size_t i) {
+        scr::FrameCycleInfo ci;
+        ci.laserIdx = static_cast<int>(i % static_cast<size_t>(n));
+        ci.tubeOdd = (i % 2) == 1;
+        return ci;
+    };
+    // 快照注入关闭（测试数据用名义标定）
+    bridge_->useSnapshotCalib_ = false;
+    // 测试模式强制融合（跳过配准门控——验证激光链用）
+    if (harness_) {
+        harness_->cfg_.runtime.fuseOnHold = true;
+        // 直打 stderr 确认生效
+        fprintf(stderr, "[FC-TEST] fuseOnHold=%d (forced)\n",
+                static_cast<int>(harness_->cfg_.runtime.fuseOnHold));
+    }
+    // onFrameMeta：填 frameId，metaValid=false
+    if (harness_) {
+        harness_->onFrameMeta = [this, n](int idx, scr::CycleProductsCompat& p) {
+            p.metaFrameId = static_cast<uint64_t>(idx % n);
+            p.metaValid = false;
+        };
+    }
+    return Scanner::Result::ok("测试数据回放 " + std::to_string(n) + " 帧");
+}
+
+// ---------------------------------------------------------------------------
 // startRealtime — 桥＋harness 装配（激光链算子/温表/配准算子）＋执行器＋收割线程
 // ---------------------------------------------------------------------------
+void FiveChainAdapter::attachStereoNominal(const cv::Mat& R1, const cv::Mat& R2,
+                                           const cv::Mat& P1, const cv::Mat& P2,
+                                           const cv::Mat& Q, const cv::Mat& K1c,
+                                           const cv::Mat& K2c, const cv::Mat& D1,
+                                           const cv::Mat& D2, const cv::Mat& Rext,
+                                           const cv::Mat& Tcomp) {
+    snR1_ = R1.clone(); snR2_ = R2.clone(); snP1_ = P1.clone(); snP2_ = P2.clone();
+    snQ_ = Q.clone(); snK1c_ = K1c.clone(); snK2c_ = K2c.clone();
+    snD1_ = D1.clone(); snD2_ = D2.clone();
+    snRext_ = Rext.clone(); snTcomp_ = Tcomp.clone();
+    hasStereoNominal_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// ensureStereoNominalFromConfig — config/camera_calib.json 就近 22.5℃ 温档
+// → attachStereoNominal。测试数据模式前置件（快照注入关闭后名义标定为唯一
+// 标定源）；任何失败返回 false（调用方 fail-fast）
+// ---------------------------------------------------------------------------
+bool FiveChainAdapter::ensureStereoNominalFromConfig() {
+    namespace fsd = std::filesystem;
+    const fsd::path calibPath = fsd::path("config") / "camera_calib.json";
+    std::error_code cec;
+    if (!fsd::exists(calibPath, cec)) {
+        JMW_LOG_ERROR("07-FiveChain",
+            "[FiveChainAdapter] 名义标定缺失: {}", calibPath.string());
+        return false;
+    }
+    try {
+        std::ifstream cf(calibPath.string());
+        nlohmann::json j;
+        cf >> j;
+        const auto& table = j.at("stereoRectifyTempTable").at("table");
+        const nlohmann::json* tier = nullptr;
+        double bestT = 0;
+        for (const auto& t : table) {
+            if (!t.contains("temperature")) continue;
+            const double tv = t.at("temperature").get<double>();
+            if (tier == nullptr
+                || std::abs(tv - 22.5) < std::abs(bestT - 22.5) - 1e-12) {
+                tier = &t; bestT = tv;
+            }
+        }
+        if (tier == nullptr) {
+            JMW_LOG_ERROR("07-FiveChain",
+                "[FiveChainAdapter] 名义标定无温档（stereoRectifyTempTable.table 空）");
+            return false;
+        }
+        auto tierM = [tier](const char* field, int r, int c) {
+            cv::Mat m(r, c, CV_64F);
+            const auto& arr = tier->at(field);
+            for (int i = 0; i < r; ++i)
+                for (int k = 0; k < c; ++k)
+                    m.at<double>(i, k) = arr.at(i).at(k).get<double>();
+            return m;
+        };
+        auto mj3 = [&j](const char* section, const char* side,
+                        const char* field, int r, int c) {
+            cv::Mat m(r, c, CV_64F);
+            const auto& arr = j.at(section).at(side).at(field);
+            for (int i = 0; i < r; ++i)
+                for (int k = 0; k < c; ++k)
+                    m.at<double>(i, k) = arr.at(i).at(k).get<double>();
+            return m;
+        };
+        auto mj2 = [&j](const char* section, const char* field, int r, int c) {
+            cv::Mat m(r, c, CV_64F);
+            const auto& arr = j.at(section).at(field);
+            for (int i = 0; i < r; ++i)
+                for (int k = 0; k < c; ++k)
+                    m.at<double>(i, k) = arr.at(i).at(k).get<double>();
+            return m;
+        };
+        attachStereoNominal(
+            tierM("R1", 3, 3), tierM("R2", 3, 3),
+            tierM("P1", 3, 4), tierM("P2", 3, 4), tierM("Q", 4, 4),
+            tierM("compensatedCameraMatrixL", 3, 3),
+            tierM("compensatedCameraMatrixR", 3, 3),
+            mj3("intrinsic", "left", "dist_coeffs", 1, 5),
+            mj3("intrinsic", "right", "dist_coeffs", 1, 5),
+            mj2("extrinsic", "R", 3, 3), mj2("extrinsic", "T", 3, 1));
+        JMW_LOG_WARN("07-FiveChain",
+            "[FiveChainAdapter] 名义标定直接加载: tier={:.1f}℃ "
+            "K1c.fx={:.1f}（确定性保证）",
+            bestT, tierM("compensatedCameraMatrixL", 3, 3).at<double>(0, 0));
+        return true;
+    } catch (const std::exception& e) {
+        JMW_LOG_ERROR("07-FiveChain",
+            "[FiveChainAdapter] 名义标定加载异常: {}", e.what());
+        return false;
+    }
+}
+
 Scanner::Result FiveChainAdapter::startRealtime(
     Scanner::data::SlotRing<Scanner::data::EnhancedFrame>& ring, size_t dropThreshold) {
     if (rtActive_.load()) return Scanner::Result::fail("五链实时链已在运行");
@@ -1040,7 +1351,8 @@ Scanner::Result FiveChainAdapter::startRealtime(
     if (rtActive_.exchange(true)) return Scanner::Result::fail("五链实时链并发启动");
 
     try {
-        // ① 桥（算法几何：默认标定表几何 1688×1400；env JMW_FC_W/H 覆盖，0=直通）
+        // ① 桥（算法几何：默认标定表几何 1688×1400；env JMW_FC_W/H 覆盖，0=直通；
+        //    原点默认居中推定，JMW_FC_CROP_X/Y 定点——离线求解器 JMW_FC_SOLVE 定标）
         bridge_ = std::make_unique<RtBridge>(ring, dropThreshold);
         {
             int aw = cfg_.algoWidth, ah = cfg_.algoHeight;
@@ -1048,8 +1360,54 @@ Scanner::Result FiveChainAdapter::startRealtime(
             if (const char* e = getenv("JMW_FC_H")) ah = atoi(e);
             bridge_->algoW_ = aw;
             bridge_->algoH_ = ah;
+            if (const char* e = getenv("JMW_FC_CROP_X")) { bridge_->cropXL_ = atoi(e); bridge_->cropXR_ = atoi(e); }
+            if (const char* e = getenv("JMW_FC_CROP_Y")) { bridge_->cropYL_ = atoi(e); bridge_->cropYR_ = atoi(e); }
+            if (const char* e = getenv("JMW_FC_CROPL_X")) bridge_->cropXL_ = atoi(e);
+            if (const char* e = getenv("JMW_FC_CROPL_Y")) bridge_->cropYL_ = atoi(e);
+            if (const char* e = getenv("JMW_FC_CROPR_X")) bridge_->cropXR_ = atoi(e);
+            if (const char* e = getenv("JMW_FC_CROPR_Y")) bridge_->cropYR_ = atoi(e);
         }
         bridge_->wire();
+
+        // ①b 测试数据回放解析（261029：config/fc_testdata.json 为正源，env
+        // JMW_FC_TESTDATA 优先覆盖）——先于 ②③：测试模式需名义标定先行注入
+        // （harness calib_/undistG 构造依赖 hasStereoNominal_）；帧源覆写在 ⑤b
+        bool testMode = false;
+        std::string tdDir, tdSrc;
+        if (const char* e = getenv("JMW_FC_TESTDATA")) {
+            tdDir = e;
+            tdSrc = "env JMW_FC_TESTDATA";
+        } else {
+            namespace fsd = std::filesystem;
+            std::error_code tec;
+            const fsd::path tdCfgPath = fsd::path("config") / "fc_testdata.json";
+            if (fsd::exists(tdCfgPath, tec)) {
+                try {
+                    std::ifstream tf(tdCfgPath.string());
+                    nlohmann::json tj;
+                    tf >> tj;
+                    if (tj.value("enabled", false)) {
+                        tdDir = tj.value("dir", std::string());
+                        tdSrc = tdCfgPath.string();
+                    }
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(
+                        std::string("fc_testdata.json 解析失败: ") + e.what());
+                }
+            }
+        }
+        if (!tdDir.empty()) {
+            testMode = true;
+            if (!hasStereoNominal_ && !ensureStereoNominalFromConfig())
+                throw std::runtime_error(
+                    "测试数据模式需名义温档标定（config/camera_calib.json）"
+                    "——加载失败，拒绝静默回退在线数据");
+            JMW_LOG_WARN("07-FiveChain",
+                "[FiveChainAdapter] 测试数据回放模式（源={}）: {}", tdSrc, tdDir);
+        } else if (!tdSrc.empty()) {
+            throw std::runtime_error(
+                "fc_testdata.json enabled=true 但 dir 为空——拒绝静默回退在线数据");
+        }
 
         // ② harness（算子宿主）——产线口径装配
         harness_ = new FcHarnessCompat(*this, bridge_->src);
@@ -1072,6 +1430,20 @@ Scanner::Result FiveChainAdapter::startRealtime(
         harness_->sepLaserL_ = sepL_.get();
         harness_->sepLaserR_ = sepR_.get();
         harness_->voxelFuseOp_ = fuse_.get();
+        if (hasStereoNominal_) {
+            // 261027 名义温档标定（config/camera_calib.json——与产表/离线验证
+            // 同源）：harness 构造期标定注入；逐帧快照注入关闭（metaValid=false
+            // ——在线 21:28 实证快照路径 conic 0/4666 vs 名义口径 20-107/30 帧）
+            harness_->calib_.R1 = snR1_;  harness_->calib_.R2 = snR2_;
+            harness_->calib_.P1 = snP1_;  harness_->calib_.P2 = snP2_;
+            harness_->calib_.Q = snQ_;
+            harness_->calib_.K1c = snK1c_; harness_->calib_.K2c = snK2c_;
+            harness_->calib_.D1 = snD1_;  harness_->calib_.D2 = snD2_;
+            harness_->calib_.Rext = snRext_; harness_->calib_.Tcomp = snTcomp_;
+            bridge_->useSnapshotCalib_ = false;
+            JMW_LOG_INFO("07-FiveChain",
+                "[FiveChainAdapter] 名义温档立体标定生效（快照注入关闭）");
+        }
         harness_->prodProfile_ = true;                     // 产线：跳过沙盒记账
         harness_->onFrameMeta = [this](int idx, scr::CycleProductsCompat& p) {
             // reader 线程回调——cur 即本帧（L/R 已读，executor 读后即调）
@@ -1082,14 +1454,18 @@ Scanner::Result FiveChainAdapter::startRealtime(
             p.snapP1 = f->snapshot.P1; p.snapP2 = f->snapshot.P2;
             p.snapQ = cv::Mat(f->snapshot.Q);              // Mat(Matx) 深拷（16 double）
             p.temperature = f->temperature;
-            p.metaValid = true;
+            // metaValid＝快照标定注入开关（名义温档口径下 false——undistG/
+            // undistCpu/conic 全用 harness 构造期标定；frameId 照常透传）
+            p.metaValid = bridge_->useSnapshotCalib_;
             (void)idx;
         };
 
         // ③ 激光链前段算子（沙盒 makeLaserOps 产线版：分眼实例＋默认参数＋
         // 强制 Scan 模式；undist 双实例——每帧 SetParams 温补快照）
+        // 261028 标点模式：laserEnabled=false 时不创建任何激光算子——
+        // submitLaserFront 走"LaserOps 未装配"分支直接返回 0（零 GPU 提交）
         auto& L = harness_->laserOps_;
-        {
+        if (cfg_.laserEnabled) {
             const auto stg = calib::StegerParams::fromJson(
                 harness_->cfg_.opParams("steger_fast"));
             L.stegerL_ = std::make_unique<calib::StegerExtractorFast>(stg);
@@ -1098,33 +1474,58 @@ Scanner::Result FiveChainAdapter::startRealtime(
                 harness_->cfg_.opParams("flat_center"));
             L.flatL_ = std::make_unique<calib::FlatCenterExtractor>(fp);
             L.flatR_ = std::make_unique<calib::FlatCenterExtractor>(fp);
+        try {
+            calib::UndistortPointsParams ul, ur;
+            if (hasStereoNominal_) {
+                // 名义温档直用式（离线对拍同构——微测变体 a/c 验证过）
+                ul.cameraMatrix = snK1c_; ul.distCoeffs = snD1_;
+                ul.R = snR1_; ul.P = snP1_.clone();
+                ur.cameraMatrix = snK2c_; ur.distCoeffs = snD2_;
+                ur.R = snR2_; ur.P = snP2_.clone();
+                ur.P.at<double>(0, 3) = 0.0;         // 右目 P 平移置零（沙盒口径）
+            } else {
+                // 快照口径占位（仅过校验——每帧 SetParams 覆写）
+                ul.cameraMatrix = rtK1_; ul.distCoeffs = rtD1_;
+                ul.R = cv::Mat::eye(3, 3, CV_64F);
+                ul.P = cv::Mat::zeros(3, 4, CV_64F);
+                rtK1_.copyTo(ul.P(cv::Rect(0, 0, 3, 3)));
+                ur.cameraMatrix = rtK2_; ur.distCoeffs = rtD2_;
+                ur.R = cv::Mat::eye(3, 3, CV_64F);
+                ur.P = cv::Mat::zeros(3, 4, CV_64F);
+                rtK2_.copyTo(ur.P(cv::Rect(0, 0, 3, 3)));
+            }
+            L.undistGL_ = std::make_unique<calib::UndistortPointsCuda>(ul);
+        } catch (const std::exception& e) {
+            JMW_LOG_ERROR("07-FiveChain", "[FiveChainAdapter] undistGL 构造失败: 失败: {}", e.what());
+            throw;
         }
-        L.undistGL_ = std::make_unique<calib::UndistortPointsCuda>([&] {
-            // 261026 真机修复：空参构造被算子校验拒绝（cameraMatrix must not be
-            // empty→五链首启即败）。构造值仅须过校验——在线每帧 SetParams 用
-            // 帧温快照覆写（K/D 真值＋R/P 占位单位阵/零平移）
-            calib::UndistortPointsParams u;
-            u.cameraMatrix = rtK1_;
-            u.distCoeffs = rtD1_;
-            u.R = cv::Mat::eye(3, 3, CV_64F);
-            u.P = cv::Mat::zeros(3, 4, CV_64F);
-            rtK1_.copyTo(u.P(cv::Rect(0, 0, 3, 3)));
-            return u;
-        }());
-        L.undistGR_ = std::make_unique<calib::UndistortPointsCuda>([&] {
-            calib::UndistortPointsParams u;
-            u.cameraMatrix = rtK2_;
-            u.distCoeffs = rtD2_;
-            u.R = cv::Mat::eye(3, 3, CV_64F);
-            u.P = cv::Mat::zeros(3, 4, CV_64F);
-            rtK2_.copyTo(u.P(cv::Rect(0, 0, 3, 3)));
-            return u;
-        }());
+        try {
+            calib::UndistortPointsParams ur;
+            if (hasStereoNominal_) {
+                ur.cameraMatrix = snK2c_; ur.distCoeffs = snD2_;
+                ur.R = snR2_; ur.P = snP2_.clone();
+                ur.P.at<double>(0, 3) = 0.0;         // 右目 P 平移置零（沙盒口径）
+            } else {
+                ur.cameraMatrix = rtK2_; ur.distCoeffs = rtD2_;
+                ur.R = cv::Mat::eye(3, 3, CV_64F);
+                ur.P = cv::Mat::zeros(3, 4, CV_64F);
+                rtK2_.copyTo(ur.P(cv::Rect(0, 0, 3, 3)));
+            }
+            L.undistGR_ = std::make_unique<calib::UndistortPointsCuda>(ur);
+        } catch (const std::exception& e) {
+            JMW_LOG_ERROR("07-FiveChain", "[FiveChainAdapter] undistGR 构造失败: 失败: {}", e.what());
+            throw;
+        }
         calib::EpipolarInterpDualParams ip = calib::EpipolarInterpDualParams::fromJson(
             harness_->cfg_.opParams("epipolar_interp_dual"));
         ip.mode = calib::InterpMode::Scan;                 // 沙盒口径：强制扫描模式
         L.interpL_ = std::make_unique<calib::EpipolarInterpDualCuda>(ip);
+
         L.interpR_ = std::make_unique<calib::EpipolarInterpDualCuda>(ip);
+        } else {
+            JMW_LOG_INFO("07-FiveChain",
+                "[FiveChainAdapter] 标点模式：激光链算子未创建（零 GPU 提交防崩溃）");
+        }
 
         // ④ 配准算子（生产调参口径——ScanChains L261-264 同源）＋兜底算子
         // （frame_fuse 默认参——断链自愈；operators json 有 frame_fuse 节时用之）
@@ -1136,6 +1537,12 @@ Scanner::Result FiveChainAdapter::startRealtime(
             harness_->cfg_.opParams("frame_fuse"));
         harness_->fuseOp_ = std::make_unique<calib::FrameFuseCPU>(
             harness_->fuseParams_);
+
+        // ⑤b 测试数据回放模式（①b 已解析并确保标定）——覆写帧源（内存直读）
+        if (testMode) {
+            const Scanner::Result tdr = loadTestData(tdDir);
+            if (!tdr.success) throw std::runtime_error(tdr.message);
+        }
 
         // ⑤ 执行器（INT_MAX＝无界实时会话——reader 由桥停信号终止）
         //    前置预热（沙盒靠 serialHead 3 帧串行预热，07 直起执行器须显式）：
@@ -1150,7 +1557,23 @@ Scanner::Result FiveChainAdapter::startRealtime(
         }
         executor_ = std::make_unique<scr::fc::FiveChainExecutor>(*harness_, 0, 0x7fffffff);
 
+        // 261028 修复：fuseOnHold 在执行器构造后强制设置（loadTestData 在执行器
+        // 前设置但 fuseLoop 读到 false——引用/时序问题；此处直接改 harness 成员，
+        // fuseLoop 每次迭代重新读取，保证生效）
+        if (testMode) {
+            harness_->cfg_.runtime.fuseOnHold = true;
+            JMW_LOG_WARN("07-FiveChain",
+                "[FiveChainAdapter] fuseOnHold 在执行器后强制=true（诊断确认修复）");
+        }
+
         // ⑥ 收割线程
+        // 261028 标志点融合算子（体素 5mm＋EMA——旧 lane MarkerFuseAdapter 同款）
+        {
+            calib::MarkerCloudFuseCPUParams mfp;
+            mfp.voxelSize = 15.0f;  // 15mm——容忍 R/T 漂移（5mm 太小，同标志点多帧分裂）
+            mfp.saturationThreshold = 99;
+            markerFuseOp_ = std::make_unique<calib::MarkerCloudFuseCPU>(mfp);
+        }
         collector_ = std::thread([this] { collectorLoop(); });
 
         JMW_LOG_INFO("07-FiveChain",
@@ -1183,6 +1606,27 @@ void FiveChainAdapter::collectorLoop() {
         if (!executor_->collect(idx, prod, err)) break;    // F 关闭且空＝会话终
         harness_->diagLaserPts_.fetch_add(prod.laserPoints3D,
                                           std::memory_order_relaxed);
+        // 261028 标志点融合（体素 5mm＋EMA 精化——替代简单去重）
+        if (prod.conic.success && prod.markersValid > 0) {
+            std::vector<calib::MarkerFuseInput> mfi;
+            mfi.reserve(prod.conic.markers.size());
+            for (const auto& m : prod.conic.markers) {
+                if (!m.validCircle) continue;
+                calib::MarkerFuseInput in;
+                in.x = static_cast<float>(m.centerX);
+                in.y = static_cast<float>(m.centerY);
+                in.z = static_cast<float>(m.centerZ);
+                in.nx = static_cast<float>(m.normalX);
+                in.ny = static_cast<float>(m.normalY);
+                in.nz = static_cast<float>(m.normalZ);
+                mfi.push_back(in);
+            }
+            if (!mfi.empty() && markerFuseOp_) {
+                const cv::Matx33d Rm(prod.R);
+                const cv::Vec3d Tv(prod.T[0], prod.T[1], prod.T[2]);
+                markerFuseOp_->Execute(mfi, Rm, Tv);
+            }
+        }
         const uint64_t fid = prod.metaValid ? prod.metaFrameId
                                             : static_cast<uint64_t>(idx);
 
@@ -1202,18 +1646,58 @@ void FiveChainAdapter::collectorLoop() {
                 mo.globalId = m.globalId;
                 fo.markerObs.push_back(mo);
             }
+        } else if (prod.conic.success && prod.markersValid > 0) {
+            // 261028 配准失败时 conic 结果也落账（GBA 全局匹配不依赖逐帧
+            // 光流——conic 有效圆 3D 位置就是观测，globalId=-1 待 GBA 关联）
+            fo.markerObs.reserve(prod.conic.markers.size());
+            for (const auto& m : prod.conic.markers) {
+                if (!m.validCircle) continue;
+                MarkerObs mo;
+                mo.xyz[0] = m.centerX;
+                mo.xyz[1] = m.centerY;
+                mo.xyz[2] = m.centerZ;
+                mo.globalId = -1;   // GBA 端全局关联
+                fo.markerObs.push_back(mo);
+            }
         }
-        obs_.push(std::move(fo), {});                      // 激光已 GPU 侧融合——无逐帧 host 缓存
+        // 261029 D 线激光重放原料入缓存：fuseLoop 已自 E 块拷出本帧设备系激光
+        // 3D（laserXyzHost）——obs 累加器按预算缓存（laserCacheSlot 槽号回填；
+        // GlobalOptimObject anyLaser 判据即非 kNoLaserSlot，GBA 后按优化位姿重融合）
+        obs_.push(std::move(fo), std::move(prod.laserXyzHost));
 
         // ② 轻计数上报（UI 统计亚秒刷新）
         if (sceneFeed_ && (idx % 8) == 0)
             sceneFeed_->notifyLaserCount(fuse_->GetFusedPointCount());
+
+        // 261028 逐帧 conic 诊断（前 200 帧——定位 conic 率随时间衰减）
+        if (idx < 200 && (idx % 10) == 0) {
+            JMW_LOG_INFO("07-FiveChain",
+                "[FC-CONIC] f={} conic={} valid={} det={} match={} regSrc={}",
+                idx, prod.conic.statistics.validCount, prod.markersValid,
+                prod.markersDetected, prod.mm.centerMatches.size(),
+                prod.regSource);
+            // 帧 0 详细诊断：逐配对输出 fail reason
+            if (idx == 0) {
+                for (size_t d = 0; d < prod.conic.diagnostics.size() && d < 8; ++d) {
+                    const auto& dg = prod.conic.diagnostics[d];
+                    JMW_LOG_WARN("07-FiveChain",
+                        "[FC-CONIC-D] L{}-R{} reason={} radius={:.2f}mm resid={:.3f}px",
+                        dg.leftIdx, dg.rightIdx,
+                        calib::ConicFailReasonName(dg.failReason),
+                        dg.reconstructedRadiusMm, dg.reprojResidualPx);
+                }
+            }
+        }
 
         // ③ 节流渲染推送（时间门 ≥3s——FuseConsumer 261018 口径）
         renderPushIfDue(/*forceFull=*/false);
         ++idx;
     }
     JMW_LOG_INFO("07-FiveChain", "[FiveChainAdapter] 收割线程退出: {} 帧处理", idx);
+    // 261029 终局全量推送：帧源尽（回放单遍完）/停机时 F 通道已排空——节流
+    // 推送可能停在半途（短会话 <500ms 节流窗只推过首段），不补全量则扫描中
+    // 显示缺末段（空隙）直到关会话 GBA 后才由全量快照补上
+    renderPushIfDue(/*forceFull=*/true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,7 +1705,7 @@ void FiveChainAdapter::collectorLoop() {
 // ---------------------------------------------------------------------------
 void FiveChainAdapter::renderPushIfDue(bool forceFull) {
     const auto now = std::chrono::steady_clock::now();
-    constexpr int64_t kMinMs = 3000;
+    constexpr int64_t kMinMs = 500;   // 261028 测试模式降节流（399 帧 ~3 秒需 ≥6 次推送）
     if (!forceFull) {
         if (lastRenderPush_.time_since_epoch().count() != 0
             && std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1251,9 +1735,25 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
             fusedXyz.clear();
         }
     }
-    lastPushedLaserPts_ = curPts;
+    // 261029 游标对齐实际下载区间：原记 curPts（读 ctx 前的旧值）——fuseLoop
+    // 并发追加时 fusedPointCount>curPts，多下载的段 [curPts, fusedPointCount)
+    // 会被下一次增量重复推送→仓库重复累计（"GBA 后点变多"假象：五链未填
+    // laserCacheSlot，GBA 激光重放本就跳过，仓库应恒等于 C 线融合云）
+    if (!fusedXyz.empty()) {
+        lastPushedLaserPts_ = (fullPush ? size_t(0) : lastPushedLaserPts_)
+                              + fusedXyz.size() / 3;
+    } else if (fullPush) {
+        lastPushedLaserPts_ = 0;   // 空云全量：归零（下载失败下次全量重推）
+    }
     ++pushSeq_;
-    if (fusedXyz.empty()) return;
+    // 261028 激光显示诊断（stderr 直打——定位融合云是否为空）
+    fprintf(stderr, "[FC-RENDER] fused=%zu pts laserUI=%zu markers=%zu full=%d\n",
+            curPts, fusedXyz.size() / 3,
+            markerFuseOp_ ? markerFuseOp_->GetFusedPoints().size() : 0,
+            static_cast<int>(fullPush));
+    // 261028 修复：标志点不依赖激光——即使激光云为空（标点模式）也推送
+    const bool hasMarkers = markerFuseOp_ && !markerFuseOp_->GetFusedPoints().empty();
+    if (fusedXyz.empty() && !hasMarkers && !forceFull) return;
 
     // 仓库＝全量真值账（全量替换/尾部追加）
     if (warehouse_) {
@@ -1277,7 +1777,8 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
     renderKeep_ = uiXyz.empty() ? std::move(fusedXyz) : std::move(uiXyz);
 
     CloudViewHandle h;
-    h.hostMarker = nullptr;                       // v1：五链无 marker 融合账本（编辑不支持）
+    h.hostMarker = (markerFuseOp_ && !markerFuseOp_->GetFusedPoints().empty())
+                       ? &markerFuseOp_->GetFusedPoints() : nullptr;
     h.deviceLaser = nullptr;
     h.hostLaser = renderKeep_.empty() ? nullptr : renderKeep_.data();
     h.laserCount = renderKeep_.size() / 3;
@@ -1316,6 +1817,7 @@ void FiveChainAdapter::stopRealtime() {
         fuse_ ? fuse_->GetFusedPointCount() : 0);    if (bridge_) bridge_->stopped.store(true);    // readFrame 速败→墓碑排空
     executor_.reset();                            // stopAll＋内部线程 join＋设备同步
     if (collector_.joinable()) collector_.join();
+    if (markerFuseOp_) markerFuseOp_->Clear();
     renderPushIfDue(true);                        // 终局全量（仓库+UI 收口）
     delete harness_; harness_ = nullptr;
     bridge_.reset();

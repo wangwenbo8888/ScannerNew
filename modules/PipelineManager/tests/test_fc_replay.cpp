@@ -27,12 +27,15 @@
 
 #include <nlohmann/json.hpp>
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>    // PairGeometryCheck 阈值/翻转
+#include <opencv2/imgcodecs.hpp>   // 裁剪原点求解器帧载入
 #include <cuda_runtime.h>   // cudaMemGetInfo（连续吞吐显存采样）
 
 #include "pipelines/scan/fivechain/FiveChainAdapter.h"
 #include "pipelines/scan/fivechain/harness.h"
 #include "pipelines/scan/fivechain/fc_executor.h"
 #include "pipelines/scan/FrameObsAccumulator.h"
+#include "SlotRing.h"   // startRealtime 复现用例
 #include "scanning/laser/laser_match_scan_v3/cmtt_table_loader.h"
 
 namespace fs = std::filesystem;
@@ -888,4 +891,783 @@ TEST(FcReplay, Continuous4MinStability) {
        << "逐秒序列: " << outDir.string() << "/cont_persec.csv";
     fprintf(stderr, "\n[FCCONT4] %s\n", ss.str().c_str());
     SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// 裁剪原点求解：JMW_FC_SOLVE=<帧目录>（真机 JMW_FC_DUMPFRAMES 转储的 L/R png）
+// ——离线扫候选偏移 (x0,y0)，跑五链取 conic 有效圆计数最大者为真原点
+//（居中只是推定；真机 21:28 实证 conic 0/4666＋激光 5%＝原点错）
+// ============================================================================
+TEST(FcReplay, CropOffsetSolve) {
+    fs::path frameDir = "diagnostics/fc_frames";
+    if (const char* e = getenv("JMW_FC_SOLVE")) frameDir = fs::path(e);
+    std::error_code ec;
+    if (!fs::exists(frameDir, ec))
+        GTEST_SKIP() << "帧目录缺失: " << frameDir.string()
+                     << "（真机 JMW_FC_DUMPFRAMES=N 扫描转储后重跑）";
+    // 载入原始帧对（裁剪前）
+    std::vector<cv::Mat> framesL, framesR;
+    std::vector<int> ids;
+    for (int i = 0;; ++i) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%06d", i);
+        const fs::path pl = frameDir / ("L_" + std::string(buf) + ".png");
+        const fs::path pr = frameDir / ("R_" + std::string(buf) + ".png");
+        if (!fs::exists(pl, ec) || !fs::exists(pr, ec)) break;
+        cv::Mat l = cv::imread(pl.string(), cv::IMREAD_GRAYSCALE);
+        cv::Mat r = cv::imread(pr.string(), cv::IMREAD_GRAYSCALE);
+        ASSERT_FALSE(l.empty()) << pl.string();
+        ASSERT_FALSE(r.empty()) << pr.string();
+        framesL.push_back(std::move(l));
+        framesR.push_back(std::move(r));
+        ids.push_back(i);
+    }
+    ASSERT_GT(framesL.size(), 0u) << "无帧对";
+    ASSERT_GE(framesL[0].cols, 1688) << "帧宽 <1688（非原图？）";
+    ASSERT_GE(framesL[0].rows, 1400) << "帧高 <1400（非原图？）";
+    const int nFrames = static_cast<int>(framesL.size());
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty()) << "沙盒根未定位";
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+    auto* h = rig.h.get();
+    fs::path outDir = fs::temp_directory_path() / "fc07_solve";
+    fs::create_directories(outDir, ec);
+    h->outDir_ = outDir.string();
+
+    // 帧源：候选裁剪视图（curX/curY 可变——逐候选重跑）
+    int curX = 0, curY = 0;
+    rig.src.cycles.fs = &rig.src;
+    rig.src.cycleAt = [&](size_t i) {
+        scr::FrameCycleInfo ci;
+        ci.laserIdx = static_cast<int>(i);        // 槽位透传 fc idx（帧号=idx%nFrames）
+        ci.tubeOdd = (i % 2) == 1;
+        return ci;
+    };
+    rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
+        const int fi = idx % nFrames;
+        const cv::Mat& src = (left ? framesL : framesR)[static_cast<size_t>(fi)];
+        if (curX + 1688 > src.cols || curY + 1400 > src.rows) {
+            e = "偏移越界";
+            return false;
+        }
+        out = src(cv::Rect(curX, curY, 1688, 1400)).clone();
+        return true;
+    };
+
+    auto runCandidate = [&](int x0, int y0) -> long {
+        curX = x0; curY = y0;
+        // 会话态复位（诊断计数器归零）
+        h->diagCclFail_ = 0; h->diagRoisL_ = 0; h->diagSplit_ = 0;
+        h->diagEllipse_ = 0; h->diagMatchPairs_ = 0; h->diagConicValid_ = 0;
+        h->prevState_ = calib::PrevFrameState{};
+        h->globalSet_ = {}; h->globalIndexById_.clear(); h->nextGid_ = 0;
+        h->candidates_.clear(); h->holdStreak_ = 0; h->cycleCount_ = 0;
+        auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, nFrames);
+        for (int c = 0; c < nFrames; ++c) {
+            CycleProducts prod;
+            std::string ce;
+            if (!ex->collect(c, prod, ce)) break;
+        }
+        ex.reset();
+        return h->diagConicValid_.load();
+    };
+
+    // —— 粗扫（x 步 60 / y 步 34）——
+    struct Cand { int x, y; long valid; };
+    std::vector<Cand> results;
+    const int maxX = framesL[0].cols - 1688;
+    const int maxY = framesL[0].rows - 1400;
+    for (int y0 = 0; y0 <= maxY; y0 += 34)
+        for (int x0 = 0; x0 <= maxX; x0 += 60)
+            results.push_back({x0, y0, runCandidate(x0, y0)});
+    std::sort(results.begin(), results.end(),
+              [](const Cand& a, const Cand& b) { return a.valid > b.valid; });
+    // —— 细扫（粗扫 top1 邻域 ±30 步 10）——
+    const Cand& best = results[0];
+    for (int y0 = std::max(0, best.y - 34); y0 <= std::min(maxY, best.y + 34); y0 += 17)
+        for (int x0 = std::max(0, best.x - 60); x0 <= std::min(maxX, best.x + 60); x0 += 15)
+            results.push_back({x0, y0, runCandidate(x0, y0)});
+    std::sort(results.begin(), results.end(),
+              [](const Cand& a, const Cand& b) { return a.valid > b.valid; });
+
+    // 显式回查居中假设（在线 21:28 会话 conic=0 的候选——定案裁剪/快照注入归属）
+    const long centerValid = runCandidate(180, 68);
+    std::ostringstream ss;
+    ss << "裁剪原点求解（" << nFrames << " 帧对，conic 有效圆计数）——top 12:\n";
+    for (size_t i = 0; i < results.size() && i < 12; ++i)
+        ss << "  #" << i << " offset=(" << results[i].x << "," << results[i].y
+           << ") valid=" << results[i].valid << "\n";
+    ss << "  【居中假设 (180,68) 回查: valid=" << centerValid << "】\n";
+    ss << "判定: 居中可行（≥top 一半）→在线 0 的根因＝逐帧快照注入；居中近零→真原点=top1";
+    fprintf(stderr, "\n[FC-SOLVE] %s\n", ss.str().c_str());
+    EXPECT_GT(results[0].valid, 0) << "全部候选 conic=0——帧数据或链路另有问题";
+    SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// L/R 帧对几何体检：行/列亮度轮廓相关——定相对错位（上下翻转/垂直水平偏移）
+//（261027 真机快照 Z 双簇跳变＝L/R 错配嫌疑——v3 真匹配首次受验）
+// ============================================================================
+TEST(FcReplay, PairGeometryCheck) {
+    fs::path frameDir = "diagnostics/fc_frames";
+    if (const char* e = getenv("JMW_FC_PAIR")) frameDir = fs::path(e);
+    std::error_code ec;
+    if (!fs::exists(frameDir / "L_000000.png", ec))
+        GTEST_SKIP() << "帧目录缺失（JMW_FC_DUMPFRAMES 转储后重跑）";
+    cv::Mat L = cv::imread((frameDir / "L_000000.png").string(), cv::IMREAD_GRAYSCALE);
+    cv::Mat R = cv::imread((frameDir / "R_000000.png").string(), cv::IMREAD_GRAYSCALE);
+    ASSERT_FALSE(L.empty() && R.empty());
+    // 居中裁剪到算法几何
+    const int ax = 1688, ay = 1400;
+    const int x0 = (L.cols - ax) / 2, y0 = (L.rows - ay) / 2;
+    cv::Mat Lc = L(cv::Rect(x0, y0, ax, ay));
+    cv::Mat Rc = R(cv::Rect(x0, y0, ax, ay));
+
+    auto rowProfile = [](const cv::Mat& m) {
+        cv::Mat prof;
+        cv::reduce(m, prof, 1, cv::REDUCE_AVG, CV_32F);   // 1×rows → rows×1
+        return prof;
+    };
+    auto colProfile = [](const cv::Mat& m) {
+        cv::Mat prof;
+        cv::reduce(m, prof, 0, cv::REDUCE_AVG, CV_32F);
+        return prof.reshape(1, 1).t();                     // cols×1
+    };
+    auto bestShiftCorr = [](cv::Mat a, cv::Mat b, int maxShift, int& bestS, double& bestC) {
+        // 沿 y 平移 b 找最大相关（归一化）
+        const int n = a.rows;
+        cv::Scalar ma, mb; cv::meanStdDev(a, ma, mb);
+        const double sa = mb[0] > 1e-9 ? mb[0] : 1;
+        bestC = -2; bestS = 0;
+        for (int s = -maxShift; s <= maxShift; ++s) {
+            double dot = 0, sb2 = 0; int cnt = 0;
+            for (int i = 0; i < n; ++i) {
+                const int j = i + s;
+                if (j < 0 || j >= n) continue;
+                const double da = a.at<float>(i, 0) - ma[0];
+                const double db = b.at<float>(j, 0);
+                dot += da * db; sb2 += db * db; ++cnt;
+            }
+            if (cnt < 100) continue;
+            const double sb = std::sqrt(sb2 / cnt);
+            if (sb < 1e-9) continue;
+            const double c = (dot / cnt) / (sa * sb);
+            if (c > bestC) { bestC = c; bestS = s; }
+        }
+    };
+
+    const cv::Mat rpL = rowProfile(Lc), rpR = rowProfile(Rc);
+    const cv::Mat cpL = colProfile(Lc), cpR = colProfile(Rc);
+    cv::Mat rpRflip; cv::flip(rpR, rpRflip, 0);            // 上下翻转假设
+    int bsN = 0, bsF = 0; double bcN = 0, bcF = 0;
+    const double c0row = [&, &bsN = bsN, &bcN = bcN]() { bestShiftCorr(rpL, rpR, 0, bsN, bcN); return bcN; }();
+    bestShiftCorr(rpL, rpR, 680, bsN, bcN);
+    bestShiftCorr(rpL, rpRflip, 680, bsF, bcF);
+    int bsC = 0; double bcC = 0;
+    const double c0col = [&, &bsC = bsC, &bcC = bcC]() { bestShiftCorr(cpL, cpR, 0, bsC, bcC); return bcC; }();
+    bestShiftCorr(cpL, cpR, 1000, bsC, bcC);
+
+    std::ostringstream ss;
+    ss << "L/R 帧对几何体检（居中裁剪 1688×1400，帧 0）:\n";
+    ss << std::fixed << std::setprecision(3);
+    ss << "  行轮廓相关: 零移位 corr=" << c0row << " ｜ 正常向 bestShift=" << bsN
+       << " corr=" << bcN << " ｜ R 翻转向 bestShift=" << bsF << " corr=" << bcF << "\n";
+    ss << "  列轮廓相关: 零移位 corr=" << c0col << " ｜ bestShift=" << bsC
+       << " corr=" << bcC << "\n";
+    ss << "判定: 正常向 corr 明显高→取向 OK（行错位=bestShift）；翻转向高→R 需 180° 旋转";
+    // —— 决定性测量：逐组件行位比对（亮斑连通域中心——标志点/激光亮带）——
+    {
+        auto blobRows = [](const cv::Mat& gray) {
+            // 阈值亮点 → 按行投影找亮带行（比 CCL 轻量且稳定）
+            cv::Mat bin;
+            cv::threshold(gray, bin, 180, 1, cv::THRESH_BINARY);
+            cv::Mat rows;
+            cv::reduce(bin, rows, 1, cv::REDUCE_SUM, CV_32S);
+            std::vector<int> out;
+            for (int i = 1; i < rows.rows - 1; ++i) {
+                const int v = rows.at<int>(i, 0);
+                if (v > 60 && v >= rows.at<int>(i - 1, 0) && v >= rows.at<int>(i + 1, 0))
+                    out.push_back(i);
+            }
+            return out;
+        };
+        const std::vector<int> rl = blobRows(Lc), rr = blobRows(Rc);
+        ss << "\n  亮带行位（局部峰>60px）: L={";
+        for (size_t i = 0; i < rl.size() && i < 12; ++i) ss << rl[i] << (i + 1 < rl.size() && i + 1 < 12 ? "," : "");
+        ss << "} R={";
+        for (size_t i = 0; i < rr.size() && i < 12; ++i) ss << rr[i] << (i + 1 < rr.size() && i + 1 < 12 ? "," : "");
+        ss << "}\n  （L/R 同场景矫正前亮带应粗对齐——差值大＝相机 ROI/取向配置错）";
+    }
+    fprintf(stderr, "\n[FC-PAIR] %s\n", ss.str().c_str());
+    SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// 精细裁剪原点搜索：±20px 范围步长 1px，以 conic 有效圆为刻度
+//（居中 (180,68) 为基准，微调让主点偏差归零——conic 从 NoRealRoot 变 PASS）
+// ============================================================================
+TEST(FcReplay, FineCropSolve) {
+    fs::path frameDir = "diagnostics/fc_frames";
+    if (const char* e = getenv("JMW_FC_FINE")) frameDir = fs::path(e);
+    std::error_code ec;
+    if (!fs::exists(frameDir / "L_000000.png", ec))
+        GTEST_SKIP() << "帧目录缺失";
+    const int nFrames = 5;
+    std::vector<cv::Mat> fl(nFrames), fr(nFrames);
+    for (int i = 0; i < nFrames; ++i) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%06d", i);
+        fl[static_cast<size_t>(i)] = cv::imread(
+            (frameDir / ("L_" + std::string(buf) + ".png")).string(), cv::IMREAD_GRAYSCALE);
+        fr[static_cast<size_t>(i)] = cv::imread(
+            (frameDir / ("R_" + std::string(buf) + ".png")).string(), cv::IMREAD_GRAYSCALE);
+    }
+    ASSERT_FALSE(fl[0].empty());
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty());
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+    auto* h = rig.h.get();
+    fs::path outDir = fs::temp_directory_path() / "fc07_fine";
+    fs::create_directories(outDir, ec);
+    h->outDir_ = outDir.string();
+
+    int cXL = 180, cYL = 68, cXR = 180, cYR = 68;
+    rig.src.cycles.fs = &rig.src;
+    rig.src.cycleAt = [&](size_t i) {
+        scr::FrameCycleInfo ci;
+        ci.laserIdx = static_cast<int>(i);
+        ci.tubeOdd = (i % 2) == 1;
+        return ci;
+    };
+    rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
+        const int fi = idx % nFrames;
+        const cv::Mat& src = (left ? fl : fr)[static_cast<size_t>(fi)];
+        const int x0 = left ? cXL : cXR;
+        const int y0 = left ? cYL : cYR;
+        if (x0 + 1688 > src.cols || y0 + 1400 > src.rows) { e = "越界"; return false; }
+        out = src(cv::Rect(x0, y0, 1688, 1400)).clone();
+        return true;
+    };
+    auto conicScore = [&]() -> long {
+        h->diagCclFail_ = 0; h->diagRoisL_ = 0; h->diagSplit_ = 0;
+        h->diagEllipse_ = 0; h->diagMatchPairs_ = 0; h->diagConicValid_ = 0;
+        h->prevState_ = calib::PrevFrameState{};
+        h->globalSet_ = {}; h->globalIndexById_.clear(); h->nextGid_ = 0;
+        h->candidates_.clear(); h->holdStreak_ = 0; h->cycleCount_ = 0;
+        auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, nFrames);
+        for (int c = 0; c < nFrames; ++c) {
+            CycleProducts prod;
+            std::string ce;
+            if (!ex->collect(c, prod, ce)) break;
+        }
+        ex.reset();
+        return h->diagConicValid_.load();
+    };
+
+    // 基准：居中 (180,68)
+    const long base = conicScore();
+    fprintf(stderr, "[FC-FINE] 基准 (180,68) conic=%ld\n", base);
+
+    // —— 第 1 轮：yL 独扫（xL=180, R 固定居中）——
+    struct Cand { int v; long s; };
+    std::vector<Cand> yl, yr, xl, xr;
+    cXL = 180; cXR = 180; cYR = 68;
+    for (int dy = -20; dy <= 20; ++dy) {
+        cYL = 68 + dy;
+        yl.push_back({dy, conicScore()});
+    }
+    cYL = 68;
+    std::sort(yl.begin(), yl.end(), [](const Cand& a, const Cand& b) { return a.s > b.s; });
+    const int bestDyL = yl[0].v;
+    fprintf(stderr, "[FC-FINE] yL 扫描 best dy=%d conic=%ld\n", bestDyL, yl[0].s);
+
+    // —— 第 2 轮：yR 独扫（yL=best）——
+    cYL = 68 + bestDyL;
+    for (int dy = -20; dy <= 20; ++dy) {
+        cYR = 68 + dy;
+        yr.push_back({dy, conicScore()});
+    }
+    cYR = 68;
+    std::sort(yr.begin(), yr.end(), [](const Cand& a, const Cand& b) { return a.s > b.s; });
+    const int bestDyR = yr[0].v;
+    fprintf(stderr, "[FC-FINE] yR 扫描 best dy=%d conic=%ld\n", bestDyR, yr[0].s);
+
+    // —— 第 3 轮：xL 独扫（y 固定最优）——
+    cYL = 68 + bestDyL; cYR = 68 + bestDyR;
+    for (int dx = -20; dx <= 20; ++dx) {
+        cXL = 180 + dx;
+        xl.push_back({dx, conicScore()});
+    }
+    cXL = 180;
+    std::sort(xl.begin(), xl.end(), [](const Cand& a, const Cand& b) { return a.s > b.s; });
+    const int bestDxL = xl[0].v;
+    fprintf(stderr, "[FC-FINE] xL 扫描 best dx=%d conic=%ld\n", bestDxL, xl[0].s);
+
+    // —— 第 4 轮：xR 独扫 ——
+    cXL = 180 + bestDxL;
+    for (int dx = -20; dx <= 20; ++dx) {
+        cXR = 180 + dx;
+        xr.push_back({dx, conicScore()});
+    }
+    cXR = 180;
+    std::sort(xr.begin(), xr.end(), [](const Cand& a, const Cand& b) { return a.s > b.s; });
+    const int bestDxR = xr[0].v;
+    fprintf(stderr, "[FC-FINE] xR 扫描 best dx=%d conic=%ld\n", bestDxR, xr[0].s);
+
+    // —— 终验 ——
+    cXL = 180 + bestDxL; cYL = 68 + bestDyL;
+    cXR = 180 + bestDxR; cYR = 68 + bestDyR;
+    const long finalScore = conicScore();
+    std::ostringstream ss;
+    ss << "精细裁剪原点（±20px 步长 1px，" << nFrames << " 帧，conic 有效圆刻度）:\n";
+    ss << "  基准 (180,68): conic=" << base << "\n";
+    ss << "  最优 L=(" << cXL << "," << cYL << ") R=(" << cXR << "," << cYR
+       << ") conic=" << finalScore << "（" << (base > 0 ? finalScore * 100 / base : 0)
+       << "% vs 基准）";
+    fprintf(stderr, "\n[FC-FINE] %s\n", ss.str().c_str());
+    SUCCEED() << ss.str();
+}
+TEST(FcReplay, ConicRejectDiagnosis) {
+    fs::path frameDir = "diagnostics/fc_frames";
+    if (const char* e = getenv("JMW_FC_DIAG")) frameDir = fs::path(e);
+    std::error_code ec;
+    if (!fs::exists(frameDir / "L_000000.png", ec))
+        GTEST_SKIP() << "帧目录缺失";
+    const int nFrames = 3;
+    std::vector<cv::Mat> fl(nFrames), fr(nFrames);
+    for (int i = 0; i < nFrames; ++i) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%06d", i);
+        fl[static_cast<size_t>(i)] = cv::imread(
+            (frameDir / ("L_" + std::string(buf) + ".png")).string(), cv::IMREAD_GRAYSCALE);
+        fr[static_cast<size_t>(i)] = cv::imread(
+            (frameDir / ("R_" + std::string(buf) + ".png")).string(), cv::IMREAD_GRAYSCALE);
+    }
+    ASSERT_FALSE(fl[0].empty());
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty());
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+    auto* h = rig.h.get();
+    fs::path outDir = fs::temp_directory_path() / "fc07_diag";
+    fs::create_directories(outDir, ec);
+    h->outDir_ = outDir.string();
+
+    // 居中裁剪（当前生产口径）
+    rig.src.cycles.fs = &rig.src;
+    rig.src.cycleAt = [&](size_t i) {
+        scr::FrameCycleInfo ci;
+        ci.laserIdx = static_cast<int>(i);
+        ci.tubeOdd = (i % 2) == 1;
+        return ci;
+    };
+    rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
+        const int fi = idx % nFrames;
+        const cv::Mat& src = (left ? fl : fr)[static_cast<size_t>(fi)];
+        const int x0 = (src.cols - 1688) / 2;
+        const int y0 = (src.rows - 1400) / 2;
+        out = src(cv::Rect(x0, y0, 1688, 1400)).clone();
+        return true;
+    };
+
+    // —— 先跑真机帧（居中裁剪）——
+    std::vector<CycleProducts> realProds(nFrames);
+    {
+        rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
+            const int fi = idx % nFrames;
+            const cv::Mat& src = (left ? fl : fr)[static_cast<size_t>(fi)];
+            const int x0 = (src.cols - 1688) / 2;
+            const int y0 = (src.rows - 1400) / 2;
+            out = src(cv::Rect(x0, y0, 1688, 1400)).clone();
+            return true;
+        };
+        h->prevState_ = calib::PrevFrameState{};
+        h->globalSet_ = {}; h->globalIndexById_.clear(); h->nextGid_ = 0;
+        h->candidates_.clear(); h->holdStreak_ = 0; h->cycleCount_ = 0;
+        h->diagConicValid_ = 0;
+        auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, nFrames);
+        for (int c = 0; c < nFrames; ++c) {
+            std::string ce;
+            ex->collect(c, realProds[static_cast<size_t>(c)], ce);
+        }
+        ex.reset();
+        fprintf(stderr, "[FC-DIAG] 真机帧: conicValid=%ld 帧数=%d\n",
+                h->diagConicValid_.load(), nFrames);
+    }
+    // —— 再跑测试数据（golden 基准——恢复 buildRig 默认帧源）——
+    std::vector<CycleProducts> testProds(nFrames);
+    {
+        // 恢复 buildRig 的原始帧源（读 ALL_raw）
+        const size_t fb = static_cast<size_t>(rig.rawW) * rig.rawH;
+        rig.src.readFrame = [&rig, fb](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
+            const auto it = std::lower_bound(rig.frameIds.begin(), rig.frameIds.end(), idx);
+            if (it == rig.frameIds.end() || *it != idx) { e = "帧号不在数据集"; return false; }
+            const size_t pos = static_cast<size_t>(it - rig.frameIds.begin());
+            unsigned char* base = (left ? rig.rawL : rig.rawR).data() + pos * fb;
+            out = cv::Mat(rig.rawH, rig.rawW, CV_8UC1, base);
+            return true;
+        };
+        rig.src.cycleAt = nullptr;   // 恢复静态 cycles 表
+        h->prevState_ = calib::PrevFrameState{};
+        h->globalSet_ = {}; h->globalIndexById_.clear(); h->nextGid_ = 0;
+        h->candidates_.clear(); h->holdStreak_ = 0; h->cycleCount_ = 0;
+        h->diagConicValid_ = 0;
+        auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, nFrames);
+        for (int c = 0; c < nFrames; ++c) {
+            std::string ce;
+            ex->collect(c, testProds[static_cast<size_t>(c)], ce);
+        }
+        ex.reset();
+        fprintf(stderr, "[FC-DIAG] 测试帧: conicValid=%ld 帧数=%d\n",
+                h->diagConicValid_.load(), nFrames);
+    }
+
+    // —— 逐标志点输出 conic 参数对比 ——
+    auto dumpConic = [](const char* tag, const std::vector<CycleProducts>& prods,
+                        std::ostringstream& ss) {
+        long totalDiag = 0, validMk = 0, totalMk = 0;
+        std::vector<double> radii, residuals;
+        std::map<std::string, int> failReasons;
+        std::map<std::string, int> gatedMsgs;
+        for (const auto& p : prods) {
+            // 诊断向量（逐配对 radius/residual/failReason）
+            for (const auto& d : p.conic.diagnostics) {
+                ++totalDiag;
+                if (d.failReason != calib::ConicFailReason::None)
+                    failReasons[calib::ConicFailReasonName(d.failReason)]++;
+                radii.push_back(d.reconstructedRadiusMm);
+                residuals.push_back(d.reprojResidualPx);
+            }
+            // 标志点向量（validCircle + message）
+            for (const auto& m : p.conic.markers) {
+                ++totalMk;
+                if (m.validCircle) ++validMk;
+                else if (!m.message.empty())
+                    gatedMsgs[m.message.substr(0, 40)]++;
+            }
+        }
+        ss << "  " << tag << ":\n";
+        ss << "    配对诊断: " << totalDiag << " 对 | 标志点: " << totalMk
+           << " 有效=" << validMk << "\n";
+        if (!radii.empty()) {
+            std::sort(radii.begin(), radii.end());
+            std::sort(residuals.begin(), residuals.end());
+            ss << "    radius: min=" << std::fixed << std::setprecision(2)
+               << radii.front() << " med=" << radii[radii.size() / 2]
+               << " max=" << radii.back() << "（门限 2.55~3.45mm）\n";
+            ss << "    residual: min=" << std::setprecision(3)
+               << (residuals.front() < 0 ? -1 : residuals.front())
+               << " med=" << residuals[residuals.size() / 2]
+               << " max=" << residuals.back() << "（门限<1.5px）\n";
+        }
+        if (!failReasons.empty()) {
+            ss << "    拒绝原因: ";
+            for (const auto& [r, c] : failReasons) ss << r << "=" << c << " ";
+            ss << "\n";
+        }
+        if (!gatedMsgs.empty()) {
+            ss << "    门控消息 top5: ";
+            int i = 0;
+            for (const auto& [m, c] : gatedMsgs) {
+                ss << "[" << m << "]×" << c << " ";
+                if (++i >= 5) break;
+            }
+            ss << "\n";
+        }
+    };
+    std::ostringstream ss;
+    ss << "conic 校验诊断（帧 0-" << nFrames - 1 << "，居中裁剪 1688×1400）:\n";
+    dumpConic("测试数据（golden）", testProds, ss);
+    dumpConic("真机帧（居中裁剪）", realProds, ss);
+
+    // —— 中间结果对比：椭圆参数＋匹配对＋undistort 后坐标 ——
+    auto dumpEllipses = [](const char* tag, const std::vector<CycleProducts>& prods,
+                           std::ostringstream& ss) {
+        for (size_t f = 0; f < prods.size() && f < 1; ++f) {   // 只看帧 0
+            const auto& p = prods[f];
+            ss << "  " << tag << " 帧 0:\n";
+            ss << "    CCL L组件=" << p.cclL.components.size()
+               << " R组件=" << p.cclR.components.size() << "\n";
+            ss << "    split L=" << p.splitL.splitCount << " R=" << p.splitR.splitCount << "\n";
+            ss << "    markersDetected=" << p.markersDetected
+               << " markersValid=" << p.markersValid << "\n";
+            ss << "    match: centerMatches.size=" << p.mm.centerMatches.size() << "\n";
+            // 椭圆参数（帧 0 的 L 眼前 5 个）
+            ss << "    L 椭圆前 5 个:\n";
+            for (size_t i = 0; i < p.ellL.size() && i < 5; ++i) {
+                const auto& e = p.ellL[i];
+                ss << "      [" << i << "] center=(" << std::fixed
+                   << std::setprecision(1) << e.centerX << "," << e.centerY
+                   << ") axes=(" << e.majorAxis << "," << e.minorAxis
+                   << ") inliers=" << e.inlierCount << "/" << e.totalPointCount
+                   << " valid=" << e.success << "\n";
+            }
+            // undistort 后坐标（帧 0 的前 5 个矫正点）
+            if (!p.undistCpu.rectifiedPoints1.empty()) {
+                ss << "    undistort 后 L 前 5 点:\n";
+                for (size_t i = 0; i < p.undistCpu.rectifiedPoints1.size() && i < 5; ++i) {
+                    ss << "      (" << p.undistCpu.rectifiedPoints1[i].x << ","
+                       << p.undistCpu.rectifiedPoints1[i].y << ")\n";
+                }
+            }
+            // conic 诊断（帧 0）
+            ss << "    conic 诊断前 5 对:\n";
+            for (size_t i = 0; i < p.conic.diagnostics.size() && i < 5; ++i) {
+                const auto& d = p.conic.diagnostics[i];
+                ss << "      [" << i << "] L" << d.leftIdx << "-R" << d.rightIdx
+                   << " reason=" << calib::ConicFailReasonName(d.failReason)
+                   << " radius=" << std::setprecision(2) << d.reconstructedRadiusMm
+                   << "mm resid=" << d.reprojResidualPx << "px\n";
+            }
+        }
+    };
+    dumpEllipses("──测试数据──", testProds, ss);
+    dumpEllipses("──真机帧──", realProds, ss);
+    fprintf(stderr, "\n[FC-DIAG] %s\n", ss.str().c_str());
+    SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// 原图标志点定位：全图检测亮圆斑（面积/圆度过滤），报告原始坐标分布——
+// 正确裁剪窗（1688×1400）应包含全部标志点（JMW_FC_BLOB=<帧目录>）
+// ============================================================================
+TEST(FcReplay, RawMarkerBlobMap) {
+    fs::path frameDir = "diagnostics/fc_frames";
+    if (const char* e = getenv("JMW_FC_BLOB")) frameDir = fs::path(e);
+    std::error_code ec;
+    if (!fs::exists(frameDir / "L_000000.png", ec))
+        GTEST_SKIP() << "帧目录缺失";
+    auto mapEye = [](const char* tag, const cv::Mat& raw, std::ostringstream& ss) {
+        cv::Mat bin;
+        // 标志点＝高亮圆斑：动态阈（均值+3σ，下限 160）
+        cv::Scalar mu, sigma;
+        cv::meanStdDev(raw, mu, sigma);
+        const double thr = std::max(120.0, mu[0] + 1.5 * sigma[0]);
+        cv::threshold(raw, bin, thr, 255, cv::THRESH_BINARY);
+        cv::Mat labels, stats, centroids;
+        const int n = cv::connectedComponentsWithStats(bin, labels, stats, centroids, 8);
+        struct Blob { cv::Point2f c; int area; };
+        std::vector<Blob> blobs;
+        for (int i = 1; i < n; ++i) {
+            const int area = stats.at<int>(i, cv::CC_STAT_AREA);
+            if (area < 80 || area > 30000) continue;      // 圆片面积档
+            const double w = stats.at<int>(i, cv::CC_STAT_WIDTH);
+            const double h = stats.at<int>(i, cv::CC_STAT_HEIGHT);
+            if (w / h < 0.45 || w / h > 2.2) continue;      // 近圆/近方
+            Blob b;
+            b.c = cv::Point2f(static_cast<float>(centroids.at<double>(i, 0)),
+                              static_cast<float>(centroids.at<double>(i, 1)));
+            b.area = area;
+            blobs.push_back(b);
+        }
+        ss << "  " << tag << "（阈=" << std::fixed << std::setprecision(0) << thr
+           << " 斑数=" << blobs.size() << "）: ";
+        for (size_t i = 0; i < blobs.size() && i < 20; ++i)
+            ss << "(" << std::setprecision(0) << blobs[i].c.x << "," << blobs[i].c.y
+               << ")" << (i + 1 < blobs.size() && i + 1 < 19 ? " " : "");
+        ss << "\n";
+        if (!blobs.empty()) {
+            float x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+            for (const auto& b : blobs) {
+                x0 = std::min(x0, b.c.x); y0 = std::min(y0, b.c.y);
+                x1 = std::max(x1, b.c.x); y1 = std::max(y1, b.c.y);
+            }
+            ss << "    包围盒 x[" << std::setprecision(0) << x0 << "," << x1 << "] y["
+               << y0 << "," << y1 << "] —— 1688×1400 窗须全含（原图 "
+               << raw.cols << "×" << raw.rows << "，x 余量=" << raw.cols - 1688
+               << " y 余量=" << raw.rows - 1400 << "）\n";
+        }
+    };
+    cv::Mat L = cv::imread((frameDir / "L_000000.png").string(), cv::IMREAD_GRAYSCALE);
+    cv::Mat R = cv::imread((frameDir / "R_000000.png").string(), cv::IMREAD_GRAYSCALE);
+    ASSERT_FALSE(L.empty() && R.empty());
+    std::ostringstream ss;
+    ss << "原图标志点定位（帧 0，动态阈值圆斑）:\n";
+    mapEye("L", L, ss);
+    mapEye("R", R, ss);
+    fprintf(stderr, "\n[FC-BLOB] %s\n", ss.str().c_str());
+    SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// 分眼裁剪原点求解：JMW_FC_PEEYE=<帧目录>——以激光 v3 匹配数为刻度（对几何
+// 错位最敏感），先 yL×yR 后 xL×xR 二维粗扫＋细扫（L/R 原点可不同）
+// ============================================================================
+TEST(FcReplay, PerEyeCropSolve) {
+    fs::path frameDir = "diagnostics/fc_frames";
+    if (const char* e = getenv("JMW_FC_PEEYE")) frameDir = fs::path(e);
+    std::error_code ec;
+    if (!fs::exists(frameDir / "L_000000.png", ec))
+        GTEST_SKIP() << "帧目录缺失";
+    const int nFrames = 3;
+    std::vector<cv::Mat> fl(nFrames), fr(nFrames);
+    for (int i = 0; i < nFrames; ++i) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%06d", i);
+        fl[static_cast<size_t>(i)] = cv::imread(
+            (frameDir / ("L_" + std::string(buf) + ".png")).string(), cv::IMREAD_GRAYSCALE);
+        fr[static_cast<size_t>(i)] = cv::imread(
+            (frameDir / ("R_" + std::string(buf) + ".png")).string(), cv::IMREAD_GRAYSCALE);
+        ASSERT_FALSE(fl[static_cast<size_t>(i)].empty());
+    }
+    ASSERT_GE(fl[0].cols, 1688);
+    ASSERT_GE(fl[0].rows, 1400);
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty());
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+    auto* h = rig.h.get();
+    fs::path outDir = fs::temp_directory_path() / "fc07_peeye";
+    fs::create_directories(outDir, ec);
+    h->outDir_ = outDir.string();
+
+    int cXL = 180, cYL = 68, cXR = 180, cYR = 68;   // 当前候选（可变）
+    rig.src.cycles.fs = &rig.src;
+    rig.src.cycleAt = [&](size_t i) {
+        scr::FrameCycleInfo ci;
+        ci.laserIdx = static_cast<int>(i);
+        ci.tubeOdd = (i % 2) == 1;
+        return ci;
+    };
+    rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
+        const int fi = idx % nFrames;
+        const cv::Mat& src = (left ? fl : fr)[static_cast<size_t>(fi)];
+        const int x0 = left ? cXL : cXR;
+        const int y0 = left ? cYL : cYR;
+        if (x0 + 1688 > src.cols || y0 + 1400 > src.rows) { e = "越界"; return false; }
+        out = src(cv::Rect(x0, y0, 1688, 1400)).clone();
+        return true;
+    };
+    auto runLaserScore = [&]() -> long {
+        h->diagCclFail_ = 0; h->diagRoisL_ = 0; h->diagSplit_ = 0;
+        h->diagEllipse_ = 0; h->diagMatchPairs_ = 0; h->diagConicValid_ = 0;
+        h->diagLaserPts_ = 0;
+        h->prevState_ = calib::PrevFrameState{};
+        h->globalSet_ = {}; h->globalIndexById_.clear(); h->nextGid_ = 0;
+        h->candidates_.clear(); h->holdStreak_ = 0; h->cycleCount_ = 0;
+        auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, nFrames);
+        for (int c = 0; c < nFrames; ++c) {
+            CycleProducts prod;
+            std::string ce;
+            if (!ex->collect(c, prod, ce)) break;
+        }
+        ex.reset();
+        return h->diagLaserPts_.load();
+    };
+
+    struct Cand { int a, b; long score; };
+    auto sweep = [&](const char* tag, bool yAxis, int fixedX,
+                     int step, int lo1, int hi1, int lo2, int hi2) -> Cand {
+        Cand best{0, 0, -1};
+        for (int v1 = lo1; v1 <= hi1; v1 += step)
+            for (int v2 = lo2; v2 <= hi2; v2 += step) {
+                if (yAxis) { cYL = v1; cYR = v2; cXL = cXR = fixedX; }
+                else       { cXL = v1; cXR = v2; /* yL/yR 保持上一轮最优——不再覆写 */ }
+                const long s = runLaserScore();
+                if (s > best.score) best = {v1, v2, s};
+            }
+        fprintf(stderr, "[FC-PEEYE] %s 粗扫 best=(%d,%d) laser=%ld\n",
+                tag, best.a, best.b, best.score);
+        return best;
+    };
+
+    // y 粗扫（x=180）→ y 细扫 → x 粗扫（y=best）→ x 细扫
+    Cand by = sweep("yL×yR", true, 180, 34, 0, 136, 0, 136);
+    const int ylc = std::max(0, by.a - 34), yhc = std::min(136, by.a + 34);
+    const int yrc = std::max(0, by.b - 34), yhc2 = std::min(136, by.b + 34);
+    Cand byf = sweep("yL×yR 细", true, 180, 17, ylc, yhc, yrc, yhc2);
+    const int yL = byf.a, yR = byf.b;
+    cXL = 180; cYL = yL; cXR = 180; cYR = yR;   // 固定 y 最优再扫 x
+    Cand bx = sweep("xL×xR", false, 0/*unused*/, 90, 0, 360, 0, 360);
+    const int xlc = std::max(0, bx.a - 90), xhc = std::min(360, bx.a + 90);
+    const int xrc = std::max(0, bx.b - 90), xhc2 = std::min(360, bx.b + 90);
+    Cand bxf = sweep("xL×xR 细", false, 0/*unused*/, 30, xlc, xhc, xrc, xhc2);
+    const int xL = bxf.a, xR = bxf.b;
+
+    // 终验：完整 5 帧
+    cXL = xL; cYL = yL; cXR = xR; cYR = yR;
+    const long finalScore = runLaserScore();
+    std::ostringstream ss;
+    ss << "分眼裁剪原点: L=(" << xL << "," << yL << ") R=(" << xR << "," << yR
+       << ") 激光匹配=" << finalScore << "（" << nFrames << " 帧；居中假设 (180,68)"
+       << "双眼前＝当前线上问题基准）";
+    fprintf(stderr, "\n[FC-PEEYE] %s\n", ss.str().c_str());
+    SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// startRealtime 名义标定路径复现：22:03 真机启动断言（fixedSize create）——
+// 离线同构装配（attachCalib＋attachStereoNominal＋算子 json）走一遍启动/停止
+// ============================================================================
+TEST(FcReplay, StartRealtimeNominalPath) {
+    if (getenv("JMW_FC_RT") == nullptr)
+        GTEST_SKIP() << "JMW_FC_RT=1 未设";
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty());
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+
+    // —— 参数微切：定位 fixedSize 断言源自哪组参数 ——
+    {
+        auto tryCtor = [](const char* tag, calib::UndistortPointsParams u) {
+            try {
+                calib::UndistortPointsCuda op(u);
+                fprintf(stderr, "[FCDBG-ctor] %s: OK\n", tag);
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[FCDBG-ctor] %s: FAIL %s\n", tag, e.what());
+            }
+        };
+        // a) 离线直用型（buildRig 同款）
+        {
+            calib::UndistortPointsParams u;
+            u.cameraMatrix = rig.tc.K1c; u.distCoeffs = rig.tc.D1;
+            u.R = rig.tc.R1; u.P = rig.tc.P1;
+            tryCtor("a-直用(K1c,D1,R1,P1)", u);
+        }
+        // b) startRealtime 同款（zeros P＋块拷＋右目置零）
+        {
+            calib::UndistortPointsParams u;
+            u.cameraMatrix = rig.tc.K1c.clone(); u.distCoeffs = rig.tc.D1.clone();
+            u.R = rig.tc.R1.clone();
+            u.P = cv::Mat::zeros(3, 4, CV_64F);
+            rig.tc.P1(cv::Rect(0, 0, 3, 3)).copyTo(u.P(cv::Rect(0, 0, 3, 3)));
+            tryCtor("b-块拷P", u);
+        }
+        // c) b＋P 第 4 列全零置零（模拟右目处理）
+        {
+            calib::UndistortPointsParams u;
+            u.cameraMatrix = rig.tc.K2c.clone(); u.distCoeffs = rig.tc.D2.clone();
+            u.R = rig.tc.R2.clone();
+            u.P = rig.tc.P2.clone();
+            u.P.at<double>(0, 3) = 0.0;
+            tryCtor("c-P2置零(clone)", u);
+        }
+    }
+    Scanner::data::SlotRing<Scanner::data::EnhancedFrame> ring(4);
+    auto adapter = std::make_unique<Scanner::pipeline::FiveChainAdapter>(
+        Scanner::pipeline::FiveChainConfig{}, *rig.obs, nullptr, nullptr,
+        &rig.operators);
+    adapter->attachCalib(rig.tc.K1, rig.tc.D1, rig.tc.K2, rig.tc.D2,
+                         rig.tc.W, rig.tc.H, rig.tc.laserTable);
+    adapter->attachStereoNominal(rig.tc.R1, rig.tc.R2, rig.tc.P1, rig.tc.P2,
+                                 rig.tc.Q, rig.tc.K1c, rig.tc.K2c,
+                                 rig.tc.D1, rig.tc.D2, rig.tc.Rext, rig.tc.Tcomp);
+    auto sr = adapter->startRealtime(ring, 0);
+    ASSERT_TRUE(sr.success) << "startRealtime 失败: " << sr.message;
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    adapter->stopRealtime();
+    SUCCEED() << "startRealtime 名义标定路径离线复现通过（真机断言未再现＝"
+                 "环境相关，需真机再查）";
 }

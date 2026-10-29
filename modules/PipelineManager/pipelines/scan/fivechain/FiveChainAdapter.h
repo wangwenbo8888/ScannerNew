@@ -10,6 +10,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
 #include <chrono>
+#include <functional>
 #include <string>
 #include <vector>
 #include <memory>
@@ -70,6 +71,12 @@ struct FiveChainConfig {
     int regWakeP99UsMax = 1000;
     int dbgInterval = 32;
     double pushBudgetMs = 0.8;
+    // 261028 标点模式（A 模式）：false＝不创建激光链算子（submitLaserFront
+    // 直接返回 0——从根源杜绝空激光数据在全链路上的级联崩溃）
+    bool laserEnabled = true;
+    // 261029 测试回放帧门（app 注入 dm->isCapturing()——与在线帧流同语义：
+    // 模式键只 arm，设备 M 键启停控制回放起停；空=恒开（离线直跑/无设备））
+    std::function<bool()> testFrameGate;
     // 261025 算法几何口径：全部标定表（K/D/P1/P2/Q/激光平面表/CMTT）为 1688×1400
     // 几何（laser-mark1688 标定链产物）；采集 2048×1536（camera.json——居中 ROI）。
     // 五链入口居中裁剪到算法几何。env JMW_FC_W/JMW_FC_H 可覆盖（=0 关闭裁剪直通）
@@ -118,8 +125,21 @@ public:
                      const cv::Mat& D2, int imageWidth, int imageHeight,
                      std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable);
 
+    /// 261027 名义温档立体标定注入（config/camera_calib.json——与产表/离线
+    /// 验证同源；启用后 harness 用构造期标定，逐帧快照注入关闭）
+    void attachStereoNominal(const cv::Mat& R1, const cv::Mat& R2,
+                             const cv::Mat& P1, const cv::Mat& P2, const cv::Mat& Q,
+                             const cv::Mat& K1c, const cv::Mat& K2c,
+                             const cv::Mat& D1, const cv::Mat& D2,
+                             const cv::Mat& Rext, const cv::Mat& Tcomp);
+
     /// 实时启动：桥接 SlotRing（Overwrite 抓最新面孔）→ 五链执行器（INT_MAX
     /// 无界哨兵）→ 收割线程（obs 落账＋节流渲染推送＋仓库直写）
+    /// 261029 测试数据回放模式（config/fc_testdata.json enabled+dir 为正源；
+    /// env JMW_FC_TESTDATA 优先覆盖）——绕过 SlotRing 直读帧文件走完整在线
+    /// 管线。加载失败＝fail（拒绝静默回退在线数据）
+    Scanner::Result loadTestData(const std::string& dir);
+
     Scanner::Result startRealtime(Scanner::data::SlotRing<Scanner::data::EnhancedFrame>& ring,
                                   size_t dropThreshold);
 
@@ -150,6 +170,12 @@ private:
     cv::Mat rtK1_, rtD1_, rtK2_, rtD2_;
     int rtW_ = 0, rtH_ = 0;
     std::shared_ptr<const calib::LaserPlaneMapTempTable> rtLaserTable_;
+    bool hasStereoNominal_ = false;               // 名义温档标定已注入
+    cv::Mat snR1_, snR2_, snP1_, snP2_, snQ_, snK1c_, snK2c_, snD1_, snD2_;
+    cv::Mat snRext_, snTcomp_;
+    // config/camera_calib.json 就近 22.5℃ 温档 → attachStereoNominal（测试
+    // 数据模式前置——快照注入关闭后名义标定为唯一标定源）
+    bool ensureStereoNominalFromConfig();
     std::unique_ptr<RtBridge> bridge_;
     class FcHarnessCompat* harness_ = nullptr;              // 五链 harness（自有）
     std::unique_ptr<scr::fc::FiveChainExecutor> executor_;  // 五链执行器（INT_MAX 无界）
@@ -163,6 +189,10 @@ private:
     uint64_t pushSeq_ = 0;
     std::vector<float> renderKeep_;                          // CloudViewHandle 指针宿主（活到下次推送）
     cv::cuda::Stream dlStream_;                              // 融合云 D2H 下载流
+    // 261028 实时标志点云（扫描中边扫边出——conic 有效圆去重累积）
+    std::vector<calib::MarkerCloudPoint> markerCloud_;       // hostMarker 指针宿主
+    // 标志点融合算子（体素 5mm＋EMA 精化——旧 lane MarkerCloudFuseCPU 同款）
+    std::unique_ptr<calib::MarkerCloudFuseCPU> markerFuseOp_;
 };
 
 } // namespace Scanner::pipeline

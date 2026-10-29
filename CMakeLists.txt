@@ -136,7 +136,7 @@ endif()
 
 # === 算子依赖（算子迁入启用）===
 find_package(OpenCV 4.13 REQUIRED COMPONENTS
-    core imgproc calib3d cudaimgproc cudaarithm cudafilters flann)
+    core imgproc calib3d imgcodecs cudaimgproc cudaarithm cudafilters flann)
 find_package(Eigen3 3.4 REQUIRED)
 
 # Ceres（global_optim/GBA 用；精简配置，免 SuiteSparse，用 Eigen 稀疏）

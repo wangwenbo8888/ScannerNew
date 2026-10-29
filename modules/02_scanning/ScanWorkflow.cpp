@@ -105,6 +105,7 @@ Result ScanWorkflow::assemblePipeline() {
 
     sp::ScanConfig cfg;
     cfg.enableLaser = (scanMode_ == ScanMode::MarkerPlusLaser);
+    cfg.testFrameGate = frameGate_;   // 261029 测试回放帧门（app 注入 isCapturing；可空）
     // P-4 体素密度档（261002 菜单①）：会话启动读档快照（待机改档下会话生效）
     if (ctx_) cfg.voxelSizeMm = static_cast<float>(ctx_->voxelDensityMm());
     JMW_LOG_INFO("02-ScanWorkflow",
@@ -446,6 +447,12 @@ void ScanWorkflow::runFinalBA() {
         // ::Config.skipBatchSolve 注释；激光会话（B/C/D）保留批算
         sp::GlobalOptimObject::Config goCfg;
         goCfg.skipBatchSolve = (scanMode_ == ScanMode::MarkerOnly);
+        // 261029 D 线激光重放体素与 C 线同参：会话体素档快照（07 五链下限同钳
+        // 0.25——否则重放计数/精度口径与扫描中融合云漂移）
+        {
+            const double vm = ctx_ ? ctx_->voxelDensityMm() : 0.0;
+            goCfg.laserVoxelSizeMm = static_cast<float>(vm >= 0.25 ? vm : 0.25);
+        }
         sp::GlobalOptimObject go(goCfg);
         sp::PipelineDeps deps;
         deps.sceneFeed = ctx_ ? ctx_->sceneFeed() : nullptr;

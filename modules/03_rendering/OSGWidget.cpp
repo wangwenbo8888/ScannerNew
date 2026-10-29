@@ -2816,6 +2816,10 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
     else
         m_laserGeom->setPrimitiveSet(
             0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0, static_cast<int>(n * 4)));
+    // 261029 扫描激光路径同标志点口径：取景走 maybeAutoFrame（左相机视角＋
+    // 半径带/1s 节流/避让拖拽）——MainWindow 的强制 autoFitCamera（LeadScan
+    // 斜视角）会在每次全量推后踩掉左相机视角（扫描中视角不对根因）
+    maybeAutoFrame();
 }
 
 // ============================================================================
@@ -2917,8 +2921,18 @@ void OSGWidget::maybeAutoFrame()
             (m_markerRoot && m_markerRoot->getNumParents() > 0)
                 ? m_markerRoot->getBound()
                 : osg::BoundingSphere();
-        if (!bs.valid() || bs.radius() <= 0.0) return;
-        radius = bs.radius();
+        if (bs.valid() && bs.radius() > 0.0) {
+            radius = bs.radius();
+        } else {
+            // 261027：无标志点时回退到激光点包围球（五链 fuseOnHold 诊断
+            // 模式——补光灯故障期标志点全灭，取景从未被调用＝3D 无显示根因）
+            const osg::BoundingSphere lbs =
+                (m_laserRoot && m_laserRoot->getNumParents() > 0)
+                    ? m_laserRoot->getBound()
+                    : osg::BoundingSphere();
+            if (!lbs.valid() || lbs.radius() <= 0.0) return;
+            radius = lbs.radius();
+        }
     }
     // 已取过景且未显著变化（0.8×~1.25× 带内）——视角不动（防每 5 帧一跳）；
     // 带外（显著增大或缩小）都重取：缩小覆盖"停止扫描/二次会话"场景——

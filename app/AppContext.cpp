@@ -818,6 +818,12 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
     // 命令通道点火（门禁/前置/装配失败均带因返回；各"不走打印点"已落日志）
     if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
     scanWf_->setScanMode(mode);
+    // 261029 测试数据回放帧门：回放与在线帧流同语义（在线帧门在本回调上方
+    // isCapturing 分流；测试回放绕过帧流——07 侧 readFrame 按此门起停）——
+    // 模式键只 arm，设备 M 键启停控制扫描/回放开始
+    if (auto* dmGate = deviceManager_.get()) {
+        scanWf_->setFrameGate([dmGate]() { return dmGate->isCapturing(); });
+    }
     lastScanMode_ = mode;                       // 就绪态续采重启灯组依据（P3）
     const char* modeName = mode == Scanner::ScanMode::MarkerOnly      ? "标点扫描(A)"
                            : mode == Scanner::ScanMode::MarkerPlusLaser ? "面片扫描(B)"
