@@ -46,7 +46,11 @@ FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
                 "[FiveChainAdapter] mask_separation 参数解析失败（用默认）: {}", e.what());
         }
     }
-    sepParams.useCudaGraph = false;   // 261028 确定性保证（CUDA Graph 多会话捕获不确定——conic 8→0 根因）
+    // 261028 确定性开关：禁用 CUDA Graph（走 legacy 逐核路径）。
+    // 【261029 复位 true：CONT4 实证 legacy 路径 FPS 289→250/CV 3.7%→16%——
+    // 261028 conic 8→0 的真根因是捕获模式毒化（已由 flat ThreadLocal＋sep
+    // Relaxed 根治），sep 图本身确定性无恙。JMW_FC_SEPNOGRAPH=1 可再禁（诊断）】
+    sepParams.useCudaGraph = getenv("JMW_FC_SEPNOGRAPH") == nullptr;
     sepL_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
     sepR_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
     calib::LaserCloudFuseCUDAParams fp;

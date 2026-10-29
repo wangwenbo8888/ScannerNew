@@ -1233,10 +1233,13 @@ void FiveChainExecutor::fuseLoop() {
             pendC_[slot] = nullptr;
             pendE_[slot] = nullptr;
             const std::string& rs = j->prod.regSource;
-            // 261028 核修：无条件融合（fuseOnHold 各种设置方式均不生效——
-            // 直接跳过配准门控，只要有激光点就融合；诊断用）
+            // 261029 恢复配准门控（261028「无条件融合」为标点模式诊断期临改——
+            // CONT4 实证 hold/skip 帧也无条件融合：数据环内突发 GPU 负载 →
+            // FPS 289→250/CV 3.7%→16% 门禁 FAIL。原语义＝仅新鲜位姿帧融合
+            //（first/flow/fuse；hold/skip＝沿用旧位姿，融合会拖影，本就不该融）
             const bool fused = h_.cfg_.fivechain.holdSkip == 0
-                               && j->eCount > 0 && j->eSlot >= 0;
+                               && j->eCount > 0 && j->eSlot >= 0
+                               && (rs == "first" || rs == "flow" || rs == "fuse");
             // 261028 融合逐帧诊断（前 5 帧——JMW_LOG 落盘）
             {
                 static std::atomic<int> s_fn{0};
@@ -1288,6 +1291,7 @@ void FiveChainExecutor::fuseLoop() {
                 // 261029 GBA 激光缓存填充：E 块（锁页 host）释放前拷出本帧设备系
                 // 激光 3D——D 线重放（GBA 优化位姿重融合）原料。与 C 线融合门控
                 //（hold/skip）无关：重放是终局遍独立路径，逐帧原料有则必缓存
+                //（CONT4 实证本拷贝非 CV 回归源——融合门控才是）
                 if (j->eCount > 0) {
                     auto& lx = j->prod.laserXyzHost;
                     lx.resize(static_cast<size_t>(j->eCount) * 3);
