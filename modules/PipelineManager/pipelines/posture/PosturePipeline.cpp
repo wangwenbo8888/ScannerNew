@@ -26,18 +26,18 @@
 #include "core/vision/ccl/region_analyze_cuda.h"
 #include "core/vision/frame_filter/frame_filter_cuda.h"
 #include "core/vision/mask_extract/mask_extract_cuda.h"
-// ---- 09 P 核标记点链算子 ----
-#include "core/marker/edge_match/edge_match_cpu.h"
+// ---- 09 P 核标记点链算子（261029 同步五链最新口径：conic 一步重建替代
+//      epipolar_intersect→edge_match→point_reconstruct 三步）----
+#include "core/marker/conic_reconstruct/conic_reconstruct_cpu.h"
 #include "core/marker/ellipse_fit/ellipse_fit_cpu.h"
-#include "core/marker/epipolar_intersect/epipolar_intersect_cpu.h"
 #include "core/marker/frame_fuse/frame_fuse_cpu.h"
 #include "core/marker/image_merge/image_merge_cpu.h"
 #include "core/marker/image_split/image_split_cpu.h"
 #include "core/marker/marker_match/marker_match_cpu.h"
 #include "core/marker/optical_flow_fuse/marker_optical_flow_fuse_cpu.h"
-#include "core/marker/point_reconstruct/point_reconstruct_cpu.h"
 #include "core/marker/undistort_cpu/undistort_points_cpu.h"
 #include "core/marker/zernike_edge/zernike_edge_cpu.h"
+#include "core/common/zitai_result_types.h"      // calib::extractEllipseCenters
 // ---- 09 姿态估计（E 段）----
 #include "calibration/posture/pose_estimate/pose_estimate_cpu.h"
 
@@ -64,9 +64,8 @@ struct PostureLaneOps {
     std::unique_ptr<calib::MarkerUndistortCPU> undistCpu;
     std::unique_ptr<calib::EllipseFitCPU> ellipse;
     std::unique_ptr<calib::MarkerMatchCPU> match;
-    std::unique_ptr<calib::EpipolarIntersectCPU> epiIntersect;
-    std::unique_ptr<calib::EdgeMatchCPU> edgeMatch;
-    std::unique_ptr<calib::PointReconstructCPU> reconstruct;
+    // 261029 conic 一步重建（五链最新口径——替代 epiIntersect/edgeMatch/reconstruct 三步）
+    std::unique_ptr<calib::ConicReconstructCPU> conic;
     // E 核终段（lane E 线程独占：eFinalize）
     std::unique_ptr<calib::MarkerOpticalFlowFuseCPU> flowFuse;
     std::unique_ptr<calib::FrameFuseCPU> frameFuse;
@@ -120,42 +119,42 @@ bool runMarkerChain(const data::CycleUnit& cycle, PostureLaneOps& ops,
                                      mL.groupIds, mR.groupIds);
     if (!ur.success) return false;
 
-    // ellipse_fit 逐组（矫正坐标系；中心即 2-7 输出）
-    auto fitGroups = [&](const std::vector<std::vector<cv::Point2d>>& groups,
-                         std::vector<calib::EllipseFitCPUResult>& out) {
-        for (const auto& g : groups) {
-            auto e = ops.ellipse->Execute(g);
-            if (e.success) out.push_back(std::move(e));
-        }
-    };
+    // ellipse fit 逐组（矫正坐标系；≥5 内点门控＋groupId——五链 runMarkerChainCore
+    // 同款：组内点数 <5 跳过（原版无此门，噪声组出伪椭圆）
+    const auto g1 = ur.splitRectifiedPoints1ByGroup();
+    const auto g2 = ur.splitRectifiedPoints2ByGroup();
     std::vector<calib::EllipseFitCPUResult> ellL, ellR;
-    fitGroups(ur.splitRectifiedPoints1ByGroup(), ellL);
-    fitGroups(ur.splitRectifiedPoints2ByGroup(), ellR);
-    if (ellL.size() < 3 || ellR.size() < 3) return false;   // 重建最少点数
+    for (size_t i = 0; i < g1.size(); ++i) {
+        if (g1[i].size() < 5) continue;
+        auto r = ops.ellipse->Execute(g1[i]);
+        r.groupId = static_cast<int>(i);
+        ellL.push_back(std::move(r));
+    }
+    for (size_t i = 0; i < g2.size(); ++i) {
+        if (g2[i].size() < 5) continue;
+        auto r = ops.ellipse->Execute(g2[i]);
+        r.groupId = static_cast<int>(i);
+        ellR.push_back(std::move(r));
+    }
+    int okL = 0, okR = 0;
+    for (const auto& e : ellL) okL += e.success ? 1 : 0;
+    for (const auto& e : ellR) okR += e.success ? 1 : 0;
+    if (okL == 0 || okR == 0) return false;
 
-    std::vector<cv::Point2f> cL, cR;
-    cL.reserve(ellL.size());
-    cR.reserve(ellR.size());
-    for (auto& e : ellL) cL.push_back(e.centerPoint2f());
-    for (auto& e : ellR) cR.push_back(e.centerPoint2f());
+    const std::vector<cv::Point2f> cL = calib::extractEllipseCenters(ellL);
+    const std::vector<cv::Point2f> cR = calib::extractEllipseCenters(ellR);
 
     auto mm = ops.match->Execute(cL, cR);
     if (!mm.success) return false;
 
-    auto eiL = ops.epiIntersect->Execute(ellL);
-    auto eiR = ops.epiIntersect->Execute(ellR);
-    if (!eiL.success || !eiR.success) return false;
-
-    auto em = ops.edgeMatch->Execute(eiL.ellipseResults, eiR.ellipseResults,
-                                     mm.centerMatches);
-    if (!em.success) return false;
-
-    auto pr = ops.reconstruct->Execute(em);
-    if (!pr.success) return false;
+    // 261029 conic 一步重建（五链最新口径——替代 epipolar_intersect→edge_match
+    // →point_reconstruct 三步）
+    auto conic = ops.conic->Execute(ellL, ellR, mm.centerMatches);
+    if (!conic.success || conic.statistics.validCount == 0) return false;
 
     result.ellipseCentersL = std::move(cL);
     result.ellipseCentersR = std::move(cR);
-    for (const auto& m : pr.markerResults) {
+    for (const auto& m : conic.markers) {
         if (!m.validPlane || !m.validCircle) continue;
         result.positions.emplace_back(m.centerX, m.centerY, m.centerZ);
         result.normals.emplace_back(m.normalX, m.normalY, m.normalZ);
@@ -451,14 +450,22 @@ std::shared_ptr<PostureLaneOps> PosturePipeline::makeOps() const {
 
         ops->ellipse = std::make_unique<calib::EllipseFitCPU>();
         ops->match = std::make_unique<calib::MarkerMatchCPU>();
-        ops->epiIntersect = std::make_unique<calib::EpipolarIntersectCPU>();
-        ops->edgeMatch = std::make_unique<calib::EdgeMatchCPU>();
-
-        calib::PointReconstructCPUParams pp;      // fx/cx 构造校验需要
-        pp.fxLeft = mp.fx1;  pp.fyLeft = mp.fy1;  pp.cxLeft = mp.cx1;  pp.cyLeft = mp.cy1;
-        pp.fxRight = mp.fx2; pp.fyRight = mp.fy2; pp.cxRight = mp.cx2; pp.cyRight = mp.cy2;
-        ops->reconstruct = std::make_unique<calib::PointReconstructCPU>(pp);
-        ops->reconstruct->SetProjectionMatrices(params_.P1, params_.P2, params_.Q);
+        // 261029 conic 一步重建（五链同款）：矫正系 K/C2 由标定档 P1/P2 派生
+        // ——K1=P1 左 3×3；K2=P2 左 3×3；C2=−K2⁻¹·t2（FiveChainAdapter 同式；
+        // A 链无逐帧快照＝构造期一次注入）
+        ops->conic = std::make_unique<calib::ConicReconstructCPU>();
+        {
+            cv::Matx33d cK1 = cv::Matx33d::eye(), cK2 = cv::Matx33d::eye();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    cK1(r, c) = params_.P1.at<double>(r, c);
+                    cK2(r, c) = params_.P2.at<double>(r, c);
+                }
+            const cv::Vec3d cT2(params_.P2.at<double>(0, 3),
+                                params_.P2.at<double>(1, 3),
+                                params_.P2.at<double>(2, 3));
+            ops->conic->SetProjectionMatrices(cK1, cK2, -(cK2.inv() * cT2));
+        }
 
         ops->flowFuse = std::make_unique<calib::MarkerOpticalFlowFuseCPU>();
         ops->frameFuse = std::make_unique<calib::FrameFuseCPU>();
