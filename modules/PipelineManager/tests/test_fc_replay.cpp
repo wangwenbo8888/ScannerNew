@@ -2184,6 +2184,280 @@ TEST(FcReplay, GbaOnCheckpoint) {
         }
         fprintf(stderr, "[GBA-CK] 终版激光 %zu 点（抽样 %zu）平面内含率(±3mm)=%.1f%%\n",
                 n, pts.size(), 100.0 * in3 / pts.size());
+
+        // —— 261030 根因判别①：连通域分解（voxel 5mm＋6 邻接 BFS）——
+        // 分解出若干各自亚毫米平面簇＝场景本就多面（墙/支架/板——重建位姿
+        // 全对，"乱"＝内容）；一坨厚块无干净平面＝位姿链仍有病
+        {
+            struct VKey { long long x, y, z; };
+            auto vkey = [](const cv::Point3f& p, float cell) {
+                return VKey{(long long)std::floor(p.x / cell),
+                            (long long)std::floor(p.y / cell),
+                            (long long)std::floor(p.z / cell)};
+            };
+            auto keyHash = [](const VKey& k) {
+                return std::hash<long long>()(k.x * 73856093ULL ^ k.y * 19349663ULL
+                                             ^ k.z * 83492791ULL);
+            };
+            auto keyEq = [](const VKey& a, const VKey& b) {
+                return a.x == b.x && a.y == b.y && a.z == b.z;
+            };
+            constexpr float kCell = 5.0f;
+            std::unordered_map<VKey, int, decltype(keyHash), decltype(keyEq)>
+                vox(0, keyHash, keyEq);
+            std::vector<int> voxIdx(pts.size(), -1);
+            for (size_t i = 0; i < pts.size(); ++i) {
+                auto k = vkey(pts[i], kCell);
+                auto it = vox.find(k);
+                if (it == vox.end()) it = vox.emplace(k, (int)vox.size()).first;
+                voxIdx[i] = it->second;
+            }
+            // voxel 并查集＋6 邻接合并
+            std::vector<int> parent(vox.size());
+            for (size_t i = 0; i < parent.size(); ++i) parent[i] = (int)i;
+            std::function<int(int)> find = [&](int x) {
+                while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+                return x;
+            };
+            auto unite = [&](int a, int b) {
+                int ra = find(a), rb = find(b);
+                if (ra != rb) parent[ra] = rb;
+            };
+            std::unordered_map<VKey, int, decltype(keyHash), decltype(keyEq)>
+                lookup(vox.size(), keyHash, keyEq);
+            // 重建带索引 map
+            {
+                size_t vi = 0;
+                for (auto it = vox.begin(); it != vox.end(); ++it, ++vi)
+                    lookup[it->first] = it->second;
+                (void)vi;
+            }
+            for (const auto& kv : lookup) {
+                static const long long d[6][3] = {{1,0,0},{-1,0,0},{0,1,0},
+                                                   {0,-1,0},{0,0,1},{0,0,-1}};
+                for (auto& dd : d) {
+                    VKey nk{kv.first.x + dd[0], kv.first.y + dd[1],
+                            kv.first.z + dd[2]};
+                    auto it = lookup.find(nk);
+                    if (it != lookup.end()) unite(kv.second, it->second);
+                }
+            }
+            // 按根聚合
+            std::unordered_map<int, std::vector<cv::Point3f>> comp;
+            for (size_t i = 0; i < pts.size(); ++i)
+                comp[find(voxIdx[i])].push_back(pts[i]);
+            // 取前 6 大簇：尺寸＋包围盒＋平面 RMS（幂迭代复用本测试口径）
+            std::vector<std::pair<size_t, int>> bySize;
+            for (const auto& c : comp) bySize.push_back({c.second.size(), c.first});
+            std::sort(bySize.rbegin(), bySize.rend());
+            // planeFit lambda 复用（WhiteboardPlaneDiagnosis 同款——本地重写简版）
+            auto fitPlaneRms = [](const std::vector<cv::Point3f>& v) {
+                cv::Point3f m(0, 0, 0);
+                for (const auto& p : v) { m.x += p.x; m.y += p.y; m.z += p.z; }
+                m.x /= v.size(); m.y /= v.size(); m.z /= v.size();
+                double a = 0, b = 0, d2 = 0, e = 0, f = 0, g = 0;
+                for (const auto& p : v) {
+                    const float x = p.x - m.x, y = p.y - m.y, z = p.z - m.z;
+                    a += x * x; b += x * y; d2 += x * z; e += y * y; f += y * z; g += z * z;
+                }
+                cv::Vec3d v1(1, 0.3, 0.1);
+                for (int it = 0; it < 60; ++it) {
+                    cv::Vec3d w(a * v1[0] + b * v1[1] + d2 * v1[2],
+                                b * v1[0] + e * v1[1] + f * v1[2],
+                                d2 * v1[0] + f * v1[1] + g * v1[2]);
+                    const double L = std::sqrt(w.dot(w));
+                    if (L < 1e-12) break;
+                    v1 = w / L;
+                }
+                cv::Vec3d v2 = v1 + cv::Vec3d(0.37, 0.61, 0.93);
+                for (int it = 0; it < 60; ++it) {
+                    cv::Vec3d w(a * v2[0] + b * v2[1] + d2 * v2[2],
+                                b * v2[0] + e * v2[1] + f * v2[2],
+                                d2 * v2[0] + f * v2[1] + g * v2[2]);
+                    w -= v1 * v1.dot(w);
+                    const double L = std::sqrt(w.dot(w));
+                    if (L < 1e-12) break;
+                    v2 = w / L;
+                }
+                cv::Vec3d nv = v1.cross(v2);
+                const double L = std::sqrt(nv.dot(nv));
+                nv /= L;
+                double s2 = 0;
+                for (const auto& p : v) {
+                    const double r = nv[0] * (p.x - m.x) + nv[1] * (p.y - m.y)
+                                   + nv[2] * (p.z - m.z);
+                    s2 += r * r;
+                }
+                return std::sqrt(s2 / v.size());
+            };
+            fprintf(stderr, "[GBA-CK] 连通域分解（voxel %.0fmm，6 邻接）：簇数=%zu\n",
+                    kCell, comp.size());
+            int shown = 0;
+            for (const auto& bs : bySize) {
+                if (++shown > 6 || bs.first < 500) break;
+                const auto& v = comp[bs.second];
+                cv::Point3f lo(v[0]), hi(v[0]);
+                for (const auto& p : v) {
+                    lo.x = std::min(lo.x, p.x); hi.x = std::max(hi.x, p.x);
+                    lo.y = std::min(lo.y, p.y); hi.y = std::max(hi.y, p.y);
+                    lo.z = std::min(lo.z, p.z); hi.z = std::max(hi.z, p.z);
+                }
+                fprintf(stderr,
+                        "  簇#%d: %zu 点 尺寸 %.0f×%.0f×%.0fmm 平面RMS=%.2fmm"
+                        "（亚毫米＝干净面；厚块＝位姿病）\n",
+                        shown, v.size(), hi.x - lo.x, hi.y - lo.y, hi.z - lo.z,
+                        fitPlaneRms(v));
+            }
+        }
+    }
+
+    // —— 261030 根因判别②：位姿平滑度剖面（修正传递缝合检查）——
+    // 相邻帧平移增量分布：关键帧边界跳变显著大于段内 → 修正传递缝合伤；
+    // 全程平滑 → 位姿链无病（乱源在别处）
+    if (out.poses.size() >= 10) {
+        std::vector<double> dAll, dAtKf;
+        for (size_t i = 1; i < out.poses.size(); ++i) {
+            const double d = std::sqrt(
+                (out.poses[i].t[0] - out.poses[i - 1].t[0])
+                    * (out.poses[i].t[0] - out.poses[i - 1].t[0])
+                + (out.poses[i].t[1] - out.poses[i - 1].t[1])
+                      * (out.poses[i].t[1] - out.poses[i - 1].t[1])
+                + (out.poses[i].t[2] - out.poses[i - 1].t[2])
+                      * (out.poses[i].t[2] - out.poses[i - 1].t[2]));
+            dAll.push_back(d);
+            // 关键帧边界：i 是关键帧（frameId 在 optimizedPoses 里）——用近似：
+            // 边界跳变=段内中位的 >5× 标记
+        }
+        std::sort(dAll.begin(), dAll.end());
+        fprintf(stderr,
+                "[GBA-CK] 位姿平移增量: 中位=%.3fmm P95=%.3fmm 最大=%.3fmm"
+                "（>10mm 级跳变＝修正传递/关联病）\n",
+                dAll[dAll.size() / 2], dAll[dAll.size() * 19 / 20], dAll.back());
+    }
+
+    // —— 261030 飞点溯源（flying points 如何产生）：终版位姿下每帧激光变换
+    // 到世界系，鲁棒主平面，>10mm 离面＝飞点；按源帧归因——整帧飞（>50%）
+    // ＝位姿错帧；帧内散飞＝匹配离群；统计占比＋Top 源帧特征
+    {
+        const auto snap2 = acc.snapshot();
+        std::vector<cv::Point3f> uni;
+        for (size_t i = 0; i < snap2.obs.size() && i < out.poses.size(); ++i) {
+            const size_t slot = snap2.obs[i].laserCacheSlot;
+            if (slot == sp::FrameObs::kNoLaserSlot || slot >= snap2.laserFrames.size())
+                continue;
+            const auto& lf = snap2.laserFrames[slot];
+            const cv::Matx33d Rm(out.poses[i].R);
+            const cv::Vec3d tv(out.poses[i].t);
+            const size_t nF = lf.size() / 3;
+            const size_t step = nF / 30 + 1;
+            for (size_t k = 0; k < nF; k += step) {
+                const cv::Vec3d w = Rm * cv::Vec3d(lf[k * 3], lf[k * 3 + 1],
+                                                   lf[k * 3 + 2]) + tv;
+                uni.emplace_back(static_cast<float>(w[0]), static_cast<float>(w[1]),
+                                 static_cast<float>(w[2]));
+            }
+        }
+        if (uni.size() >= 1000) {
+            auto fitN = [](const std::vector<cv::Point3f>& v)
+                -> std::pair<cv::Vec3d, cv::Point3f> {
+                cv::Point3f m(0, 0, 0);
+                for (const auto& p : v) { m.x += p.x; m.y += p.y; m.z += p.z; }
+                m.x /= v.size(); m.y /= v.size(); m.z /= v.size();
+                double a = 0, b = 0, d2 = 0, e = 0, f = 0, g = 0;
+                for (const auto& p : v) {
+                    const float x = p.x - m.x, y = p.y - m.y, z = p.z - m.z;
+                    a += x * x; b += x * y; d2 += x * z; e += y * y; f += y * z; g += z * z;
+                }
+                cv::Vec3d v1(1, 0.3, 0.1);
+                for (int it = 0; it < 60; ++it) {
+                    cv::Vec3d w(a * v1[0] + b * v1[1] + d2 * v1[2],
+                                b * v1[0] + e * v1[1] + f * v1[2],
+                                d2 * v1[0] + f * v1[1] + g * v1[2]);
+                    const double L = std::sqrt(w.dot(w));
+                    if (L < 1e-12) break;
+                    v1 = w / L;
+                }
+                cv::Vec3d v2 = v1 + cv::Vec3d(0.37, 0.61, 0.93);
+                for (int it = 0; it < 60; ++it) {
+                    cv::Vec3d w(a * v2[0] + b * v2[1] + d2 * v2[2],
+                                b * v2[0] + e * v2[1] + f * v2[2],
+                                d2 * v2[0] + f * v2[1] + g * v2[2]);
+                    w -= v1 * v1.dot(w);
+                    const double L = std::sqrt(w.dot(w));
+                    if (L < 1e-12) break;
+                    v2 = w / L;
+                }
+                cv::Vec3d nv = v1.cross(v2);
+                nv /= std::sqrt(nv.dot(nv));
+                return {nv, m};
+            };
+            auto [nrm, ctr] = fitN(uni);
+            std::vector<cv::Point3f> core;
+            for (const auto& p : uni) {
+                const double r = nrm[0] * (p.x - ctr.x) + nrm[1] * (p.y - ctr.y)
+                               + nrm[2] * (p.z - ctr.z);
+                if (std::abs(r) < 3.0) core.push_back(p);
+            }
+            if (core.size() > 100) std::tie(nrm, ctr) = fitN(core);
+            struct FlyRec { size_t obsIdx; size_t flyN, totN; double jumpMm, iqrMm; };
+            std::vector<FlyRec> offenders;
+            size_t totalFly = 0, totalPts = 0;
+            size_t wholeFlyFrames = 0, scatterFrames = 0;
+            size_t wholeFlyPts = 0, scatterFlyPts = 0;
+            for (size_t i = 0; i < snap2.obs.size() && i < out.poses.size(); ++i) {
+                const size_t slot = snap2.obs[i].laserCacheSlot;
+                if (slot == sp::FrameObs::kNoLaserSlot || slot >= snap2.laserFrames.size())
+                    continue;
+                const auto& lf = snap2.laserFrames[slot];
+                const size_t n = lf.size() / 3;
+                if (n < 50) continue;
+                const cv::Matx33d Rm(out.poses[i].R);
+                const cv::Vec3d tv(out.poses[i].t);
+                size_t fly = 0;
+                for (size_t k = 0; k < n; ++k) {
+                    const cv::Vec3d w = Rm * cv::Vec3d(lf[k * 3], lf[k * 3 + 1],
+                                                       lf[k * 3 + 2]) + tv;
+                    const double r = nrm[0] * (w[0] - ctr.x) + nrm[1] * (w[1] - ctr.y)
+                                   + nrm[2] * (w[2] - ctr.z);
+                    if (std::abs(r) > 10.0) ++fly;
+                }
+                totalFly += fly; totalPts += n;
+                if (fly > n / 2) {
+                    ++wholeFlyFrames; wholeFlyPts += fly;
+                } else if (fly > n / 20) {
+                    ++scatterFrames; scatterFlyPts += fly;
+                }
+                if (fly > n / 20) {
+                    double jump = 0;
+                    if (i > 0) {
+                        const double dx = out.poses[i].t[0] - out.poses[i - 1].t[0];
+                        const double dy = out.poses[i].t[1] - out.poses[i - 1].t[1];
+                        const double dz = out.poses[i].t[2] - out.poses[i - 1].t[2];
+                        jump = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    }
+                    std::vector<float> zs(n);
+                    for (size_t k = 0; k < n; ++k) zs[k] = lf[k * 3 + 2];
+                    std::sort(zs.begin(), zs.end());
+                    offenders.push_back({i, fly, n, jump, zs[n * 3 / 4] - zs[n / 4]});
+                }
+            }
+            fprintf(stderr,
+                "[FLY] 飞点溯源(>10mm 离主平面)：总飞 %zu/%zu（%.1f%%）｜整帧飞帧 "
+                "%zu（%zu 点＝位姿错帧）｜散飞帧 %zu（%zu 点＝帧内匹配离群）\n",
+                totalFly, totalPts, totalPts ? 100.0 * totalFly / totalPts : 0.0,
+                wholeFlyFrames, wholeFlyPts, scatterFrames, scatterFlyPts);
+            std::sort(offenders.begin(), offenders.end(),
+                      [](const FlyRec& a, const FlyRec& b) { return a.flyN > b.flyN; });
+            int shown = 0;
+            for (const auto& o : offenders) {
+                if (++shown > 8) break;
+                fprintf(stderr,
+                        "  飞点源帧 obs#%zu: %zu/%zu(%.0f%%) 位姿跳变=%.1fmm "
+                        "Z-IQR=%.0fmm\n",
+                        o.obsIdx, o.flyN, o.totN, 100.0 * o.flyN / o.totN,
+                        o.jumpMm, o.iqrMm);
+            }
+        }
     }
     SUCCEED();
 }

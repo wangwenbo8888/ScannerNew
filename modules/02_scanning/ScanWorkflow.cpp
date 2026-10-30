@@ -544,6 +544,77 @@ void ScanWorkflow::runFinalBA() {
                     laserEditExclusions_.size(), removed);
                 finalLaser = std::move(kept);
             }
+            // —— 261030 飞点过滤（终版入仓前）：半径邻域统计——真表面点在
+            // 5mm 半径内有邻域支撑（体素云密度 ~15 点/cm²），错配飞点随机
+            // 落点孤立无邻。溯源实证：飞点 91% ＝帧内 2-5% 错配长尾（8.4%
+            // 总量）；<2 邻居剔除。编辑排除后做（排除点已走，不算邻居）
+            {
+                const auto t0 = std::chrono::steady_clock::now();
+                const size_t n = finalLaser.size() / 3;
+                if (n > 1000) {
+                    constexpr float kCell = 5.0f;      // 与判据半径同格
+                    constexpr int kMinNb = 2;          // 5mm 内最少邻居数
+                    struct FlyF {
+                        static int32_t c(float v) {
+                            return static_cast<int32_t>(std::floor(v / kCell));
+                        }
+                        static int64_t k(float x, float y, float z) {
+                            return (static_cast<int64_t>(c(x) & 0x1FFFFF) << 42)
+                                 | (static_cast<int64_t>(c(y) & 0x1FFFFF) << 21)
+                                 | static_cast<int64_t>(c(z) & 0x1FFFFF);
+                        }
+                    };
+                    std::unordered_map<int64_t, std::vector<uint32_t>> grid;
+                    grid.reserve(n);
+                    for (size_t i = 0; i < n; ++i)
+                        grid[FlyF::k(finalLaser[i * 3], finalLaser[i * 3 + 1],
+                                     finalLaser[i * 3 + 2])]
+                            .push_back(static_cast<uint32_t>(i));
+                    std::vector<float> kept2;
+                    kept2.reserve(finalLaser.size());
+                    size_t dropped = 0;
+                    for (size_t i = 0; i < n; ++i) {
+                        const float x = finalLaser[i * 3], y = finalLaser[i * 3 + 1],
+                                    z = finalLaser[i * 3 + 2];
+                        int nb = 0;
+                        const int32_t cx = FlyF::c(x), cy = FlyF::c(y), cz = FlyF::c(z);
+                        for (int32_t dx = -1; dx <= 1 && nb < kMinNb; ++dx)
+                            for (int32_t dy = -1; dy <= 1 && nb < kMinNb; ++dy)
+                                for (int32_t dz = -1; dz <= 1 && nb < kMinNb; ++dz) {
+                                    const int64_t k =
+                                        (static_cast<int64_t>((cx + dx) & 0x1FFFFF) << 42)
+                                      | (static_cast<int64_t>((cy + dy) & 0x1FFFFF) << 21)
+                                      | static_cast<int64_t>((cz + dz) & 0x1FFFFF);
+                                    const auto it = grid.find(k);
+                                    if (it == grid.end()) continue;
+                                    for (uint32_t j : it->second) {
+                                        if (j == i) continue;
+                                        const float ddx = finalLaser[j * 3] - x,
+                                                    ddy = finalLaser[j * 3 + 1] - y,
+                                                    ddz = finalLaser[j * 3 + 2] - z;
+                                        if (ddx * ddx + ddy * ddy + ddz * ddz
+                                            <= kCell * kCell) {
+                                            ++nb;
+                                            if (nb >= kMinNb) break;
+                                        }
+                                    }
+                                }
+                        if (nb >= kMinNb) {
+                            kept2.push_back(x); kept2.push_back(y); kept2.push_back(z);
+                        } else {
+                            ++dropped;
+                        }
+                    }
+                    const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    JMW_LOG_WARN("02-ScanWorkflow",
+                        "[终局遍] 飞点过滤: {} → {} 点（剔除孤立 {} 点＝{:.1f}%，"
+                        "5mm 内 <{} 邻居，{}ms）",
+                        n, n - dropped, dropped,
+                        100.0 * dropped / n, kMinNb, el);
+                    finalLaser = std::move(kept2);
+                }
+            }
             ctx_->pointCloudBuffer()->pushSessionCloud(finalLaser);
             JMW_LOG_INFO("02-ScanWorkflow",
                 "[终局遍] 激光终版入仓: {} 点（替换 C 线中间版）", finalLaser.size() / 3);

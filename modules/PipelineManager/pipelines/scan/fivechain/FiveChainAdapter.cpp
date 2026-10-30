@@ -554,7 +554,36 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
         }
         const bool flowOk = !driftRejected && p.regFlow.success
                             && static_cast<int>(p.regFlow.getMatchedCount()) >= 3;
-        if (flowOk) {
+        // 261030 运动合理性门（飞点-sheet 根治）：帧间平移/旋转跳变超物理界限
+        // ＝光流劣解（真机位姿增量实测 P95=16.1mm/最大 28.9mm 每帧＝55fps 下
+        // 1.6m/s 不可能——劣解整帧平面被甩离＝"成片飞点"）。拒采纳 → 走既有
+        // frame_fuse 兜底/hold。阈值 env JMW_FC_JUMPMM（默认 15mm，0=关）＋
+        // 旋转 8°（快扫保守界）
+        bool flowOkGated = flowOk;
+        if (flowOkGated && !prevState_.empty()) {
+            static const double sJumpMm = [] {
+                const char* e = getenv("JMW_FC_JUMPMM");
+                return e ? atof(e) : 15.0;
+            }();
+            const cv::Vec3d dt(p.regFlow.T.val[0] - prevState_.T.val[0],
+                               p.regFlow.T.val[1] - prevState_.T.val[1],
+                               p.regFlow.T.val[2] - prevState_.T.val[2]);
+            const double jumpMm = cv::norm(dt);
+            // 旋转增量角：R_δ = R_cand·R_prevᵀ
+            const cv::Matx33d Rc(p.regFlow.R.val);
+            const cv::Matx33d Rp(prevState_.R.val);
+            const cv::Matx33d Rd = Rc * Rp.t();
+            const double tr = Rd(0, 0) + Rd(1, 1) + Rd(2, 2);
+            const double angDeg = std::acos(std::min(1.0, std::max(-1.0,
+                (tr - 1.0) / 2.0))) * 180.0 / CV_PI;
+            if ((sJumpMm > 0 && jumpMm > sJumpMm) || angDeg > 8.0) {
+                flowOkGated = false;
+                p.flowMessageDiag += " [jump-gate: dT=" + std::to_string(jumpMm)
+                                   + "mm ang=" + std::to_string(angDeg) + "deg]";
+                diagRegHold_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (flowOkGated) {
             p.regSource = prevState_.empty() ? "first" : "flow";
             p.regMatched = static_cast<int>(p.regFlow.getMatchedCount());
             adoptRegistration(p.regFlow, p);

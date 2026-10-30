@@ -645,6 +645,9 @@ void OSGWidget::loadCloudSnapshot(uint64_t version,
     if (m_pcbGeode && m_pcbGeode->getNumParents() > 0)
         m_root->removeChild(m_pcbGeode.get());
     m_pcbGeode = geode;
+    // 261030 修「只隐藏部分激光点」：仓库快照层随激光开关（终版云也是激光点
+    // ——关会话后 cloudTimer 灌入此层，原不吃开关）
+    geode->setNodeMask(m_laserVisible ? ~0u : 0u);
     m_root->addChild(geode.get());
 
     m_lastIngestVersion = version;
@@ -1380,6 +1383,13 @@ void OSGWidget::setLaserPointsVisible(bool visible)
     m_laserVisible = visible;
     if (m_laserRoot.valid())
         m_laserRoot->setNodeMask(visible ? ~0u : 0u);
+    // 261030 修「只隐藏了部分激光点」：激光来源共三层几何——①扫描会话层
+    // （m_laserRoot）②仓库快照层（m_pcbGeode——关会话后 cloudTimer 灌终版云）
+    // ③导入云层（m_cloudRoot）。原只切①——快照层原样露出＝"只隐藏了部分"
+    if (m_pcbGeode.valid())
+        m_pcbGeode->setNodeMask(visible ? ~0u : 0u);
+    if (m_cloudRoot.valid())
+        m_cloudRoot->setNodeMask(visible ? ~0u : 0u);
     update();
 }
 
@@ -2328,6 +2338,8 @@ void OSGWidget::loadPointCloudWithNormals(const std::vector<osg::Vec3>& points,
         m_cloudCoords = new osg::Vec3Array;
         m_cloudNormals = new osg::Vec3Array;
         m_cloudColors = new osg::Vec4Array;
+        // 261030 导入云层创建即随激光开关（与快照层/会话层同口径）
+        m_cloudRoot->setNodeMask(m_laserVisible ? ~0u : 0u);
     }
 
     // 设置数据
