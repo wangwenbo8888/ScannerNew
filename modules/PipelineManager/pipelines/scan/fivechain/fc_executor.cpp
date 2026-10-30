@@ -282,6 +282,15 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles)
     splitCpu_ = std::make_unique<calib::LaserMatchScanSplitCpuV3>(v3p);
     reconP_ = calib::LaserReconstructParams::fromJson(
         h_.cfg_.opParams("laser_reconstruct"));
+    // 261030 飞线门阈值（laser_reconstruct 节点 linePlaneGateMm——07 侧治理
+    // 参数随算子配置下发；默认 0=关（深物体生产场景不误杀——白板等平场景
+    // 现场 config 开 15）；env JMW_FC_LINEPLANE 覆盖）
+    {
+        const auto& jn = h_.cfg_.opParams("laser_reconstruct");
+        if (jn.contains("linePlaneGateMm"))
+            linePlaneGateMm_ = jn.value("linePlaneGateMm", 0);
+    }
+    if (const char* e = getenv("JMW_FC_LINEPLANE")) linePlaneGateMm_ = atoi(e);
     reconCpu_ = std::make_unique<calib::LaserReconstructCpu>(reconP_);
     splitGpu_->Warmup(40000, 40000);   // 冷启动防护（P2 交付项）
     // 【N4·测量卫生】温表预注：双管表构造期注入，把 140MB 级上传＋流同步挪出
@@ -1222,6 +1231,106 @@ void FiveChainExecutor::chain2Loop() {
                                         j->idx, iqr, sZgate, iqr / range,
                                         zGateDrops_.load());
                             j->eCount = 0;   // 整帧弃：不融合不缓存（E 块照常归还）
+                        }
+                    }
+                }
+                // 261030 飞线治理（帧内逐线离面剪枝）：真实激光线共面于被扫
+                // 表面；错线匹配产出「飞线」＝整段错深度但线内稠密（终版孤立
+                // 点过滤滤不掉——线自身互为邻居）。帧主平面（幂迭代）→ 逐点
+                // 残差 → 逐线统计：离面占比 >50% ＝飞线整线剔；否则剔线内
+                // 离面散点。E 块就地压缩。env JMW_FC_LINEPLANE（默认 15mm，0=关）
+                if (j->eCount > 200 && linePlaneGateMm_ > 0) {
+                    static const int sLinePlane = linePlaneGateMm_;
+                    if (sLinePlane > 0) {
+                        float* eb = eBlocks_[static_cast<size_t>(s)];
+                        const int n = j->eCount;
+                        // 帧主平面（质心＋协方差幂迭代）
+                        double mx = 0, my = 0, mz = 0;
+                        for (int q = 0; q < n; ++q) {
+                            mx += eb[q * 3]; my += eb[q * 3 + 1]; mz += eb[q * 3 + 2];
+                        }
+                        mx /= n; my /= n; mz /= n;
+                        double a = 0, b = 0, d2 = 0, e2 = 0, f2 = 0, g = 0;
+                        for (int q = 0; q < n; ++q) {
+                            const double x = eb[q * 3] - mx, y = eb[q * 3 + 1] - my,
+                                         z = eb[q * 3 + 2] - mz;
+                            a += x * x; b += x * y; d2 += x * z;
+                            e2 += y * y; f2 += y * z; g += z * z;
+                        }
+                        double v1[3] = {1, 0.3, 0.1};
+                        for (int it = 0; it < 40; ++it) {
+                            double w[3] = {a * v1[0] + b * v1[1] + d2 * v1[2],
+                                           b * v1[0] + e2 * v1[1] + f2 * v1[2],
+                                           d2 * v1[0] + f2 * v1[1] + g * v1[2]};
+                            const double L = std::sqrt(w[0] * w[0] + w[1] * w[1]
+                                                      + w[2] * w[2]);
+                            if (L < 1e-12) break;
+                            v1[0] = w[0] / L; v1[1] = w[1] / L; v1[2] = w[2] / L;
+                        }
+                        double v2[3] = {v1[0] + 0.37, v1[1] + 0.61, v1[2] + 0.93};
+                        for (int it = 0; it < 40; ++it) {
+                            double w[3] = {a * v2[0] + b * v2[1] + d2 * v2[2],
+                                           b * v2[0] + e2 * v2[1] + f2 * v2[2],
+                                           d2 * v2[0] + f2 * v2[1] + g * v2[2]};
+                            const double dot = v1[0] * w[0] + v1[1] * w[1]
+                                             + v1[2] * w[2];
+                            w[0] -= v1[0] * dot; w[1] -= v1[1] * dot;
+                            w[2] -= v1[2] * dot;
+                            const double L = std::sqrt(w[0] * w[0] + w[1] * w[1]
+                                                      + w[2] * w[2]);
+                            if (L < 1e-12) break;
+                            v2[0] = w[0] / L; v2[1] = w[1] / L; v2[2] = w[2] / L;
+                        }
+                        double nv[3] = {v1[1] * v2[2] - v1[2] * v2[1],
+                                        v1[2] * v2[0] - v1[0] * v2[2],
+                                        v1[0] * v2[1] - v1[1] * v2[0]};
+                        const double nL = std::sqrt(nv[0] * nv[0] + nv[1] * nv[1]
+                                                  + nv[2] * nv[2]);
+                        if (nL > 1e-12) {
+                            nv[0] /= nL; nv[1] /= nL; nv[2] /= nL;
+                            const float thr = static_cast<float>(sLinePlane);
+                            // 逐线统计离面占比（idsScratch＝ReconstructInto 平行线号）
+                            const int* ids = idsScratch.data();
+                            std::unordered_map<int, std::pair<int, int>> lineStat;
+                            lineStat.reserve(256);
+                            for (int q = 0; q < n; ++q) {
+                                auto& st = lineStat[ids[q]];
+                                ++st.second;
+                                const double r = nv[0] * (eb[q * 3] - mx)
+                                               + nv[1] * (eb[q * 3 + 1] - my)
+                                               + nv[2] * (eb[q * 3 + 2] - mz);
+                                if (std::abs(r) > thr) ++st.first;
+                            }
+                            // 就地压缩：飞线（离面>50%）整线剔；其余线剔离面散点
+                            int w = 0;
+                            int pruned = 0;
+                            for (int q = 0; q < n; ++q) {
+                                const auto& st = lineStat[ids[q]];
+                                const double r = nv[0] * (eb[q * 3] - mx)
+                                               + nv[1] * (eb[q * 3 + 1] - my)
+                                               + nv[2] * (eb[q * 3 + 2] - mz);
+                                const bool drop = (st.first * 2 > st.second)
+                                               || (std::abs(r) > thr);
+                                if (drop) {
+                                    ++pruned;
+                                    continue;
+                                }
+                                eb[w * 3] = eb[q * 3];
+                                eb[w * 3 + 1] = eb[q * 3 + 1];
+                                eb[w * 3 + 2] = eb[q * 3 + 2];
+                                idsScratch[static_cast<size_t>(w)] = ids[q];
+                                ++w;
+                            }
+                            if (pruned > 0) {
+                                zLinePruned_.fetch_add(static_cast<size_t>(pruned),
+                                                       std::memory_order_relaxed);
+                                if (zLinePruned_.load(std::memory_order_relaxed)
+                                        / 50000 == (zLinePruned_.load() - pruned)
+                                                     / 50000) {
+                                    // 每 5 万点一报（低噪）
+                                }
+                                j->eCount = w;
+                            }
                         }
                     }
                 }

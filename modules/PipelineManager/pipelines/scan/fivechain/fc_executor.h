@@ -374,11 +374,13 @@ private:
     // 261030 激光帧质量门（Z 离散度——chain2 线程私有；幻影帧治理）
     std::vector<float> zScratch_;             // Z 抽取 scratch（容量跨帧复用）
     std::atomic<size_t> zGateDrops_{0};       // 质量门弃帧累计（观测出口）
+    std::atomic<size_t> zLinePruned_{0};      // 飞线剪枝点累计（chain2 统计）
 
     // —— fivechain 专属算子（温表/参数与 harness v3 同源）——
     std::unique_ptr<calib::LaserMatchScanSplitGpuV3> splitGpu_;
     std::unique_ptr<calib::LaserMatchScanSplitCpuV3> splitCpu_;
     calib::LaserReconstructParams reconP_;
+    int linePlaneGateMm_ = 0;                 // 261030 飞线门（0=关；config/env）
     std::unique_ptr<calib::LaserReconstructCpu> reconCpu_;
 
     // —— 配对（CUDA链2；界=在飞上限）——
