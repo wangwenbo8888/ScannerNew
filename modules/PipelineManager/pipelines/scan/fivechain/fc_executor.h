@@ -256,6 +256,12 @@ public:
     /// 主线程收割第 curIdx 帧产物（F 通道按帧序产出——阻塞等待）
     bool collect(int curIdx, CycleProducts& out, std::string& err);
 
+    /// 261030 软停（不析构）：置停止位＋通道全关＋唤醒全部等待者——阻塞中的
+    /// collect() 解阻塞返回 false。调用方随后 join 自有线程、再 reset 析构
+    ///（原 stopRealtime 先 reset 后 join：收割线程可能在 collect 内阻塞，
+    /// 析构抽走脚下对象＝空指针成员读崩溃 0x748——先软停再 join 根治）
+    void requestStop();
+
     // —— 对账计数（P2 验收：七通道 elem 计数 vs totalCycles）——
     // 通道序：0=读 1=上传 2=A 3=B 4=C 5=D 6=E 7=F
     int chCount(int i) const { return chCount_[static_cast<size_t>(i)].load(); }
@@ -365,6 +371,9 @@ private:
     std::vector<int> eFree_;
     std::atomic<int> eTruncPts_{0};
     cv::cuda::GpuMat d_pts_;                  // 融合上传设备中转（1×eCapPts CV_32FC3）
+    // 261030 激光帧质量门（Z 离散度——chain2 线程私有；幻影帧治理）
+    std::vector<float> zScratch_;             // Z 抽取 scratch（容量跨帧复用）
+    std::atomic<size_t> zGateDrops_{0};       // 质量门弃帧累计（观测出口）
 
     // —— fivechain 专属算子（温表/参数与 harness v3 同源）——
     std::unique_ptr<calib::LaserMatchScanSplitGpuV3> splitGpu_;

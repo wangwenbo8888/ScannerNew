@@ -966,10 +966,13 @@ struct FiveChainAdapter::RtBridge {
     cv::Mat cropL_, cropR_;                                    // 裁剪产物宿主（在飞帧消费）
 
     int algoW_ = 0, algoH_ = 0;        // 算法几何（0=直通不裁剪）
-    // 分眼裁剪原点（-1=居中推定）。优先级：分眼 env（JMW_FC_CROPL_X/Y、
-    // JMW_FC_CROPR_X/Y）＞双眼统一（JMW_FC_CROP_X/Y）＞居中。
-    // 261027 求解器实证分眼不对称：L=(180,119) R=(180,68)（左眼 y 低 51px）
-    int cropXL_ = -1, cropYL_ = -1, cropXR_ = -1, cropYR_ = -1;
+    // 分眼裁剪原点。优先级：分眼 env（JMW_FC_CROPL_X/Y、JMW_FC_CROPR_X/Y）
+    // ＞双眼统一（JMW_FC_CROP_X/Y）＞本默认。
+    // 261030 默认＝ConicCropSolve 实证值（conic 有效性为目标——激光目标解出的
+    // L=(180,119)R=(180,68) 线上 conic 反归零＝目标脱节）：yL=yR=102 时 conic
+    // 2→10、激光 2535→9058（3 帧累计）；x 用居中推定 (2048-1688)/2=180。
+    // env -1 回居中；换机/重标定后须重解（JMW_FC_CONICROP 转储重扫）
+    int cropXL_ = -1, cropYL_ = 102, cropXR_ = -1, cropYR_ = 102;
     std::atomic<uint64_t> cropFrames_{0};   // 裁剪帧计数（诊断）
 
     scr::FrameSourceCompat src;
@@ -1818,9 +1821,16 @@ void FiveChainAdapter::stopRealtime() {
         bridge_ ? bridge_->servedFrames.load() : 0,
         bridge_ ? bridge_->skippedTotal.load() : 0,
         bridge_ ? bridge_->cropFrames_.load() : 0,
-        fuse_ ? fuse_->GetFusedPointCount() : 0);    if (bridge_) bridge_->stopped.store(true);    // readFrame 速败→墓碑排空
-    executor_.reset();                            // stopAll＋内部线程 join＋设备同步
-    if (collector_.joinable()) collector_.join();
+        fuse_ ? fuse_->GetFusedPointCount() : 0);
+    // 261030 崩溃修复（停止竞态——0xC0000005 读 0x748＝collect 在析构中对象上
+    // 成员读）：原序「executor_.reset() 先于 collector_.join()」——收割线程可能
+    // 正阻塞在 executor_->collect()（chF_ 等待），析构把通道/成员抽走＝UAF。
+    // 正序：①桥停（readFrame 速败）②执行器软停（stop 置位＋通道全关——阻塞的
+    // collect 解阻塞返回 false）③join 收割线程（含其终局全量推送）④再析构
+    if (bridge_) bridge_->stopped.store(true);    // readFrame 速败→墓碑排空
+    if (executor_) executor_->requestStop();      // 软停：解阻塞 collect/全部等待者
+    if (collector_.joinable()) collector_.join(); // 收割线程先退干净（无人再用执行器）
+    executor_.reset();                            // 此后析构安全（stopAll 幂等）
     if (markerFuseOp_) markerFuseOp_->Clear();
     renderPushIfDue(true);                        // 终局全量（仓库+UI 收口）
     delete harness_; harness_ = nullptr;

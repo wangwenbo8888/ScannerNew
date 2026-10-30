@@ -389,6 +389,25 @@ FiveChainExecutor::~FiveChainExecutor() {
     h_.fcFuseStreamPtr_ = nullptr;
 }
 
+// 261030 软停（信号段——不含线程 join；stopAll 复用同款信号后追加 join）
+void FiveChainExecutor::requestStop() {
+    stop_.store(true);
+    chRead_.close(); chGpu_.close(); ch1ab_.close();
+    for (auto& q : aQs_) q->close();
+    chB_.close(); chC_.close(); chD_.close(); chE_.close(); chF_.close();
+    {
+        std::lock_guard<std::mutex> lk(fedMtx_);
+        fedIdx_ = totalCycles_;   // 预上传线程 fed 等待速放
+    }
+    gateFed_.store(totalCycles_);
+    lmaskFed_.store(totalCycles_);
+    rleCopied_.store(totalCycles_);
+    fedCv_.notify_all();
+    gateCv_.notify_all();
+    jobCv_.notify_all();
+    eCv_.notify_all();
+}
+
 void FiveChainExecutor::stopAll() {
     stop_.store(true);
     chRead_.close(); chGpu_.close(); ch1ab_.close();
@@ -1167,6 +1186,45 @@ void FiveChainExecutor::chain2Loop() {
                     eBlocks_[static_cast<size_t>(s)], idsScratch.data(), eCapPts_);
                 if (cr.matchedCount > eCapPts_)
                     eTruncPts_.fetch_add(cr.matchedCount - eCapPts_);
+                // 261030 激光帧质量门（Z 离散度）：错管型/错表匹配产生随机深度
+                // 弥散帧（白板实证：幻影帧 Z-IQR~90mm vs 干净帧 <5mm，交替出现
+                // ＝tubeOdd 单值时另一管全错）。IQR>P75-P25 阈值＝整帧弃（eCount
+                // 归零——不融合不缓存）；阈值 env JMW_FC_ZIQR（默认 45mm，0=关）。
+                // 真实单视场景深离散通常 <40mm（工作距离门内）——误杀可控
+                if (j->eCount > 200) {
+                    static const int sZgate = [] {
+                        const char* e = getenv("JMW_FC_ZIQR");
+                        return e ? atoi(e) : 60;
+                    }();
+                    if (sZgate > 0) {
+                        zScratch_.resize(static_cast<size_t>(j->eCount));
+                        const float* eb = eBlocks_[static_cast<size_t>(s)];
+                        for (int q = 0; q < j->eCount; ++q)
+                            zScratch_[static_cast<size_t>(q)] = eb[q * 3 + 2];
+                        const size_t n = zScratch_.size();
+                        std::sort(zScratch_.begin(), zScratch_.end());
+                        const float p25 = zScratch_[n / 4];
+                        const float p75 = zScratch_[n * 3 / 4];
+                        const float p5 = zScratch_[n / 20];
+                        const float p95 = zScratch_[n * 19 / 20];
+                        const float iqr = p75 - p25;
+                        const float range = p95 - p5;
+                        // 双判据：IQR 超限 且 均匀弥散形态（IQR/范围≈0.5＝均匀
+                        // 分布；真实表面结构有尾部 → 比值低。测试数据深结构场景
+                        // 实测 IQR 49mm 合法——单 IQR 会误杀，联合判据放行）
+                        const bool uniform = range > 1.0f && iqr / range > 0.42f;
+                        if (iqr > static_cast<float>(sZgate) && uniform) {
+                            zGateDrops_.fetch_add(1, std::memory_order_relaxed);
+                            if (zGateDrops_.load(std::memory_order_relaxed) % 100 == 1)
+                                fprintf(stderr,
+                                        "[fc:zgate] idx=%d 弃帧（IQR=%.0fmm>%dmm "
+                                        "均匀度=%.2f——错管型/错表弥散帧）累计=%zu\n",
+                                        j->idx, iqr, sZgate, iqr / range,
+                                        zGateDrops_.load());
+                            j->eCount = 0;   // 整帧弃：不融合不缓存（E 块照常归还）
+                        }
+                    }
+                }
                 j->prod.laserPoints3D = j->eCount;
                 h_.diagLaserPts_.fetch_add(j->eCount, std::memory_order_relaxed);
             }

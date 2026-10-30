@@ -211,9 +211,23 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     // —— 步骤 2：装配 GlobalBAInput + 软先验合并 ——
     if (cb) cb(10, "装配 GBA 输入");
     calib::GlobalBAInput in;
-    in.frames.reserve(snap.obs.size());
+    // 261030 关键帧子采样：GBA 在 >~6K 帧病态（Ceres numeric factorization
+    // 失败——15025 帧会话 fail(fallback) 无重放实证）。超限只解关键帧（每
+    // stride 帧取一，含首尾），非关键帧位姿在步骤 4 前由「关键帧修正 ∘
+    // 初始相对位姿」传递（C_k·T_init_i——标准关键帧位姿图手法）
+    const size_t kfCap = cfg_.gbaKeyframeCap > 0
+        ? static_cast<size_t>(cfg_.gbaKeyframeCap) : SIZE_MAX;
+    const size_t nObsAll = snap.obs.size();
+    const size_t kfStride = nObsAll > kfCap ? (nObsAll + kfCap - 1) / kfCap : 1;
+    if (kfStride > 1)
+        JMW_LOG_WARN("07-GlobalOptim",
+            "[GlobalOptim] 关键帧子采样: 观测 {} 帧 > 上限 {} → stride={}（解 {} 关键帧，"
+            "非关键帧位姿按 C_k·T_init_i 传递）",
+            nObsAll, kfCap, kfStride, (nObsAll + kfStride - 1) / kfStride);
+    in.frames.reserve(nObsAll / kfStride + 1);
     std::unordered_set<int> obsHpIds;
-    for (const auto& fo : snap.obs) {
+    for (size_t i = 0; i < nObsAll; i += kfStride) {
+        const auto& fo = snap.obs[i];
         calib::GlobalBAFrame f;
         f.frameId = fo.frameId;
         f.R_init = matxFromArr9(fo.R_init);
@@ -318,6 +332,30 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c) pose.R[3 * r + c] = fp->R(r, c);
             for (int k = 0; k < 3; ++k) pose.t[k] = fp->t(k);
+        } else if (gba.success && kfStride > 1) {
+            // 261030 非关键帧：修正传递 pose_i = C_k · T_init_i，其中 k=i 所在
+            // stride 段的关键帧（i/stride*stride），C_k = T_opt_k · T_init_k⁻¹。
+            // 保段内运动初值，套关键帧全局修正
+            const size_t k = (i / kfStride) * kfStride;
+            auto itk = poseById.find(snap.obs[k].frameId);
+            if (itk != poseById.end()) {
+                const cv::Matx33d Rok(itk->second->R);
+                const cv::Vec3d tok(itk->second->t);
+                const cv::Matx33d Rik(snap.obs[k].R_init);
+                const cv::Vec3d tik(snap.obs[k].t_init);
+                const cv::Matx33d Rc = Rok * Rik.t();          // 修正旋转
+                const cv::Vec3d tc = tok - Rc * tik;           // 修正平移
+                const cv::Matx33d Rii(snap.obs[i].R_init);
+                const cv::Vec3d tii(snap.obs[i].t_init);
+                const cv::Matx33d Ri = Rc * Rii;
+                const cv::Vec3d ti = Rc * tii + tc;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) pose.R[3 * r + c] = Ri(r, c);
+                for (int q = 0; q < 3; ++q) pose.t[q] = ti(q);
+            } else {                                   // 关键帧缺解=初值兜底
+                for (int q = 0; q < 9; ++q) pose.R[q] = snap.obs[i].R_init[q];
+                for (int q = 0; q < 3; ++q) pose.t[q] = snap.obs[i].t_init[q];
+            }
         } else {                                   // 兜底：无修正可用=初值
             for (int k = 0; k < 9; ++k) pose.R[k] = snap.obs[i].R_init[k];
             for (int k = 0; k < 3; ++k) pose.t[k] = snap.obs[i].t_init[k];

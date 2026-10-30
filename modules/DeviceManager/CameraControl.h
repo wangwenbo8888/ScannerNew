@@ -136,6 +136,10 @@ private:
     //    首脉冲恒打 T 左斜——固件确认中；确认前 tvKnown 恒 false 可整体旁路）——
     uint64_t m_tvT0 = 0;                         // 锚（m_bufferMutex 内；首对锚定）
     bool m_tvT0Valid = false;                    // t₀ 已锚定（同上）
+    // 261030 交付脉冲计数（T/V 判定新法——原 ts 奇偶法失效：ts tick 4.166ms≠
+    // 交付帧周期 16.67ms（4 tick）→idx 每帧恒+4 奇偶不翻转）。每个成功配对
+    // 交付帧＝一脉冲，偶=T 左斜（锚=首交付脉冲）——与 ts 语义解耦
+    std::atomic<uint64_t> m_tvPulseCount{0};     // 成功配对交付计数（偶=T）
 
     // 标定缓存（注入式 B3：app 从 06 标定结果仓库喂入，08 不做第二真相源）
     mutable std::mutex m_calibMutex;

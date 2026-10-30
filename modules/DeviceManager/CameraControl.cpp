@@ -46,11 +46,24 @@ public:
         const uint64_t ts = imageData->GetTimeStamp();
 
         // 时间戳配对·周期估计（260927 方案B）：相邻帧 ts 差≈触发周期——ε=period/4
-        // 的单位无关基准；重开首帧跨零/巨跳（>2^40）不入账防污染
+        // 的单位无关基准；重开首帧跨零/巨跳（>2^40）不入账防污染。
+        // 261030 改「近 8 差中位数」（两轮修复：①原始末次差被 USB 突发差污染
+        // ——真 ~10.6ms 估成 4.17ms →tv 奇偶乱；②EMA 版 uint64 下溢产 2^59 怪值
+        // 且离群拒绝锁死。中位数两者皆免疫，8 帧内自愈）
         if (m_lastTs != 0 && ts > m_lastTs) {
             const uint64_t d = ts - m_lastTs;
-            if (d < (1ull << 40))
-                m_owner->m_sideTsPeriod[m_sideIndex].store(d, std::memory_order_relaxed);
+            if (d < (1ull << 40)) {
+                m_tsDeltas[m_nTsDeltas % 8] = d;
+                ++m_nTsDeltas;
+                if (m_nTsDeltas >= 2) {
+                    uint64_t s[8];
+                    const int n = m_nTsDeltas < 8 ? m_nTsDeltas : 8;
+                    for (int i = 0; i < n; ++i) s[i] = m_tsDeltas[i];
+                    std::sort(s, s + n);
+                    m_owner->m_sideTsPeriod[m_sideIndex].store(
+                        s[n / 2], std::memory_order_relaxed);
+                }
+            }
         }
         m_lastTs = ts;
 
@@ -255,24 +268,20 @@ private:
         frame.timestamp = 0;
         frame.timestampLeft = leftBuf.timestamp;    // 设备原始时间戳（方案B 可观测性）
         frame.timestampRight = rightBuf.timestamp;
-        // —— T/V 激光组判定（260927 时间戳奇偶法）：脉冲序＝round((tsL−t₀)/周期)
-        //    的奇偶（偶=T 左斜）；t₀ 未锚定（开流首对）在本对锚定并判 T。周期用
-        //    min(双侧)（健康侧为准）；周期未知时本帧不判（tvKnown=false——消费方
-        //    回退帧号奇偶），锚照常立（下帧起可判）——
+        // —— T/V 激光组判定（261030 改交付脉冲计数法）：每个成功配对交付帧＝
+        //    一个激光脉冲，脉冲序＝交付计数（偶=T 左斜，锚=首交付脉冲 T）。
+        //    【原时间戳奇偶法根因失效】：相机 ts 每 tick 4.166ms 而实际交付帧
+        //    间隔 16.67ms（=4 tick）——idx=(ts−t₀)/周期 每帧恒 +4 → 奇偶恒定
+        //    不翻转 → tubeOdd 永远单值 → 半数物理帧管型判反 → v3 随机深度
+        //    幻影点（白板会话逐帧实证：正确帧平面 RMS 0.46mm/判反帧 Z 均匀
+        //    弥散）。交付计数天然按交付节奏交替，与 ts 语义解耦。
+        //    丢组（stale 侧等待真伙伴）不丢脉冲；物理丢帧会滑相——与原法同险，
+        //    不劣化。
         {
-            const uint64_t pl = m_owner->m_sideTsPeriod[0].load(std::memory_order_relaxed);
-            const uint64_t pr = m_owner->m_sideTsPeriod[1].load(std::memory_order_relaxed);
-            const uint64_t tvPeriod = (pl && pr) ? (pl < pr ? pl : pr) : 0;
-            if (!m_owner->m_tvT0Valid) {
-                m_owner->m_tvT0 = leftBuf.timestamp;
-                m_owner->m_tvT0Valid = true;
-            }
-            if (tvPeriod > 0 && leftBuf.timestamp >= m_owner->m_tvT0) {
-                const uint64_t idx =
-                    (leftBuf.timestamp - m_owner->m_tvT0 + tvPeriod / 2) / tvPeriod;
-                frame.tvKnown = true;
-                frame.tvLeftSkew = (idx % 2) == 0;   // 偶脉冲=T 左斜（锚=首脉冲 T）
-            }
+            const uint64_t pulse =
+                m_owner->m_tvPulseCount.fetch_add(1, std::memory_order_relaxed);
+            frame.tvKnown = true;
+            frame.tvLeftSkew = (pulse % 2) == 0;   // 偶脉冲=T 左斜（锚=首脉冲 T）
         }
         frame.leftGray  = leftBuf.image.clone();
         frame.rightGray = rightBuf.image.clone();
@@ -306,6 +315,12 @@ private:
     uint64_t m_lastFid = 0;   // 本侧最近帧号（每侧回调单线程——无锁；帧号回退检测基线，
                               // 新会话随 handler 重建归零）
     uint64_t m_lastTs = 0;    // 本侧最近时间戳（周期估计用——同上单线程无锁）
+    // 261030 周期估计改「近 8 差中位数」：EMA 版 uint64 下溢（d<cur 时 (d-cur)
+    // 回绕）产出 2^59 级怪值且被离群拒绝永久锁死（实测 周=576460752307589913ns
+    // →ε 巨大 →29ms 错位帧也配对＋tv 周期恒定＝tubeOdd 恒定半反）。中位数免疫
+    // 突发/离群且 8 帧内自愈
+    uint64_t m_tsDeltas[8] = {};
+    int m_nTsDeltas = 0;
 };
 
 // ============================================================================

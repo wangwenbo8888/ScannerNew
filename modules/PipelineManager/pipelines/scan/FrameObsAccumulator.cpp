@@ -16,7 +16,9 @@ namespace Scanner::pipeline {
 namespace {
 // 检查点格式：魔术字｜版本｜obs 段｜激光段｜降级标志（小端原生布局，同机恢复）
 constexpr char kMagic[8] = {'J', 'M', 'W', 'F', 'O', 'B', 'S', '1'};
-constexpr uint32_t kVersion = 1;
+// 261030 v2：obs 段增 laserCacheSlot（v1 缺——检查点往返槽位全丢）；v1 载入
+// 走按序 1:1 兼容映射（见 loadCheckpoint）
+constexpr uint32_t kVersion = 2;
 
 template<typename T>
 void wr(std::ostream& o, const T& v) {
@@ -123,6 +125,9 @@ Scanner::Result FrameObsAccumulator::saveCheckpoint(const std::string& path) con
         wr(out, fo.frameId);
         out.write(reinterpret_cast<const char*>(fo.R_init), sizeof(fo.R_init));
         out.write(reinterpret_cast<const char*>(fo.t_init), sizeof(fo.t_init));
+        // 261030 v2：逐 obs 落 laserCacheSlot（v1 缺此字段——载入后槽位全丢，
+        // 快照恢复态 GBA anyLaser=false 激光重放整段跳过＝检查点往返断链）
+        wr(out, static_cast<uint64_t>(fo.laserCacheSlot));
         wr(out, static_cast<uint64_t>(fo.markerObs.size()));
         for (const auto& mo : fo.markerObs) {
             out.write(reinterpret_cast<const char*>(mo.xyz), sizeof(mo.xyz));
@@ -149,7 +154,7 @@ Scanner::Result FrameObsAccumulator::loadCheckpoint(const std::string& path) {
     if (!in.read(magic, sizeof(magic)) || std::memcmp(magic, kMagic, sizeof(kMagic)) != 0)
         return Scanner::Result::fail("检查点魔术字不符(坏档): " + path);
     uint32_t ver = 0;
-    if (!rd(in, ver) || ver != kVersion)
+    if (!rd(in, ver) || (ver != 1 && ver != kVersion))
         return Scanner::Result::fail("检查点版本不符: " + path);
 
     Snapshot snap;
@@ -164,6 +169,12 @@ Scanner::Result FrameObsAccumulator::loadCheckpoint(const std::string& path) {
                 !in.read(reinterpret_cast<char*>(fo.R_init), sizeof(fo.R_init)) ||
                 !in.read(reinterpret_cast<char*>(fo.t_init), sizeof(fo.t_init)))
                 return Scanner::Result::fail("检查点 obs 记录截断");
+            if (ver >= 2) {
+                uint64_t slot = FrameObs::kNoLaserSlot;
+                if (!rd(in, slot))
+                    return Scanner::Result::fail("检查点槽位截断");
+                fo.laserCacheSlot = static_cast<size_t>(slot);
+            }
             uint64_t mc = 0;
             if (!rd(in, mc)) return Scanner::Result::fail("检查点 marker 段截断");
             fo.markerObs.resize(static_cast<size_t>(mc));
@@ -189,6 +200,28 @@ Scanner::Result FrameObsAccumulator::loadCheckpoint(const std::string& path) {
             snap.laserFrames.push_back(std::move(lf));
         }
         if (!rd(in, degraded)) degraded = 0;
+        // v1 兼容（无槽位字段）：obs 数==激光帧数时按序 1:1 映射（push 双侧
+        // 同序——每 obs 带激光的会话成立）；否则槽位不可恢复（-1，重放无数据）
+        if (ver == 1) {
+            if (snap.obs.size() == snap.laserFrames.size() && !snap.obs.empty()) {
+                JMW_LOG_WARN("07-FrameObs",
+                    "[FrameObs] v1 检查点按序映射槽位（obs {}==激光帧 {}——1:1 假设）",
+                    snap.obs.size(), snap.laserFrames.size());
+                for (size_t k = 0; k < snap.obs.size(); ++k)
+                    snap.obs[k].laserCacheSlot = k;
+            } else {
+                JMW_LOG_WARN("07-FrameObs",
+                    "[FrameObs] v1 检查点槽位不可恢复（obs {} != 激光帧 {}）——"
+                    "激光重放将无数据",
+                    snap.obs.size(), snap.laserFrames.size());
+            }
+        } else {
+            // v2：槽位越界防御（坏档→视为无激光帧）
+            for (auto& fo : snap.obs)
+                if (fo.laserCacheSlot != FrameObs::kNoLaserSlot
+                    && fo.laserCacheSlot >= snap.laserFrames.size())
+                    fo.laserCacheSlot = FrameObs::kNoLaserSlot;
+        }
     } catch (const std::exception& e) {
         return Scanner::Result::fail(std::string("检查点读异常: ") + e.what());
     }

@@ -85,6 +85,11 @@ public:
         // ——走既有降级路径（质量 Degraded 如实标注）。激光会话保留批算（帧
         // 数通常较低且收益直接）；帧子采样/关键帧化后可再放开（待办）。
         bool   skipBatchSolve = false;
+        // 261030 GBA 关键帧上限：观测帧超限时只解关键帧（每 stride 帧取一），
+        // 非关键帧位姿＝关键帧全局修正 ∘ 初始相对位姿（C_k·T_init_i）。根因：
+        // Ceres 在 >~6K 帧病态（45K+ 参数 numeric factorization 失败——15025
+        // 帧会话 GBA=fail 无重放实证）。0=不设限（旧行为）
+        int    gbaKeyframeCap = 4000;
         // 261029 D 线激光重放体素（mm）——须与 C 线会话融合同参（否则重放计数/
         // 精度口径漂移；02 按会话体素档注入，默认五链验证口径 0.25）
         float  laserVoxelSizeMm = 0.25f;

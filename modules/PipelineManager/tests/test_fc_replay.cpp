@@ -1610,6 +1610,585 @@ TEST(FcReplay, PerEyeCropSolve) {
 }
 
 // ============================================================================
+// conic 有效数原点扫描（261030）：PerEyeCropSolve 以激光匹配数为目标解出的
+// (180,119)/(180,68) 在线上 conic 反而 0-2→0——目标与 conic 有效性脱节。
+// 本用例以 diagConicValid_ 为目标直接扫 yL×yR（x 固定 180），打印粗扫矩阵
+// ＋居中基准＋最优细扫——判定「裁剪原点」是否在线 conic 低效的真实变量
+// ============================================================================
+TEST(FcReplay, ConicCropSolve) {
+    if (getenv("JMW_FC_CONICROP") == nullptr)
+        GTEST_SKIP() << "JMW_FC_CONICROP=<帧目录> 未设";
+
+    fs::path frameDir = getenv("JMW_FC_CONICROP");
+    std::error_code ec;
+    if (!fs::exists(frameDir / "L_000000.png", ec))
+        GTEST_SKIP() << "帧目录缺失";
+    const int nFrames = 3;
+    std::vector<cv::Mat> fl(nFrames), fr(nFrames);
+    for (int i = 0; i < nFrames; ++i) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%06d", i);
+        fl[static_cast<size_t>(i)] = cv::imread(
+            (frameDir / ("L_" + std::string(buf) + ".png")).string(), cv::IMREAD_GRAYSCALE);
+        fr[static_cast<size_t>(i)] = cv::imread(
+            (frameDir / ("R_" + std::string(buf) + ".png")).string(), cv::IMREAD_GRAYSCALE);
+        ASSERT_FALSE(fl[static_cast<size_t>(i)].empty());
+    }
+    ASSERT_GE(fl[0].cols, 1688);
+    ASSERT_GE(fl[0].rows, 1400);
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty());
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+    auto* h = rig.h.get();
+    fs::path outDir = fs::temp_directory_path() / "fc07_conicrop";
+    fs::create_directories(outDir, ec);
+    h->outDir_ = outDir.string();
+
+    int cXL = 180, cYL = 68, cXR = 180, cYR = 68;
+    rig.src.cycles.fs = &rig.src;
+    rig.src.cycleAt = [&](size_t i) {
+        scr::FrameCycleInfo ci;
+        ci.laserIdx = static_cast<int>(i);
+        ci.tubeOdd = (i % 2) == 1;
+        return ci;
+    };
+    rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
+        const int fi = idx % nFrames;
+        const cv::Mat& src = (left ? fl : fr)[static_cast<size_t>(fi)];
+        const int x0 = left ? cXL : cXR;
+        const int y0 = left ? cYL : cYR;
+        if (x0 + 1688 > src.cols || y0 + 1400 > src.rows) { e = "越界"; return false; }
+        out = src(cv::Rect(x0, y0, 1688, 1400)).clone();
+        return true;
+    };
+    auto runConicScore = [&](long* laserPts = nullptr) -> long {
+        h->diagCclFail_ = 0; h->diagRoisL_ = 0; h->diagSplit_ = 0;
+        h->diagEllipse_ = 0; h->diagMatchPairs_ = 0; h->diagConicValid_ = 0;
+        h->diagLaserPts_ = 0;
+        h->prevState_ = calib::PrevFrameState{};
+        h->globalSet_ = {}; h->globalIndexById_.clear(); h->nextGid_ = 0;
+        h->candidates_.clear(); h->holdStreak_ = 0; h->cycleCount_ = 0;
+        auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*h, 0, nFrames);
+        for (int c = 0; c < nFrames; ++c) {
+            CycleProducts prod;
+            std::string ce;
+            if (!ex->collect(c, prod, ce)) break;
+        }
+        ex.reset();
+        if (laserPts) *laserPts = h->diagLaserPts_.load();
+        return h->diagConicValid_.load();
+    };
+
+    // 居中基准
+    cXL = 180; cYL = 68; cXR = 180; cYR = 68;
+    long baseLaser = 0;
+    const long baseConic = runConicScore(&baseLaser);
+    fprintf(stderr, "[FC-CONICROP] 居中(180,68)/(180,68) 基准: conic=%ld laser=%ld\n",
+            baseConic, baseLaser);
+
+    // yL×yR 粗扫矩阵（x=180，步 34：0..136）
+    struct Cand { int yl, yr; long conic; };
+    Cand best{68, 68, baseConic};
+    fprintf(stderr, "[FC-CONICROP] yL\\yR 矩阵（conic 有效数，3 帧累计）:\n");
+    for (int yl = 0; yl <= 136; yl += 34) {
+        std::ostringstream row;
+        row << "  yL=" << std::setw(3) << yl << ":";
+        for (int yr = 0; yr <= 136; yr += 34) {
+            cYL = yl; cYR = yr;
+            const long s = runConicScore();
+            row << " yR" << std::setw(3) << yr << "=" << std::setw(4) << s;
+            if (s > best.conic) best = {yl, yr, s};
+        }
+        fprintf(stderr, "%s\n", row.str().c_str());
+    }
+    // 最优细扫（±34 步 17）
+    const int ylc = std::max(0, best.yl - 34), yhc = std::min(136, best.yl + 34);
+    const int yrc = std::max(0, best.yr - 34), yhc2 = std::min(136, best.yr + 34);
+    for (int yl = ylc; yl <= yhc; yl += 17)
+        for (int yr = yrc; yr <= yhc2; yr += 17) {
+            if (yl == best.yl && yr == best.yr) continue;
+            cYL = yl; cYR = yr;
+            const long s = runConicScore();
+            if (s > best.conic) best = {yl, yr, s};
+        }
+    long bestLaser = 0;
+    cYL = best.yl; cYR = best.yr;
+    const long confirmConic = runConicScore(&bestLaser);
+    fprintf(stderr, "[FC-CONICROP] 粗细扫后: yL=%d yR=%d conic=%ld laser=%ld\n",
+            best.yl, best.yr, confirmConic, bestLaser);
+
+    // —— 261030 精化：y ±15 步 5 → x ±30 步 10（x 此前固定 180 未扫）。
+    //    配准质量随 conic 数上升（在线 initialRMSE 2.64mm＝conic ~3/帧踩光流
+    //    下限欠约束）——目标 conic ≥6/帧（测试数据 4-8/帧档）
+    for (int yl = best.yl - 15; yl <= best.yl + 15; yl += 5)
+        for (int yr = best.yr - 15; yr <= best.yr + 15; yr += 5) {
+            if (yl < 0 || yr < 0 || yl > 136 || yr > 136) continue;
+            cXL = 180; cXR = 180; cYL = yl; cYR = yr;
+            const long s = runConicScore();
+            if (s > best.conic) best = {yl, yr, s};
+        }
+    fprintf(stderr, "[FC-CONICROP] y 精化: yL=%d yR=%d conic=%ld\n",
+            best.yl, best.yr, best.conic);
+    int bestXL = 180, bestXR = 180;
+    for (int xl = 150; xl <= 210; xl += 10)
+        for (int xr = 150; xr <= 210; xr += 10) {
+            cYL = best.yl; cYR = best.yr; cXL = xl; cXR = xr;
+            const long s = runConicScore();
+            if (s > best.conic) { best.conic = s; bestXL = xl; bestXR = xr; }
+        }
+    fprintf(stderr, "[FC-CONICROP] x 粗精化: xL=%d xR=%d conic=%ld\n",
+            bestXL, bestXR, best.conic);
+    std::ostringstream ss;
+    ss << "conic 最优原点≈L=(" << bestXL << "," << best.yl << ") R=(" << bestXR
+       << "," << best.yr << ") conic=" << best.conic << "（居中基准 " << baseConic
+       << "；测试数据档 4-8/帧）";
+    fprintf(stderr, "\n[FC-CONICROP] %s\n", ss.str().c_str());
+    SUCCEED() << ss.str();
+}
+
+// ============================================================================
+// 白板平面性诊断（261030）：单帧重建质量 vs 融合位姿质量 判别。
+//   ①obs checkpoint 逐帧激光（设备系）平面拟合——白板单帧应为平面；残差
+//     RMS 大/边缘带恶化＝重建问题（Q/畸变边缘），残差亚毫米＝重建无罪
+//   ②终版 PLY（GBA 重放后）鲁棒平面拟合＋径向残差剖面——分层/边缘喷溅
+//     ＝位姿/融合侧
+// ============================================================================
+TEST(FcReplay, WhiteboardPlaneDiagnosis) {
+    const char* ckPath = getenv("JMW_FC_PLANECHK");
+    const char* plyPath = getenv("JMW_FC_PLANEPLY");
+    if (ckPath == nullptr && plyPath == nullptr)
+        GTEST_SKIP() << "JMW_FC_PLANECHK=<obs checkpoint> / JMW_FC_PLANEPLY=<ply> 未设";
+    namespace sp = Scanner::pipeline;
+    // 261030 可选深度门限模拟（JMW_FC_PLANEGATE=min:max，mm）——按现行生产
+    // laser_reconstruct 门限过滤逐帧点后评估（预测重扫质量，免真机往返）
+    float gateMin = -1e30f, gateMax = 1e30f;
+    if (const char* g = getenv("JMW_FC_PLANEGATE")) {
+        if (sscanf_s(g, "%f:%f", &gateMin, &gateMax) == 2)
+            fprintf(stderr, "[PLANE-CHK] 模拟深度门限 [%.0f,%.0f]mm\n",
+                    gateMin, gateMax);
+    }
+
+    auto planeFit = [](const std::vector<cv::Point3f>& pts, cv::Vec3f& n,
+                       cv::Point3f& c) -> double {
+        // 质心＋协方差最小特征向量（幂迭代求最大两次，叉乘得法向）
+        cv::Point3f mean(0, 0, 0);
+        for (const auto& p : pts) { mean.x += p.x; mean.y += p.y; mean.z += p.z; }
+        mean.x /= pts.size(); mean.y /= pts.size(); mean.z /= pts.size();
+        double a = 0, b = 0, d = 0, e = 0, f = 0, g = 0;   // xx xy xz yy yz zz
+        for (const auto& p : pts) {
+            const float x = p.x - mean.x, y = p.y - mean.y, z = p.z - mean.z;
+            a += x * x; b += x * y; d += x * z; e += y * y; f += y * z; g += z * z;
+        }
+        // 3×3 协方差幂迭代（最大特征向量）→ 叉乘第二近似得最小方向
+        cv::Vec3d v1(1, 0.3, 0.1);
+        for (int it = 0; it < 60; ++it) {
+            cv::Vec3d w(a * v1[0] + b * v1[1] + d * v1[2],
+                        b * v1[0] + e * v1[1] + f * v1[2],
+                        d * v1[0] + f * v1[1] + g * v1[2]);
+            const double L = std::sqrt(w.dot(w));
+            if (L < 1e-12) break;
+            v1 = w / L;
+        }
+        cv::Vec3d v2 = v1 + cv::Vec3d(0.37, 0.61, 0.93);
+        for (int it = 0; it < 60; ++it) {
+            cv::Vec3d w(a * v2[0] + b * v2[1] + d * v2[2],
+                        b * v2[0] + e * v2[1] + f * v2[2],
+                        d * v2[0] + f * v2[1] + g * v2[2]);
+            w -= v1 * v1.dot(w);          // 去主方向分量
+            const double L = std::sqrt(w.dot(w));
+            if (L < 1e-12) break;
+            v2 = w / L;
+        }
+        cv::Vec3d nv = v1.cross(v2);
+        const double L = std::sqrt(nv.dot(nv));
+        if (L < 1e-12) return -1;
+        nv /= L;
+        double s2 = 0;
+        for (const auto& p : pts) {
+            const double r = nv[0] * (p.x - mean.x) + nv[1] * (p.y - mean.y)
+                           + nv[2] * (p.z - mean.z);
+            s2 += r * r;
+        }
+        n = cv::Vec3f(static_cast<float>(nv[0]), static_cast<float>(nv[1]),
+                      static_cast<float>(nv[2]));
+        c = mean;
+        return std::sqrt(s2 / pts.size());
+    };
+
+    // ── ①逐帧（设备系）平面性 ──
+    if (ckPath != nullptr) {
+        sp::FrameObsAccumulator acc(size_t{1} << 30);
+        const auto lr = acc.loadCheckpoint(ckPath);
+        ASSERT_TRUE(lr.success) << "checkpoint 载入失败: " << lr.message;
+        const auto snap = acc.snapshot();
+        fprintf(stderr, "[PLANE-CHK] obs=%zu 激光帧=%zu degraded=%d\n",
+                snap.obs.size(), snap.laserFrames.size(),
+                static_cast<int>(acc.degradedLaser()));
+        // 261030 首 40 帧点数序列（交替模式＝tubeOdd 奇偶病；随机＝另有因）
+        {
+            std::ostringstream seq;
+            int shown = 0;
+            for (size_t i = 0; i < snap.obs.size() && shown < 40; ++i) {
+                const size_t slot = snap.obs[i].laserCacheSlot;
+                if (slot == sp::FrameObs::kNoLaserSlot || slot >= snap.laserFrames.size())
+                    continue;
+                seq << snap.laserFrames[slot].size() / 3 << " ";
+                ++shown;
+            }
+            fprintf(stderr, "[PLANE-CHK] 首帧点数序列: %s\n", seq.str().c_str());
+        }
+        for (size_t i = 0; i < 5 && i < snap.obs.size(); ++i)
+            fprintf(stderr, "  obs[%zu] slot=%zu size=%zu\n", i,
+                    snap.obs[i].laserCacheSlot,
+                    snap.obs[i].laserCacheSlot < snap.laserFrames.size()
+                        ? snap.laserFrames[snap.obs[i].laserCacheSlot].size()
+                        : size_t{0});
+        // 帧点数分布（诊断——门槛失败时看量级）
+        {
+            std::vector<size_t> sizes;
+            for (size_t i = 0; i < snap.obs.size(); ++i) {
+                const size_t slot = snap.obs[i].laserCacheSlot;
+                if (slot == sp::FrameObs::kNoLaserSlot || slot >= snap.laserFrames.size())
+                    continue;
+                sizes.push_back(snap.laserFrames[slot].size() / 3);
+            }
+            if (!sizes.empty()) {
+                std::sort(sizes.begin(), sizes.end());
+                fprintf(stderr, "[PLANE-CHK] 帧点数: min=%zu P25=%zu 中位=%zu P90=%zu max=%zu\n",
+                        sizes.front(), sizes[sizes.size() / 4],
+                        sizes[sizes.size() / 2], sizes[sizes.size() * 9 / 10],
+                        sizes.back());
+            }
+        }
+        std::vector<double> rmsList;
+        std::vector<double> sprayList;
+        double worstEdgeGrow = 0;
+        bool dumpedBig = false;
+        double worstSprayPct = -1;
+        size_t worstSprayIdx = 0;
+        std::vector<cv::Point3f> worstSprayPts;
+        // 分层抽样详细：首帧＋首个「大帧」（>5000 点）＋最差喷溅帧——各打
+        // Z 分位（离面内容=紧簇物理面 vs 弥散幻影 的判别材料）
+        auto dumpFrame = [&](const char* tag, size_t idx,
+                             const std::vector<cv::Point3f>& v) {
+            std::vector<double> zs;
+            zs.reserve(v.size());
+            for (const auto& p : v) zs.push_back(p.z);
+            std::sort(zs.begin(), zs.end());
+            fprintf(stderr,
+                    "  %s 帧#%zu: %zu 点 Z分位 P5=%.0f P25=%.0f P50=%.0f P75=%.0f"
+                    " P95=%.0f min=%.0f max=%.0f\n",
+                    tag, idx, v.size(), zs[zs.size() / 20], zs[zs.size() / 4],
+                    zs[zs.size() / 2], zs[zs.size() * 3 / 4],
+                    zs[zs.size() * 19 / 20], zs.front(), zs.back());
+        };
+        int frames = 0;
+        for (size_t i = 0; i < snap.obs.size(); ++i) {
+            const size_t slot = snap.obs[i].laserCacheSlot;
+            if (slot == sp::FrameObs::kNoLaserSlot || slot >= snap.laserFrames.size())
+                continue;
+            const auto& lf = snap.laserFrames[slot];
+            if (lf.size() < 60) continue;   // 点太少拟合不稳（白板远距帧点数少）
+            std::vector<cv::Point3f> pts;
+            pts.reserve(lf.size() / 3);
+            for (size_t k = 0; k + 2 < lf.size(); k += 3) {
+                if (lf[k + 2] < gateMin || lf[k + 2] > gateMax) continue;
+                pts.emplace_back(lf[k], lf[k + 1], lf[k + 2]);
+            }
+            if (pts.size() < 60) continue;
+            cv::Vec3f n; cv::Point3f c;
+            double rms = planeFit(pts, n, c);
+            if (rms < 0) continue;
+            // 稳健二遍：剔 |r|>3mm 外点后重拟合（区分「整体弯曲畸变」vs
+            // 「少量喷溅拉爆 RMS」——核 RMS 仍大＝系统性重建畸变）
+            std::vector<cv::Point3f> core;
+            core.reserve(pts.size());
+            for (const auto& p : pts) {
+                const double r = n[0] * (p.x - c.x) + n[1] * (p.y - c.y)
+                               + n[2] * (p.z - c.z);
+                if (std::abs(r) < 3.0) core.push_back(p);
+            }
+            double coreRms = rms;
+            size_t coreN = core.size();
+            double sprayPct = 100.0 * (pts.size() - core.size()) / pts.size();
+            if (core.size() >= 60) {
+                cv::Vec3f n2; cv::Point3f c2;
+                const double r2 = planeFit(core, n2, c2);
+                if (r2 >= 0) { coreRms = r2; n = n2; c = c2; }
+            }
+            (void)rms;
+            // 边缘带（径向外 25%）残差 vs 内带——重建边缘畸变特征
+            std::vector<double> rad(pts.size());
+            double rMax = 0;
+            for (size_t k = 0; k < pts.size(); ++k) {
+                rad[k] = std::sqrt((pts[k].x - c.x) * (pts[k].x - c.x)
+                                 + (pts[k].y - c.y) * (pts[k].y - c.y)
+                                 + (pts[k].z - c.z) * (pts[k].z - c.z));
+                rMax = std::max(rMax, rad[k]);
+            }
+            double in2 = 0, out2 = 0; int inN = 0, outN = 0;
+            for (size_t k = 0; k < pts.size(); ++k) {
+                const double r = n[0] * (pts[k].x - c.x) + n[1] * (pts[k].y - c.y)
+                               + n[2] * (pts[k].z - c.z);
+                if (rad[k] < rMax * 0.75) { in2 += r * r; ++inN; }
+                else                      { out2 += r * r; ++outN; }
+            }
+            const double inRms = inN ? std::sqrt(in2 / inN) : 0;
+            const double outRms = outN ? std::sqrt(out2 / outN) : 0;
+            if (inRms > 0.01) worstEdgeGrow = std::max(worstEdgeGrow, outRms / inRms);
+            rmsList.push_back(coreRms);
+            sprayList.push_back(sprayPct);
+            ++frames;
+            if (frames == 1)
+                dumpFrame("首帧", i, pts);
+            if (pts.size() > 5000 && !dumpedBig) {
+                dumpedBig = true;
+                dumpFrame("大帧", i, pts);
+            }
+            if (sprayPct > worstSprayPct) {
+                worstSprayPct = sprayPct;
+                worstSprayPts = pts;
+                worstSprayIdx = i;
+            }
+            if (frames <= 3 || frames % 200 == 0)
+                fprintf(stderr, "  帧#%zu: %zu 点 核RMS=%.3fmm 喷溅=%.1f%% 内带=%.3f 边缘带=%.3f\n",
+                        i, pts.size(), coreRms, sprayPct, inRms, outRms);
+        }
+        ASSERT_GT(frames, 0) << "无逐帧激光缓存";
+        // 最差喷溅帧落 Z 分位（离面内容判别）
+        if (!worstSprayPts.empty())
+            dumpFrame("最差喷溅帧", worstSprayIdx, worstSprayPts);
+
+        // —— 261030 决定性实验：联合云内含率分解 ——
+        // 三种联合（各帧按 R_init 变换拼接，抽样 ≤20 万点，鲁棒平面 ±3mm）：
+        //   A=全部帧  B=仅过质量门的帧（IQR≤60 或非均匀） C=被门拒的帧
+        // A 乱 B 净 → 乱源＝幻影帧（质量门可解）；B 也乱 → 乱源＝位姿/联合侧
+        {
+            std::vector<cv::Point3f> unionAll, unionGood, unionBad;
+            size_t gatedFrames = 0;
+            for (size_t i = 0; i < snap.obs.size(); ++i) {
+                const size_t slot = snap.obs[i].laserCacheSlot;
+                if (slot == sp::FrameObs::kNoLaserSlot
+                    || slot >= snap.laserFrames.size())
+                    continue;
+                const auto& lf = snap.laserFrames[slot];
+                if (lf.size() < 60) continue;
+                std::vector<cv::Point3f> pts;
+                pts.reserve(lf.size() / 3);
+                for (size_t k = 0; k + 2 < lf.size(); k += 3) {
+                    if (lf[k + 2] < gateMin || lf[k + 2] > gateMax) continue;
+                    pts.emplace_back(lf[k], lf[k + 1], lf[k + 2]);
+                }
+                if (pts.size() < 60) continue;
+                // 质量门判据（同 fc_executor zgate：IQR>60 且 均匀度>0.42）
+                std::vector<float> zs(pts.size());
+                for (size_t k = 0; k < pts.size(); ++k) zs[k] = pts[k].z;
+                std::sort(zs.begin(), zs.end());
+                const float iqr = zs[zs.size() * 3 / 4] - zs[zs.size() / 4];
+                const float rng = zs[zs.size() * 19 / 20] - zs[zs.size() / 20];
+                const bool bad = iqr > 60.0f && rng > 1.0f && iqr / rng > 0.42f;
+                if (bad) ++gatedFrames;
+                // R_init 变换入世界系
+                const cv::Matx33d Rm(snap.obs[i].R_init);
+                const cv::Vec3d tv(snap.obs[i].t_init);
+                // 抽样：每帧取 ≤60 点（6k 帧 × 60 ≈ 36 万→再截 20 万）
+                const size_t step = pts.size() / 60 + 1;
+                for (size_t k = 0; k < pts.size(); k += step) {
+                    const cv::Vec3d w = Rm * cv::Vec3d(pts[k].x, pts[k].y, pts[k].z) + tv;
+                    unionAll.emplace_back(static_cast<float>(w[0]),
+                                          static_cast<float>(w[1]),
+                                          static_cast<float>(w[2]));
+                    (bad ? unionBad : unionGood).emplace_back(
+                        static_cast<float>(w[0]), static_cast<float>(w[1]),
+                        static_cast<float>(w[2]));
+                }
+            }
+            auto inlierRate = [&](const std::vector<cv::Point3f>& v) {
+                if (v.size() < 100) return -1.0;
+                cv::Vec3f n; cv::Point3f c;
+                if (planeFit(v, n, c) < 0) return -1.0;
+                std::vector<cv::Point3f> core;
+                for (const auto& p : v) {
+                    const double r = n[0] * (p.x - c.x) + n[1] * (p.y - c.y)
+                                   + n[2] * (p.z - c.z);
+                    if (std::abs(r) < 3.0) core.push_back(p);
+                }
+                return 100.0 * core.size() / v.size();
+            };
+            fprintf(stderr,
+                    "[PLANE-CHK] 联合云分解（R_init 位姿拼接）：全部帧 %.1f%%"
+                    "｜过门帧 %.1f%%｜被拒帧 %.1f%%（被拒帧数 %zu/%d）"
+                    "——全部乱/过门净＝幻影主导（门可解）；过门也乱＝位姿联合侧\n",
+                    inlierRate(unionAll), inlierRate(unionGood),
+                    inlierRate(unionBad), gatedFrames, frames);
+        }
+        std::sort(rmsList.begin(), rmsList.end());
+        std::sort(sprayList.begin(), sprayList.end());
+        fprintf(stderr,
+                "[PLANE-CHK] 逐帧核RMS(剔>3mm): 中位=%.3fmm P90=%.3fmm 最大=%.3fmm"
+                "｜喷溅占比: 中位=%.1f%% P90=%.1f%%（帧数=%d；边缘/内带残差比最差=%.2f"
+                "）——核RMS 大＝系统性重建畸变；核RMS 小而喷溅大＝提取离群\n",
+                rmsList[rmsList.size() / 2], rmsList[rmsList.size() * 9 / 10],
+                rmsList.back(), sprayList[sprayList.size() / 2],
+                sprayList[sprayList.size() * 9 / 10], frames, worstEdgeGrow);
+    }
+
+    // ── ②终版 PLY 鲁棒平面＋径向剖面 ──
+    if (plyPath != nullptr) {
+        std::ifstream pf(plyPath);
+        ASSERT_TRUE(pf) << "PLY 不可读";
+        std::string line;
+        size_t n = 0;
+        while (std::getline(pf, line)) {
+            std::istringstream ls(line);
+            std::string tag;
+            ls >> tag;
+            if (tag == "element" ) { std::string what; ls >> what; if (what == "vertex") ls >> n; }
+            if (tag == "end_header") break;
+        }
+        ASSERT_GT(n, size_t{0});
+        const size_t stride = std::max<size_t>(1, n / 200000);   // 抽样 ≤20 万
+        std::vector<cv::Point3f> pts;
+        pts.reserve(n / stride + 8);
+        for (size_t i = 0; i < n && pf; ++i) {
+            float x, y, z;
+            if (!(pf >> x >> y >> z)) break;
+            if (i % stride == 0) pts.emplace_back(x, y, z);
+        }
+        cv::Vec3f nrm; cv::Point3f ctr;
+        double rms = planeFit(pts, nrm, ctr);
+        // 鲁棒二遍：剔 |r|>3mm 后重拟合
+        std::vector<cv::Point3f> core;
+        core.reserve(pts.size());
+        for (const auto& p : pts) {
+            const double r = nrm[0] * (p.x - ctr.x) + nrm[1] * (p.y - ctr.y)
+                           + nrm[2] * (p.z - ctr.z);
+            if (std::abs(r) < 3.0) core.push_back(p);
+        }
+        const double inlierPct = 100.0 * core.size() / pts.size();
+        rms = planeFit(core, nrm, ctr);
+        // 径向剖面（core 最大半径；含离群的径向位置）
+        double rMax = 0;
+        for (const auto& p : core) {
+            const double d = std::sqrt((p.x - ctr.x) * (p.x - ctr.x)
+                                     + (p.y - ctr.y) * (p.y - ctr.y)
+                                     + (p.z - ctr.z) * (p.z - ctr.z));
+            rMax = std::max(rMax, d);
+        }
+        constexpr int kBins = 5;
+        double s2[kBins] = {0}; size_t cnt[kBins] = {0};
+        size_t sprayIn = 0, sprayOut = 0;
+        for (const auto& p : pts) {
+            const double r = nrm[0] * (p.x - ctr.x) + nrm[1] * (p.y - ctr.y)
+                           + nrm[2] * (p.z - ctr.z);
+            const double d = std::sqrt((p.x - ctr.x) * (p.x - ctr.x)
+                                     + (p.y - ctr.y) * (p.y - ctr.y)
+                                     + (p.z - ctr.z) * (p.z - ctr.z));
+            const int b = std::min(kBins - 1, static_cast<int>(d / rMax * kBins));
+            s2[b] += r * r; ++cnt[b];
+            if (std::abs(r) > 10.0) { if (b >= kBins - 2) ++sprayOut; else ++sprayIn; }
+        }
+        std::ostringstream prof;
+        for (int b = 0; b < kBins; ++b)
+            prof << " [" << (100 * b / kBins) << "-" << (100 * (b + 1) / kBins)
+                 << "%]=" << (cnt[b] ? std::sqrt(s2[b] / cnt[b]) : 0.0);
+        fprintf(stderr,
+                "[PLANE-PLY] %zu 点（抽样 %zu）内含率(±3mm)=%.1f%% 核RMS=%.3fmm"
+                "\n  径向残差RMS%s\n  喷溅(|r|>10mm): 内带=%zu 边缘带=%zu"
+                "（分层/多帧错位→融合位姿侧；径向平滑恶化→重建畸变侧）\n",
+                n, pts.size(), inlierPct, rms, prof.str().c_str(),
+                sprayIn, sprayOut);
+        SUCCEED();
+        return;
+    }
+    SUCCEED();
+}
+
+// ============================================================================
+// GBA on checkpoint（261030）：在真机会话 checkpoint 上离线复跑全局优化——
+// 验证关键帧子采样修复（15025 帧原 fail(fallback) 无重放）＋终版云平面率
+// ============================================================================
+TEST(FcReplay, GbaOnCheckpoint) {
+    const char* ckPath = getenv("JMW_FC_GBACHK");
+    if (ckPath == nullptr)
+        GTEST_SKIP() << "JMW_FC_GBACHK=<obs checkpoint> 未设";
+    namespace sp = Scanner::pipeline;
+    sp::FrameObsAccumulator acc(size_t{1} << 30);
+    const auto lr = acc.loadCheckpoint(ckPath);
+    ASSERT_TRUE(lr.success) << lr.message;
+    sp::GlobalOptimObject go;
+    sp::PipelineDeps deps;
+    ASSERT_TRUE(go.configure(deps).success);
+    sp::CancelToken cancel;
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto r = go.run(acc, [](int, const std::string&) {}, cancel);
+    const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+    ASSERT_TRUE(r.success) << r.message;
+    const auto& out = go.output();
+    fprintf(stderr,
+            "[GBA-CK] 帧数=%zu gba=%s 初RMSE=%.4f 末RMSE=%.4f 标志点=%zu "
+            "重放=%d 时长=%lldms: %s\n",
+            out.frameCount, out.gbaSuccess ? "ok" : "FAIL",
+            out.gbaStats.initialRMSE, out.gbaStats.finalRMSE,
+            out.gbaMarkers.size(), static_cast<int>(out.laserReplayed), el,
+            out.gbaMessage.c_str());
+    ASSERT_TRUE(out.gbaSuccess) << "GBA 仍失败: " << out.gbaMessage;
+    // 终版激光云鲁棒平面内含率（白板场景判据）
+    if (!out.laserXyzFinal.empty()) {
+        std::vector<cv::Point3f> pts;
+        const size_t n = out.laserXyzFinal.size() / 3;
+        const size_t stride = n / 200000 + 1;
+        for (size_t i = 0; i < n; i += stride)
+            pts.emplace_back(out.laserXyzFinal[i * 3], out.laserXyzFinal[i * 3 + 1],
+                             out.laserXyzFinal[i * 3 + 2]);
+        // 复用 WhiteboardPlaneDiagnosis 的平面拟合口径（局部重写幂迭代）
+        cv::Point3f mean(0, 0, 0);
+        for (const auto& p : pts) { mean.x += p.x; mean.y += p.y; mean.z += p.z; }
+        mean.x /= pts.size(); mean.y /= pts.size(); mean.z /= pts.size();
+        double a = 0, b = 0, d = 0, e = 0, f = 0, g = 0;
+        for (const auto& p : pts) {
+            const float x = p.x - mean.x, y = p.y - mean.y, z = p.z - mean.z;
+            a += x * x; b += x * y; d += x * z; e += y * y; f += y * z; g += z * z;
+        }
+        cv::Vec3d v1(1, 0.3, 0.1);
+        for (int it = 0; it < 60; ++it) {
+            cv::Vec3d w(a * v1[0] + b * v1[1] + d * v1[2],
+                        b * v1[0] + e * v1[1] + f * v1[2],
+                        d * v1[0] + f * v1[1] + g * v1[2]);
+            const double L = std::sqrt(w.dot(w));
+            if (L < 1e-12) break;
+            v1 = w / L;
+        }
+        cv::Vec3d v2 = v1 + cv::Vec3d(0.37, 0.61, 0.93);
+        for (int it = 0; it < 60; ++it) {
+            cv::Vec3d w(a * v2[0] + b * v2[1] + d * v2[2],
+                        b * v2[0] + e * v2[1] + f * v2[2],
+                        d * v2[0] + f * v2[1] + g * v2[2]);
+            w -= v1 * v1.dot(w);
+            const double L = std::sqrt(w.dot(w));
+            if (L < 1e-12) break;
+            v2 = w / L;
+        }
+        cv::Vec3d nv = v1.cross(v2);
+        const double L = std::sqrt(nv.dot(nv));
+        nv /= L;
+        size_t in3 = 0;
+        for (const auto& p : pts) {
+            const double rr = nv[0] * (p.x - mean.x) + nv[1] * (p.y - mean.y)
+                            + nv[2] * (p.z - mean.z);
+            if (std::abs(rr) < 3.0) ++in3;
+        }
+        fprintf(stderr, "[GBA-CK] 终版激光 %zu 点（抽样 %zu）平面内含率(±3mm)=%.1f%%\n",
+                n, pts.size(), 100.0 * in3 / pts.size());
+    }
+    SUCCEED();
+}
+
+// ============================================================================
 // startRealtime 名义标定路径复现：22:03 真机启动断言（fixedSize create）——
 // 离线同构装配（attachCalib＋attachStereoNominal＋算子 json）走一遍启动/停止
 // ============================================================================
