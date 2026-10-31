@@ -15,3 +15,5 @@ projector_calib_*.asc
 # 261024 产线集成：speed_optimize 联建目录（BUILD_SCAN_REPLAY=ON 专用）
 build-so/
 build-so-ops/
+
+backup_config_*/

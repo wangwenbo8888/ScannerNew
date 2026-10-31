@@ -2627,6 +2627,28 @@ TEST(FcReplay, GbaOptimizedMarkersAndLaser) {
             }
         }
         if (!prod.laserXyzHost.empty()) ++laserCachedFrames;
+        // 261031 双链深度一致性探针：同帧 conic 标志点 Z 均值 vs 激光 Z 中位
+        // ——两链用不同标定源（conic=camera_calib 名义档；激光=CMTT 表），
+        // 同表面系统错位＝「标志点/激光不同平面」根源探针
+        if (c < 20 && prod.conic.success && prod.markersValid > 0
+            && !prod.laserXyzHost.empty()) {
+            double mkZ = 0;
+            int mkN = 0;
+            for (const auto& m : prod.conic.markers) {
+                if (!m.validCircle) continue;
+                mkZ += m.centerZ;
+                ++mkN;
+            }
+            std::vector<float> lz(prod.laserXyzHost.size() / 3);
+            for (size_t k = 0; k < lz.size(); ++k)
+                lz[k] = prod.laserXyzHost[k * 3 + 2];
+            std::sort(lz.begin(), lz.end());
+            if (mkN > 0 && !lz.empty())
+                fprintf(stderr,
+                        "[DUAL-Z] 帧%d: 标志点Z=%.1f(%d个) 激光Z=%.1f 偏差=%.1fmm\n",
+                        c, mkZ / mkN, mkN, lz[lz.size() / 2],
+                        mkZ / mkN - lz[lz.size() / 2]);
+        }
         rig.obs->push(std::move(fo), std::move(prod.laserXyzHost));
     }
     ex.reset();

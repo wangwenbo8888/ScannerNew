@@ -1049,6 +1049,26 @@ struct FiveChainAdapter::RtBridge {
     void wire() {
         src.cycles.fs = &src;
         if (const char* e = getenv("JMW_FC_DUMPFRAMES")) dumpMax_ = atoi(e);
+        // 261031 config 转储开关（config/fc_dump.json {"count":N}——env 易丢；
+        // 0/缺文件=关。N 帧 L/R 原图落 diagnostics/fc_frames/，硬件一致性
+        // 验证/离线分析素材口）
+        if (dumpMax_ == 0) {
+            namespace fsd2 = std::filesystem;
+            std::error_code dec;
+            const fsd2::path p = fsd2::path("config") / "fc_dump.json";
+            if (fsd2::exists(p, dec)) {
+                try {
+                    std::ifstream f(p);
+                    nlohmann::json j;
+                    f >> j;
+                    dumpMax_ = j.value("count", 0);
+                    if (dumpMax_ > 0)
+                        JMW_LOG_WARN("07-FiveChain",
+                            "[FiveChainAdapter] 帧转储开启: {} 帧 → diagnostics/fc_frames",
+                            dumpMax_);
+                } catch (...) { /* 开关件失败静默 */ }
+            }
+        }
         src.cycleAt = [this](size_t i) -> scr::FrameCycleInfo {
             scr::FrameCycleInfo ci;
             ci.laserIdx = static_cast<int>(i);   // 桥语义：laserIdx 槽位复用透传 fc idx
@@ -1722,6 +1742,32 @@ void FiveChainAdapter::collectorLoop() {
                         calib::ConicFailReasonName(dg.failReason),
                         dg.reconstructedRadiusMm, dg.reprojResidualPx);
                 }
+            }
+        }
+        // 261031 双链深度探针（每 100 帧一次——标定一致性验收口）：同帧
+        // conic 标志点 Z 均值 vs 激光 Z 中位——两链共用同一表面，系统偏差
+        // ＝camera_calib（conic）与 CMTT（激光）标定口径错位（实测 ~3mm；
+        // 重标定后此值应 <1mm）
+        if ((idx % 100) == 0 && prod.conic.success && prod.markersValid > 0
+            && !prod.laserXyzHost.empty()) {
+            double mkZ = 0;
+            int mkN = 0;
+            for (const auto& m : prod.conic.markers) {
+                if (!m.validCircle) continue;
+                mkZ += m.centerZ;
+                ++mkN;
+            }
+            if (mkN > 0) {
+                std::vector<float> lz(prod.laserXyzHost.size() / 3);
+                for (size_t k = 0; k < lz.size(); ++k)
+                    lz[k] = prod.laserXyzHost[k * 3 + 2];
+                std::sort(lz.begin(), lz.end());
+                if (!lz.empty())
+                    JMW_LOG_WARN("07-FiveChain",
+                        "[DUAL-Z] f={} 标志点Z={:.1f}({}个) 激光Z={:.1f} "
+                        "偏差={:.1f}mm（重标定后应<1mm）",
+                        idx, mkZ / mkN, mkN, lz[lz.size() / 2],
+                        mkZ / mkN - lz[lz.size() / 2]);
             }
         }
 
