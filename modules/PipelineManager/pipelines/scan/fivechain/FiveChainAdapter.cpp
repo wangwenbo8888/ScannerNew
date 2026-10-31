@@ -1218,7 +1218,13 @@ Scanner::Result FiveChainAdapter::loadTestData(const std::string& dir) {
                 const size_t fb = static_cast<size_t>(rw) * rh;
                 const size_t total = fb * ids.size();
                 // 限制 50 帧（内存）
-                if (ids.size() > 50) ids.resize(50);
+                // 261031 帧上限改 env 可调（JMW_FC_TESTN，默认 399 全量——原硬编码 50）
+    {
+        int maxN = 399;
+        if (const char* e = getenv("JMW_FC_TESTN")) maxN = atoi(e);
+        if (maxN > 0 && ids.size() > static_cast<size_t>(maxN))
+            ids.resize(static_cast<size_t>(maxN));
+    }
                 std::vector<unsigned char> bufL, bufR;
                 {
                     std::ifstream fl(base / "left.bin", std::ios::binary);
@@ -1683,7 +1689,9 @@ Scanner::Result FiveChainAdapter::startRealtime(
         // 261028 标志点融合算子（体素 5mm＋EMA——旧 lane MarkerFuseAdapter 同款）
         {
             calib::MarkerCloudFuseCPUParams mfp;
-            mfp.voxelSize = 15.0f;  // 15mm——容忍 R/T 漂移（5mm 太小，同标志点多帧分裂）
+            mfp.voxelSize = 30.0f;  // 261031 15→30mm——399 帧长序列 R/T 漂移 ~20mm+
+                              // 致同点跨 15mm 体素分裂（用户「同一物点很多像点」
+                              // 实证）；30mm 容忍全程漂移，GBA 终版才出精细位
             mfp.saturationThreshold = 99;
             markerFuseOp_ = std::make_unique<calib::MarkerCloudFuseCPU>(mfp);
         }

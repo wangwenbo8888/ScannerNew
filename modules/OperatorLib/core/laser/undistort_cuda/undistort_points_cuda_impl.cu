@@ -50,41 +50,49 @@ __global__ void UndistortRectifyKernel(
     // Step 2: 迭代反向去畸变
     // 给定畸变归一化坐标 (x, y), 求无畸变坐标 (xu, yu)
     // 使得 distort(xu, yu) == (x, y)
-    float xu = x;
-    float yu = y;
+    // 261031 对齐 OpenCV：迭代 5→15（OpenCV 默认 10，边缘大畸变点 5 次不
+    // 收敛＝系统性偏差来源）；迭代变量 double 精度（OpenCV 用 double——
+    // float 精度在边缘累积 ~0.1px 差＝重建 ~0.5mm 偏差）
+    double xu = static_cast<double>(x);
+    double yu = static_cast<double>(y);
+    const double xd = static_cast<double>(x);
+    const double yd = static_cast<double>(y);
+    const double k1d = k1, k2d = k2, k3d = k3;
+    const double k4d = k4, k5d = k5, k6d = k6;
+    const double p1d = p1, p2d = p2;
 
-    for (int iter = 0; iter < 5; ++iter) {
-        float r2 = xu * xu + yu * yu;
-        float r4 = r2 * r2;
-        float r6 = r4 * r2;
+    for (int iter = 0; iter < 15; ++iter) {
+        double r2 = xu * xu + yu * yu;
+        double r4 = r2 * r2;
+        double r6 = r4 * r2;
 
-        float num = 1.0f + k1 * r2 + k2 * r4 + k3 * r6;
-        float den = 1.0f + k4 * r2 + k5 * r4 + k6 * r6;
-        float radial = num / den;
+        double num = 1.0 + k1d * r2 + k2d * r4 + k3d * r6;
+        double den = 1.0 + k4d * r2 + k5d * r4 + k6d * r6;
+        double radial = num / den;
 
-        float dx_t = 2.0f * p1 * xu * yu + p2 * (r2 + 2.0f * xu * xu);
-        float dy_t = p1 * (r2 + 2.0f * yu * yu) + 2.0f * p2 * xu * yu;
+        double dx_t = 2.0 * p1d * xu * yu + p2d * (r2 + 2.0 * xu * xu);
+        double dy_t = p1d * (r2 + 2.0 * yu * yu) + 2.0 * p2d * xu * yu;
 
-        xu = (x - dx_t) / radial;
-        yu = (y - dy_t) / radial;
+        xu = (xd - dx_t) / radial;
+        yu = (yd - dy_t) / radial;
     }
 
-    // Step 3: 旋转矫正
-    // [x'', y'', z''] = R * [xu, yu, 1]^T （齐次，保留第三行）
-    float xr = d_R[0] * xu + d_R[1] * yu + d_R[2];
-    float yr = d_R[3] * xu + d_R[4] * yu + d_R[5];
-    float zr = d_R[6] * xu + d_R[7] * yu + d_R[8];
+    // Step 3: 旋转矫正（double 精度——与 OpenCV undistortPoints 同口径）
+    double xr = static_cast<double>(d_R[0]) * xu + static_cast<double>(d_R[1]) * yu
+              + static_cast<double>(d_R[2]);
+    double yr = static_cast<double>(d_R[3]) * xu + static_cast<double>(d_R[4]) * yu
+              + static_cast<double>(d_R[5]);
+    double zr = static_cast<double>(d_R[6]) * xu + static_cast<double>(d_R[7]) * yu
+              + static_cast<double>(d_R[8]);
 
     // Step 4: 投影到矫正后像素坐标（齐次归一化后加主点）
-    // 归一化坐标经 R 旋转后 zr != 1（R1/R2 含绕 x/y 分量, zr≈0.88~1.08）。
-    // 与 cv::undistortPoints 一致的公式: u' = fx'·(xr/zr) + cx'
-    // （方向项除以 zr 归一化, 主点/平移项不参与除法）。
-    // 缺失 zr 归一化会在图像边缘引入 ~10% (>100px) 系统偏差, 立体重建呈拱面。
-    float inv_z = 1.0f / zr;
-    float u_out = fx_p * (xr * inv_z) + cx_p + tx_p;
-    float v_out = fy_p * (yr * inv_z) + cy_p;
+    double inv_z = 1.0 / zr;
+    double u_out = static_cast<double>(fx_p) * (xr * inv_z)
+                 + static_cast<double>(cx_p) + static_cast<double>(tx_p);
+    double v_out = static_cast<double>(fy_p) * (yr * inv_z)
+                 + static_cast<double>(cy_p);
 
-    d_dst[tid] = make_float2(u_out, v_out);
+    d_dst[tid] = make_float2(static_cast<float>(u_out), static_cast<float>(v_out));
 }
 
 // ============================================================================

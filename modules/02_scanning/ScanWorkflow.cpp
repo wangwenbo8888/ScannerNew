@@ -490,12 +490,19 @@ void ScanWorkflow::runFinalBA() {
         // GBA 系而标志点显示此前停留在 live 系＝两云脱离）
         if (ctx_ && ctx_->sceneFeed() && !out.markerCloud.empty()) {
             finalMarkerCloud_ = out.markerCloud;
+            // 261031 防冻结丢弃：GBA UnfreezeGuard 释放时序不保证在推送前
+            //（后台线程竞态）——显式解冻再推（幂等，安全）
+            ctx_->sceneFeed()->notifyFreeze(false);
             Scanner::pipeline::CloudViewHandle h;
             h.hostMarker = &finalMarkerCloud_;
             ctx_->sceneFeed()->pushCloudSnapshot(h);
             JMW_LOG_INFO("02-ScanWorkflow",
-                "[终局遍] GBA 终版标志点 %zu 个推 3D（与终版激光同系）",
+                "[终局遍] GBA 终版标志点 {} 个推 3D（与终版激光同系）",
                 finalMarkerCloud_.size());
+        } else if (!out.gbaMarkers.empty() && out.markerCloud.empty()) {
+            JMW_LOG_WARN("02-ScanWorkflow",
+                "[终局遍] gbaMarkers={} 但 markerCloud 空——近距合并清空",
+                out.gbaMarkers.size());
         }
         // 终版激光融合云入 06 仓库（260920：优化后顶掉优化前 C 线版）
         if (ctx_ && ctx_->pointCloudBuffer() && !out.laserXyzFinal.empty()) {
