@@ -485,6 +485,18 @@ void ScanWorkflow::runFinalBA() {
             }
             ctx_->pointCloudBuffer()->setMarkers(recs);
         }
+        // 261031 GBA 终版标志点推 3D（与终版激光同世界系——「标志点/激光脱离」
+        // 根治：GBA 软先验锚定使优化解世界系≠live R_init 世界系，激光重放已入
+        // GBA 系而标志点显示此前停留在 live 系＝两云脱离）
+        if (ctx_ && ctx_->sceneFeed() && !out.markerCloud.empty()) {
+            finalMarkerCloud_ = out.markerCloud;
+            Scanner::pipeline::CloudViewHandle h;
+            h.hostMarker = &finalMarkerCloud_;
+            ctx_->sceneFeed()->pushCloudSnapshot(h);
+            JMW_LOG_INFO("02-ScanWorkflow",
+                "[终局遍] GBA 终版标志点 %zu 个推 3D（与终版激光同系）",
+                finalMarkerCloud_.size());
+        }
         // 终版激光融合云入 06 仓库（260920：优化后顶掉优化前 C 线版）
         if (ctx_ && ctx_->pointCloudBuffer() && !out.laserXyzFinal.empty()) {
             // 261018 激光编辑排除：GBA 重放不知道软删（重放重排后下标也找不回）

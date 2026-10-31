@@ -2137,6 +2137,42 @@ TEST(FcReplay, GbaOnCheckpoint) {
             out.gbaMarkers.size(), static_cast<int>(out.laserReplayed), el,
             out.gbaMessage.c_str());
     ASSERT_TRUE(out.gbaSuccess) << "GBA 仍失败: " << out.gbaMessage;
+    // —— 261031 世界系一致性验证：GBA 标志点（终版激光所在系）vs R_init
+    // 世界系标志点簇心（扫描中 live 标志点所在系）——刚体偏移量＝两云脱离量
+    {
+        const auto snap3 = acc.snapshot();
+        std::unordered_map<int, cv::Vec3d> sum;
+        std::unordered_map<int, int> cnt;
+        for (size_t i = 0; i < snap3.obs.size(); ++i) {
+            const cv::Matx33d Rm(snap3.obs[i].R_init);
+            const cv::Vec3d tv(snap3.obs[i].t_init);
+            for (const auto& mo : snap3.obs[i].markerObs) {
+                if (mo.globalId < 0) continue;
+                sum[mo.globalId] += Rm * cv::Vec3d(mo.xyz[0], mo.xyz[1], mo.xyz[2]) + tv;
+                ++cnt[mo.globalId];
+            }
+        }
+        fprintf(stderr, "[FRAME-CHECK] GBA 标志点 vs R_init 世界簇心（同 id 对比）:\n");
+        double worst = 0;
+        int pairs = 0;
+        for (const auto& m : out.gbaMarkers) {
+            const auto it = sum.find(m.globalId);
+            if (it == sum.end() || cnt[m.globalId] == 0) continue;
+            const cv::Vec3d initMean = it->second / static_cast<double>(cnt[m.globalId]);
+            const double d = cv::norm(initMean - cv::Vec3d(m.X.x, m.X.y, m.X.z));
+            worst = std::max(worst, d);
+            ++pairs;
+            fprintf(stderr,
+                    "  gid=%d: GBA=(%.1f,%.1f,%.1f) init=(%.1f,%.1f,%.1f) 偏移=%.1fmm\n",
+                    m.globalId, m.X.x, m.X.y, m.X.z, initMean[0], initMean[1],
+                    initMean[2], d);
+        }
+        fprintf(stderr,
+                "[FRAME-CHECK] 配对 %d 个，最大偏移 %.1fmm——大偏移＝GBA 世界系"
+                "（软先验锚到上次会话标志点图）与本次会话 R_init 世界系错位＝"
+                "标志点/激光脱离根源\n",
+                pairs, worst);
+    }
     // 终版激光云鲁棒平面内含率（白板场景判据）
     if (!out.laserXyzFinal.empty()) {
         std::vector<cv::Point3f> pts;

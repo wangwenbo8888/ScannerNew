@@ -29,6 +29,7 @@
 #include "ScanSessionData.h"
 #include "base/types.h"
 #include "pipelines/calibcompute/CalibComputeTypes.h"   // CancelToken（终局遍取消令牌成员 261004）
+#include "core/marker/marker_cloud_fuse_cpu/marker_cloud_fuse_cpu.h"   // calib::MarkerCloudPoint（finalMarkerCloud_ 261031）
 #include <opencv2/core.hpp>
 #include <functional>
 #include <memory>
@@ -186,6 +187,9 @@ private:
     std::vector<double> priorXyz_;                 // 3n 展开x,y,z
     std::function<void(int, const std::string&)> finalBAProgress_;  // 进度出口（可空）
     std::vector<cv::Point3f> laserEditExclusions_;   // 261018 激光编辑排除集（终版云位置剔除）
+    // 261031 GBA 终版标志点云宿主（sceneFeed 句柄式推送——queued 信号投递期间
+    // 须存活；GBA 世界系≠live R_init 世界系——标志点显示须随终版激光一起换系）
+    std::vector<calib::MarkerCloudPoint> finalMarkerCloud_;
     Scanner::pipeline::CancelToken finalBACancel_; // 261004：终局遍取消令牌（原局部
                                                    // 令牌无人 cancel——见 cancelFinalBA 注释）
 
