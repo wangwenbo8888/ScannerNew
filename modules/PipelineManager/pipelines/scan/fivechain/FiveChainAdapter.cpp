@@ -1,4 +1,4 @@
-﻿// FiveChainAdapter.cpp — 适配层实现（自持算子宿主＋07 桥）＋FcHarnessCompat 方法实现
+// FiveChainAdapter.cpp — 适配层实现（自持算子宿主＋07 桥）＋FcHarnessCompat 方法实现
 #include "FiveChainAdapter.h"
 #include "harness.h"
 
@@ -181,7 +181,7 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
                 // 消费"右目自身列坐标"约定——保留则 x 偏 -17.1 万像素 v3 全排除）
                 ur.P = cv::Mat(p.snapP2).clone();
                 if (ur.P.rows > 0 && ur.P.cols > 3)
-                    ur.P.at<double>(0, 3) = 0.0;
+                    // ur.P.at<double>(0, 3) = 0.0; // 261031 不置零——与标志点链同口径
                 L.undistGL_->SetParams(ul);
                 L.undistGR_->SetParams(ur);
             }
@@ -1601,7 +1601,7 @@ Scanner::Result FiveChainAdapter::startRealtime(
                 ul.R = snR1_; ul.P = snP1_.clone();
                 ur.cameraMatrix = snK2c_; ur.distCoeffs = snD2_;
                 ur.R = snR2_; ur.P = snP2_.clone();
-                ur.P.at<double>(0, 3) = 0.0;         // 右目 P 平移置零（沙盒口径）
+                // ur.P.at<double>(0, 3) = 0.0; // 261031 不置零——与标志点链同口径         // 右目 P 平移置零（沙盒口径）
             } else {
                 // 快照口径占位（仅过校验——每帧 SetParams 覆写）
                 ul.cameraMatrix = rtK1_; ul.distCoeffs = rtD1_;
@@ -1623,7 +1623,7 @@ Scanner::Result FiveChainAdapter::startRealtime(
             if (hasStereoNominal_) {
                 ur.cameraMatrix = snK2c_; ur.distCoeffs = snD2_;
                 ur.R = snR2_; ur.P = snP2_.clone();
-                ur.P.at<double>(0, 3) = 0.0;         // 右目 P 平移置零（沙盒口径）
+                // ur.P.at<double>(0, 3) = 0.0; // 261031 不置零——与标志点链同口径         // 右目 P 平移置零（沙盒口径）
             } else {
                 ur.cameraMatrix = rtK2_; ur.distCoeffs = rtD2_;
                 ur.R = cv::Mat::eye(3, 3, CV_64F);
