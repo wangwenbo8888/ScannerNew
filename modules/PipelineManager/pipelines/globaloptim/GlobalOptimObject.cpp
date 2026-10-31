@@ -319,12 +319,42 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
     std::unordered_map<uint64_t, const calib::FramePose*> poseById;
     if (gba.success)
         for (const auto& p : gba.optimizedPoses) poseById[p.frameId] = &p;
+    // 261030 信任帧判定＋修正传递全覆盖：无标志点观测（<2 个）的帧不被
+    // GBA 约束——解算器留其坏初值 → 位姿链 60-100mm 跳变簇＝终版 35% 稠密
+    // 错位块根因（22:16 会话实测）。对不信任帧：用最近前置信任帧的修正
+    // C_k=T_opt_k·T_init_k⁻¹ 传递（保段内运动初值，套全局修正）
+    std::vector<int> trustedIdx;          // 信任帧索引（升序）
+    trustedIdx.reserve(snap.obs.size());
+    if (gba.success)
+        for (size_t i = 0; i < snap.obs.size(); ++i) {
+            int obsN = 0;
+            for (const auto& mo : snap.obs[i].markerObs)
+                if (mo.globalId >= 0) ++obsN;
+            if (obsN >= 2) trustedIdx.push_back(static_cast<int>(i));
+        }
+    auto nearestTrusted = [&](size_t i) -> int {
+        // 二分：≤i 的最大信任帧索引；无（i 在首信任帧前）→ -1
+        int lo = 0, hi = static_cast<int>(trustedIdx.size()) - 1, ans = -1;
+        while (lo <= hi) {
+            const int mid = (lo + hi) / 2;
+            if (trustedIdx[static_cast<size_t>(mid)] <= static_cast<int>(i)) {
+                ans = mid; lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return ans >= 0 ? trustedIdx[static_cast<size_t>(ans)] : -1;
+    };
     out_.poses.resize(snap.obs.size());
     for (size_t i = 0; i < snap.obs.size(); ++i) {
         auto& pose = out_.poses[i];
         pose.frameId = snap.obs[i].frameId;
         const calib::FramePose* fp = nullptr;
-        if (gba.success) {
+        int obsN = 0;
+        for (const auto& mo : snap.obs[i].markerObs)
+            if (mo.globalId >= 0) ++obsN;
+        const bool trusted = gba.success && obsN >= 2;
+        if (trusted) {
             auto it = poseById.find(snap.obs[i].frameId);
             if (it != poseById.end()) fp = it->second;
         }
@@ -332,27 +362,31 @@ Scanner::Result GlobalOptimObject::runLocked(FrameObsAccumulator& obsAcc,
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c) pose.R[3 * r + c] = fp->R(r, c);
             for (int k = 0; k < 3; ++k) pose.t[k] = fp->t(k);
-        } else if (gba.success && kfStride > 1) {
-            // 261030 非关键帧：修正传递 pose_i = C_k · T_init_i，其中 k=i 所在
-            // stride 段的关键帧（i/stride*stride），C_k = T_opt_k · T_init_k⁻¹。
-            // 保段内运动初值，套关键帧全局修正
-            const size_t k = (i / kfStride) * kfStride;
-            auto itk = poseById.find(snap.obs[k].frameId);
-            if (itk != poseById.end()) {
-                const cv::Matx33d Rok(itk->second->R);
-                const cv::Vec3d tok(itk->second->t);
-                const cv::Matx33d Rik(snap.obs[k].R_init);
-                const cv::Vec3d tik(snap.obs[k].t_init);
-                const cv::Matx33d Rc = Rok * Rik.t();          // 修正旋转
-                const cv::Vec3d tc = tok - Rc * tik;           // 修正平移
-                const cv::Matx33d Rii(snap.obs[i].R_init);
-                const cv::Vec3d tii(snap.obs[i].t_init);
-                const cv::Matx33d Ri = Rc * Rii;
-                const cv::Vec3d ti = Rc * tii + tc;
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c) pose.R[3 * r + c] = Ri(r, c);
-                for (int q = 0; q < 3; ++q) pose.t[q] = ti(q);
-            } else {                                   // 关键帧缺解=初值兜底
+        } else if (gba.success) {
+            // 不信任帧（观测 <2 或缺解）：最近前置信任帧 k 的修正传递
+            // pose_i = C_k · T_init_i；无前置信任帧＝初值兜底
+            const int k = nearestTrusted(i);
+            bool done = false;
+            if (k >= 0) {
+                auto itk = poseById.find(snap.obs[static_cast<size_t>(k)].frameId);
+                if (itk != poseById.end()) {
+                    const cv::Matx33d Rok(itk->second->R);
+                    const cv::Vec3d tok(itk->second->t);
+                    const cv::Matx33d Rik(snap.obs[static_cast<size_t>(k)].R_init);
+                    const cv::Vec3d tik(snap.obs[static_cast<size_t>(k)].t_init);
+                    const cv::Matx33d Rc = Rok * Rik.t();
+                    const cv::Vec3d tc = tok - Rc * tik;
+                    const cv::Matx33d Rii(snap.obs[i].R_init);
+                    const cv::Vec3d tii(snap.obs[i].t_init);
+                    const cv::Matx33d Ri = Rc * Rii;
+                    const cv::Vec3d ti = Rc * tii + tc;
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c) pose.R[3 * r + c] = Ri(r, c);
+                    for (int q = 0; q < 3; ++q) pose.t[q] = ti(q);
+                    done = true;
+                }
+            }
+            if (!done) {                               // 无信任锚=初值兜底
                 for (int q = 0; q < 9; ++q) pose.R[q] = snap.obs[i].R_init[q];
                 for (int q = 0; q < 3; ++q) pose.t[q] = snap.obs[i].t_init[q];
             }

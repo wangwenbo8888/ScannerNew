@@ -266,6 +266,10 @@ public:
     // 通道序：0=读 1=上传 2=A 3=B 4=C 5=D 6=E 7=F
     int chCount(int i) const { return chCount_[static_cast<size_t>(i)].load(); }
     int tombCount() const { return tombCount_.load(); }
+    // 261030 治理观测口（stopRealtime 链路诊断消费）
+    size_t zGateDrops() const { return zGateDrops_.load(std::memory_order_relaxed); }
+    size_t zLinePruned() const { return zLinePruned_.load(std::memory_order_relaxed); }
+    int linePlaneGateMm() const { return linePlaneGateMm_; }
     int inflightNow() const {
         std::lock_guard<std::mutex> lk(jobMtx_);
         return static_cast<int>(jobs_.size()) - static_cast<int>(jobFree_.size());

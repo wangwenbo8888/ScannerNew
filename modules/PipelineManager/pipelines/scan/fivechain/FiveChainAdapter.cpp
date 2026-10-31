@@ -1836,14 +1836,18 @@ void FiveChainAdapter::stopRealtime() {
         JMW_LOG_WARN("07-FiveChain",
             "[FiveChainAdapter] 链路诊断: CCL失败帧={} CCL组件L累计={} split成功帧={} "
             "ellipse成功帧={} 匹配对累计={} conic有效圆累计={} | 配准 first/flow/fuse/hold/skip="
-            "{}/{}/{}/{}/{} | 激光重建点累计={} 融合云={} 点",
+            "{}/{}/{}/{}/{} | 激光重建点累计={} 融合云={} 点 | 质量门弃帧={} "
+            "飞线剪枝点={}(gate={}mm)",
             harness_->diagCclFail_.load(), harness_->diagRoisL_.load(),
             harness_->diagSplit_.load(), harness_->diagEllipse_.load(),
             harness_->diagMatchPairs_.load(), harness_->diagConicValid_.load(),
             harness_->diagRegFirst_.load(), harness_->diagRegFlow_.load(),
             harness_->diagRegFuse_.load(), harness_->diagRegHold_.load(),
             harness_->diagRegSkip_.load(), harness_->diagLaserPts_.load(),
-            fuse_->GetFusedPointCount());
+            fuse_->GetFusedPointCount(),
+            executor_ ? executor_->zGateDrops() : 0,
+            executor_ ? executor_->zLinePruned() : 0,
+            executor_ ? executor_->linePlaneGateMm() : 0);
     }
     JMW_LOG_INFO("07-FiveChain",
         "[FiveChainAdapter] 实时链停止: 服务 {} 帧（过载跳帧 {}/裁剪 {}）/融合云 {} 点",
