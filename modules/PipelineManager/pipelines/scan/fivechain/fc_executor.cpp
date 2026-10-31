@@ -1379,6 +1379,11 @@ void FiveChainExecutor::fuseLoop() {
         const int n = atoi(e);
         if (n >= 0) fcPinThreadLP(n, 1, "fc:fuse");
     }
+    // 261031 崩溃根治（abort「请求了严重的程序退出」实锤链）：异步 CUDA 错误
+    // 在 fS_ 的 waitForCompletion 处抛 cv::Exception——工作线程无人接 →
+    // std::terminate → 全进程 abort。整循环 try/catch containment：异常＝
+    // 落诊断＋软停执行器（优雅收尾），绝不逸出线程入口
+    try {
     for (;;) {
         void* v = nullptr;
         if (chC_.tryPop(v)) {
@@ -1502,6 +1507,22 @@ void FiveChainExecutor::fuseLoop() {
         }
     }
     chF_.close();
+    } catch (const cv::Exception& e) {
+        JMW_LOG_ERROR("07-FiveChain",
+            "[fc:fuse] cv::Exception（异步 CUDA 错误在同步点引爆）: {}——软停执行器",
+            e.what());
+        fprintf(stderr, "[fc:fuse] CV EXC: %s\n", e.what());
+        stop_.store(true);
+        requestStop();
+    } catch (const std::exception& e) {
+        JMW_LOG_ERROR("07-FiveChain", "[fc:fuse] 异常: {}——软停执行器", e.what());
+        stop_.store(true);
+        requestStop();
+    } catch (...) {
+        JMW_LOG_ERROR("07-FiveChain", "[fc:fuse] 未知异常——软停执行器");
+        stop_.store(true);
+        requestStop();
+    }
 }
 
 // ============================================================================
