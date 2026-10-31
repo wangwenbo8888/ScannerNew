@@ -3412,3 +3412,60 @@ TEST(FcReplay, GbaOptimizedMarkersAndLaser) {
         }
     }
 }
+// 399 帧标志点检出/重建率统计（快速探针——不经 GBA，只跑标志点链）
+TEST(FcReplay, MarkerYield399) {
+    if (getenv("JMW_FC_REPLAY") == nullptr)
+        GTEST_SKIP() << "JMW_FC_REPLAY=1 未设";
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty());
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+    rig.resetSessionState();
+
+    int totalFrames = 0;
+    int detNonZero = 0;       // 检出 ≥1 的帧
+    int validNonZero = 0;     // conic ≥1 的帧
+    int validGe3 = 0;         // conic ≥3（光流下限）的帧
+    int validGe5 = 0;         // conic ≥5 的帧
+    long detTotal = 0, validTotal = 0;
+    std::vector<int> validHist(10, 0);   // 0-9+ 的分布
+
+    auto ex = std::make_unique<scr::fc::FiveChainExecutor>(*rig.h, 0, rig.total);
+    for (int c = 0; c < rig.total; ++c) {
+        CycleProducts prod;
+        std::string ce;
+        if (!ex->collect(c, prod, ce)) break;
+        ++totalFrames;
+        if (prod.markersDetected > 0) ++detNonZero;
+        if (prod.markersValid > 0) ++validNonZero;
+        if (prod.markersValid >= 3) ++validGe3;
+        if (prod.markersValid >= 5) ++validGe5;
+        detTotal += prod.markersDetected;
+        validTotal += prod.markersValid;
+        const int bin = std::min(9, prod.markersValid);
+        ++validHist[static_cast<size_t>(bin)];
+    }
+    ex.reset();
+
+    fprintf(stderr,
+        "\n[MARKER-399] 总帧=%d\n"
+        "  检出(det≥1): %d/%d = %.1f%%\n"
+        "  conic≥1:     %d/%d = %.1f%%\n"
+        "  conic≥3:     %d/%d = %.1f%%  ← 光流可工作\n"
+        "  conic≥5:     %d/%d = %.1f%%\n"
+        "  det 均值=%.1f valid 均值=%.1f 通过率=%.1f%%\n"
+        "  valid 分布: ",
+        totalFrames,
+        detNonZero, totalFrames, 100.0 * detNonZero / totalFrames,
+        validNonZero, totalFrames, 100.0 * validNonZero / totalFrames,
+        validGe3, totalFrames, 100.0 * validGe3 / totalFrames,
+        validGe5, totalFrames, 100.0 * validGe5 / totalFrames,
+        totalFrames ? (double)detTotal / totalFrames : 0,
+        totalFrames ? (double)validTotal / totalFrames : 0,
+        detTotal ? 100.0 * validTotal / detTotal : 0);
+    for (int i = 0; i < 10; ++i)
+        fprintf(stderr, "[%d]=%d ", i, validHist[static_cast<size_t>(i)]);
+    fprintf(stderr, "\n");
+    SUCCEED();
+}
