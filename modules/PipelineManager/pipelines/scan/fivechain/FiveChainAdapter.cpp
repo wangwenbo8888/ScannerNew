@@ -240,9 +240,11 @@ void FcHarnessCompat::finishLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
             fail("steger_fast", p, p.stegerL.message + " | " + p.stegerR.message);
         }
     }
-    // 零点检查
+    // 零点检查（261031 补 d_line_ids——棋盘格扫描崩溃实证：d_centerPoints 可
+    // 非 null 但 d_line_ids null 时 interp/undistort 下游在 null+8 崩溃）
     if (p.stegerL.success && p.stegerR.success
         && (!p.stegerL.d_centerPoints || !p.stegerR.d_centerPoints
+            || !p.stegerL.d_line_ids || !p.stegerR.d_line_ids
             || p.stegerL.d_centerPoints->empty() || p.stegerR.d_centerPoints->empty())) {
         fail("undistort_cuda", p, "steger 0 中心点（延迟段排水后）");
         return;
@@ -431,6 +433,61 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
     } catch (const std::exception& e) {
         fail("conic_reconstruct", p, e.what());
         return;
+    }
+
+    // ── 261031 Q 基准三角化（DUAL-Z 根治）：conic 锥面相交与激光 Q 三角化
+    //    同源标定不同数学路径 → 系统性 ~2.3mm 深度偏差。将配对的椭圆中心
+    //    用 Q 矩阵直接三角化（与激光 ReconstructInto 同路径），替换锥面相交
+    //    的位置输出。validCircle/validPlane 质量门保留（conic 筛选仍有效），
+    //    仅替换 centerX/Y/Z。法线保留 conic 值（用于配准/融合方向参考）。
+    //    env JMW_FC_QBASIS=0 可回退锥面相交（对照用）。
+    {
+        static const bool sQBasis = [] {
+            const char* e = getenv("JMW_FC_QBASIS");
+            return e ? atoi(e) != 0 : true;   // 默认开
+        }();
+        if (sQBasis && p.markersValid > 0) {
+            const cv::Matx44d& Qm = calib_.Q;
+            int replaced = 0;
+            int skipped = 0;
+            for (auto& m : p.conic.markers) {
+                if (!m.validCircle || !m.validPlane) { ++skipped; continue; }
+                if (m.leftEllipseIdx < 0 || m.rightEllipseIdx < 0) { ++skipped; continue; }
+                if (m.leftEllipseIdx >= static_cast<int>(p.ellL.size())
+                    || m.rightEllipseIdx >= static_cast<int>(p.ellR.size())) { ++skipped; continue; }
+                const auto& eL = p.ellL[static_cast<size_t>(m.leftEllipseIdx)];
+                const auto& eR = p.ellR[static_cast<size_t>(m.rightEllipseIdx)];
+                if (!eL.success || !eR.success) { ++skipped; continue; }
+                // Q 三角化（矫正坐标系——与激光 ReconstructInto 同式）
+                const double uL = eL.centerX, vL = eL.centerY;
+                const double uR = eR.centerX;
+                const double d = uL - uR;
+                if (std::abs(d) < 1e-9) { ++skipped; continue; }
+                const double X = Qm(0,0)*uL + Qm(0,1)*vL + Qm(0,2)*d + Qm(0,3);
+                const double Y = Qm(1,0)*uL + Qm(1,1)*vL + Qm(1,2)*d + Qm(1,3);
+                const double Z = Qm(2,0)*uL + Qm(2,1)*vL + Qm(2,2)*d + Qm(2,3);
+                const double W = Qm(3,0)*uL + Qm(3,1)*vL + Qm(3,2)*d + Qm(3,3);
+                if (std::abs(W) < 1e-12) { ++skipped; continue; }
+                const double qX = X / W, qY = Y / W, qZ = Z / W;
+                if (!std::isfinite(qX) || !std::isfinite(qY) || !std::isfinite(qZ)) { ++skipped; continue; }
+                // 合理性门：Q 结果与锥面结果差 >30mm ＝异常——保留锥面值
+                const double dx = qX - m.centerX, dy = qY - m.centerY, dz = qZ - m.centerZ;
+                if (dx*dx + dy*dy + dz*dz > 900.0) { ++skipped; continue; }
+                // 首帧诊断（Q vs 锥面）
+                if (replaced == 0 && diagConicValid_.load() < 50) {
+                    fprintf(stderr,
+                        "[Q-BASIS] cone=(%.1f,%.1f,%.1f) Q=(%.1f,%.1f,%.1f) "
+                        "uL=%.1f d=%.1f\n",
+                        m.centerX, m.centerY, m.centerZ, qX, qY, qZ, uL, d);
+                }
+                m.centerX = qX;
+                m.centerY = qY;
+                m.centerZ = qZ;
+                ++replaced;
+            }
+            if (diagConicValid_.load() < 50)
+                fprintf(stderr, "[Q-BASIS] replaced=%d skipped=%d\n", replaced, skipped);
+        }
     }
     // 逐级诊断计数（split/ellipse/match 成功帧）
     if (p.splitL.success && p.splitR.success)

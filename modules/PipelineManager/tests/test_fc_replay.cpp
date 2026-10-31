@@ -30,6 +30,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>    // PairGeometryCheck 阈值/翻转
 #include <opencv2/imgcodecs.hpp>   // 裁剪原点求解器帧载入
+#include <opencv2/calib3d.hpp>     // IntrinsicFingerprint findChessboardSB/calibrateCamera
 #include <cuda_runtime.h>   // cudaMemGetInfo（连续吞吐显存采样）
 
 #include "pipelines/scan/fivechain/FiveChainAdapter.h"
@@ -2101,8 +2102,6 @@ TEST(FcReplay, WhiteboardPlaneDiagnosis) {
                 "（分层/多帧错位→融合位姿侧；径向平滑恶化→重建畸变侧）\n",
                 n, pts.size(), inlierPct, rms, prof.str().c_str(),
                 sprayIn, sprayOut);
-        SUCCEED();
-        return;
     }
     SUCCEED();
 }
@@ -2494,6 +2493,614 @@ TEST(FcReplay, GbaOnCheckpoint) {
                         o.jumpMm, o.iqrMm);
             }
         }
+    }
+    SUCCEED();
+}
+
+// ============================================================================
+// 激光图案指纹（261031）：硬件同一性验证——线图案拓扑/走向簇/L-R 视差模式。
+// 参照组（D:\calib 激光素材）vs 今日组（diagnostics/fc_frames 转储）。图像域
+// 分析（无需标定）：亮线提取→共线合并→逐帧线表→角度簇＋线数分布对比
+// ============================================================================
+TEST(FcReplay, LaserFingerprint) {
+    const char* refDir = getenv("JMW_FP_REF");
+    const char* newDir = getenv("JMW_FP_NEW");
+    if (refDir == nullptr && newDir == nullptr)
+        GTEST_SKIP() << "JMW_FP_REF=<参照目录> / JMW_FP_NEW=<今日目录> 未设";
+
+    // 单图线特征：亮阈值→Hough→共线合并（角度±2° 且 距离<15px）→线表
+    auto extract = [](const cv::Mat& gray, std::vector<double>& angles,
+                      std::vector<double>& absics, int& nLines) {
+        cv::Mat bw;
+        cv::threshold(gray, bw, 60, 255, cv::THRESH_BINARY);
+        std::vector<cv::Vec4i> lines;
+        cv::HoughLinesP(bw, lines, 1, CV_PI / 180.0, 80, 200, 25);
+        nLines = 0;
+        for (const auto& l : lines) {
+            const double dx = l[2] - l[0], dy = l[3] - l[1];
+            const double len = std::sqrt(dx * dx + dy * dy);
+            if (len < 150) continue;
+            double ang = std::atan2(dy, dx) * 180.0 / CV_PI;
+            if (ang > 90.0) ang -= 180.0;
+            if (ang < -90.0) ang += 180.0;
+            // 归一化截距（原点到线的距离，符号随角度）——线身份的第二维
+            const double nx = -dy / len, ny = dx / len;
+            const double d = nx * l[0] + ny * l[1];
+            bool merged = false;
+            for (size_t k = 0; k < angles.size(); ++k) {
+                double da = std::abs(ang - angles[k]);
+                if (da > 180.0 - da) da = 180.0 - da;
+                if (da < 2.5 && std::abs(d - absics[k]) < 15.0) {
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged) {
+                angles.push_back(ang);
+                absics.push_back(d);
+                ++nLines;
+            }
+        }
+    };
+
+    // 目录遍历：左图为主（L 前缀）；返回 {帧数, 线数分布, 角度样本, 逐帧主导角度}
+    auto scanDir = [&](const char* dir, const char* tag) {
+        std::vector<double> allAngles;
+        std::vector<int> lineCounts;
+        std::vector<double> domAngles;   // 逐帧主导角度（该帧线数最多的 5° 簇中心）
+        namespace fsd = std::filesystem;
+        std::vector<fsd::path> files;
+        for (const auto& e : fsd::directory_iterator(dir)) {
+            const std::string n = e.path().filename().string();
+            if (n.size() > 0 && (n[0] == 'L' || n[0] == 'l')
+                && (n.find(".png") != std::string::npos
+                    || n.find(".bmp") != std::string::npos
+                    || n.find(".PNG") != std::string::npos
+                    || n.find(".BMP") != std::string::npos))
+                files.push_back(e.path());
+        }
+        std::sort(files.begin(), files.end());
+        int used = 0;
+        for (const auto& p : files) {
+            if (used >= 60) break;   // 每组 ≤60 帧
+            cv::Mat g = cv::imread(p.string(), cv::IMREAD_GRAYSCALE);
+            if (g.empty()) continue;
+            if (g.cols > 1700 && g.rows > 1400)
+                g = g(cv::Rect((g.cols - 1688) / 2, (g.rows - 1400) / 2, 1688, 1400));
+            std::vector<double> angs, abs;
+            int n = 0;
+            extract(g, angs, abs, n);
+            if (n >= 5) {                    // 有效激光帧（≥5 线才可靠）
+                lineCounts.push_back(n);
+                for (double a : angs) allAngles.push_back(a);
+                // 逐帧主导角度：5° 簇中数最多者，簇中心＝成员角度中位
+                std::map<int, std::vector<double>> bins;
+                for (double a : angs)
+                    bins[static_cast<int>(std::floor(a / 5.0))].push_back(a);
+                size_t bestN = 0;
+                double domA = 1e9;
+                for (auto& kv : bins) {
+                    if (kv.second.size() > bestN) {
+                        bestN = kv.second.size();
+                        std::vector<double> v = kv.second;
+                        std::sort(v.begin(), v.end());
+                        domA = v[v.size() / 2];
+                    }
+                }
+                if (bestN >= 5 && domA < 1e8) domAngles.push_back(domA);
+                ++used;
+            }
+        }
+        // 统计
+        std::sort(lineCounts.begin(), lineCounts.end());
+        std::sort(allAngles.begin(), allAngles.end());
+        fprintf(stderr, "[FP-%s] %s: 帧数=%d 线数中位=%d P10/P90=%d/%d 角度样本=%zu\n",
+                tag, dir, used,
+                lineCounts.empty() ? 0 : lineCounts[lineCounts.size() / 2],
+                lineCounts.empty() ? 0 : lineCounts[lineCounts.size() / 10],
+                lineCounts.empty() ? 0 : lineCounts[lineCounts.size() * 9 / 10],
+                allAngles.size());
+        // 逐帧主导角度簇（混合流分离成双管型簇——每管一个指纹角）
+        std::sort(domAngles.begin(), domAngles.end());
+        fprintf(stderr, "[FP-%s] 逐帧主导角度: 样本=%zu\n", tag, domAngles.size());
+        if (!domAngles.empty()) {
+            // 聚类：相邻差 <4° 合并；报前 4 簇（角度中心/帧占比）
+            std::ostringstream cs;
+            std::vector<std::pair<double, int>> clusters;
+            for (double a : domAngles) {
+                if (!clusters.empty() && a - clusters.back().first < 4.0) {
+                    auto& c = clusters.back();
+                    c.first = (c.first * c.second + a) / (c.second + 1);
+                    ++c.second;
+                } else {
+                    clusters.push_back({a, 1});
+                }
+            }
+            std::sort(clusters.begin(), clusters.end(),
+                      [](auto& x, auto& y) { return x.second > y.second; });
+            int shown = 0;
+            for (const auto& c : clusters) {
+                if (++shown > 4 || c.second < 2) break;
+                cs << "\n      簇 " << std::fixed << std::setprecision(1) << c.first
+                   << "° × " << c.second << " 帧（"
+                   << 100 * c.second / domAngles.size() << "%）";
+            }
+            fprintf(stderr, "[FP-%s] 主导角簇:%s\n", tag, cs.str().c_str());
+        }
+        return std::make_tuple(allAngles, lineCounts, domAngles);
+    };
+
+    std::vector<double> refAng, newAng;
+    std::vector<int> refCnt, newCnt;
+    std::vector<double> refDom, newDom;
+    if (refDir) std::tie(refAng, refCnt, refDom) = scanDir(refDir, "参照");
+    if (newDir) std::tie(newAng, newCnt, newDom) = scanDir(newDir, "今日");
+    if (refDir && newDir && !refDom.empty() && !newDom.empty()) {
+        // 双管型指纹判定：参照（单管采集）主导角簇中心 vs 今日（混合流）各簇
+        // ——今日任一簇与参照中心差 <3° 且该簇帧占比 ≥20% ＝同投射器管型
+        const double refA = refDom[refDom.size() / 2];
+        double best = 1e9, bestShare = 0;
+        std::vector<std::pair<double, int>> clusters;
+        for (double a : newDom) {
+            if (!clusters.empty() && a - clusters.back().first < 4.0) {
+                auto& c = clusters.back();
+                c.first = (c.first * c.second + a) / (c.second + 1);
+                ++c.second;
+            } else {
+                clusters.push_back({a, 1});
+            }
+        }
+        for (const auto& c : clusters) {
+            const double d = std::abs(c.first - refA);
+            if (d < best) { best = d; bestShare = 100.0 * c.second / newDom.size(); }
+        }
+        fprintf(stderr,
+            "[FP-判定] 参照主导角=%.1f° 今日最近簇差=%.1f°（簇占比 %.0f%%）\n"
+            "  → 差<3° 且占比≥20%% ＝同套硬件（含激光投射器）；差>5° 或无簇"
+            "＝不同投射器/不同投影模式——先止损\n",
+            refA, best, bestShare);
+    }
+    SUCCEED();
+}
+
+// ============================================================================
+// 内参指纹（261031）：棋盘格角点→calibrateCamera→K 对比——硬件同一性硬判据。
+// 激光线干扰下用 findChessboardSB（扇区自适应，比经典方法抗亮线）。多内格
+// 尺寸尝试（9x6/11x8/12x9/8x6/10x7/7x5）
+// ============================================================================
+TEST(FcReplay, IntrinsicFingerprint) {
+    const char* refDir = getenv("JMW_K_REF");
+    const char* newDir = getenv("JMW_K_NEW");
+    if (refDir == nullptr || newDir == nullptr)
+        GTEST_SKIP() << "JMW_K_REF/JMW_K_NEW=<目录> 未设";
+
+    // 尝试的棋盘格内格尺寸
+    static const cv::Size kPatterns[] = {
+        {11, 8}, {9, 6}, {12, 9}, {8, 6}, {10, 7}, {7, 5}, {9, 5}, {11, 7},
+        {8, 8}, {12, 8}, {10, 8}, {11, 9}
+    };
+
+    struct KResult {
+        double fx, fy, cx, cy;
+        int frames;
+        double rms;
+    };
+
+    auto calibDir = [&](const char* dir, const char* tag, KResult& out) {
+        namespace fsd = std::filesystem;
+        std::vector<fsd::path> files;
+        for (const auto& e : fsd::directory_iterator(dir)) {
+            const std::string n = e.path().filename().string();
+            if (n.find(".png") != std::string::npos
+                || n.find(".PNG") != std::string::npos)
+                files.push_back(e.path());
+        }
+        std::sort(files.begin(), files.end());
+        // 多尺寸尝试：第一个找到角点的尺寸为准
+        cv::Size boardSize{};
+        std::vector<std::vector<cv::Point2f>> allCorners;
+        std::vector<cv::Mat> goodFrames;
+        for (const auto& pat : kPatterns) {
+            allCorners.clear();
+            goodFrames.clear();
+            int found = 0;
+            for (size_t fi = 0; fi < files.size() && fi < 40; ++fi) {
+                cv::Mat g = cv::imread(files[fi].string(), cv::IMREAD_GRAYSCALE);
+                if (g.empty()) continue;
+                std::vector<cv::Point2f> corners;
+                bool found = false;
+                // 预处理变体：原图→模糊→反相→半尺（棋盘检测对预处理敏感）
+                cv::Mat prep;
+                for (int variant = 0; variant < 4 && !found; ++variant) {
+                    switch (variant) {
+                    case 0: prep = g; break;
+                    case 1: { cv::GaussianBlur(g, prep, {5,5}, 0); } break;
+                    case 2: { cv::bitwise_not(g, prep); } break;
+                    case 3: { cv::resize(g, prep, cv::Size(), 0.5, 0.5); } break;
+                    }
+                    cv::Size sz = (variant == 3)
+                        ? cv::Size(pat.width, pat.height) : pat;
+                    if (cv::findChessboardCorners(prep, sz, corners,
+                            cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_FILTER_QUADS)
+                        || cv::findChessboardCornersSB(prep, sz, corners)) {
+                        if (variant == 3) {
+                            // 半尺检测成功——角点坐标×2 还原
+                            for (auto& c : corners) { c.x *= 2; c.y *= 2; }
+                        }
+                        found = true;
+                    }
+                }
+                if (found) {
+                    allCorners.push_back(corners);
+                    goodFrames.push_back(g);
+                }
+            }
+            if (allCorners.size() >= 5) {
+                boardSize = pat;
+                break;
+            }
+        }
+        if (allCorners.size() < 5) {
+            fprintf(stderr, "[K-%s] %s: 未找到棋盘格角点（试了 8 种尺寸）\n",
+                    tag, dir);
+            return false;
+        }
+        // 内参解算
+        std::vector<std::vector<cv::Point3f>> objPoints(allCorners.size());
+        for (auto& op : objPoints) {
+            for (int r = 0; r < boardSize.height; ++r)
+                for (int c = 0; c < boardSize.width; ++c)
+                    op.emplace_back(static_cast<float>(c), static_cast<float>(r), 0.0f);
+        }
+        cv::Mat K = cv::Mat::eye(3, 3, CV_64F), D;
+        std::vector<cv::Mat> rvecs, tvecs;
+        const double rms = cv::calibrateCamera(objPoints, allCorners,
+                                               goodFrames[0].size(), K, D,
+                                               rvecs, tvecs);
+        out.fx = K.at<double>(0, 0);
+        out.fy = K.at<double>(1, 1);
+        out.cx = K.at<double>(0, 2);
+        out.cy = K.at<double>(1, 2);
+        out.frames = static_cast<int>(allCorners.size());
+        out.rms = rms;
+        fprintf(stderr,
+            "[K-%s] %s: 棋盘 %dx%d 内格 | %d 帧角点 | fx=%.1f fy=%.1f cx=%.1f "
+            "cy=%.1f rms=%.3fpx\n",
+            tag, dir, boardSize.width, boardSize.height, out.frames,
+            out.fx, out.fy, out.cx, out.cy, rms);
+        return true;
+    };
+
+    KResult refK, newK;
+    const bool ok1 = calibDir(refDir, "参照", refK);
+    const bool ok2 = calibDir(newDir, "今日", newK);
+    if (ok1 && ok2) {
+        const double dfx = std::abs(newK.fx - refK.fx) / refK.fx * 100;
+        const double dfy = std::abs(newK.fy - refK.fy) / refK.fy * 100;
+        const double dcx = std::abs(newK.cx - refK.cx) / refK.cx * 100;
+        const double dcy = std::abs(newK.cy - refK.cy) / refK.cy * 100;
+        fprintf(stderr,
+            "\n[K-判定] 内参偏差: fx=%.2f%% fy=%.2f%% cx=%.2f%% cy=%.2f%%\n"
+            "  → 全部 <1%% ＝同对相机；任一 >2%% ＝不同相机（序列号/换件）\n",
+            dfx, dfy, dcx, dcy);
+    }
+    // —— 261031 备用：镜头渐晕指纹（角点检测失败时）——列/行均值剖面＝镜头
+    // 暗角特征（同镜头同传感器→剖面形状一致；不同镜头→渐晕分布不同）
+    if (!ok1 || !ok2) {
+        auto vignetteProfile = [&](const char* dir, const char* tag,
+                                   std::vector<double>& prof) {
+            namespace fsd = std::filesystem;
+            std::vector<fsd::path> files;
+            for (const auto& e : fsd::directory_iterator(dir)) {
+                const std::string n = e.path().filename().string();
+                if (n.find(".png") != std::string::npos
+                    || n.find(".PNG") != std::string::npos)
+                    files.push_back(e.path());
+            }
+            std::sort(files.begin(), files.end());
+            cv::Mat avg;
+            int cnt = 0;
+            for (size_t fi = 0; fi < files.size() && fi < 20; ++fi) {
+                cv::Mat g = cv::imread(files[fi].string(), cv::IMREAD_GRAYSCALE);
+                if (g.empty()) continue;
+                cv::Mat f;
+                g.convertTo(f, CV_64F);
+                if (avg.empty()) avg = cv::Mat::zeros(f.rows, f.cols, CV_64F);
+                avg += f;
+                ++cnt;
+            }
+            if (cnt < 3) return false;
+            avg /= cnt;
+            cv::Mat colProf, rowProf;
+            cv::reduce(avg, colProf, 0, cv::REDUCE_AVG);
+            cv::reduce(avg, rowProf, 1, cv::REDUCE_AVG);
+            const double mean = cv::sum(avg)[0] / (avg.rows * avg.cols);
+            prof.clear();
+            for (int i = 0; i < colProf.cols; ++i)
+                prof.push_back(colProf.at<double>(0, i) / mean);
+            for (int i = 0; i < rowProf.rows; ++i)
+                prof.push_back(rowProf.at<double>(i, 0) / mean);
+            fprintf(stderr, "[V-%s] %s: %d 帧渐晕剖面（列%d＋行%d）\n",
+                    tag, dir, cnt, colProf.cols, rowProf.rows);
+            return true;
+        };
+        std::vector<double> vp1, vp2;
+        if (vignetteProfile(refDir, "参照", vp1)
+            && vignetteProfile(newDir, "今日", vp2)
+            && vp1.size() == vp2.size() && vp1.size() > 100) {
+            double ssd = 0;
+            for (size_t i = 0; i < vp1.size(); ++i) {
+                const double d = vp1[i] - vp2[i];
+                ssd += d * d;
+            }
+            fprintf(stderr,
+                "\n[V-判定] 渐晕剖面 RMS 差=%.4f（归一化域）\n"
+                "  → <0.02 ＝同镜头同传感器；>0.05 ＝不同光学系统\n",
+                std::sqrt(ssd / vp1.size()));
+        }
+    }
+    SUCCEED();
+}
+
+// ============================================================================
+// 裁剪原点求解（261031）：离线测试帧（1688×1400）在 D:\calib 全幅帧（2048×1536）
+// 中的精确位置——归一化互相关（NCC）全搜索＋亚像素精化。输出：x/y 偏移＋匹
+// 配峰值（>0.9＝同源帧找到）
+// ============================================================================
+TEST(FcReplay, CropOriginMatch) {
+    const char* rawDir = getenv("JMW_CROP_RAW");      // 离线 raw（left.bin/meta.json）
+    const char* calibDir = getenv("JMW_CROP_CALIB");  // D:\calib 全幅帧目录
+    if (rawDir == nullptr || calibDir == nullptr)
+        GTEST_SKIP() << "JMW_CROP_RAW=<raw目录> / JMW_CROP_CALIB=<calib帧目录> 未设";
+
+    // 读离线第 0 帧（raw → Mat）
+    cv::Mat test;
+    {
+        std::ifstream mf(std::filesystem::path(rawDir) / "meta.json");
+        ASSERT_TRUE(mf) << "meta.json 不可读";
+        nlohmann::json meta;
+        mf >> meta;
+        const int w = meta.at("width").get<int>();
+        const int h = meta.at("height").get<int>();
+        const size_t fb = static_cast<size_t>(w) * h;
+        std::ifstream fl(std::filesystem::path(rawDir) / "left.bin", std::ios::binary);
+        ASSERT_TRUE(fl) << "left.bin 不可读";
+        std::vector<unsigned char> buf(fb);
+        fl.read(reinterpret_cast<char*>(buf.data()), fb);
+        test = cv::Mat(h, w, CV_8UC1, buf.data()).clone();
+    }
+    fprintf(stderr, "[CROP] 离线帧: %dx%d\n", test.cols, test.rows);
+
+    // 遍历 calib 帧，滑动窗口 NCC 找最佳匹配
+    namespace fsd = std::filesystem;
+    std::vector<fsd::path> files;
+    for (const auto& e : fsd::directory_iterator(calibDir)) {
+        const std::string n = e.path().filename().string();
+        if (n.find(".png") != std::string::npos
+            || n.find(".bmp") != std::string::npos)
+            files.push_back(e.path());
+    }
+    std::sort(files.begin(), files.end());
+
+    double bestScore = -1;
+    int bestX = -1, bestY = -1;
+    std::string bestFile;
+    int tried = 0;
+    for (const auto& p : files) {
+        if (++tried > 20) break;
+        cv::Mat full = cv::imread(p.string(), cv::IMREAD_GRAYSCALE);
+        if (full.empty()) continue;
+        if (full.cols <= test.cols || full.rows <= test.rows) {
+            // 同尺寸＝直接像素对比（不滑动）
+            if (full.cols == test.cols && full.rows == test.rows) {
+                cv::Mat diff;
+                cv::absdiff(full, test, diff);
+                const double mad = cv::sum(diff)[0] / (diff.rows * diff.cols);
+                const double score = 1.0 - mad / 255.0;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestX = 0;
+                    bestY = 0;
+                    bestFile = p.filename().string();
+                }
+                if (tried <= 5 || score > 0.9)
+                    fprintf(stderr, "[CROP] %s: 直接相似度=%.4f MAD=%.1f\n",
+                            p.filename().string().c_str(), score, mad);
+            }
+            continue;
+        }
+        // NCC 模板匹配（全幅→裁剪滑动）
+        cv::Mat result;
+        cv::matchTemplate(full, test, result, cv::TM_CCOEFF_NORMED);
+        double minV, maxV;
+        cv::Point minP, maxP;
+        cv::minMaxLoc(result, &minV, &maxV, &minP, &maxP);
+        if (maxV > bestScore) {
+            bestScore = maxV;
+            bestX = maxP.x;
+            bestY = maxP.y;
+            bestFile = p.filename().string();
+        }
+        if (tried <= 5 || maxV > 0.9)
+            fprintf(stderr, "[CROP] %s: NCC=%.4f @(x=%d,y=%d)\n",
+                    p.filename().string().c_str(), maxV, maxP.x, maxP.y);
+    }
+    fprintf(stderr,
+        "\n[CROP-判定] 最佳匹配: %s NCC=%.4f 裁剪原点=(x=%d, y=%d)\n"
+        "  → NCC>0.9 ＝同源帧＋精确原点；NCC<0.5 ＝非同源（或裁剪/图像处理不同）\n",
+        bestFile.c_str(), bestScore, bestX, bestY);
+    SUCCEED();
+}
+
+// ============================================================================
+// 五链口径立体标定（261031）：1688×1400 直接标定（不裁剪）——calib1/2 棋盘格
+// 左右帧对 → 角点 → calibrateCamera → stereoCalibrate → stereoRectify →
+// 输出 camera_calib.json（与五链消费格式同构，imageSize=1688×1400）
+// ============================================================================
+TEST(FcReplay, StereoCalib1688) {
+    const char* leftDir = getenv("JMW_STEREO_L");
+    const char* rightDir = getenv("JMW_STEREO_R");
+    const char* outPath = getenv("JMW_STEREO_OUT");
+    if (leftDir == nullptr || rightDir == nullptr)
+        GTEST_SKIP() << "JMW_STEREO_L=<左目录> / JMW_STEREO_R=<右目录> 未设";
+    if (outPath == nullptr) outPath = "camera_calib_1688.json";
+
+    // 棋盘格参数
+    const cv::Size boardSize(11, 8);
+    const double squareMm = 15.0;
+
+    // 角点检测（左右同步）
+    auto detectPairs = [&](std::vector<std::vector<cv::Point2f>>& lc,
+                           std::vector<std::vector<cv::Point2f>>& rc,
+                           cv::Size& imgSize) {
+        namespace fsd = std::filesystem;
+        std::vector<fsd::path> lf, rf;
+        for (const auto& e : fsd::directory_iterator(leftDir)) {
+            const std::string n = e.path().filename().string();
+            if (n.find(".png") != std::string::npos) lf.push_back(e.path());
+        }
+        for (const auto& e : fsd::directory_iterator(rightDir)) {
+            const std::string n = e.path().filename().string();
+            if (n.find(".png") != std::string::npos) rf.push_back(e.path());
+        }
+        std::sort(lf.begin(), lf.end());
+        std::sort(rf.begin(), rf.end());
+        const size_t n = std::min(lf.size(), rf.size());
+        for (size_t i = 0; i < n; ++i) {
+            cv::Mat L = cv::imread(lf[i].string(), cv::IMREAD_GRAYSCALE);
+            cv::Mat R = cv::imread(rf[i].string(), cv::IMREAD_GRAYSCALE);
+            if (L.empty() || R.empty()) continue;
+            imgSize = L.size();
+            std::vector<cv::Point2f> cl, cr;
+            if (cv::findChessboardCorners(L, boardSize, cl,
+                    cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_FILTER_QUADS)
+                && cv::findChessboardCorners(R, boardSize, cr,
+                    cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_FILTER_QUADS)) {
+                cv::cornerSubPix(L, cl, {5,5}, {-1,-1},
+                    cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01));
+                cv::cornerSubPix(R, cr, {5,5}, {-1,-1},
+                    cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01));
+                lc.push_back(cl);
+                rc.push_back(cr);
+            }
+        }
+        return static_cast<int>(lc.size());
+    };
+
+    std::vector<std::vector<cv::Point2f>> leftCorners, rightCorners;
+    cv::Size imgSize;
+    const int nPairs = detectPairs(leftCorners, rightCorners, imgSize);
+    fprintf(stderr, "[STEREO] 角点: %d 对有效帧（%dx%d）\n", nPairs,
+            imgSize.width, imgSize.height);
+    ASSERT_GE(nPairs, 5) << "有效帧不足";
+
+    // 3D 物点
+    std::vector<std::vector<cv::Point3f>> objPoints(nPairs);
+    for (auto& op : objPoints) {
+        for (int r = 0; r < boardSize.height; ++r)
+            for (int c = 0; c < boardSize.width; ++c)
+                op.emplace_back(c * squareMm, r * squareMm, 0.0f);
+    }
+
+    // 单目标定
+    cv::Mat KL = cv::Mat::eye(3, 3, CV_64F), KR = cv::Mat::eye(3, 3, CV_64F);
+    cv::Mat DL, DR;
+    std::vector<cv::Mat> rvecsL, tvecsL, rvecsR, tvecsR;
+    const double rmsL = cv::calibrateCamera(objPoints, leftCorners, imgSize,
+                                            KL, DL, rvecsL, tvecsL);
+    const double rmsR = cv::calibrateCamera(objPoints, rightCorners, imgSize,
+                                            KR, DR, rvecsR, tvecsR);
+    fprintf(stderr, "[STEREO] 左单目: rms=%.3f fx=%.1f cx=%.1f cy=%.1f\n",
+            rmsL, KL.at<double>(0,0), KL.at<double>(0,2), KL.at<double>(1,2));
+    fprintf(stderr, "[STEREO] 右单目: rms=%.3f fx=%.1f cx=%.1f cy=%.1f\n",
+            rmsR, KR.at<double>(0,0), KR.at<double>(0,2), KR.at<double>(1,2));
+
+    // 双目标定
+    cv::Mat R, T, E, F;
+    const double rmsS = cv::stereoCalibrate(objPoints, leftCorners, rightCorners,
+                                            KL, DL, KR, DR, imgSize,
+                                            R, T, E, F,
+                                            cv::CALIB_FIX_INTRINSIC
+                                            | cv::CALIB_USE_INTRINSIC_GUESS,
+                                            cv::TermCriteria(cv::TermCriteria::EPS
+                                                           + cv::TermCriteria::COUNT,
+                                                           100, 1e-6));
+    fprintf(stderr, "[STEREO] 双目: rms=%.3f 基线=|T|=%.2fmm\n",
+            rmsS, cv::norm(T));
+
+    // 立体矫正
+    cv::Mat R1, R2, P1, P2, Q;
+    cv::stereoRectify(KL, DL, KR, DR, imgSize, R, T, R1, R2, P1, P2, Q,
+                      cv::CALIB_ZERO_DISPARITY, 1.0, imgSize);
+    fprintf(stderr, "[STEREO] 矫正: P1.fx=%.1f P2.fx=%.1f Q=%.2f\n",
+            P1.at<double>(0,0), P2.at<double>(0,0), Q.at<double>(3,2));
+
+    // 输出 JSON（与 camera_calib.json 同构）
+    {
+        nlohmann::json j;
+        j["schema"] = "factory_camera_calib_v1";
+        j["imageSize"] = {imgSize.width, imgSize.height};
+        j["referenceTemp"] = 22.5;
+        j["cte"] = 2.36e-05;
+        auto mat3 = [](const cv::Mat& m) {
+            return nlohmann::json::array({nlohmann::json::array({m.at<double>(0,0), m.at<double>(0,1), m.at<double>(0,2)}),
+                                          nlohmann::json::array({m.at<double>(1,0), m.at<double>(1,1), m.at<double>(1,2)}),
+                                          nlohmann::json::array({m.at<double>(2,0), m.at<double>(2,1), m.at<double>(2,2)})});
+        };
+        auto mat34 = [](const cv::Mat& m) {
+            return nlohmann::json::array({nlohmann::json::array({m.at<double>(0,0), m.at<double>(0,1), m.at<double>(0,2), m.at<double>(0,3)}),
+                                          nlohmann::json::array({m.at<double>(1,0), m.at<double>(1,1), m.at<double>(1,2), m.at<double>(1,3)}),
+                                          nlohmann::json::array({m.at<double>(2,0), m.at<double>(2,1), m.at<double>(2,2), m.at<double>(2,3)})});
+        };
+        auto mat44 = [](const cv::Mat& m) {
+            return nlohmann::json::array({nlohmann::json::array({m.at<double>(0,0), m.at<double>(0,1), m.at<double>(0,2), m.at<double>(0,3)}),
+                                          nlohmann::json::array({m.at<double>(1,0), m.at<double>(1,1), m.at<double>(1,2), m.at<double>(1,3)}),
+                                          nlohmann::json::array({m.at<double>(2,0), m.at<double>(2,1), m.at<double>(2,2), m.at<double>(2,3)}),
+                                          nlohmann::json::array({m.at<double>(3,0), m.at<double>(3,1), m.at<double>(3,2), m.at<double>(3,3)})});
+        };
+        j["intrinsic"]["left"]["camera_matrix"] = mat3(KL);
+        j["intrinsic"]["left"]["dist_coeffs"] = nlohmann::json::array(
+            {nlohmann::json::array({DL.at<double>(0,0), DL.at<double>(0,1),
+             DL.at<double>(0,2), DL.at<double>(0,3), DL.at<double>(0,4)})});
+        j["intrinsic"]["left"]["rms_error"] = rmsL;
+        j["intrinsic"]["left"]["valid_frame_count"] = nPairs;
+        j["intrinsic"]["right"]["camera_matrix"] = mat3(KR);
+        j["intrinsic"]["right"]["dist_coeffs"] = nlohmann::json::array(
+            {nlohmann::json::array({DR.at<double>(0,0), DR.at<double>(0,1),
+             DR.at<double>(0,2), DR.at<double>(0,3), DR.at<double>(0,4)})});
+        j["intrinsic"]["right"]["rms_error"] = rmsR;
+        j["intrinsic"]["right"]["valid_frame_count"] = nPairs;
+        j["extrinsic"]["R"] = mat3(R);
+        j["extrinsic"]["T"] = nlohmann::json::array(
+            {nlohmann::json::array({T.at<double>(0,0)}),
+             nlohmann::json::array({T.at<double>(1,0)}),
+             nlohmann::json::array({T.at<double>(2,0)})});
+        j["extrinsic"]["E"] = mat3(E);
+        j["extrinsic"]["F"] = mat3(F);
+        // 顶层 rectify（工厂 module2 handoff 读这个——非 stereoRectifyTempTable）
+        j["rectify"]["R1"] = mat3(R1);
+        j["rectify"]["R2"] = mat3(R2);
+        j["rectify"]["P1"] = mat34(P1);
+        j["rectify"]["P2"] = mat34(P2);
+        j["rectify"]["Q"] = mat44(Q);
+        // 顶层温度范围字段（工厂 handoff 消费）
+        j["tempRangeMin"] = -15.0;
+        j["tempRangeMax"] = 15.0;
+        j["tempStep"] = 0.5;
+        // stereoRectifyTempTable（五链消费——单温档）
+        nlohmann::json tier;
+        tier["temperature"] = 22.5;
+        tier["R1"] = mat3(R1);
+        tier["R2"] = mat3(R2);
+        tier["P1"] = mat34(P1);
+        tier["P2"] = mat34(P2);
+        tier["Q"] = mat44(Q);
+        tier["compensatedCameraMatrixL"] = mat3(KL);
+        tier["compensatedCameraMatrixR"] = mat3(KR);
+        j["stereoRectifyTempTable"]["table"] = nlohmann::json::array({tier});
+        std::ofstream f(outPath);
+        f << j.dump(2);
+        fprintf(stderr, "[STEREO] 输出: %s（%zu 字节）\n", outPath, j.dump().size());
     }
     SUCCEED();
 }
