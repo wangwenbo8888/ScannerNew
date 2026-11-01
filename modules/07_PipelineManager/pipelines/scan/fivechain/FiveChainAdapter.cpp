@@ -28,6 +28,17 @@
 
 namespace Scanner::pipeline {
 
+namespace {
+// 261103 地图 EMA 系数：库位置/法线按 α 慢融合成「历史累积地图」——原
+// 「最新观测整覆盖」＝滚动快照，flow 绝对锚定拿到的地图位置逐位等于上帧
+// 累积坐标（锚定空转——261031 复核实测 MK 统计逐位不变的机制根源）。
+// env JMW_FC_MAPEMA=α（默认 0.1；1.0＝旧覆盖语义 A/B）
+const double kMapEma = [] {
+    const char* e = getenv("JMW_FC_MAPEMA");
+    return e ? atof(e) : 0.1;
+}();
+}   // namespace
+
 FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
                                    FrameObsAccumulator& obs,
                                    Scanner::data::ICloudWarehouse* warehouse,
@@ -826,8 +837,15 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
                             globalSet_.positions.push_back(gpos);
                             globalSet_.normals.push_back(gnorm);
                         } else {
-                            globalSet_.positions[it->second] = gpos;
-                            globalSet_.normals[it->second] = gnorm;
+                            // 261103 EMA 慢融合（同 adoptRegistration 口径）
+                            auto& gp = globalSet_.positions[it->second];
+                            gp.x += kMapEma * (gpos.x - gp.x);
+                            gp.y += kMapEma * (gpos.y - gp.y);
+                            gp.z += kMapEma * (gpos.z - gp.z);
+                            auto& gn = globalSet_.normals[it->second];
+                            gn = gn + kMapEma * (gnorm - gn);
+                            const double gnLen = cv::norm(gn);
+                            if (gnLen > 1e-12) gn /= gnLen;
                         }
                         prevState_.rawPositions.push_back(c);
                         prevState_.rawNormals.push_back(n);
@@ -946,8 +964,16 @@ void FcHarnessCompat::adoptRegistration(calib::MarkerOpticalFlowFuseCPUResult& r
             globalSet_.positions.push_back(m.transformedPosition);
             globalSet_.normals.push_back(m.transformedNormal);
         } else {
-            globalSet_.positions[it->second] = m.transformedPosition;
-            globalSet_.normals[it->second] = m.transformedNormal;
+            // 261103 EMA 慢融合：库＝历史累积地图（不再被最新帧整覆盖——
+            // 滚动快照使绝对锚定空转；见 kMapEma 注释）
+            auto& gp = globalSet_.positions[it->second];
+            gp.x += kMapEma * (tp.x - gp.x);
+            gp.y += kMapEma * (tp.y - gp.y);
+            gp.z += kMapEma * (tp.z - gp.z);
+            auto& gn = globalSet_.normals[it->second];
+            gn = gn + kMapEma * (tn - gn);
+            const double gnLen = cv::norm(gn);
+            if (gnLen > 1e-12) gn /= gnLen;
         }
     }
     ++libVersion_;   // 库已写 → 三角索引脏
@@ -1754,6 +1780,7 @@ Scanner::Result FiveChainAdapter::startRealtime(
 // ---------------------------------------------------------------------------
 void FiveChainAdapter::collectorLoop() {
     int idx = 0;
+    size_t mkGated = 0;   // 261103 标志点累积门拦截计数（验证手段）
     for (;;) {
         scr::CycleProductsCompat prod;
         std::string err;
@@ -1786,6 +1813,8 @@ void FiveChainAdapter::collectorLoop() {
                 const cv::Vec3d Tv(prod.T[0], prod.T[1], prod.T[2]);
                 markerFuseOp_->Execute(mfi, Rm, Tv);
             }
+        } else if (prod.conic.success && prod.markersValid > 0) {
+            ++mkGated;   // 有标志点但未配准（hold/skip）——拦截不入显示云
         }
         const uint64_t fid = prod.metaValid ? prod.metaFrameId
                                             : static_cast<uint64_t>(idx);
@@ -1912,6 +1941,10 @@ void FiveChainAdapter::collectorLoop() {
         ++idx;
     }
     JMW_LOG_INFO("07-FiveChain", "[FiveChainAdapter] 收割线程退出: {} 帧处理", idx);
+    if (mkGated > 0)
+        JMW_LOG_INFO("07-FiveChain",
+            "[FC-MKGATE] 标志点累积门: 拦截未配准帧 {}/{}（hold/skip 位姿过期"
+            "标志点不进显示云——261103 孪生修复的验证口）", mkGated, idx);
     // 261029 终局全量推送：帧源尽（回放单遍完）/停机时 F 通道已排空——节流
     // 推送可能停在半途（短会话 <500ms 节流窗只推过首段），不补全量则扫描中
     // 显示缺末段（空隙）直到关会话 GBA 后才由全量快照补上
