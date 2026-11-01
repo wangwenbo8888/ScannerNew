@@ -18,7 +18,7 @@ namespace {
 constexpr char kMagic[8] = {'J', 'M', 'W', 'F', 'O', 'B', 'S', '1'};
 // 261030 v2：obs 段增 laserCacheSlot（v1 缺——检查点往返槽位全丢）；v1 载入
 // 走按序 1:1 兼容映射（见 loadCheckpoint）
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 4;
 
 template<typename T>
 void wr(std::ostream& o, const T& v) {
@@ -128,6 +128,12 @@ Scanner::Result FrameObsAccumulator::saveCheckpoint(const std::string& path) con
         // 261030 v2：逐 obs 落 laserCacheSlot（v1 缺此字段——载入后槽位全丢，
         // 快照恢复态 GBA anyLaser=false 激光重放整段跳过＝检查点往返断链）
         wr(out, static_cast<uint64_t>(fo.laserCacheSlot));
+        // 261031 v3：逐 obs 落双链深度差 laserDzMm（GBA 激光重放逐帧对齐原料；
+        // v1/v2 载入回 NaN＝不可测——重放退化为不修正）
+        wr(out, fo.laserDzMm);
+        // 261031 v4：live 融合门镜像（hold/skip 位姿过期帧重放须跳过）；
+        // v1-v3 载入回默认 1＝全融合（旧档兼容）
+        wr(out, static_cast<uint8_t>(fo.laserFuse));
         wr(out, static_cast<uint64_t>(fo.markerObs.size()));
         for (const auto& mo : fo.markerObs) {
             out.write(reinterpret_cast<const char*>(mo.xyz), sizeof(mo.xyz));
@@ -154,7 +160,7 @@ Scanner::Result FrameObsAccumulator::loadCheckpoint(const std::string& path) {
     if (!in.read(magic, sizeof(magic)) || std::memcmp(magic, kMagic, sizeof(kMagic)) != 0)
         return Scanner::Result::fail("检查点魔术字不符(坏档): " + path);
     uint32_t ver = 0;
-    if (!rd(in, ver) || (ver != 1 && ver != kVersion))
+    if (!rd(in, ver) || ver < 1 || ver > kVersion)
         return Scanner::Result::fail("检查点版本不符: " + path);
 
     Snapshot snap;
@@ -175,6 +181,16 @@ Scanner::Result FrameObsAccumulator::loadCheckpoint(const std::string& path) {
                     return Scanner::Result::fail("检查点槽位截断");
                 fo.laserCacheSlot = static_cast<size_t>(slot);
             }
+            if (ver >= 3) {
+                if (!rd(in, fo.laserDzMm))
+                    return Scanner::Result::fail("检查点 DUAL-Z 段截断");
+            }   // v1/v2：laserDzMm 保持结构体默认 NaN（重放不修正）
+            if (ver >= 4) {
+                uint8_t lf = 1;
+                if (!rd(in, lf))
+                    return Scanner::Result::fail("检查点融合门段截断");
+                fo.laserFuse = lf;
+            }   // v1-v3：默认 1＝全融合（旧档兼容）
             uint64_t mc = 0;
             if (!rd(in, mc)) return Scanner::Result::fail("检查点 marker 段截断");
             fo.markerObs.resize(static_cast<size_t>(mc));

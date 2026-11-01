@@ -7,6 +7,7 @@
 // ============================================================================
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -144,6 +145,15 @@ struct FrameObs {
     double t_init[3] = {0,0,0};
     std::vector<MarkerObs> markerObs;
     size_t laserCacheSlot = kNoLaserSlot;     // 激光帧缓存槽引用
+    // 261031 逐帧双链深度差（相机系，mm）：conic 标志点 Z 均值 − 激光 Z 中位。
+    // 两链标定口径错位（P2_tx0 vs 原始 P2）的逐帧实测——GBA 激光重放按此
+    // 逐帧对齐（|dz|≤门限：位姿平移加相机系 Z 补偿）或丢帧（>门限＝散点源）
+    float laserDzMm = std::numeric_limits<float>::quiet_NaN();
+    // 261031 八轮：live 融合门镜像（fc_executor fuseLoop：holdSkip==0 时仅
+    // regSource∈{first,flow,fuse} 融合——hold/skip 位姿过期，live 从不融合
+    // 防拖影）。重放必须同门，否则过期位姿帧全部回灌＝GBA 后散点爆发
+    //（PLY 体检 8.5% 离群/+40mm 均值的根因）。0=该帧激光重放须跳过
+    uint8_t laserFuse = 1;
 };
 
 } // namespace Scanner::pipeline

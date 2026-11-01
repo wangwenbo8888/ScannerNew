@@ -489,16 +489,17 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
                 fprintf(stderr, "[Q-BASIS] replaced=%d skipped=%d\n", replaced, skipped);
         }
     }
-    // ── 261031 标志点-激光坐标系对齐（B 方案：经验 Z 校正）──
+    // ── 261031 标志点-激光坐标系对齐（B 方案：经验 Z 校正；四轮定常数）──
     // 根因：激光链 undistGR 用 P2_tx0（tx 置零）vs 标志点链 undistCpu 用原始
     // P2 → 两条链在不同坐标系 → GBA 拟合标志点坐标系的位姿 → 激光重放被拉偏。
-    // 校正：DUAL-Z 实测两链系统偏差（标志点比激光近 ~3.2mm），给标志点 Z 加
-    // 偏差补偿 → GBA 观测在统一坐标系 → 位姿对两条链同时正确。
-    // env JMW_FC_MKZ=<mm> 可调（默认 3.2——399 帧 DUAL-Z 中位）
+    // 校正：DUAL-Z 实测两链系统偏差给标志点 Z 补偿。261031 三轮全序列拟合
+    // （348 帧）：MKZ=3.2 时残差 dz 均值 +1.6mm（过矫）→ 3.2−1.6=1.6。
+    // （四轮验证：4.8 实测把 f=0 探针 0.9→2.5 恶化，方向确认）
+    // env JMW_FC_MKZ=<mm> 可调（默认 1.6）
     {
         static const double sMkZ = [] {
             const char* e = getenv("JMW_FC_MKZ");
-            return e ? atof(e) : 3.2;
+            return e ? atof(e) : 1.6;
         }();
         if (sMkZ != 0.0) {
             for (auto& m : p.conic.markers) {
@@ -1775,6 +1776,14 @@ void FiveChainAdapter::collectorLoop() {
         fo.frameId = fid;
         for (int i = 0; i < 9; ++i) fo.R_init[i] = prod.R[i];
         for (int i = 0; i < 3; ++i) fo.t_init[i] = prod.T[i];
+        // 261031 八轮：live 融合门镜像（与 fc_executor fuseLoop 同判定式）——
+        // hold/skip 帧位姿过期，live 不融合防拖影；重放须同门（此前无门，
+        // 过期位姿帧全部回灌＝GBA 后 8.5% 散点离群的根因）
+        fo.laserFuse =
+            (cfg_.holdSkip != 0 || prod.regSource == "first"
+             || prod.regSource == "flow" || prod.regSource == "fuse")
+                ? 1
+                : 0;
         if (prod.regFlow.success) {
             fo.markerObs.reserve(prod.regFlow.markers.size());
             for (const auto& m : prod.regFlow.markers) {
@@ -1798,6 +1807,30 @@ void FiveChainAdapter::collectorLoop() {
                 mo.xyz[2] = m.centerZ;
                 mo.globalId = -1;   // GBA 端全局关联
                 fo.markerObs.push_back(mo);
+            }
+        }
+        // 261031 逐帧双链深度差（DUAL-Z 常态化——GBA 激光重放逐帧对齐原料）：
+        // 相机系 conic 标志点 Z 均值 − 激光 Z 中位（mm）。两链共用同一表面，
+        // 该值即激光链（P2_tx0）与标志点链（原始 P2）标定口径错位的逐帧实测
+        // （位置依赖 1~10mm——常量校正治不了；重放按此逐帧对齐或门控丢帧）。
+        // 质量门槛 mkN≥2：单标志点帧的 Z 均值噪声大（399 帧实测 f=300 单点
+        // 偏 10.6mm），留 NaN 由 GBA 侧时间窗插值兜底
+        if (prod.conic.success && !prod.laserXyzHost.empty()) {
+            double mkZ = 0;
+            int mkN = 0;
+            for (const auto& m : prod.conic.markers) {
+                if (!m.validCircle) continue;
+                mkZ += m.centerZ;
+                ++mkN;
+            }
+            if (mkN >= 2) {
+                const size_t n = prod.laserXyzHost.size() / 3;
+                std::vector<float> lz(n);
+                for (size_t k = 0; k < n; ++k)
+                    lz[k] = prod.laserXyzHost[k * 3 + 2];
+                std::nth_element(lz.begin(), lz.begin() + static_cast<std::ptrdiff_t>(n / 2),
+                                 lz.end());
+                fo.laserDzMm = static_cast<float>(mkZ / mkN - lz[n / 2]);
             }
         }
         // 261029 D 线激光重放原料入缓存：fuseLoop 已自 E 块拷出本帧设备系激光

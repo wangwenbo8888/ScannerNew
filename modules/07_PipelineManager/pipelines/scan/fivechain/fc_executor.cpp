@@ -7,10 +7,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 
 #include <opencv2/core/cuda_stream_accessor.hpp>
+#include <nlohmann/json.hpp>
+
+#include "jmw_logging.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -292,6 +297,35 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles)
     }
     if (const char* e = getenv("JMW_FC_LINEPLANE")) linePlaneGateMm_ = atoi(e);
     reconCpu_ = std::make_unique<calib::LaserReconstructCpu>(reconP_);
+    // 261031 口径统一：CMTT uR 偏置模型注册（离线拟合产物——FitUrbiasModel
+    // 测试消费 checkpoint 生成 config/urbias.json；env JMW_FC_URBIAS=wx,wy,wz
+    // 优先）。匹配期逐点补偿（ω 一阶旋转→v 向 CMOS 偏移→dZ），激光深度
+    // 出厂即对齐标志点链（P2 原始口径）——live 云与 GBA 重放同享
+    {
+        std::vector<float> ub(3, 0.0f);
+        bool has = false;
+        if (const char* e = std::getenv("JMW_FC_URBIAS")) {
+            if (sscanf(e, "%f,%f,%f", &ub[0], &ub[1], &ub[2]) == 3) has = true;
+        } else {
+            std::ifstream ubf("config/urbias.json");
+            if (ubf.is_open()) {
+                try {
+                    const auto j = nlohmann::json::parse(ubf);
+                    ub = {j.at("wx").get<float>(), j.at("wy").get<float>(),
+                          j.at("wz").get<float>()};
+                    has = true;
+                } catch (...) {}
+            }
+        }
+        if (has) {
+            // 仅 GPU 路注册（CPU split 为对拍调试路径，无偏置机制——其结果
+            // 不带口径修正，仅用于算子级回归比对，不进产线）
+            splitGpu_->SetuRBiasModel(ub[0], ub[1], ub[2], 0.0f);
+            JMW_LOG_INFO("07-FiveChain",
+                "[FC-URBIAS] uR 偏置模型注册: wx={:.6f} wy={:.6f} wz={:.6f}（dtx=0，GPU 路）",
+                ub[0], ub[1], ub[2]);
+        }
+    }
     splitGpu_->Warmup(40000, 40000);   // 冷启动防护（P2 交付项）
     // 【N4·测量卫生】温表预注：双管表构造期注入，把 140MB 级上传＋流同步挪出
     // 首帧计时窗（此前落在 fc 帧 3/4 的 1b 线程——Warmup 只分配缓冲不注表；
