@@ -3866,3 +3866,202 @@ TEST(FcReplay, AnalyzeFinalPly) {
         nOut10 ? outSum / nOut10 : 0, outMinD, outMaxD, oXmin, oXmax, oYmin, oYmax);
     SUCCEED();
 }
+
+// ============================================================================
+// AnalyzeCheckpointReg — 配准质量离线体检（261103：光流配准差·量化病灶）
+// 读 checkpoint（obs 含逐帧 R_init/t_init/markerObs）→
+//   ① GBA 可用观测产出率：markerObs(≥1/≥2/≥3) 占比——GBA 信任锚的原料
+//   ② 位姿连续性：帧间 ΔT/Δ角 分布（hold 帧=Δ0；跳变=劣解漏网）
+//   ③ hold 段结构：连续 Δ0 段的长度分布（光流断档时长）
+//   ④ 低观测帧与位姿异常的关联
+// ============================================================================
+TEST(FcReplay, AnalyzeCheckpointReg) {
+    namespace fs = std::filesystem;
+    std::string ck;
+    if (const char* e = std::getenv("JMW_FC_CKPT")) ck = e;
+    if (ck.empty()) {
+        for (const char* c : {"artifacts/scan_obs_checkpoint.dat",
+                              "build/bin/Release/artifacts/scan_obs_checkpoint.dat"}) {
+            if (fs::exists(c)) { ck = c; break; }
+        }
+    }
+    if (ck.empty()) GTEST_SKIP() << "找不到 checkpoint";
+    Scanner::pipeline::FrameObsAccumulator acc(0);
+    ASSERT_TRUE(acc.loadCheckpoint(ck).success);
+    const auto snap = acc.snapshot();
+    const size_t n = snap.obs.size();
+    ASSERT_GT(n, 50u);
+
+    size_t c0 = 0, c1 = 0, c2 = 0, c3 = 0, cLaser = 0;
+    for (const auto& fo : snap.obs) {
+        const size_t m = fo.markerObs.size();
+        if (m >= 1) ++c1;
+        if (m >= 2) ++c2;
+        if (m >= 3) ++c3;
+        if (m == 0) ++c0;
+        if (fo.laserCacheSlot != Scanner::pipeline::FrameObs::kNoLaserSlot) ++cLaser;
+    }
+    fprintf(stderr, "[REG] 帧=%zu 观测产出: ≥1=%.1f%% ≥2=%.1f%% ≥3=%.1f%% 无标志=%.1f%% "
+        "（≥2＝GBA 信任锚口径；激光帧=%zu）\n",
+        n, 100.0 * c1 / n, 100.0 * c2 / n, 100.0 * c3 / n, 100.0 * c0 / n, cLaser);
+
+    // 位姿连续性＋hold 段
+    std::vector<double> dTmm, dAng;
+    std::vector<int> obsCnt;
+    for (size_t i = 1; i < n; ++i) {
+        const cv::Vec3d t0(snap.obs[i - 1].t_init), t1(snap.obs[i].t_init);
+        const cv::Matx33d R0(snap.obs[i - 1].R_init), R1(snap.obs[i].R_init);
+        const cv::Matx33d Rd = R1 * R0.t();
+        const double tr = Rd(0, 0) + Rd(1, 1) + Rd(2, 2);
+        dAng.push_back(std::acos(std::min(1.0, std::max(-1.0, (tr - 1.0) * 0.5)))
+                       * 180.0 / CV_PI);
+        dTmm.push_back(cv::norm(t1 - t0));
+        obsCnt.push_back(static_cast<int>(snap.obs[i].markerObs.size()));
+    }
+    auto pct = [&](std::vector<double> v, double p) {
+        std::sort(v.begin(), v.end());
+        return v[static_cast<size_t>(p * (v.size() - 1))];
+    };
+    const auto dTs = dTmm;
+    size_t nHold = 0, nJump15 = 0, nJump5 = 0, nAngJ = 0;
+    double sumHold = 0;
+    int holdRun = 0;
+    std::vector<int> holdRuns;
+    for (size_t i = 0; i < dTs.size(); ++i) {
+        if (dTs[i] < 1e-9) {
+            ++nHold; sumHold += 1; ++holdRun;
+        } else {
+            if (holdRun > 0) holdRuns.push_back(holdRun);
+            holdRun = 0;
+        }
+        if (dTs[i] > 15.0) ++nJump15;
+        if (dTs[i] > 5.0) ++nJump5;
+        if (dAng[i] > 8.0) ++nAngJ;
+    }
+    if (holdRun > 0) holdRuns.push_back(holdRun);
+    std::sort(holdRuns.begin(), holdRuns.end());
+    const size_t holdN = holdRuns.size();
+    fprintf(stderr, "[REG] ΔT(mm): 中位=%.2f P95=%.2f 最大=%.1f | >5mm=%.1f%% >15mm=%.1f%% "
+        "Δ角>8°=%.1f%% | hold(Δ0)帧=%.1f%% 段数=%zu 最长段=%d 段中位=%d\n",
+        pct(dTs, 0.5), pct(dTs, 0.95), pct(dTs, 1.0),
+        100.0 * nJump5 / dTs.size(), 100.0 * nJump15 / dTs.size(),
+        100.0 * nAngJ / dAng.size(), 100.0 * nHold / dTs.size(), holdN,
+        holdN ? holdRuns.back() : 0, holdN ? holdRuns[holdN / 2] : 0);
+
+    // 低观测帧 ↔ 位姿异常关联
+    size_t lowObsJump = 0, highObsJump = 0, lowN = 0, highN = 0;
+    for (size_t i = 0; i < dTs.size(); ++i) {
+        const bool jump = dTs[i] > 5.0 || dAng[i] > 3.0;
+        if (obsCnt[i] < 2) { ++lowN; if (jump) ++lowObsJump; }
+        else { ++highN; if (jump) ++highObsJump; }
+    }
+    fprintf(stderr, "[REG] 异常率: <2观测帧 %.1f%%（%zu 帧中）vs ≥2观测帧 %.1f%%（%zu 帧中）\n",
+            lowN ? 100.0 * lowObsJump / lowN : 0, lowN,
+            highN ? 100.0 * highObsJump / highN : 0, highN);
+
+    // —— 标志点跨帧一致体体检（病灶直接度量）——
+    // 同一 globalId 的所有帧观测（R_init 变换到世界系）位置散布＝配准累积
+    // 误差的直接读数（「四百帧标志点偏那么远」的数字形态）：
+    //   每 id：观测数 / 均值 / 最大偏差 / σ；>2mm 散布的 id 占比＝翘曲率
+    {
+        std::unordered_map<int, std::vector<cv::Point3d>> byId;
+        for (const auto& fo : snap.obs) {
+            const cv::Matx33d R(fo.R_init);
+            const cv::Vec3d t(fo.t_init);
+            for (const auto& mo : fo.markerObs) {
+                if (mo.globalId < 0) continue;
+                const cv::Vec3d w = R * cv::Vec3d(mo.xyz[0], mo.xyz[1], mo.xyz[2]) + t;
+                byId[mo.globalId].emplace_back(w[0], w[1], w[2]);
+            }
+        }
+        size_t nId = byId.size(), nMulti = 0, nS2 = 0, nS5 = 0;
+        double worst = 0;
+        int worstId = -1;
+        std::vector<double> maxDevs;
+        for (const auto& kv : byId) {
+            const auto& v = kv.second;
+            if (v.size() < 2) continue;
+            ++nMulti;
+            cv::Point3d mean(0, 0, 0);
+            for (const auto& p : v) { mean.x += p.x; mean.y += p.y; mean.z += p.z; }
+            mean.x /= v.size(); mean.y /= v.size(); mean.z /= v.size();
+            double mx = 0;
+            for (const auto& p : v) {
+                const double d = std::sqrt((p.x - mean.x) * (p.x - mean.x)
+                    + (p.y - mean.y) * (p.y - mean.y)
+                    + (p.z - mean.z) * (p.z - mean.z));
+                mx = std::max(mx, d);
+            }
+            maxDevs.push_back(mx);
+            if (mx > 2.0) ++nS2;
+            if (mx > 5.0) ++nS5;
+            if (mx > worst) { worst = mx; worstId = kv.first; }
+        }
+        std::sort(maxDevs.begin(), maxDevs.end());
+        const double med = maxDevs.empty() ? 0 : maxDevs[maxDevs.size() / 2];
+        const double p95 = maxDevs.empty() ? 0
+            : maxDevs[static_cast<size_t>(0.95 * (maxDevs.size() - 1))];
+        fprintf(stderr, "[MK] 标志点跨帧一致: id 数=%zu 多观测 id=%zu | "
+            "同 id 世界坐标最大偏差: 中位=%.2fmm P95=%.2fmm 最大=%.2fmm(id=%d) | "
+            "散布>2mm 占比=%.1f%% >5mm 占比=%.1f%%（翘曲率的直接度量）\n",
+            nId, nMulti, med, p95, worst, worstId,
+            nMulti ? 100.0 * nS2 / nMulti : 0,
+            nMulti ? 100.0 * nS5 / nMulti : 0);
+    }
+    // —— 时间定位（「后面乱了」验证）：偏差按会话十等分桶演化 ＋
+        // 后期新发号（关联断裂＝老标志拿新 id，各自内部一致但互为鬼影）
+        {
+            // 每 id 均值（先全量）＋出生帧
+            std::unordered_map<int, cv::Point3d> meanOf;
+            std::unordered_map<int, size_t> bornAt;
+            for (size_t i = 0; i < snap.obs.size(); ++i) {
+                const auto& fo = snap.obs[i];
+                const cv::Matx33d R(fo.R_init);
+                const cv::Vec3d t(fo.t_init);
+                for (const auto& mo : fo.markerObs) {
+                    if (mo.globalId < 0) continue;
+                    bornAt.emplace(mo.globalId, i);   // 首见即出生（不覆盖）
+                    const cv::Vec3d w = R * cv::Vec3d(mo.xyz[0], mo.xyz[1], mo.xyz[2]) + t;
+                    auto it = meanOf.find(mo.globalId);
+                    if (it == meanOf.end()) meanOf[mo.globalId] = cv::Point3d(w[0], w[1], w[2]);
+                    else {
+                        it->second.x = (it->second.x + w[0]) * 0.5;
+                        it->second.y = (it->second.y + w[1]) * 0.5;
+                        it->second.z = (it->second.z + w[2]) * 0.5;
+                    }
+                }
+            }
+            const size_t nObs = snap.obs.size();
+            const size_t kBins = 10;
+            std::vector<double> binSum(kBins, 0.0);
+            std::vector<size_t> binCnt(kBins, 0);
+            for (size_t i = 0; i < nObs; ++i) {
+                const auto& fo = snap.obs[i];
+                const cv::Matx33d R(fo.R_init);
+                const cv::Vec3d t(fo.t_init);
+                for (const auto& mo : fo.markerObs) {
+                    if (mo.globalId < 0) continue;
+                    const auto mit = meanOf.find(mo.globalId);
+                    if (mit == meanOf.end()) continue;
+                    const cv::Vec3d w = R * cv::Vec3d(mo.xyz[0], mo.xyz[1], mo.xyz[2]) + t;
+                    const double d = std::sqrt(
+                        (w[0] - mit->second.x) * (w[0] - mit->second.x)
+                        + (w[1] - mit->second.y) * (w[1] - mit->second.y)
+                        + (w[2] - mit->second.z) * (w[2] - mit->second.z));
+                    const size_t b = std::min(kBins - 1, i * kBins / nObs);
+                    binSum[b] += d;
+                    ++binCnt[b];
+                }
+            }
+            fprintf(stderr, "[MK-T] 偏差随时间演化（会话十等分，观测到该 id 均值的距离均值 mm）: ");
+            for (size_t b = 0; b < kBins; ++b)
+                fprintf(stderr, "%.2f ", binCnt[b] ? binSum[b] / binCnt[b] : -1.0);
+            fprintf(stderr, "\n");
+            size_t bornLate = 0;
+            for (const auto& kv : bornAt)
+                if (kv.second > nObs / 2) ++bornLate;
+            fprintf(stderr, "[MK-T] id 出生分布: 后半会话新发号 %zu/%zu（>0 且位置近老 id "
+                "＝关联断裂·同点鬼影——「后面乱」的直接形态）\n", bornLate, bornAt.size());
+        }
+        SUCCEED();
+}
