@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -3467,5 +3468,401 @@ TEST(FcReplay, MarkerYield399) {
     for (int i = 0; i < 10; ++i)
         fprintf(stderr, "[%d]=%d ", i, validHist[static_cast<size_t>(i)]);
     fprintf(stderr, "\n");
+    SUCCEED();
+}
+
+// ============================================================================
+// FitUrbiasModel — CMTT uR 偏置模型离线拟合（261031 口径统一：激光链→标志点链）
+//
+// 数据源：FrameObs checkpoint（会话终局自动落盘 artifacts/scan_obs_checkpoint.dat
+// ——obs 含标志点观测＋逐帧 laserDzMm，laserFrames 含设备系激光 3D）。
+// 模型（镜像 laser_match_scan_v3_cuda_impl.cu:887-911 kernel 数学，URB_* 同源
+// 于 :749-755）：相对投影器方向 (TX,TY,TZ) 的 ω 一阶旋转 → v 向 CMOS 偏移
+// dv → 深度修正 dZ = dv·Z/dzr（匹配期 bias=f·B·dZ/Z² 逐点补偿）。
+// 拟合：Gauss-Newton（数值雅可比＋阻尼，3 参数）最小化
+//   Σ_frames (帧内 model_dZ 均值 − laserDzMm)²   （模型修正量＝实测双链差）
+// 产物：config/urbias.json {wx,wy,wz,rmsBeforeMm,rmsAfterMm,frames}
+//   （fc_executor 装配期读取注册；env JMW_FC_URBIAS=wx,wy,wz 优先）
+// 流程：先跑一轮扫描/回放生成 checkpoint → 跑本测试 → 重启 exe 生效
+// ============================================================================
+TEST(FcReplay, FitUrbiasModel) {
+    namespace fs = std::filesystem;
+    std::string ck;
+    if (const char* e = std::getenv("JMW_FC_CKPT")) ck = e;
+    if (ck.empty()) {
+        for (const char* c : {"artifacts/scan_obs_checkpoint.dat",
+                              "build/bin/Release/artifacts/scan_obs_checkpoint.dat"}) {
+            if (fs::exists(c)) { ck = c; break; }
+        }
+    }
+    if (ck.empty()) GTEST_SKIP() << "找不到 checkpoint（先跑一轮扫描/回放生成）";
+    Scanner::pipeline::FrameObsAccumulator acc(0);   // 仅 loadCheckpoint，不 push
+    ASSERT_TRUE(acc.loadCheckpoint(ck).success);
+    const auto snap = acc.snapshot();
+
+    // URB 常量（镜像 laser_match_scan_v3_cuda_impl.cu:749-755；改标定需同步）
+    constexpr float F = 1231.139f, B = 133.311f;
+    constexpr float TX = 39.847f, TY = 8.087f, TZ = 10.626f;
+
+    // 采样：帧（≥2 标志点＋有效 dz＋激光槽≥64 点＋|dz|≤20mm 离群剔除——
+    // checkpoint 内 dz 含单标志点帧与劣质激光中位（实测范围 [-99,+27]mm），
+    // 不剔除会带崩最小二乘）→ (目标 dz, ≤128 点样本)
+    struct Fr { float dz; std::vector<std::array<float, 3>> pts; };
+    std::vector<Fr> frs;
+    for (const auto& fo : snap.obs) {
+        if (fo.laserCacheSlot == Scanner::pipeline::FrameObs::kNoLaserSlot) continue;
+        if (fo.laserCacheSlot >= snap.laserFrames.size()) continue;
+        if (!std::isfinite(fo.laserDzMm) || fo.markerObs.size() < 2) continue;
+        if (std::fabs(fo.laserDzMm) > 20.0f) continue;
+        const auto& lf = snap.laserFrames[fo.laserCacheSlot];
+        const size_t n = lf.size() / 3;
+        if (n < 64) continue;
+        Fr fr;
+        fr.dz = fo.laserDzMm;
+        const size_t stride = std::max<size_t>(1, n / 128);
+        for (size_t k = 0; k < n; k += stride)
+            fr.pts.push_back({lf[k * 3], lf[k * 3 + 1], lf[k * 3 + 2]});
+        frs.push_back(std::move(fr));
+    }
+    ASSERT_GT(frs.size(), 20u) << "可用帧太少（需 ≥2 标志点＋≥64 激光点＋|dz|≤20 的帧 >20）";
+
+    auto modelDz = [&](float wx, float wy, float wz, float X, float Y, float Z) {
+        const float dx = X - TX, dy = Y - TY, dzr = Z - TZ;
+        const float ddy = wz * dx - wx * dzr;
+        const float ddz = wx * dy - wy * dx;
+        const float dv = F * (ddy * dzr - dy * ddz) / (dzr * dzr);
+        return dv * Z / dzr;
+    };
+    auto residuals = [&](const float w[3], std::vector<double>& r) {
+        r.resize(frs.size());
+        for (size_t i = 0; i < frs.size(); ++i) {
+            double s = 0;
+            for (const auto& p : frs[i].pts)
+                s += modelDz(w[0], w[1], w[2], p[0], p[1], p[2]);
+            r[i] = s / static_cast<double>(frs[i].pts.size()) - frs[i].dz;
+        }
+    };
+    auto rms = [](const std::vector<double>& r) {
+        double s = 0;
+        for (double v : r) s += v * v;
+        return std::sqrt(s / static_cast<double>(r.size()));
+    };
+
+    float w[3] = {0, 0, 0};
+    std::vector<double> r0;
+    residuals(w, r0);
+    const double rms0 = rms(r0);
+    // 精确线性最小二乘（模型对 w 线性：ddy/ddz 线性→dv 线性→dZ 线性）：
+    // 帧内均值基 (Ā,B̄,C̄)，解 3×3 正则方程；两趟（第二趟剔 |残差|>2.5σ）
+    auto solveLinear = [&]() {
+        double a[3][3] = {{0}}, b[3] = {0};
+        for (const auto& fr : frs) {
+            double ba = 0, bb = 0, bc = 0;   // 帧内 ∂dZ/∂w 基均值
+            for (const auto& p : fr.pts) {
+                const float dx = p[0] - TX, dy = p[1] - TY, dzr = p[2] - TZ;
+                // ddy = wz·dx − wx·dzr；ddz = wx·dy − wy·dx
+                // dv = F·(ddy·dzr − dy·ddz)/dzr² → ∂dv/∂wx = −F·(dzr² + dy²)/dzr²
+                //   ∂dv/∂wy = F·dy·dx/dzr²；∂dv/∂wz = F·dx/dzr
+                const float gwx = -F * (dzr * dzr + dy * dy) / (dzr * dzr);
+                const float gwy = F * dy * dx / (dzr * dzr);
+                const float gwz = F * dx / dzr;
+                const float gZ = p[2] / dzr;   // dZ = dv·Z/dzr
+                ba += gwx * gZ; bb += gwy * gZ; bc += gwz * gZ;
+            }
+            const double na = ba / fr.pts.size(), nb = bb / fr.pts.size(),
+                         nc = bc / fr.pts.size();
+            a[0][0] += na * na; a[0][1] += na * nb; a[0][2] += na * nc;
+            a[1][1] += nb * nb; a[1][2] += nb * nc; a[2][2] += nc * nc;
+            b[0] += na * fr.dz; b[1] += nb * fr.dz; b[2] += nc * fr.dz;
+        }
+        a[1][0] = a[0][1]; a[2][0] = a[0][2]; a[2][1] = a[1][2];
+        // 列归一化＋岭回归（帧内基均值近对称相消 → 病态；归一化后相关阵＋
+        // λ=0.01 对角岭，解保守不爆）
+        double cn[3] = {std::sqrt(a[0][0]), std::sqrt(a[1][1]), std::sqrt(a[2][2])};
+        for (int d = 0; d < 3; ++d)
+            if (cn[d] < 1e-12) return false;
+        double an[3][3], bn[3];
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c)
+                an[r][c] = a[r][c] / (cn[r] * cn[c]);
+            an[r][r] += 0.01;
+            bn[r] = b[r] / cn[r];
+        }
+        const double det = an[0][0] * (an[1][1] * an[2][2] - an[1][2] * an[2][1]) -
+                           an[0][1] * (an[1][0] * an[2][2] - an[1][2] * an[2][0]) +
+                           an[0][2] * (an[1][0] * an[2][1] - an[1][1] * an[2][0]);
+        if (std::fabs(det) < 1e-12) return false;
+        double u[3];
+        u[0] = (bn[0] * (an[1][1] * an[2][2] - an[1][2] * an[2][1]) -
+                an[0][1] * (bn[1] * an[2][2] - an[1][2] * bn[2]) +
+                an[0][2] * (bn[1] * an[2][1] - an[1][1] * bn[2])) / det;
+        u[1] = (an[0][0] * (bn[1] * an[2][2] - an[1][2] * bn[2]) -
+                bn[0] * (an[1][0] * an[2][2] - an[1][2] * an[2][0]) +
+                an[0][2] * (an[1][0] * bn[2] - bn[1] * an[2][0])) / det;
+        u[2] = (an[0][0] * (an[1][1] * bn[2] - bn[1] * an[2][1]) -
+                an[0][1] * (an[1][0] * bn[2] - bn[0] * an[2][0]) +
+                bn[0] * (an[1][0] * an[2][1] - an[1][1] * an[2][0])) / det;
+        for (int d = 0; d < 3; ++d) {
+            w[d] = static_cast<float>(u[d] * cn[d]);
+            w[d] = std::max(-0.5f, std::min(0.5f, w[d]));
+        }
+        return true;
+    };
+    ASSERT_TRUE(solveLinear()) << "正则方程奇异";
+    {   // 第二趟：剔 |残差|>2.5σ 后重解
+        std::vector<double> rt;
+        residuals(w, rt);
+        double m = 0;
+        for (double v : rt) m += v;
+        m /= static_cast<double>(rt.size());
+        double sd = 0;
+        for (double v : rt) sd += (v - m) * (v - m);
+        sd = std::sqrt(sd / static_cast<double>(rt.size()));
+        std::vector<Fr> keep;
+        for (size_t i = 0; i < frs.size(); ++i)
+            if (std::fabs(rt[i] - m) <= 2.5 * sd) keep.push_back(std::move(frs[i]));
+        if (keep.size() > 20) {
+            frs = std::move(keep);
+            solveLinear();
+        }
+    }
+    {   // 收缩线搜保险：沿 0→w 找 rms 最小 t（岭解＋限幅后仍可能过冲，
+        // 保证终值不劣于 w=0 基线）
+        std::vector<double> rb;
+        residuals(w, rb);
+        double best = rms(rb);
+        float wt[3] = {w[0], w[1], w[2]};
+        for (double t : {1.0, 0.7, 0.5, 0.3, 0.15, 0.0}) {
+            float wc[3] = {wt[0] * static_cast<float>(t), wt[1] * static_cast<float>(t),
+                           wt[2] * static_cast<float>(t)};
+            std::vector<double> rc;
+            residuals(wc, rc);
+            const double c = rms(rc);
+            if (c < best) {
+                best = c;
+                w[0] = wc[0]; w[1] = wc[1]; w[2] = wc[2];
+            }
+        }
+    }
+    std::vector<double> r1;
+    residuals(w, r1);
+    const double rms1 = rms(r1);
+
+    // dz 分布（拟合前后残差——口径统一应把残差压到 ~0）
+    auto spread = [](const std::vector<double>& r, double& mn, double& mx, double& sd) {
+        mn = 1e9; mx = -1e9; double s = 0;
+        for (double v : r) { mn = std::min(mn, v); mx = std::max(mx, v); s += v; }
+        const double m = s / r.size(); s = 0;
+        for (double v : r) s += (v - m) * (v - m);
+        sd = std::sqrt(s / r.size());
+    };
+    double mn0, mx0, sd0, mn1, mx1, sd1;
+    spread(r0, mn0, mx0, sd0);
+    spread(r1, mn1, mx1, sd1);
+    fprintf(stderr,
+        "[URBIAS] frames=%zu 拟合前: rms=%.3f 范围[%.2f,%.2f] σ=%.3f → "
+        "拟合后: rms=%.3f 范围[%.2f,%.2f] σ=%.3f\n",
+        frs.size(), rms0, mn0, mx0, sd0, rms1, mn1, mx1, sd1);
+    // dz 结构诊断（261031 三轮）：模型解释力≈0 → 看 dz 到底随什么变——
+    // 与（帧序/深度Z/X/Y/半场漂移）的 Pearson 相关，判定可建模方向
+    {
+        auto pearson = [](const std::vector<double>& x, const std::vector<double>& y) {
+            const size_t n = x.size();
+            double mx = 0, my = 0;
+            for (size_t i = 0; i < n; ++i) { mx += x[i]; my += y[i]; }
+            mx /= n; my /= n;
+            double sxy = 0, sxx = 0, syy = 0;
+            for (size_t i = 0; i < n; ++i) {
+                sxy += (x[i] - mx) * (y[i] - my);
+                sxx += (x[i] - mx) * (x[i] - mx);
+                syy += (y[i] - my) * (y[i] - my);
+            }
+            return (sxx > 1e-12 && syy > 1e-12) ? sxy / std::sqrt(sxx * syy) : 0.0;
+        };
+        std::vector<double> idx, dzv, zv, xv, yv;
+        for (size_t i = 0; i < frs.size(); ++i) {
+            double sx = 0, sy = 0, sz = 0;
+            for (const auto& p : frs[i].pts) { sx += p[0]; sy += p[1]; sz += p[2]; }
+            const size_t m = frs[i].pts.size();
+            idx.push_back(static_cast<double>(i));
+            dzv.push_back(frs[i].dz);
+            xv.push_back(sx / m); yv.push_back(sy / m); zv.push_back(sz / m);
+        }
+        const size_t half = dzv.size() / 2;
+        double m1 = 0, m2 = 0;
+        for (size_t i = 0; i < half; ++i) m1 += dzv[i];
+        for (size_t i = half; i < dzv.size(); ++i) m2 += dzv[i];
+        m1 /= half; m2 /= dzv.size() - half;
+        fprintf(stderr,
+            "[URBIAS-DIAG] corr(dz,帧序)=%.3f corr(dz,Z)=%.3f corr(dz,X)=%.3f "
+            "corr(dz,Y)=%.3f | 前半均值=%.2f 后半均值=%.2f（漂移=%.2fmm）\n",
+            pearson(idx, dzv), pearson(zv, dzv), pearson(xv, dzv),
+            pearson(yv, dzv), m1, m2, m2 - m1);
+    }
+
+    fprintf(stderr, "[URBIAS] wx=%.6f wy=%.6f wz=%.6f\n", w[0], w[1], w[2]);
+
+    // 写 config/urbias.json（测试 CWD＝build/bin/<配置>＝exe 同目录，直接生效）
+    std::error_code ec;
+    fs::create_directories("config", ec);
+    nlohmann::json jout = {{"wx", w[0]},
+                           {"wy", w[1]},
+                           {"wz", w[2]},
+                           {"rmsBeforeMm", rms0},
+                           {"rmsAfterMm", rms1},
+                           {"frames", frs.size()},
+                           {"source", ck}};
+    std::ofstream of("config/urbias.json", std::ios::trunc);
+    of << jout.dump(2) << std::endl;
+    fprintf(stderr, "[URBIAS] 已写 config/urbias.json（重启 exe 后装配注册）\n");
+    EXPECT_LT(rms1, rms0) << "拟合应收敛";
+    SUCCEED();
+}
+
+// ============================================================================
+// AnalyzeFinalPly — 终版激光 PLY 离线体检（261031 六轮：散点长什么样）
+// 读 artifacts/scan_laser_final.ply（env JMW_FC_PLY 覆盖）→ 鲁棒平面拟合
+//（白板场景；迭代剔 |d|>5mm 重拟合）→ 距离直方图＋离群结构：
+//   · 分层（离群 |d| 集中在另一平面）＝帧级口径/位姿层错
+//   · 弥散（各距离均匀）＝逐点噪声/飞线
+//   · 远端块（|d|>50mm）＝坏帧
+// ============================================================================
+TEST(FcReplay, AnalyzeFinalPly) {
+    namespace fs = std::filesystem;
+    std::string ply;
+    if (const char* e = std::getenv("JMW_FC_PLY")) ply = e;
+    if (ply.empty()) {
+        for (const char* c : {"artifacts/scan_laser_final.ply",
+                              "build/bin/Release/artifacts/scan_laser_final.ply"}) {
+            if (fs::exists(c)) { ply = c; break; }
+        }
+    }
+    if (ply.empty()) GTEST_SKIP() << "找不到 scan_laser_final.ply";
+
+    std::ifstream f(ply, std::ios::binary);
+    ASSERT_TRUE(f.is_open());
+    // 头解析：format / vertex 数 / property 列表（取 x,y,z 偏移；ascii 兜底取行首三数）
+    std::string line;
+    size_t nVtx = 0;
+    bool ascii = false;
+    struct Prop { std::string t, n; };
+    std::vector<Prop> props;
+    size_t dataBeg = 0;
+    while (std::getline(f, line)) {
+        dataBeg += line.size() + 1;
+        std::istringstream ss(line);
+        std::string tok;
+        ss >> tok;
+        if (tok == "format") { std::string fmt; ss >> fmt; ascii = (fmt == "ascii"); }
+        else if (tok == "element") {
+            std::string en; size_t n = 0; ss >> en >> n;
+            if (en == "vertex") nVtx = n;
+        } else if (tok == "property") {
+            Prop p; ss >> p.t >> p.n; props.push_back(p);
+        } else if (tok == "end_header") break;
+    }
+    ASSERT_GT(nVtx, 0u);
+    std::vector<float> xs, ys, zs;
+    xs.reserve(nVtx); ys.reserve(nVtx); zs.reserve(nVtx);
+    if (ascii) {
+        std::string a, b, cc;
+        for (size_t i = 0; i < nVtx && (f >> a >> b >> cc); ++i) {
+            xs.push_back(std::stof(a)); ys.push_back(std::stof(b)); zs.push_back(std::stof(cc));
+            std::getline(f, line);   // 行尾余列
+        }
+    } else {
+        size_t stride = 0;
+        long ox = -1, oy = -1, oz = -1;
+        for (size_t k = 0; k < props.size(); ++k) {
+            const size_t sz = props[k].t == "float" || props[k].t == "int" ? 4
+                              : props[k].t == "double" || props[k].t == "double" ? 8
+                              : props[k].t == "uchar" || props[k].t == "char" ? 1 : 2;
+            if (props[k].n == "x") ox = static_cast<long>(stride);
+            if (props[k].n == "y") oy = static_cast<long>(stride);
+            if (props[k].n == "z") oz = static_cast<long>(stride);
+            stride += sz;
+        }
+        ASSERT_TRUE(ox >= 0 && oy >= 0 && oz >= 0) << "PLY 无 xyz 列";
+        std::vector<char> buf(stride);
+        for (size_t i = 0; i < nVtx && f.read(buf.data(), static_cast<std::streamsize>(stride)); ++i) {
+            float xv, yv, zv;
+            std::memcpy(&xv, buf.data() + ox, 4);
+            std::memcpy(&yv, buf.data() + oy, 4);
+            std::memcpy(&zv, buf.data() + oz, 4);
+            xs.push_back(xv); ys.push_back(yv); zs.push_back(zv);
+        }
+    }
+    ASSERT_GT(xs.size(), 1000u);
+    // 降采样 ≤800k
+    const size_t n = xs.size();
+    const size_t strideS = std::max<size_t>(1, n / 800000);
+    std::vector<cv::Point3f> pts;
+    pts.reserve(n / strideS + 1);
+    for (size_t i = 0; i < n; i += strideS) pts.emplace_back(xs[i], ys[i], zs[i]);
+
+    // 鲁棒平面拟合（3 轮剔 |d|>5mm）
+    cv::Vec3f bestN(0, 0, 1);
+    float bestD = 0;
+    std::vector<bool> inlier(pts.size(), true);
+    for (int it = 0; it < 3; ++it) {
+        double cx = 0, cy = 0, cz = 0;
+        size_t m = 0;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            if (!inlier[i]) continue;
+            cx += pts[i].x; cy += pts[i].y; cz += pts[i].z; ++m;
+        }
+        cx /= m; cy /= m; cz /= m;
+        double a[9] = {0};
+        for (size_t i = 0; i < pts.size(); ++i) {
+            if (!inlier[i]) continue;
+            const double dx = pts[i].x - cx, dy = pts[i].y - cy, dz = pts[i].z - cz;
+            a[0] += dx * dx; a[1] += dx * dy; a[2] += dx * dz;
+            a[4] += dy * dy; a[5] += dy * dz; a[8] += dz * dz;
+        }
+        a[3] = a[1]; a[6] = a[2]; a[7] = a[5];
+        cv::Matx33d A(a);
+        cv::Mat evals, evecs;
+        cv::eigen(cv::Mat(A), evals, evecs);   // 降序——最小特征向量=法向
+        const cv::Vec3f nrm(static_cast<float>(evecs.at<double>(2, 0)),
+                            static_cast<float>(evecs.at<double>(2, 1)),
+                            static_cast<float>(evecs.at<double>(2, 2)));
+        const float d = -nrm.dot(cv::Vec3f(static_cast<float>(cx), static_cast<float>(cy),
+                                           static_cast<float>(cz)));
+        bestN = nrm; bestD = d;
+        for (size_t i = 0; i < pts.size(); ++i)
+            inlier[i] = std::fabs(nrm.dot(cv::Vec3f(pts[i].x, pts[i].y, pts[i].z)) + d) < 5.0f;
+    }
+    // 距离直方图＋离群结构
+    const float bins[] = {-1e9f, -50, -10, -5, -2, 2, 5, 10, 50, 1e9f};
+    size_t hist[9] = {0};
+    double outSum = 0;
+    float outMinD = 1e9f, outMaxD = -1e9f;
+    float oXmin = 1e9f, oXmax = -1e9f, oYmin = 1e9f, oYmax = -1e9f;
+    size_t nOut10 = 0, nOut50 = 0;
+    for (const auto& p : pts) {
+        const float dd = bestN.dot(cv::Vec3f(p.x, p.y, p.z)) + bestD;
+        int b = 0;
+        while (b < 8 && dd > bins[b + 1]) ++b;
+        hist[static_cast<size_t>(b)]++;
+        if (std::fabs(dd) > 10) {
+            ++nOut10; outSum += dd;
+            outMinD = std::min(outMinD, dd); outMaxD = std::max(outMaxD, dd);
+            oXmin = std::min(oXmin, p.x); oXmax = std::max(oXmax, p.x);
+            oYmin = std::min(oYmin, p.y); oYmax = std::max(oYmax, p.y);
+        }
+        if (std::fabs(dd) > 50) ++nOut50;
+    }
+    const size_t tot = pts.size();
+    fprintf(stderr, "[PLY] %s 采样=%zu/%zu 法向=(%.3f,%.3f,%.3f)\n", ply.c_str(),
+            tot, n, bestN[0], bestN[1], bestN[2]);
+    fprintf(stderr, "[PLY] 距离直方(mm): <-50:%.2f%% -50~-10:%.2f%% -10~-5:%.2f%% "
+        "-5~-2:%.2f%% -2~2:%.2f%% 2~5:%.2f%% 5~10:%.2f%% 10~50:%.2f%% >50:%.2f%%\n",
+        100.0 * hist[0] / tot, 100.0 * hist[1] / tot, 100.0 * hist[2] / tot,
+        100.0 * hist[3] / tot, 100.0 * hist[4] / tot, 100.0 * hist[5] / tot,
+        100.0 * hist[6] / tot, 100.0 * hist[7] / tot, 100.0 * hist[8] / tot);
+    fprintf(stderr, "[PLY] |d|>10mm 离群: %.2f%%（%zu 点）|d|>50mm: %.2f%% "
+        "| 均值d=%.1f 范围[%.1f,%.1f] X范围[%.0f,%.0f] Y范围[%.0f,%.0f]\n",
+        100.0 * nOut10 / tot, nOut10, 100.0 * nOut50 / tot,
+        nOut10 ? outSum / nOut10 : 0, outMinD, outMaxD, oXmin, oXmax, oYmin, oYmax);
     SUCCEED();
 }
