@@ -29,14 +29,14 @@ set(APP_SOURCES
 
 # === 模块文件（物理在 modules/ 下，编译进 LeadScannerK2）===
 set(MOD_CALIBRATION
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/calib_workflow.cpp
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/calib_workflow.h
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibDialog.cpp
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibDialog.h
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibDisplay.cpp
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibDisplay.h
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/IntegrateTestDialog.cpp
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/IntegrateTestDialog.h
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/calib_workflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/calib_workflow.h
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/CalibDialog.cpp
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/CalibDialog.h
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/CalibDisplay.cpp
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/CalibDisplay.h
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/IntegrateTestDialog.cpp
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/IntegrateTestDialog.h
 )
 
 set(MOD_SCANNING
@@ -47,19 +47,19 @@ set(MOD_SCANNING
 
 # === 工作流（Phase 5：自 fw_workflow 接管编译归属；物理仍 in modules）===
 set(MOD_WORKFLOWS
-    ${CMAKE_SOURCE_DIR}/modules/02_scanning/ScanWorkflow.cpp
-    ${CMAKE_SOURCE_DIR}/modules/02_scanning/ScanWorkflow.h
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibrationWorkflow.cpp
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration/CalibrationWorkflow.h
-    ${CMAKE_SOURCE_DIR}/modules/04_postprocessing/PostProcessWorkflow.cpp
-    ${CMAKE_SOURCE_DIR}/modules/04_postprocessing/PostProcessWorkflow.h
-    ${CMAKE_SOURCE_DIR}/modules/Editing/EditWorkflow.cpp
-    ${CMAKE_SOURCE_DIR}/modules/Editing/EditWorkflow.h
+    ${CMAKE_SOURCE_DIR}/modules/02_Scanning/ScanWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/02_Scanning/ScanWorkflow.h
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/CalibrationWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration/CalibrationWorkflow.h
+    ${CMAKE_SOURCE_DIR}/modules/04_PostProcessing/PostProcessWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/04_PostProcessing/PostProcessWorkflow.h
+    ${CMAKE_SOURCE_DIR}/modules/05_Editing/EditWorkflow.cpp
+    ${CMAKE_SOURCE_DIR}/modules/05_Editing/EditWorkflow.h
 )
 
 set(MOD_RENDERING
-    ${CMAKE_SOURCE_DIR}/modules/03_rendering/OSGWidget.cpp
-    ${CMAKE_SOURCE_DIR}/modules/03_rendering/OSGWidget.h
+    ${CMAKE_SOURCE_DIR}/modules/03_Rendering/OSGWidget.cpp
+    ${CMAKE_SOURCE_DIR}/modules/03_Rendering/OSGWidget.h
 )
 
 set(GENERATED_QRC_CPP ${CMAKE_CURRENT_BINARY_DIR}/qrc_resources.cpp)
@@ -88,12 +88,12 @@ target_link_options(LeadScannerK2 PRIVATE $<$<CONFIG:Release>:/DEBUG>)
 target_include_directories(LeadScannerK2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/modules/01_calibration
-    ${CMAKE_SOURCE_DIR}/modules/02_scanning
-    ${CMAKE_SOURCE_DIR}/modules/03_rendering
-    ${CMAKE_SOURCE_DIR}/modules/Editing
-    ${CMAKE_SOURCE_DIR}/modules/DataManager
-    ${CMAKE_SOURCE_DIR}/modules/04_postprocessing
+    ${CMAKE_SOURCE_DIR}/modules/01_Calibration
+    ${CMAKE_SOURCE_DIR}/modules/02_Scanning
+    ${CMAKE_SOURCE_DIR}/modules/03_Rendering
+    ${CMAKE_SOURCE_DIR}/modules/05_Editing
+    ${CMAKE_SOURCE_DIR}/modules/06_DataManager
+    ${CMAKE_SOURCE_DIR}/modules/04_PostProcessing
     ${OSG_ROOT}/include
 )
 

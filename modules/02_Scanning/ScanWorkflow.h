@@ -1,0 +1,213 @@
+﻿#pragma once
+// ============================================================================
+// ScanWorkflow.h — 扫描工作流（编排/记账壳；帧处理已移交 07 ScanPipeline）
+//
+// P6-T29a（07 文档 §3 修改 1）：旧 scanLoop 单线程五 Stage
+// （Capture/Preprocess/Marker/Laser/Fuse）退役——帧处理路径改为持有
+// Scanner::pipeline::ScanPipeline（07 §1.1-C，会话私有件：每次扫描新建、
+// stop 后不重启），本类只留 IWorkflow 生命周期编排 + 会话记账
+// （D6：记账归工作流自身成员，SessionService 随 07_session 退役）+ EventBus/UI 回调。
+//
+// 装配序（start 内）：
+//   session_.assemble（06 出口查表装表）→ ScanConfig（scanMode→enableLaser＋
+//   existingMarkers 续扫基准注入）→ attachRing（session_.ring）→ attachCalib
+//   （ScanCalibration 注入转接——静态 K/D 过渡契约）→ configure（EventBus 接线）
+//   → start ⇄ pause/resume → stop。
+//
+// TODO(接入期接线，见 07 文档 §3/客户端扫描流水线.md）：
+//   - 08 采集侧：采集回调 session_.pushFrame（enrich 出口查表→ring；FrameBuffer
+//     扫描路径退役）；当前无真帧源写入——ring 空转，07 防御路径保留
+//     （无 ring/无标定时 configure/start 返回 fail，不崩）。
+//   - 激光网格数据（§8-1 协调项）：attachCalib 激光温度表整表注入（现空表=
+//     A 模式可空；逐温档 K/D 经 session_ 已并行生效）。
+//   - 03 渲染：PipelineDeps.sceneFeed（ISceneFeed→OSG 点云/姿态推送；现空）。
+//   - 02-⑦ 收尾批算：GlobalOptimObject 消费 pipeline_->obs()（Q5 定案归 02）。
+// ============================================================================
+
+#include "IWorkflow.h"
+#include "WorkflowContext.h"
+#include "ScanSessionData.h"
+#include "base/types.h"
+#include "pipelines/calibcompute/CalibComputeTypes.h"   // CancelToken（终局遍取消令牌成员 261004）
+#include "core/marker/marker_cloud_fuse_cpu/marker_cloud_fuse_cpu.h"   // calib::MarkerCloudPoint（finalMarkerCloud_ 261031）
+#include <opencv2/core.hpp>
+#include <functional>
+#include <memory>
+#include <atomic>
+
+namespace Scanner::pipeline {
+struct IMarkerFuse;              // 05 P4 编辑账本窄出口（定义在 07 FuseConsumer.h）
+struct ILaserFuse;               // 05 P4 编辑账本窄出口·激光侧（同上）
+class FrameObsAccumulator;
+}
+
+// 前向声明（07 流水线对象；定义见 modules/07_PipelineManager/pipelines/scan/）
+namespace Scanner::pipeline {
+class ScanPipeline;
+class SimScanSource;                                       // 中段模拟提取源（调试件）
+class FrameObsAccumulator;
+struct FrameResult;                                     // ScanTypes.h（outputQueue 透传口）
+namespace sched {
+template <typename T> class FrameResultQueue;           // sched/FrameResultQueue.h
+}
+}
+namespace calib { struct LaserPlaneMapTempTable; }   // 09 激光温度表（档→映射表）
+
+namespace Scanner::workflow {
+
+// ============================================================================
+// ScanCalibration — 扫描所需的标定参数（由 CalibrationWorkflow 产出）
+// ============================================================================
+struct ScanCalibration {
+    cv::Mat cameraMatrixL, distCoeffsL;
+    cv::Mat cameraMatrixR, distCoeffsR;
+    cv::Mat R1, R2, P1, P2, Q;
+    cv::Size imageSize;
+    bool valid = false;
+};
+
+// ============================================================================
+// ScanWorkflow — 扫描工作流（实现 IWorkflow；帧处理移交 07）
+// ============================================================================
+class ScanWorkflow : public IWorkflow {
+public:
+    explicit ScanWorkflow(WorkflowContext* ctx);
+    ~ScanWorkflow() override;
+
+    void setScanMode(ScanMode mode) { scanMode_ = mode; }
+    void setCalibration(const ScanCalibration& calib);
+    /// 中段模拟提取源（调试件；start 前设置。空=真机链；非空=每帧标志点/激光
+    /// 提取结果由模拟观测替换，配准/融合/渲染走生产代码。生命周期归调用方）
+    void setSimSource(Scanner::pipeline::SimScanSource* src) { simSource_ = src; }
+    /// 261029 测试数据回放帧门（start 前设置；app 注入 dm->isCapturing()——
+    /// 测试回放与在线帧流同语义：模式键只 arm，M 键启停控制回放起停。空=恒开）
+    void setFrameGate(std::function<bool()> gate) { frameGate_ = std::move(gate); }
+
+    // —— 完成回报钩子（P5-T15 门禁接线，同 01 T14 模式）——
+    /// 会话终态回报（stop() 活跃会话终止处调用，bool=ok）。
+    /// app 侧注入 lambda 调 CommandGate::notifyCompleted 合账切 S2——
+    /// 依赖方向 app→02/10，02 不 include 10 头（经回调反向解耦）。
+    void setOnFinished(std::function<void(bool)> cb) { onFinished_ = std::move(cb); }
+
+    /// P-4 景深屏蔽（261002 §3.3.2）：转发 07 pipeline（无会话时静默忽略——
+    /// 会话启动经 WorkflowContext::depthOfField() 快照对齐基线）
+    void setDepthOfField(int mode);
+
+    // P3 可观测（渲染加固计划）：app 装配喂 HardwareMonitor（会话外/未启动=0）
+    uint64_t processedFrameCount() const;    // 已融合消费帧数（07 FuseConsumer）
+    uint64_t droppedFrameCount() const;      // 输出队列覆盖丢帧累计（07 queue）
+
+    // —— 帧响应接线（08 采集回调→会话环；app 帧回调双投递：预览 FrameBuffer＋此口）——
+    /// 扫描会话帧入口：enrich 出口查表→Overwrite 环。仅 Running/Paused 态接收；
+    /// 其余态静默丢弃（app 回调常驻注册，非扫描期帧不进环）。
+    /// 线程＝相机回调线程（SlotRing 单生产者约定——只从这一个线程调）
+    void pushSessionFrame(const cv::Mat& grayL, const cv::Mat& grayR,
+                          double temperatureC, uint64_t frameId,
+                          bool tvKnown = false, bool tvLeftSkew = true,
+                          Scanner::ScanMode scanMode = Scanner::ScanMode::MarkerPlusLaser);
+    /// enrich fail 丢帧累计（挂 10 故障桥的口径源）
+    uint64_t droppedSessionFrames() const;
+
+    // —— 编辑账本窄出口（05 P4：就绪态编辑会话作用融合云/obs）——
+    /// 标志点融合累积器（会话私有件；未装配/已停=空）
+    Scanner::pipeline::IMarkerFuse* markerFuse();
+#ifdef JMW_BUILD_CUDA
+    /// 激光融合累积器（05 P4 激光侧；未装配/已停=空）
+    Scanner::pipeline::ILaserFuse* laserFuse();
+#endif
+    /// 逐帧观测累加器（GBA 输入账本；未装配/已停=空）
+    Scanner::pipeline::FrameObsAccumulator* obsAccumulator();
+
+    /// 逐帧观测累加器出口（app 收尾 GBA 消费；pipeline_ 未装配/已停＝未定义——
+    /// 调方保证仅在会话 stop 后、对象存活期内访问）
+    Scanner::pipeline::FrameObsAccumulator& obs();
+
+    /// 终局遍进度出口（260920 Q5：app 弹窗消费——percent 0-100＋阶段文案；
+    /// 回调在 finish 后台线程执行，订阅方自行切 UI 线程）
+    void setFinalBAProgress(std::function<void(int, const std::string&)> cb) {
+        finalBAProgress_ = std::move(cb);
+    }
+    /// 261018 激光编辑排除集（用户口径：删除要在全局优化后保持）：终版云
+    /// （GBA 重放）按下标找不回删除点——按空间位置剔除（重放位姿修正位移
+    /// 亚毫米级，容差 0.5mm）；undo 驱动（撤销后调用方应重设）
+    void setLaserEditExclusions(std::vector<cv::Point3f> pts) {
+        laserEditExclusions_ = std::move(pts);
+    }
+
+    /// 输出队列透传（调试注入口：SimScanSource→真融合链，2026-09-13 模拟调通；
+    /// pipeline_ 未装配/已停＝nullptr——调方保证会话期访问，停止链先停注入线程）
+    Scanner::pipeline::sched::FrameResultQueue<Scanner::pipeline::FrameResult>* outputQueue();
+
+    // ── 261004 加固：终局遍（GBA）外部取消口 ──
+    // 【为什么】runFinalBA 原用局部 CancelToken，无人能 cancel——真机会话在
+    // GBA 批算卡 5 分钟+时，用户关程序 → AppContext 析构 join 收尾线程 →
+    // 进程挂死在优化器里被 Task 杀。改为成员令牌后：AppContext 关停路径先
+    // 调本方法 → 令牌置位 → 09 层 Ceres 迭代回调一次迭代内 SOLVER_ABORT →
+    // 07 取消检查点干净退出 → 收尾线程秒级可 join。（正常关会话不调——
+    // 让 GBA 跑完出全量结果；时长上限另由 60s/阶段兜底，见 09 加固注释）
+    void cancelFinalBA();
+
+    // IWorkflow
+    std::string getName() const override { return "ScanWorkflow"; }
+    Result initialize() override;
+    Result start() override;
+    Result pause() override;
+    Result resume() override;
+    Result stop() override;
+    WorkflowState getState() const override { return state_.load(); }
+    Result setProgressCallback(WorkflowCallback cb) override;
+
+    /// 261004：⑤重置 discard 链置 false → stop() 跳过 runFinalBA（GBA/L4/入仓
+    /// 全跳＝「不落库」语义）；armScanSession 时恢复 true（下次会话默认走全链）
+    void setFinalBAEnabled(bool on) { finalBAEnabled_ = on; }
+
+private:
+    /// 激光温度表装载：06 仓库档表 JSON → 09 LaserPlaneMapTempTable（mapData 格式，
+    /// 与 laser_match_scan::LoadTempTable 同源）。全档无 mapData → nullptr（降级 A）
+    std::shared_ptr<calib::LaserPlaneMapTempTable> buildLaserTableFromRepo() const;
+
+    /// 02-⑦ 尾批算（Q5 接线 260919）：终局遍＝GlobalOptimObject（冻结→GBA→
+    /// 重融合→cloudRepo→解冻推修正云）。stop() 内、pipeline_.reset() 前调用
+    /// （obs 随 pipeline 存活）；GBA 终版标志点经 setMarkers 入 06 仓库
+    void runFinalBA();
+
+private:
+    WorkflowContext* ctx_;
+    ScanMode scanMode_ = ScanMode::MarkerOnly;
+    ScanCalibration calib_;
+    Scanner::pipeline::SimScanSource* simSource_ = nullptr;   // 中段模拟提取源（可空）
+    std::function<bool()> frameGate_;                         // 261029 测试回放帧门（可空=恒开）
+    std::atomic<WorkflowState> state_{WorkflowState::Idle};
+    WorkflowCallback callback_;
+    std::function<void(bool)> onFinished_;         // 完成回报（app 注入；可空）
+
+    /// —— 终局遍（Q5）——
+    bool finalBAEnabled_ = true;                   // 尾批 GBA＋重融合开关
+    std::vector<int>    priorIds_;                 // 续扫基准软先验（装配期自仓库快照）
+    std::vector<double> priorXyz_;                 // 3n 展开x,y,z
+    std::function<void(int, const std::string&)> finalBAProgress_;  // 进度出口（可空）
+    std::vector<cv::Point3f> laserEditExclusions_;   // 261018 激光编辑排除集（终版云位置剔除）
+    // 261031 GBA 终版标志点云宿主（sceneFeed 句柄式推送——queued 信号投递期间
+    // 须存活；GBA 世界系≠live R_init 世界系——标志点显示须随终版激光一起换系）
+    std::vector<calib::MarkerCloudPoint> finalMarkerCloud_;
+    Scanner::pipeline::CancelToken finalBACancel_; // 261004：终局遍取消令牌（原局部
+                                                   // 令牌无人 cancel——见 cancelFinalBA 注释）
+
+    // —— 会话记账（D6：归工作流自身；起止时间戳/帧计数，接入期由 07 流水线回调回填）——
+    TimestampMs sessionStartTime_   = 0;
+    TimestampMs sessionEndTime_     = 0;
+    uint64_t    sessionFrames_      = 0;
+    uint64_t    sessionFusedFrames_ = 0;
+
+    // —— 06 会话件（装表＋ring＋pushFrame 唯一入口）——声明序铁律（§4.4）：必须在
+    // pipeline_ 之前声明——C++ 逆序析构：pipeline_ 先死（停用 ring），ring 随 session_ 最后死
+    Scanner::data::ScanSessionData session_;
+
+    // —— 07 帧处理引擎（会话私有件：start 建、stop 收）——
+    std::unique_ptr<Scanner::pipeline::ScanPipeline> pipeline_;
+
+    /// 装配 07 ScanPipeline（attachRing/attachCalib/configure；失败自清理）
+    Result assemblePipeline();
+};
+
+} // namespace Scanner::workflow

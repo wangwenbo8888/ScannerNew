@@ -22,9 +22,9 @@
 #include "StateMachine.h"  // P1-2: getCurrentState() 需完整类型
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
-#include "modules/DeviceManager/ParamStore.h"      // ParamEntry::Source
-#include "modules/DeviceManager/HardwareMonitor.h" // 261018 相机预览 GPU 行（snapshot 完整类型）
-#include "modules/DeviceManager/DeviceManager.h"   // setParam 三路联动（完整类型）
+#include "modules/08_DeviceManager/ParamStore.h"      // ParamEntry::Source
+#include "modules/08_DeviceManager/HardwareMonitor.h" // 261018 相机预览 GPU 行（snapshot 完整类型）
+#include "modules/08_DeviceManager/DeviceManager.h"   // setParam 三路联动（完整类型）
 
 #include <algorithm>
 #include <chrono>
