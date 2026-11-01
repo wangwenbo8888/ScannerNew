@@ -595,7 +595,20 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
             centers.emplace_back(m.centerX, m.centerY, m.centerZ);
             normals.emplace_back(m.normalX, m.normalY, m.normalZ);
         }
-        p.regFlow = flowOp_->Execute(centers, normals, prevState_);
+        // 261103 绝对锚定：光流配准带全局地图解算（4 参重载）——关联仍用
+        // 上帧匹配（防错配），SVD 目标改用地图绝对坐标（防漂移）。原 3 参
+        // 重载传空地图 → 算子走「上帧 R/T 累积坐标」分支＝纯航位推算，
+        // 每帧误差累加：400 帧可测漂移（标志点云翘曲），数万帧线性发散。
+        // 守卫：地图空自动回退老分支（早期帧）；地图条目与上帧变换位置差
+        // >4mm 拒配对 → matched<3 走 fuse 兜底（同为绝对解）。
+        // env JMW_FC_FLOWLIB=0 回退旧行为（A/B 对拍）
+        static const bool sFlowLib = [] {
+            const char* e = getenv("JMW_FC_FLOWLIB");
+            return !e || atoi(e) != 0;
+        }();
+        p.regFlow = sFlowLib
+            ? flowOp_->Execute(centers, normals, prevState_, globalSet_)
+            : flowOp_->Execute(centers, normals, prevState_);
         // 261026 精度对拍探针（JMW_RTDBG=1）：R/T 17 位打印——与沙盒 harness
         // L1312-1323 同款同格式（regLoop 处理序＝两边同基準，逐行可比）
         if (getenv("JMW_RTDBG") && p.regFlow.success) {
@@ -1748,7 +1761,13 @@ void FiveChainAdapter::collectorLoop() {
         harness_->diagLaserPts_.fetch_add(prod.laserPoints3D,
                                           std::memory_order_relaxed);
         // 261028 标志点融合（体素 5mm＋EMA 精化——替代简单去重）
-        if (prod.conic.success && prod.markersValid > 0) {
+        // 261103 孪生修复（同激光八轮门）：hold/skip 过期位姿帧的标志点不进
+        // C 线累积/显示云——此前仅激光有门，标志点在配准断档期按冻结位姿
+        // 整片错位累积＝标志点云「越到后面越乱」的来源（用户裁决：未配准帧
+        // 的数据一并丢弃）
+        const bool regOkMk = (cfg_.holdSkip != 0 || prod.regSource == "first"
+                              || prod.regSource == "flow" || prod.regSource == "fuse");
+        if (prod.conic.success && prod.markersValid > 0 && regOkMk) {
             std::vector<calib::MarkerFuseInput> mfi;
             mfi.reserve(prod.conic.markers.size());
             for (const auto& m : prod.conic.markers) {
