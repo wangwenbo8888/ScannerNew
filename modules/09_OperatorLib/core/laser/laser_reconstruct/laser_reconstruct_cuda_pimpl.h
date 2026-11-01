@@ -40,6 +40,10 @@ struct LaserReconstructCuda::Impl {
     int warmup_count_ = 0;
     int old_device_id_ = 0;
 
+    // 【P0-d】Q 内容比对缓存（实例级——上下文/实例重建自动失效，安全于静态）
+    float q_cache_[16] = {0};
+    bool  q_cached_ = false;
+
 #ifndef NDEBUG
     std::atomic<bool> inProcess_{false};
 #endif

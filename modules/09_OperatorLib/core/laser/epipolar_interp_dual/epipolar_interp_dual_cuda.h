@@ -23,6 +23,7 @@
 #include "common/calib_warmup_config.h"  // WarmupConfig
 
 #include <nlohmann/json.hpp>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 
@@ -163,19 +164,41 @@ public:
 
     /// 【前段提前提交配套 2026-10-23】延迟期访问口（ExecuteDeferred 成功后、
     /// FinishInterp 前可用；浅引用同帧生命周期）——供 v3 前段容量提交取输入：
-    /// points＝d_scan_cpts_ 全幅；ids＝链接开→d_link_label_（容量化后满幅），
-    /// 否则 d_scan_cfids_；count＝d_scan_ccount_（设备输出计数——插值补点后
-    /// 输出数可大于输入数，勿用输入计数）。
     cv::cuda::GpuMat GetCapacityPointsView() const;
     cv::cuda::GpuMat GetCapacityIdsView() const;
     const int* GetOutputCountPtr() const;
 
+    /// 【G′·三合一大图】裸发射体（harness FrontBigGraph 捕获窗专用）：
+    /// submitScanSequence＋launchLinkPhase 按容量发射（与逐发/自图捕获体同源；
+    /// 前置＝cap==capacity_≥2 且缓冲已暖＝暖机帧常规路径保证；捕获区禁分配）。
+    /// 成功置 lastLinkAtCap_/lastCs_（FinishInterp 只建视图）并填 result 壳
+    ///（success=true/interpCount=-1）；失败返 false＝调用方大图臂回退
+    bool EmitDeferredBody(const cv::cuda::GpuMat& d_points,
+                          const int* d_deviceCount,
+                          cv::cuda::Stream& stream,
+                          EpipolarInterpResult& result);
+
+    /// 【G′】延迟结果壳（不发射——大图稳态帧 graphLaunch 后填 p.interp*；
+    /// 与 ExecuteDeferred 提交级结果同构＝success/interpCount=-1）
+    EpipolarInterpResult MakeBigShell() const;
+
+    /// 【G′】大图在飞标记：稳态帧 graphLaunch 后调用——置 lastLinkAtCap_/
+    /// lastCs_（FinishInterp 只建视图；不置则误走精确 N 链接逐发路径＝+28
+    /// launch/帧回退税，2026-10-28 census 诊断实锤）
+    void MarkBigInFlight(cv::cuda::Stream& stream);
+
     void Destroy();
+
     void Warmup(int pointCount);
     void Warmup(const WarmupConfig& config);
     void SetParams(const EpipolarInterpDualParams& params);
 
     const EpipolarInterpDualParams& GetParams() const;
+
+    /// 【G′·C4′ paramsEpoch_】参数/缓冲代际计数（F 批 fuseNeedRecapture_ 范式
+    /// 平移）：SetParams／ensureCapacity 扩容／Destroy 时递增——harness 大图
+    /// 签名聚合消费（epoch 变→毁图重捕）。回放运行期恒定（census/帧率中性）。
+    uint64_t GetParamsEpoch() const;
 
     /// 【测速工具】最近一次 Execute 的内部阶段耗时串（" 相名=毫秒 …"），
     /// 供 gpu_stress 聚合；失效条件：下一次 Execute 覆写

@@ -132,6 +132,10 @@ struct CycleProductsCompat {
     bool usedFrameFuse = false;
     bool fuseSlowPath = false;   // 配准兜底 5 帧胜出解来自慢路径（预测失效频率）
     calib::FrameFuseCPUResult regFuse;
+    // 261103 fuse 帧观测入链旁路：fuse 路径解算的逐点 globalId（按 conic
+    // validCircle 顺序；-1=未关联）——此前 fuse 帧 obs 只记匿名 -1，GBA
+    // 全局关联挂不上晚生 id＝「优化后少 3 点」根因（地图 26/链 23 实证）
+    std::vector<int> fuseMarkerGids;
     // 【E3】fivechain：1b/chain1 流已排空标记——RLE 帧宿主可见拷出免事件同步
     bool gpuDrained = false;
     // 统计/报告（沙盒 report.csv 字段——fc_executor 的 fuseLoop 写）

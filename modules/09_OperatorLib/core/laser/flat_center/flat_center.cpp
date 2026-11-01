@@ -10,6 +10,7 @@
 #include "common/calib_logging.h"
 #include "common/calib_warmup_config.h"
 #include <opencv2/core/cuda.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>
 #include <stdexcept>
 
 using namespace calib;
@@ -220,6 +221,31 @@ void FlatCenterExtractor::LastBenchMs(float out[3]) const {
 
 const FlatCenterParams& FlatCenterExtractor::GetParams() const {
     return pImpl_->GetParams();
+}
+
+uint64_t FlatCenterExtractor::GetParamsEpoch() const {
+    return pImpl_->paramsEpoch_;
+}
+
+bool FlatCenterExtractor::PrepareBigGraph(const cv::cuda::GpuMat& d_grayImage,
+                                          const cv::cuda::GpuMat& d_binaryMask) {
+    return pImpl_->prepareBigGraph_(d_grayImage, d_binaryMask);
+}
+
+bool FlatCenterExtractor::EmitGraphBody(cv::cuda::Stream& stream) {
+    return pImpl_->emitGraphBody_(cv::cuda::StreamAccessor::getStream(stream));
+}
+
+StegerResult FlatCenterExtractor::MakeDeferredShell() {
+    return pImpl_->makeDeferredShell_();
+}
+
+bool FlatCenterExtractor::GraphDims(int& rows, int& cols, int& bands) const {
+    if (pImpl_->paramsFailed_ || !pImpl_->d_params_) return false;
+    rows = pImpl_->graph_rows_;
+    cols = pImpl_->graph_cols_;
+    bands = pImpl_->graph_bands_;
+    return pImpl_->graph_rows_ > 0;
 }
 
 #else

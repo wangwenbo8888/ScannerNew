@@ -67,6 +67,13 @@ public:
         : fuse_([voxelSizeMm] {
               calib::LaserCloudFuseCUDAParams fp;
               fp.voxelSize = voxelSizeMm;
+              // 261103 集成重放【配额降载】：原走默认 reserve=50M＝单实例
+              // ~2GB 显存（keys 400M+idx/counts 各200M+xyz/normal 各600M），
+              // GBA 期与 live fuse（同 50M）并存 ~4GB——显存/pinned 压力下
+              // 分配失败即崩。重放终版云实测 ~4.5M 点 → 8M 槽 + 2M 步进
+              // （~330MB）充裕；不够会走 grow（有全检护栏）
+              fp.reserveVoxelCount = 8000000;
+              fp.growSlotCount = 2000000;
               return fp;
           }()) {}
     bool fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) override {
@@ -159,6 +166,15 @@ calib::GlobalBAParams GlobalOptimObject::gbaParams() const {
     p.defaultPriorSigma = cfg_.defaultPriorSigma;
     p.sigmaObserved = cfg_.sigmaObserved;
     p.maxSolveSecondsPerPhase = cfg_.maxSolveSecondsPerPhase;   // 261004 加固透传
+    // 261103 坏帧剔除 3→2（env JMW_FC_MINPT 可调回 3）：白板 26 真点实测丢
+    // 3——晚生 id 的观测集中在弱帧（<3 点被整帧剔除＝51/399 帧），帧被剔→
+    // 观测全灭→点被丢。2 点帧＋位姿软先验＝可解（先验正则化）；防劣解＝
+    // 下游位姿多项式平滑＋chi2 剔除兜底
+    {
+        int minPt = 2;
+        if (const char* e = std::getenv("JMW_FC_MINPT")) minPt = std::max(2, atoi(e));
+        p.minPointsPerFrame = minPt;
+    }
     return p;
 }
 

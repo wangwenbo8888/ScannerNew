@@ -46,4 +46,23 @@ void gpuRleTailCopy(const cv::cuda::GpuMat& runBufL, const cv::cuda::GpuMat& run
                     int capRuns, int window, int nL, int nR,
                     int* runsPinned, cudaEvent_t evDone);
 
+// ============================================================================
+// 【批C·RLE 入图】槽图构建（每槽一图，9 节点单流线性）：6 内核＋counts D2H
+// ＋双眼窗口 runs D2H×2。**事件留图外（退守变体定案 2026-10-28）**：K1 三探针
+// 实锤本机 CUDA 12.6/WDDM 下 legacy cudaEventRecord 捕获期被静默丢弃（节点不
+// 成、事件陷 invalid 态）；cudaEventRecordWithFlags+External 虽成节点但与
+// 1B/前段图并发时 1b 侧现 sticky invalid argument 时序脆弱（flat 图/V3GRAPH
+// 崩溃同源家族史）——对齐仓内全部既有图模式（1B/B4/sep 图均无事件节点），
+// 调用方 graphLaunch 后按槽常规 record。调用前须排空本流（内部会再强制
+// cudaStreamSynchronize——WDDM 捕获铁规）；任一步失败返回 false 且流内零
+// 残留（调用方逐发兜底安全）。线程暂存按需增长（K6 修复）且捕获前预分配
+// （捕获禁 malloc）。graph/exec 双返回。
+// ============================================================================
+bool gpuRleBuildSlotGraph(const cv::cuda::GpuMat& maskL, const cv::cuda::GpuMat& maskR,
+                          cv::cuda::GpuMat& runBufL, cv::cuda::GpuMat& runBufR,
+                          int capRuns, int window,
+                          int* countsPinned, int* runsPinned,
+                          cv::cuda::Stream& stream,
+                          cudaGraph_t* outGraph, cudaGraphExec_t* outExec);
+
 } // namespace scr

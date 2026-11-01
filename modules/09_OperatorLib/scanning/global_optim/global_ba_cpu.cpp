@@ -121,7 +121,10 @@ void GlobalBAParams::validate() const {
     if (maxIterations < 1) throw std::invalid_argument("maxIterations must be >= 1");
     if (minCovisForLoopEdge < 3) throw std::invalid_argument("minCovisForLoopEdge must be >= 3");
     if (loopFrameGap < 1) throw std::invalid_argument("loopFrameGap must be >= 1");
-    if (minPointsPerFrame < 3) throw std::invalid_argument("minPointsPerFrame must be >= 3");
+    // 261103 校验放行 ≥2（原 ≥3）：2 点帧＋位姿软先验可解；坏帧剔除阈值由
+    // 07 侧经 env JMW_FC_MINPT 下发（默认 2——晚生弱 id 的观测集中在弱帧，
+    // 整帧剔除＝观测全灭＝真点丢失，白板 26→23 实证）
+    if (minPointsPerFrame < 2) throw std::invalid_argument("minPointsPerFrame must be >= 2");
     if (defaultPriorSigma <= 0.0) throw std::invalid_argument("defaultPriorSigma must be > 0");
     // 261004 加固：0=不限是合法值（离线批量工具），负数是配置错误
     if (maxSolveSecondsPerPhase < 0.0) throw std::invalid_argument("maxSolveSecondsPerPhase must be >= 0 (0 = unlimited)");

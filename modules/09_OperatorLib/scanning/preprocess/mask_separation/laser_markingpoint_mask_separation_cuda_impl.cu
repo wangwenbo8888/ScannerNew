@@ -1,4 +1,4 @@
-﻿#include "laser_markingpoint_mask_separation_cuda_pimpl.h"
+#include "laser_markingpoint_mask_separation_cuda_pimpl.h"
 #include "common/calib_types.h"
 #include "common/calib_logging.h"
 #include <cuda_runtime.h>
@@ -56,11 +56,13 @@ __global__ void fusedGaussianThresholdKernel(
 template<int KHALF, bool IS_ERODE>
 __global__ void binaryMorphKernel(
     const uint8_t* __restrict__ src, uint8_t* __restrict__ dst,
-    int width, int height, bool circle)
+    int width, int height, bool circle, bool skipBlank = false)
 {
     constexpr int SW = BW + 2*KHALF, SH = BH + 2*KHALF;
     __shared__ uint8_t smem[SH][SW];
+    __shared__ int anyFg_;              // 【方案一·P2b】step5 膨胀空白旗标
     int tx = threadIdx.x, ty = threadIdx.y;
+    const int tid = ty * BW + tx;
 
     for (int j = ty; j < SH; j += BH)
         for (int i = tx; i < SW; i += BW) {
@@ -69,7 +71,24 @@ __global__ void binaryMorphKernel(
             smem[j][i] = (gx >= 0 && gx < width && gy >= 0 && gy < height)
                          ? src[gy*width + gx] : (IS_ERODE ? 255 : 0);
         }
+    if (tid == 0) anyFg_ = 0;
     __syncthreads();
+
+    // ── 【方案一·P2b】step5 边缘膨胀空白跳过（2026-10-25）──
+    //    膨胀窗口包含引理 L2：dilate(p)=255 ⇔ p 的 R 邻域（界外按 0）含
+    //    前景 ⇒ 块+halo（整个 smem，OOB 已填 0）全零 ⇒ 输出全 0。
+    //    决策栅栏后全块一致；后续逐点扫描无栅栏——早退分支安全。
+    if (skipBlank) {
+        const uint8_t* t = &smem[0][0];
+        for (int i = tid; i < SW * SH; i += BW * BH)
+            if (t[i] != 0) anyFg_ = 1;
+        __syncthreads();
+        if (anyFg_ == 0) {
+            int x = blockIdx.x*BW + tx, y = blockIdx.y*BH + ty;
+            if (x < width && y < height) dst[y*width+x] = 0;
+            return;   // 全块一致返回：跳过逐点窗口扫描
+        }
+    }
 
     int x = blockIdx.x*BW + tx, y = blockIdx.y*BH + ty;
     if (x >= width || y >= height) return;
@@ -267,19 +286,56 @@ __global__ void diskErodePrevZeroKernel(
 template<int R, bool IS_ERODE, int TW = 64, int TH = 16>
 __global__ void blockMorphKernel(
     const uint8_t* __restrict__ src, uint8_t* __restrict__ dst,
-    int width, int height, bool circle)
+    int width, int height, bool circle, bool skipBlank = false,
+    bool innerFirst = false)
 {
     constexpr int SW = TW + 2 * R, SH = TH + 2 * R;
     __shared__ uint8_t tile[SH][SW];
     __shared__ unsigned short pfx[SH][SW];
     __shared__ int hwTab[2 * R + 1];   // 圆盘半宽表（每块一次，替每像素 sqrtf）
+    __shared__ int anyFg_;             // 【方案一·P1】块空白旗标（K2 跳过用）
     const int tx = threadIdx.x, ty = threadIdx.y;
     const int tid = ty * TW + tx;
-    // 0) 半宽表：hw[dy+R]=⌊√(R²-dy²)⌋（circle）/ R（方核）
+    // 0) 半宽表：hw[dy+R]=⌊√(R²−dy²)⌋（circle）/ R（方核）
     if (tid < 2 * R + 1) {
         const int dy = tid - R;
         hwTab[tid] = circle ? (int)sqrtf((float)(R * R - dy * dy)) : R;
     }
+    if (skipBlank && IS_ERODE && innerFirst) {
+        // ── 【方案一·P1+】两段式载入（2026-10-25）：先载内域（1:1）判空，命中 ──
+        //    （全零）直接短路返回，免 halo 环载入（R19 环面积＝内域 4.4×/整片 5.4×）；
+        //    未命中再补环带（一道额外栅栏）。判据＝腐蚀中心引理（同 P1，无需 halo）；
+        //    内域 OOB 槽按 erode=255 填充（供未命中路径后续形态学消费），判空只认在图像素。
+        {
+            const int gx = blockIdx.x * TW + tx, gy = blockIdx.y * TH + ty;
+            tile[ty + R][tx + R] = (gx < width && gy < height)
+                                       ? src[(size_t)gy * width + gx]
+                                       : (IS_ERODE ? 255 : 0);
+        }
+        if (tid == 0) anyFg_ = 0;
+        __syncthreads();
+        {
+            const int gx0 = blockIdx.x * TW + tx, gy0 = blockIdx.y * TH + ty;
+            if (gx0 < width && gy0 < height && tile[ty + R][tx + R] != 0) anyFg_ = 1;
+        }
+        __syncthreads();
+        if (anyFg_ == 0) {
+            const int gx0 = blockIdx.x * TW + tx, gy0 = blockIdx.y * TH + ty;
+            if (gx0 < width && gy0 < height) dst[(size_t)gy0 * width + gx0] = 0;
+            return;   // 全块一致返回：跳过环载入＋前缀＋查表
+        }
+        // 1b) 补 halo 环带（全 tile 除内域外格子；OOB 填充同整片规则）
+        for (int idx = tid; idx < SW * SH; idx += TW * TH) {
+            const int j = idx / SW, i = idx % SW;
+            if (j >= R && j < SH - R && i >= R && i < SW - R) continue;   // 内域已载
+            const int gx = blockIdx.x * TW + i - R;
+            const int gy = blockIdx.y * TH + j - R;
+            tile[j][i] = (gx >= 0 && gx < width && gy >= 0 && gy < height)
+                             ? src[(size_t)gy * width + gx]
+                             : (IS_ERODE ? 255 : 0);
+        }
+        __syncthreads();
+    } else {
     // 1) 载入 tile（界外：erode=255 / dilate=0）
     for (int j = ty; j < SH; j += TH)
         for (int i = tx; i < SW; i += TW) {
@@ -289,7 +345,22 @@ __global__ void blockMorphKernel(
                              ? src[(size_t)gy * width + gx]
                              : (IS_ERODE ? 255 : 0);
         }
+    if (tid == 0) anyFg_ = 0;
     __syncthreads();
+    // ── 【方案一·P1】K2 空白跳过（2026-10-24 侦察实测空白率 97.5%）──
+    //    判据：块内域（64×16）src 全零 ⇒ 输出全零——腐蚀中心引理：输出 255 需
+    //    窗口内全部非零（含中心像素自身），与邻域无关，无需 halo。
+    //    决策在栅栏后全块一致（部分线程不得先 return——CUDA 同步纪律）。
+    if (skipBlank && IS_ERODE) {
+        const int gx0 = blockIdx.x * TW + tx, gy0 = blockIdx.y * TH + ty;
+        if (gx0 < width && gy0 < height && tile[ty + R][tx + R] != 0) anyFg_ = 1;
+        __syncthreads();
+        if (anyFg_ == 0) {
+            if (gx0 < width && gy0 < height) dst[(size_t)gy0 * width + gx0] = 0;
+            return;   // 全块一致返回：跳过前缀与查表（重活）
+        }
+    }
+    }
     // 2) 行前缀——SWAR 向量化（4 字节/步，无目标组批量写同一 last，有目标回退逐字节）
     if (tid < SH) {
         unsigned short last = 0;
@@ -362,19 +433,20 @@ __global__ void blockDilateSubKernel(
     const uint8_t* __restrict__ src,
     const uint8_t* __restrict__ subtrahend,
     uint8_t* __restrict__ dst, uint8_t* __restrict__ dst_dilated,
-    int width, int height, bool circle)
+    int width, int height, bool circle, bool skipBlank = false)
 {
     constexpr int SW = TW + 2 * R, SH = TH + 2 * R;
     __shared__ uint8_t tile[SH][SW];
     __shared__ unsigned short pfx[SH][SW];
     __shared__ int hwTab[2 * R + 1];
     __shared__ int anySub255;
+    __shared__ int anySrcFg;             // 【方案一·P2】K3 膨胀源空白旗标
     const int tx = threadIdx.x, ty = threadIdx.y;
     const int tid = ty * TW + tx;
     const int x0 = blockIdx.x * TW, y0 = blockIdx.y * TH;
 
     // —— 块级被减数检查（两步同步保证一致）——
-    if (tid == 0) anySub255 = 0;
+    if (tid == 0) { anySub255 = 0; anySrcFg = 0; }
     __syncthreads();
     {
         const int x = x0 + tx, y = y0 + ty;
@@ -402,6 +474,28 @@ __global__ void blockDilateSubKernel(
                              ? src[(size_t)gy * width + gx] : 0;
         }
     __syncthreads();
+    // ── 【方案一·P2】K3 空白跳过（2026-10-24 侦察 m3a：64×16+halo7 空白率 97.4%）──
+    //    判据（膨胀窗口包含引理 L2）：dilate(p)=255 ⇔ p 的 R 邻域（界外按 0）含
+    //    前景 ⇒ 块+halo（整个共享 tile）全零 ⇒ 输出全 0——扫描必须含 halo。
+    //    双输出红线（step3 双消费）：d_survivor 全 0 必写＋d_laserRaw 按
+    //    anySub255 分支拷贝写（L3：dilated≡0 ⇒ dst≡sub，sub 为纯二值）。
+    //    决策在栅栏后全块一致；skipBlank 为 uniform 内核参数，分支内栅栏合法。
+    if (skipBlank) {
+        const uint8_t* t = &tile[0][0];
+        for (int i = tid; i < SW * SH; i += TW * TH)
+            if (t[i] != 0) anySrcFg = 1;
+        __syncthreads();
+        if (anySrcFg == 0) {
+            const int x = x0 + tx, y = y0 + ty;
+            if (x < width && y < height) {
+                dst_dilated[(size_t)y * width + x] = 0;   // 双输出①：survivor 全 0
+                dst[(size_t)y * width + x] =
+                    (anySub255 && subtrahend[(size_t)y * width + x] == 255)
+                        ? 255 : 0;                        // 双输出②：laserRaw 拷贝写
+            }
+            return;   // 全块一致返回：跳过前缀与 O(R) 查表（重活）
+        }
+    }
     if (tid < SH) {
         unsigned short last = 0;
         const int aligned_end = SW & ~3;
@@ -461,9 +555,24 @@ static void launchBlockMorphDispatch(const uint8_t* s, uint8_t* d, int w, int h,
     }
     dim3 b(64, 16);
     dim3 g((w + 63) / 64, (h + 15) / 16);
+    // 【方案一·P1】K2（kh=19）空白跳过：默认开；JMW_SEPSKIP=0 关（对照臂/回退）。
+    //    侦察口径：survivor 64×16 块空白率 97.5%（blank_rates.csv）。kh=6（K1）
+    //    64×16 空白率仅 29.7% 不过门槛——不启用。static 读 env：图捕获参数一致。
+    static const bool k2SkipOn = [] {
+        const char* e = getenv("JMW_SEPSKIP");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    // 【方案一·P1+】K2 两段式载入（内域先载判空、命中免 halo 环载入）：默认开；
+    //    JMW_SEPSKIP_P1P=0 回退整片载入（隔离对照臂）。static 读 env：图捕获一致。
+    static const bool p1pOn = [] {
+        const char* p = getenv("JMW_SEPSKIP_P1P");
+        if (p != nullptr && p[0] == '0') return false;
+        const char* ga = getenv("JMW_SEPSKIP");
+        return !(ga != nullptr && ga[0] == '0');
+    }();
     switch (kh) {
-        case 6:  blockMorphKernel<6, true><<<g,b,0,st>>>(s,d,w,h,circle); return;
-        case 19: blockMorphKernel<19,true><<<g,b,0,st>>>(s,d,w,h,circle); return;
+        case 6:  blockMorphKernel<6, true><<<g,b,0,st>>>(s,d,w,h,circle,false,false); return;
+        case 19: blockMorphKernel<19,true><<<g,b,0,st>>>(s,d,w,h,circle,k2SkipOn,p1pOn); return;
         default: break;
     }
     launchErode(s, d, w, h, ks, circle, st);
@@ -480,9 +589,20 @@ static void launchBlockDilateSubDispatch(const uint8_t* s, const uint8_t* sub,
     }
     dim3 b(64, 16);
     dim3 g((w + 63) / 64, (h + 15) / 16);
+    // 【方案一·P2】K3（kh=7）膨胀源空白跳过：默认开；JMW_SEPSKIP_K3=0 单独关
+    // （隔离对照臂），JMW_SEPSKIP=0 全局关。侦察口径：temp3a 块+halo7 空白率
+    // 97.4%（blank_rates.csv）。kh=20（step4）不启用——已有 anySub255 停写跳过
+    // （dst_dilated==nullptr 场景）覆盖其空白。static 读 env：图捕获参数一致
+    // （改 env 须重启进程）。
+    static const bool k3SkipOn = [] {
+        const char* k3 = getenv("JMW_SEPSKIP_K3");
+        if (k3 != nullptr && k3[0] == '0') return false;
+        const char* ga = getenv("JMW_SEPSKIP");
+        return !(ga != nullptr && ga[0] == '0');
+    }();
     switch (kh) {
-        case 7:  blockDilateSubKernel<7><<<g,b,0,st>>>(s,sub,dst,dstDil,w,h,circle); return;
-        case 20: blockDilateSubKernel<20><<<g,b,0,st>>>(s,sub,dst,dstDil,w,h,circle); return;
+        case 7:  blockDilateSubKernel<7><<<g,b,0,st>>>(s,sub,dst,dstDil,w,h,circle,k3SkipOn); return;
+        case 20: blockDilateSubKernel<20><<<g,b,0,st>>>(s,sub,dst,dstDil,w,h,circle,false); return;
         default: break;
     }
     launchFusedDilateSub(s, sub, dst, dstDil, w, h, ks, circle, st);
@@ -567,11 +687,21 @@ static void launchErode(const uint8_t* s, uint8_t* d, int w, int h, int ks, bool
 }
 static void launchDilate(const uint8_t* s, uint8_t* d, int w, int h, int ks, bool circle, cudaStream_t st) {
     int kh=(ks-1)/2; dim3 b(BW,BH), g=gridSz(w,h);
+    // 【方案一·P2b】step5 边缘膨胀（kh=3/4，本算子唯一 dilate 调用族）空白跳过：
+    //    默认开；JMW_SEPSKIP5=0 单独关（隔离对照臂），JMW_SEPSKIP=0 全局关。
+    //    判据＝膨胀窗口包含引理 L2（块+halo 全零 ⇒ 输出全 0，OOB 填 0 不点亮）。
+    //    static 读 env：图捕获参数一致（改 env 须重启进程）。
+    static const bool s5SkipOn = [] {
+        const char* s5 = getenv("JMW_SEPSKIP5");
+        if (s5 != nullptr && s5[0] == '0') return false;
+        const char* ga = getenv("JMW_SEPSKIP");
+        return !(ga != nullptr && ga[0] == '0');
+    }();
     switch(kh){
         case 1: binaryMorphKernel<1,false><<<g,b,0,st>>>(s,d,w,h,circle);break;
         case 2: binaryMorphKernel<2,false><<<g,b,0,st>>>(s,d,w,h,circle);break;
-        case 3: binaryMorphKernel<3,false><<<g,b,0,st>>>(s,d,w,h,circle);break;
-        case 4: binaryMorphKernel<4,false><<<g,b,0,st>>>(s,d,w,h,circle);break;
+        case 3: binaryMorphKernel<3,false><<<g,b,0,st>>>(s,d,w,h,circle,s5SkipOn);break;
+        case 4: binaryMorphKernel<4,false><<<g,b,0,st>>>(s,d,w,h,circle,s5SkipOn);break;
         case 5: binaryMorphKernel<5,false><<<g,b,0,st>>>(s,d,w,h,circle);break;
         case 6: binaryMorphKernel<6,false><<<g,b,0,st>>>(s,d,w,h,circle);break;
         case 7: binaryMorphKernel<7,false><<<g,b,0,st>>>(s,d,w,h,circle);break;
@@ -853,6 +983,44 @@ void LaserMarkingSeparationCUDA::Impl::setParams(const LaserMarkingSeparationPar
     if (graph_) { cudaGraphDestroy(graph_); graph_ = nullptr; }
         if (graphExecDev_) { cudaGraphExecDestroy(graphExecDev_); graphExecDev_ = nullptr; }
         if (graphDev_) { cudaGraphDestroy(graphDev_); graphDev_ = nullptr; }
+    ++paramsEpoch_;   // 【N-6】SetParams——形态学参数/阈值烧值变化（自图已毁＋1a 大图签名失配）
+}
+
+// ============================================================================
+// 【N-6·1a 三合一大图】裸发射口＋结果壳——executor FrontSepGraph 捕获窗专用
+// （与 separateDev 稳态路径同源：D2D 入驻 copyTo＋executePipeline 纯核序列）
+// ============================================================================
+void LaserMarkingSeparationCUDA::Impl::emitPipelineBody(
+    const cv::cuda::GpuMat& d_grayImage, cv::cuda::Stream& stream) {
+    // ⚠ copyTo 处理行距（源 GpuMat 可能带 pitch——按字节裸拷会压扁布局）
+    d_grayImage.copyTo(d_inputBuffer, stream);
+    MaskSeparationTimings dummy;
+    executePipeline(stream, dummy, /*recordEvents=*/false);
+}
+
+LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::makeShell() const {
+    LaserMarkingSeparationResult result;
+    result.success = true;
+    result.message = "Separation successful";
+    result.qualityFlag = calib::QualityFlag::Normal;
+    result.d_laserMask = std::make_shared<cv::cuda::GpuMat>(d_laserFinal);
+    result.d_markingPointMask = std::make_shared<cv::cuda::GpuMat>(d_markingFinal);
+    result.d_combinedMask = std::make_shared<cv::cuda::GpuMat>(d_structures);
+    result.d_step1_binary = std::make_shared<cv::cuda::GpuMat>(d_binary);
+    return result;
+}
+
+// 【批D·c1】1a 分离图逃生口（图族 B-3）：JMW_SEPGRAPH=0 干净关断（legacyPath/
+// 直发逐核——此前仅 JMW_SEPTIME 诊断旁路，非干净关断）；JMW_NOGRAPH=1 统一
+// 总闸优先级最高（c2 翻默认后产线一键全关/ABBA 对照臂）。static 一次性读。
+static bool sepGraphEnabled_() {
+    static const bool off = [] {
+        const char* ng = getenv("JMW_NOGRAPH");
+        if (ng != nullptr && ng[0] == '1') return true;
+        const char* e = getenv("JMW_SEPGRAPH");
+        return e != nullptr && e[0] == '0';
+    }();
+    return !off;
 }
 
 LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
@@ -894,15 +1062,19 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
             }
             memcpy(h_grayPin_, grayImage.data, n);
         }
-        const bool diagMode = getenv("JMW_SEPTIME") != nullptr || !params_.useCudaGraph;
-        if (!diagMode && graphExec_) {
+        const bool graphOff = !sepGraphEnabled_();
+        const bool diagMode = getenv("JMW_SEPTIME") != nullptr;
+        if (!graphOff && !diagMode && graphExec_) {
             // 稳态：整管线一次提交（图内含 H2D 上传——pinned 源地址恒定）
             cudaGraphLaunch(graphExec_, cs);
             goto pipelineDone;   // 【P0 修复】防 fall-through 到 legacy 双执行
         } else if (!diagMode) {
             // 首帧：捕获完整序列（上传＋全部分步核），实例化后立即执行
-            // 【261027 捕获毒化根治】Global→Relaxed（同设备版口径——见下注）
-            cudaError_t ce = cudaStreamBeginCapture(cs, cudaStreamCaptureModeRelaxed);
+            // 【案件二修复】Global→ThreadLocal：Global 模式下捕获窗内进程级禁止
+            // cudaMalloc——fivechain 多线程并发首帧分配（1b/marker 等）撞窗即
+            // cv::Exception→terminate→abort(0xC0000409/param7)。捕获体单流单线程，
+            // ThreadLocal 语义等价且解除跨线程禁令（竞态消除）
+            cudaError_t ce = cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal);
             if (ce != cudaSuccess) goto legacyPath;
             {
                 const cv::Mat wrap(r, c, CV_8UC1, h_grayPin_);
@@ -917,6 +1089,12 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
             goto pipelineDone;
         }
         { legacyPath:;
+            // 【批D·c1 逃生口】SEPGRAPH=0/NOGRAPH=1 → 纯逐发零诊断开销
+            if (graphOff) {
+                const cv::Mat wrap(r, c, CV_8UC1, h_grayPin_);
+                d_inputBuffer.upload(wrap, stream);
+                executePipeline(stream, result.timings, /*recordEvents=*/false);
+            } else {
             cudaEventRecord(event_start_, cs);
             {
                 const cv::Mat wrap(r, c, CV_8UC1, h_grayPin_);
@@ -924,6 +1102,7 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separate(
             }
             cudaEventRecord(event_upload_done_, cs);
             executePipeline(stream, result.timings, /*recordEvents=*/true);
+            }
         }
         pipelineDone:;
 
@@ -983,17 +1162,19 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separateDev(
             a(d_inputBuffer); a(d_binary); a(d_structures); a(d_temp);
             a(d_survivor); a(d_laserRaw); a(d_markingRaw); a(d_discard);
             a(d_laserFinal); a(d_markingFinal);
-            warmup_rows_ = r; warmup_cols_ = c; warmed_up_ = true;
+            warmup_rows_=r; warmup_cols_=c; warmed_up_=true;
             if (graphExec_) { cudaGraphExecDestroy(graphExec_); graphExec_ = nullptr; }
             if (graph_) { cudaGraphDestroy(graph_); graph_ = nullptr; }
-            if (graphExecDev_) { cudaGraphExecDestroy(graphExecDev_); graphExecDev_ = nullptr; }
-            if (graphDev_) { cudaGraphDestroy(graphDev_); graphDev_ = nullptr; }
+        if (graphExecDev_) { cudaGraphExecDestroy(graphExecDev_); graphExecDev_ = nullptr; }
+        if (graphDev_) { cudaGraphDestroy(graphDev_); graphDev_ = nullptr; }
+            ++paramsEpoch_;   // 【N-6】尺寸重建——内部缓冲全体重分配（指针变化）
         }
         auto cs = cv::cuda::StreamAccessor::getStream(stream);
         const size_t n = static_cast<size_t>(r) * c;
 
-        const bool diagMode = getenv("JMW_SEPTIME") != nullptr || !params_.useCudaGraph;
-        if (!diagMode && graphExecDev_) {
+        const bool graphOff = !sepGraphEnabled_();
+        const bool diagMode = getenv("JMW_SEPTIME") != nullptr;
+        if (!graphOff && !diagMode && graphExecDev_) {
             // 稳态：D2D 入驻 + 一次 graphLaunch。
             // ⚠ 必须用 copyTo：源 GpuMat 可能带行距（pitch），按字节裸拷会压扁布局
             d_grayImage.copyTo(d_inputBuffer, stream);
@@ -1005,12 +1186,8 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separateDev(
             // 【WDDM 边界修复】同流前序图仍在飞时紧接 BeginCapture 会触发驱动
             // 崩溃——捕获仅每实例一次，排空等待代价可忽略
             stream.waitForCompletion();
-            // 【261027 捕获毒化根治】Global→Relaxed：Global 模式下捕获窗内任何
-            // 线程的 cudaMalloc（其它 lane 的 Warmup/懒分配）都是非法——一旦
-            // 撞上，异常从捕获中抛出、流永久滞留捕获态、全进程 CUDA 毒化
-            //（真机 18:44:57 崩溃链实证）。Relaxed 只录本流工作，跨线程分配
-            // 合法；图内容与 Global 逐位一致（对拍不受影响）
-            cudaError_t ce = cudaStreamBeginCapture(cs, cudaStreamCaptureModeRelaxed);
+            // 【案件二修复】Global→ThreadLocal（同 separate() 处，跨线程分配竞态）
+            cudaError_t ce = cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal);
             if (ce == cudaSuccess) {
                 executePipeline(stream, result.timings, /*recordEvents=*/false);
                 if (cudaStreamEndCapture(cs, &graphDev_) != cudaSuccess) graphDev_ = nullptr;
@@ -1023,11 +1200,17 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Impl::separateDev(
                 executePipeline(stream, result.timings, /*recordEvents=*/false);
             }
         } else {
-            // 诊断路径（与 host 版一致：逐核事件＋同步计时）
-            cudaEventRecord(event_start_, cs);
-            d_grayImage.copyTo(d_inputBuffer, stream);   // ⚠ copyTo 处理行距
-            cudaEventRecord(event_upload_done_, cs);
-            executePipeline(stream, result.timings, /*recordEvents=*/true);
+            // 诊断路径（与 host 版一致：逐核事件＋同步计时）；
+            // 【批D·c1 逃生口】SEPGRAPH=0/NOGRAPH=1 → 纯逐发零诊断开销
+            if (!graphOff) {
+                cudaEventRecord(event_start_, cs);
+                d_grayImage.copyTo(d_inputBuffer, stream);   // ⚠ copyTo 处理行距
+                cudaEventRecord(event_upload_done_, cs);
+                executePipeline(stream, result.timings, /*recordEvents=*/true);
+            } else {
+                d_grayImage.copyTo(d_inputBuffer, stream);
+                executePipeline(stream, result.timings, /*recordEvents=*/false);
+            }
         }
 
         result.success = true;

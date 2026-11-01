@@ -69,6 +69,12 @@ struct LaserMatchScanParamsV3 {
     int cascade_friend_minrows = 3;     // 友军合并：最少共享行数
     float cascade_spacing_px = 36.9f;   // 间距检查：相邻线距标定值（px，随机型标定）
     float cascade_spacing_tol = 0.55f;  // 间距检查：容差比例（×spacing_px）
+    // 【离面鬼影修复 2026-10-30】帧级视差一致性门：段级投票在曲线收敛区可把
+    // 整段投到错误线号（错配对视差系统性偏离主面 ~3+ 线距，本数据集实测
+    // −145px → 重建深度 +120~170mm 离面鬼影片）。门＝|对视差 − 全帧鲁棒中位
+    // 视差| > disp_gate_px 的对子丢弃（紧缩输出）。默认 false＝行为与原版一致。
+    bool disp_gate = false;
+    float disp_gate_px = 60.0f;
 
     void validate() const {
         if (match_threshold <= 0.0f)
@@ -93,6 +99,8 @@ struct LaserMatchScanParamsV3 {
             throw std::invalid_argument("LaserMatchScanParamsV3::cascade_friend_minrows must be >= 1");
         if (cascade_spacing_px <= 0.0f || cascade_spacing_tol <= 0.0f)
             throw std::invalid_argument("LaserMatchScanParamsV3::cascade_spacing_px/tol must be > 0");
+        if (disp_gate_px <= 0.0f)
+            throw std::invalid_argument("LaserMatchScanParamsV3::disp_gate_px must be > 0");
     }
 
     nlohmann::json toJson() const {
@@ -111,6 +119,8 @@ struct LaserMatchScanParamsV3 {
             {"cascade_friend_xpx", cascade_friend_xpx},
             {"cascade_friend_minrows", cascade_friend_minrows},
             {"cascade_spacing_px", cascade_spacing_px},
+            {"disp_gate", disp_gate},
+            {"disp_gate_px", disp_gate_px},
             {"cascade_spacing_tol", cascade_spacing_tol}
         };
     }
@@ -147,6 +157,10 @@ struct LaserMatchScanParamsV3 {
             p.cascade_spacing_px = j.at("cascade_spacing_px").get<float>();
         if (j.contains("cascade_spacing_tol"))
             p.cascade_spacing_tol = j.at("cascade_spacing_tol").get<float>();
+        if (j.contains("disp_gate"))
+            p.disp_gate = j.at("disp_gate").get<bool>();
+        if (j.contains("disp_gate_px"))
+            p.disp_gate_px = j.at("disp_gate_px").get<float>();
         if (p.cascade_elim && !p.conflict_reelect)
             p.conflict_reelect = true;   // 级联依赖 host 求解路径，隐含开启
         p.validate();
@@ -169,6 +183,7 @@ struct LaserMatchScanResultV3 {
     std::shared_ptr<cv::cuda::GpuMat> d_matched_line_ids;
     std::shared_ptr<cv::cuda::GpuMat> d_matched_track_ids;   // V3: per-pair track id
     int matchedCount = 0;
+    int dispGateDropped = 0;   // 【离面鬼影修复 2026-10-30】视差门丢弃对数
 
     // status 为 ping-pong 双缓冲当前帧视图（有效期同上）
     std::shared_ptr<cv::cuda::GpuMat> d_left_status;

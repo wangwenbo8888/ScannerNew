@@ -77,6 +77,15 @@ struct LaserMarkingSeparationCUDA::Impl {
     void executePipeline(cv::cuda::Stream& stream, MaskSeparationTimings& timings,
                          bool recordEvents = true);
 
+    // 【N-6·1a 三合一大图】裸发射口（executor 捕获窗专用——与 separateDev 图体
+    // 同源：D2D 入驻＋executePipeline 纯核序列，零事件）＋结果壳＋epoch
+    void emitPipelineBody(const cv::cuda::GpuMat& d_grayImage, cv::cuda::Stream& stream);
+    LaserMarkingSeparationResult makeShell() const;
+    uint64_t paramsEpoch_ = 0;   // 【N-6】setParams/尺寸重建/缓冲重建递增（大图签名）
+    const void* inputBufferPtr() const { return d_inputBuffer.ptr(); }
+    const void* laserMaskPtr() const { return d_laserFinal.ptr(); }
+    const void* markingMaskPtr() const { return d_markingFinal.ptr(); }
+
     const LaserMarkingSeparationParams& getParams() const { return params_; }
 };
 

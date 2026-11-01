@@ -203,7 +203,16 @@ void UndistortPointsCuda::Impl::Warmup(int maxPointCount) {
     float h_R[9];
     for (int i = 0; i < 9; ++i) h_R[i] = R_[i];
     d_R_.create(1, 9, CV_32FC1);
-    d_R_.upload(cv::Mat(1, 9, CV_32FC1, h_R));
+    // 261103 集成重放【G′·退役配套·沙盒补丁回植】：显式流上传＋同步——
+    // bare upload 走 legacy(NULL) 流，与并行其他流图捕获（1a sep/RLE 捕获窗）
+    // 互斥＝cudaErrorStreamCaptureUnsupported 竞态（沙盒 261028 实锤 ×30 崩
+    // 13/30 命中；生产 261103 集成后对拍首轮即现——本处 Warmup 上传为唯一
+    // 残留裸上传点，Execute 路径已带显式流）
+    {
+        cv::cuda::Stream st;
+        d_R_.upload(cv::Mat(1, 9, CV_32FC1, h_R), st);
+        st.waitForCompletion();
+    }
 
     warmed_up_ = true;
     warmup_pointCount_ = maxPointCount;

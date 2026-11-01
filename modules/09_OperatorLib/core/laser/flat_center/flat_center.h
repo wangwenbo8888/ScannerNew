@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <stdexcept>
@@ -168,11 +169,30 @@ public:
     /// 内核作设备计数界，如 interp ExecuteDeferred 的 dcnt）
     const int* GetDeviceCountPtr() const;
 
+    /// 【G′·三合一大图】裸发射口三件（harness FrontBigGraph 捕获窗专用——
+    /// 发射体与 flat 自图捕获体同源：参数块 memcpy＋PreSmooth/K1 Block 壳＋
+    /// stats D2H 并入图体；逐帧稳态只调 PrepareBigGraph（纯宿主写）＋图外
+    /// cudaGraphLaunch）：
+    /// 参数块 lazy 建＋h_params_ 刷新＋维度守卫置位（捕获帧/稳态帧均调用；
+    /// 返回 false＝参数块不可用＝大图臂永久回退）
+    bool PrepareBigGraph(const cv::cuda::GpuMat& d_grayImage,
+                         const cv::cuda::GpuMat& d_binaryMask);
+    bool EmitGraphBody(cv::cuda::Stream& stream);   ///< 发射体（仅捕获窗内；前置 Prepare 成功）
+    /// 延迟结果壳（容量宽视图＋提交级 success；与 extractFlatSubmit 尾段同构，
+    /// FinishDeferred 填真值）——大图路径每帧调用
+    StegerResult MakeDeferredShell();
+    /// 当前守卫维度三元组（harness 大图签名用；参数块未建返回 false）
+    bool GraphDims(int& rows, int& cols, int& bands) const;
+
     void Destroy();
     void Warmup(int rows, int cols);
     void Warmup(const WarmupConfig& config);
     void SetParams(const FlatCenterParams& params);
     const FlatCenterParams& GetParams() const;
+    /// 【G′·C4′ paramsEpoch_】参数/缓冲代际计数（F 批 fuseNeedRecapture_ 范式平移）：
+    /// SetParams／ensureBuffers 扩容／freeAll 时递增——harness 大图签名聚合消费
+    /// （epoch 变→毁图重捕）。回放运行期恒定（census/帧率中性）。
+    uint64_t GetParamsEpoch() const;
 
     /// 控制 host 侧 centerPoints 收集（D2H＋CPU 拷贝）。false=只出 GPU 视图
     /// （d_centerPoints/d_line_ids）。**默认 false**（沙箱速度口径；steger_fast

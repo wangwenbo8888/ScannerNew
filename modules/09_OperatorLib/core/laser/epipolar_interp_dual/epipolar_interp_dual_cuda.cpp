@@ -21,6 +21,8 @@ CALIB_DEFINE_LOG_TAG(06, EpipolarInterpDualCuda);
 
 #include "epipolar_interp_dual_cuda_pimpl.h"
 
+#include <opencv2/core/cuda_stream_accessor.hpp>
+
 EpipolarInterpDualCuda::EpipolarInterpDualCuda(const EpipolarInterpDualParams& params)
     : pImpl_(std::make_unique<Impl>(params))
 {
@@ -130,6 +132,32 @@ void EpipolarInterpDualCuda::SetParams(const EpipolarInterpDualParams& params) {
 
 const EpipolarInterpDualParams& EpipolarInterpDualCuda::GetParams() const {
     return pImpl_->GetParams();
+}
+
+uint64_t EpipolarInterpDualCuda::GetParamsEpoch() const {
+    return pImpl_->paramsEpoch_;
+}
+
+bool EpipolarInterpDualCuda::EmitDeferredBody(const cv::cuda::GpuMat& d_points,
+                                              const int* d_deviceCount,
+                                              cv::cuda::Stream& stream,
+                                              EpipolarInterpResult& result) {
+    return pImpl_->emitDeferredBody(
+        d_points, d_deviceCount,
+        cv::cuda::StreamAccessor::getStream(stream), result);
+}
+
+EpipolarInterpResult EpipolarInterpDualCuda::MakeBigShell() const {
+    EpipolarInterpResult r;
+    r.success = true;
+    r.message = "Success (scan mode, deferred big-graph)";
+    r.interpCount = -1;
+    return r;
+}
+
+void EpipolarInterpDualCuda::MarkBigInFlight(cv::cuda::Stream& stream) {
+    pImpl_->lastCs_ = cv::cuda::StreamAccessor::getStream(stream);
+    pImpl_->lastLinkAtCap_ = true;   // link 相位在大图体内（在飞）——FinishInterp 只建视图
 }
 
 std::string EpipolarInterpDualCuda::LastTimingBreakdown() const {

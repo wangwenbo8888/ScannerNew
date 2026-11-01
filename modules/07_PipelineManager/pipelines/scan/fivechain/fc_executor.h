@@ -25,6 +25,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cuda_runtime.h>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -256,24 +257,23 @@ public:
     /// 主线程收割第 curIdx 帧产物（F 通道按帧序产出——阻塞等待）
     bool collect(int curIdx, CycleProducts& out, std::string& err);
 
-    /// 261030 软停（不析构）：置停止位＋通道全关＋唤醒全部等待者——阻塞中的
-    /// collect() 解阻塞返回 false。调用方随后 join 自有线程、再 reset 析构
-    ///（原 stopRealtime 先 reset 后 join：收割线程可能在 collect 内阻塞，
-    /// 析构抽走脚下对象＝空指针成员读崩溃 0x748——先软停再 join 根治）
-    void requestStop();
-
     // —— 对账计数（P2 验收：七通道 elem 计数 vs totalCycles）——
     // 通道序：0=读 1=上传 2=A 3=B 4=C 5=D 6=E 7=F
     int chCount(int i) const { return chCount_[static_cast<size_t>(i)].load(); }
     int tombCount() const { return tombCount_.load(); }
-    // 261030 治理观测口（stopRealtime 链路诊断消费）
-    size_t zGateDrops() const { return zGateDrops_.load(std::memory_order_relaxed); }
-    size_t zLinePruned() const { return zLinePruned_.load(std::memory_order_relaxed); }
-    int linePlaneGateMm() const { return linePlaneGateMm_; }
     int inflightNow() const {
         std::lock_guard<std::mutex> lk(jobMtx_);
         return static_cast<int>(jobs_.size()) - static_cast<int>(jobFree_.size());
     }
+
+    // —— 生产侧治理观测口（261030/261031 系列修复，261103 集成重放）——
+    // 激光质量观测（stopRealtime 下路侧日志用）
+    size_t zGateDrops() const { return zGateDrops_.load(std::memory_order_relaxed); }
+    size_t zLinePruned() const { return zLinePruned_.load(std::memory_order_relaxed); }
+    int linePlaneGateMm() const { return linePlaneGateMm_; }
+    // 261030 软停（信号段——不含线程 join；stopAll 复用同款信号后追 join）
+    // 析构抽走脚下对象＝空指针成员读崩（0x748——先软停再 join 根治）
+    void requestStop();
 
 private:
     void readerLoop();
@@ -283,7 +283,11 @@ private:
     void chain1bLoop();   // CUDA链1b（splitChain1=1）：flat/undist/interp/v3前段→槽释放→RLE 拷出→推 A/D
     void markerLoop(int laneIdx);   // CPU链1（×lanes，idx%lanes 分派＋窃取）
     void regLoop();        // CPU链3（急取重排）
-    void chain2Loop();     // CPU链2（v3 后段＋CPU 重建）
+    void chain2Loop();     // CPU链2（v3 后段＋CPU 重建；全GPU臂＝整体匹配＋GPU 重建）
+    void ch2FullGpu_(FcJob* j);   // 【全GPU链2】ch2 消费体（cS_ 流：匹配→重建→D2H→E 块）
+    // 261030 激光帧质量门＋飞线剪枝（Z-IQR 弥散弃帧＋逐线离面剔点）——
+    // 分体/全GPU 两路共用；ids 可空（空＝仅 Z 门）【261103 集成重放件】
+    void applyLaserQualityGates_(FcJob* j, int slot, const int* ids);
     void fuseLoop();       // CUDA链2（到齐配对＋融合＋F 单点产出）
     void stopAll();
 
@@ -293,6 +297,9 @@ private:
     // 【前段提前提交】v3 提交段随 1b 提交相位（排水前）——容量视图＋设备计数
     // 尾闸；false＝未提交（执行器回退排水后整段旧路径）。env：JMW_V3DEFER=0 关
     bool submitV3FrontDeferred_(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls);
+    // 【批1·E3】容量提交核心（相位无关）：V3DEFER＝排水前 / V3POSTDEF＝排水后
+    // 立刻（消灭排水后到首笔提交的 GPU 空窗）——两臂共用同一提交体
+    bool submitV3FrontCapacity_(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls);
     void fcV3Front(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls);
 
     int acquireEBlock();
@@ -335,27 +342,82 @@ private:
 
     // —— 灰度环（d_grayLanes 复用为环；双保险槽释放——P4.5 后由 1b 侧驱动）——
     cv::cuda::Stream upS_, gS_, fS_;          // 上传流/1a 流/融合流
+    cudaStream_t fuseLowStream_ = nullptr;    // 【B2 修复】低优先级融合流原始句柄（wrap 不拥有）
     cv::cuda::Stream gS2_;                    // 【P4.5】1b 流（flat→undist→interp→前段）
     BoundedQueue ch1ab_;                      // 【P4.5】1a→1b 交接（Job*，容量 4）
-    cudaEvent_t evGate_ = nullptr;            // 1a→1b：lmask D2D＋RLE 入队完成（1b 流 wait）
+    cudaEvent_t evGate_ = nullptr;            // 1a→1b：lmask D2D＋RLE 入队完成（1b 流 wait）；
+                                               // 【N-2·事件合一】兼 RLE 落地事件（原 evRleRing_
+                                               // 并入——1b 早退兜底/尾拷/单线程臂 record 同源）
     std::atomic<int> gateFed_{-1};            // evGate_ 提交序（防 wait 捕获旧记录）
     // 【调优①】lmask 单槽→多槽环：1a(N) 写槽 N%S，1b(N-S) 为上一代读者——放松
     // 在飞距 1→S，解耦两流紧耦合（单槽时 1a(N) D2D 须等 1b(N-1) flat 完成）
     std::vector<cv::cuda::GpuMat> lmaskRingL_, lmaskRingR_;
+    // 【B5·事件合一】lmaskSlots_ = graySlots_（构造期对齐，默认 8）：环槽数与事件
+    // 槽必须同模——4 槽环×%8 事件＝上代读者被跳代覆写（红队B 竞态证明）。对齐后
+    // 灰槽/掩膜环同模同槽，evSlot_（1b 无条件按 idx%8 记录）升格双消费者：
+    // ① upload 灰槽复用闸 ② 1a 下一代 lmask D2D 覆写闸。evLmaskRing_ 退役删除。
     int lmaskSlots_ = 2;
-    std::vector<cudaEvent_t> evLmaskRing_;    // [S]：1b flat 入队后按槽 record（1a D2D 前 wait）
-    std::atomic<int> lmaskFed_{-1};           // evLmaskRing_ 提交序（1b 侧）
+    std::atomic<int> lmaskFed_{-1};   // 掩膜环提交序水位（1b 侧；B5 后守护 evSlot_ 记录序）
     // 【调优②】宿主侧等待统一 cv 阻塞（原自旋 yield×THREAD_PRIORITY_HIGHEST 双线程
     // 互踢＝WDDM 乒乓病理疑点——nsys/实测在案）；三个提交序计数器共用一把锁
     mutable std::mutex gateMtx_;
     std::condition_variable gateCv_;
     // 【P4.5】RLE 环形槽（设备＋锁页成环；1b 拷出计数闸门防 1a 越代覆写）
     std::vector<cv::cuda::GpuMat> dRleRingL_, dRleRingR_;
+    int* warmScratchD_ = nullptr;             // 【批1·E5】16B 预热垫（JMW_V3WARM 臂）
     int* rleCntRing_ = nullptr;               // 锁页 slots×2
-    int* rleRunsRing_ = nullptr;              // 锁页 slots×6cap
-    std::vector<cudaEvent_t> evRleRing_;      // per-slot（1a 记录→1b 事件同步）
-    std::atomic<int> rleCopied_{-1};          // 1b 已拷出的最大帧号（1a 入队闸门）
+    int* rleRunsRing_ = nullptr;               // 锁页 slots×6cap
+                                               // 【N-2】evRleRing_ 退役删除：稳态消费者为零
+                                               // （正常帧 RLE 落地由排水经 evGate_ 传递覆盖；
+                                               // 兜底/尾拷改等 evGate_——同流更后记录，语义等价）
+    std::atomic<int> rleCopied_{-1};           // 1b 已拷出的最大帧号（1a 入队闸门）
     int rleSlots_ = 4;
+    // 【批C·RLE 入图】每槽一图（JMW_RLEGRAPH=1 实验臂，构造器成员读取非 static
+    // ——gtest 进程内 _putenv A/B，K12）；捕获体＝gpuRleBuildSlotGraph 11 节点；
+    // 签名失配全毁重建（一槽失配＝槽槽失配——mask 是两眼全局属性）；attempts>8
+    // 永久回退；warm≥2 才首捕。rleSlots_ 钳位 [2,8] 与定容 array 对齐。
+    bool rleGraphArm_ = false;
+    bool rleGraphDisabled_ = false;
+    int  rleGraphAttempts_ = 0;
+    int  rleGraphWarm_ = 0;
+    std::array<cudaGraphExec_t, 8> rleGraphExec_{};
+    std::array<cudaGraph_t, 8>     rleGraph_{};
+    struct RleGraphSig {                       // 72B 无 padding（红队B 附验 PASS）
+        const uint8_t* mL; const uint8_t* mR;
+        int rows, cols; long long stepL, stepR;
+        const int *cnt, *runs, *runBL, *runBR;
+    };
+    std::array<RleGraphSig, 8> rleGraphSig_{};
+    std::array<bool, 8> rleGraphSigValid_{};
+    void fcEmitRleSlot_(FcJob* j, int rs);     // 图/逐发统一发射口（回退链核心）
+    void rleGraphInvalidateAll_();             // 排空→逐槽销毁→签名清（K4）
+    // 【N-6·1a 三合一大图】sep L/R＋lmask D2D＋RLE 三合一 per-slot（JMW_1AGRAPH=1
+    // 实验臂默认关；NOGRAPH 总闸优先）。前置＝构造期钉死 rleSlots_==graySlots_
+    //（rs↔灰环槽配对恒定→每槽图灰度指针稳定可捕）；K1 捕获窗零事件（evGate_
+    // record 图外常规——RLE 退守同模式）；签名＝sep 双实例 paramsEpoch_＋维度＋
+    // 灰环/lmask 环/RLE 环指针族；一槽失配＝槽槽失配（mask/灰环全局属性）
+    bool sepBigArm_ = false;
+    bool sepBigDisabled_ = false;
+    int  sepBigWarm_ = 0;
+    int  sepBigAttempts_ = 0;
+    struct SepBigSig {                          // 全 POD 无 padding
+        uint64_t epSepL, epSepR;
+        int rows, cols;
+        const void *grayL, *grayR;              // 灰环槽（rs 配对恒定）
+        const void *inBufL, *inBufR;            // sep 内部入驻缓冲
+        const void *lmaskL, *lmaskR;            // lmask 环槽
+        const void *laserL, *laserR, *markL, *markR;   // sep 产物
+        const int *cnt, *runs, *runBL, *runBR;  // RLE 环槽
+        int rleCap, rleWin;
+    };
+    std::array<cudaGraph_t, 8>     sepBig_{};
+    std::array<cudaGraphExec_t, 8> sepBigExec_{};
+    std::array<SepBigSig, 8> sepBigSig_{};
+    std::array<bool, 8> sepBigSigValid_{};
+    void sepBigInvalidateAll_();
+    /// 1a 大图统一口：waits＋签名＋稳态发射/捕获＋evGate/gateFed＋产物壳填充；
+    /// false＝本帧走 legacy 逐段路径（幂等——未发射任何前序）
+    bool trySubmit1aBig_(FcJob* j);
     int rleWin_ = 4096;                       // 【E7】RLE 按实拷窗口（钳 [64, rleCap_]）
     long rleNCnt_ = 0;                        // 【E7】行程数分布统计（落档 fc_summary）
     long long rleNSum_ = 0;
@@ -369,23 +431,47 @@ private:
 
     // —— E 锁页池 ——
     std::vector<float*> eBlocks_;
+    std::vector<float*> eDevBlocks_;           // 【N-4】mapped 设备指针（EZERO 臂）
+    bool eZero_ = false;                       // 【N-4】JMW_EZERO=1 零拷贝臂（构造器读）
     int eCapPts_;
     std::mutex eMtx_;
     std::condition_variable eCv_;
     std::vector<int> eFree_;
     std::atomic<int> eTruncPts_{0};
+    // 【离面鬼影修复 2026-10-30·观测⑦】五链视差门累计丢弃对数（析构期汇总打印）
+    std::atomic<long long> dispGateDropped_{0};
     cv::cuda::GpuMat d_pts_;                  // 融合上传设备中转（1×eCapPts CV_32FC3）
-    // 261030 激光帧质量门（Z 离散度——chain2 线程私有；幻影帧治理）
-    std::vector<float> zScratch_;             // Z 抽取 scratch（容量跨帧复用）
-    std::atomic<size_t> zGateDrops_{0};       // 质量门弃帧累计（观测出口）
-    std::atomic<size_t> zLinePruned_{0};      // 飞线剪枝点累计（chain2 统计）
 
     // —— fivechain 专属算子（温表/参数与 harness v3 同源）——
     std::unique_ptr<calib::LaserMatchScanSplitGpuV3> splitGpu_;
     std::unique_ptr<calib::LaserMatchScanSplitCpuV3> splitCpu_;
     calib::LaserReconstructParams reconP_;
-    int linePlaneGateMm_ = 0;                 // 261030 飞线门（0=关；config/env）
+    // 261030/261031 生产侧激光治理件（261103 集成重放）：质量门 scratch/计数
+    // ＋飞线门阈值（0=关；config operators.laser_reconstruct.linePlaneGateMm
+    // /env JMW_FC_LINEPLANE 覆盖）
+    std::vector<float> zScratch_;             // Z 离散 scratch（质量门帧内专用）
+    std::vector<int> zIdsScratch_;            // 线号 host scratch（飞线门 fullGpu 路下载）
+    std::atomic<size_t> zGateDrops_{0};       // 弥散弃帧累计（观测口径）
+    std::atomic<size_t> zLinePruned_{0};      // 飞线剪枝点累计（chain2 统计）
+    int linePlaneGateMm_ = 0;                 // 飞线门（0=关；config/env）
     std::unique_ptr<calib::LaserReconstructCpu> reconCpu_;
+
+    // —— 【全GPU链2】整体版 GPU 匹配＋GPU 重建（本沙箱主实验；JMW_FC_FULLGPU=0
+    //    回退分体旧路径——单 exe A/B）——
+    //    架构：1b 侧 interp 结果 D2D 搬入环槽（同流 FIFO 保证先拷后覆写；槽闸门
+    //    防越代覆写）→ ch2 线程在自己的 cS_ 流上跑整体匹配＋GPU 重建＋D2H 直写
+    //    E 锁页块（融合只吃 xyz 浮点——与分体路径 E 块契约一致）。
+    bool fullGpu_ = false;
+    std::unique_ptr<calib::LaserMatchScanCudaV3> matchFull_;
+    std::unique_ptr<calib::LaserReconstructCuda> reconGpu_;
+    cv::cuda::Stream cS_;                    // ch2 全GPU臂专用流
+    std::vector<cv::cuda::GpuMat> iRingPtsL_, iRingIdsL_, iRingPtsR_, iRingIdsR_;
+    std::vector<cudaEvent_t> evIRing_;       // 每槽：1b D2D 完成事件（ch2 cS_ 流等待）
+    int iRingSlots_ = 16;                    // ≥ 在飞上限×2（1b 入队闸门永不实等）
+    int iRingCap_ = 65536;
+    std::atomic<int> iRingDone_{-1};         // ch2 已消费的最大帧号（1b 入队闸门）
+    std::vector<cv::Point2f> hML_, hMR_;     // 视差统计小拷贝（线程驻留零分配）
+    std::vector<double> hDisp_;
 
     // —— 配对（CUDA链2；界=在飞上限）——
     // 【零分配】定容环替代 std::map（容量=maxInflight+8；读帧闸保证在飞≤界）
@@ -395,6 +481,12 @@ private:
     std::vector<FcJob*> reorder_;
     int nextFuse_;
     int nextRegIdx_;                          // CPU链3 急取重排游标
+
+    // —— 【P0-b】融合滞后读 + E 块滞后回收 ——
+    bool fusePending_ = false;                // ExecuteDeferred 已受理、Finish 未落地
+    std::deque<int> pendingERelease_;         // H2D 在飞待回收槽（下一帧 Finish 时批量释放）
+    void drainPendingERelease_();             // 前置条件：fS_ 流已排干（Finish/wait 之后调用）
+    void accountFuseResult_(const calib::LaserCloudFuseCudaResult& res);
 
     // —— 对账计数 ——
     std::array<std::atomic<int>, 8> chCount_{};

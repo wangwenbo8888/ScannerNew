@@ -98,6 +98,17 @@ LaserCloudFuseCudaResult LaserCloudFuseCuda::Execute(const cv::cuda::GpuMat& d_p
     return Execute(d_points3d, R, T, stream);
 }
 
+// 【P0-b·滞后读】两段式转发
+LaserCloudFuseCudaResult LaserCloudFuseCuda::ExecuteDeferred(const cv::cuda::GpuMat& d_points3d,
+                                 const cv::Matx33d& R, const cv::Vec3d& T,
+                                 cv::cuda::Stream& stream) {
+    return pImpl_->executeDeferredImpl(d_points3d, R, T, stream);
+}
+
+LaserCloudFuseCudaResult LaserCloudFuseCuda::Finish() {
+    return pImpl_->finishImpl();
+}
+
 // ============================================================
 // Destroy
 // ============================================================
@@ -183,6 +194,7 @@ void LaserCloudFuseCuda::SetParams(const LaserCloudFuseCUDAParams& params) {
     params.validate();
     pImpl_->params_ = params;
     pImpl_->warmed_up_ = false;
+    pImpl_->fuseNeedRecapture_ = true;   // 【批F】voxelSize/threshold 入签名——重捕
 }
 
 const LaserCloudFuseCUDAParams& LaserCloudFuseCuda::GetParams() const {

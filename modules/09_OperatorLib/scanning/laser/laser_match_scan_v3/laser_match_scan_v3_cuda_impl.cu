@@ -393,6 +393,23 @@ bool LaserMatchScanCudaV3::Impl::SetTempTable(
     if (tableLoaded_ && srcHold_ && srcHold_.get() == table.get()) {
         return true;
     }
+    // 【P0-e·双管表位·宿主半】B 槽命中：仅切槽（host swap，零转换）。
+    // uploadedSrc_（设备真值）不动——单 GPU 表下切槽后首笔 SetCurrentTemperature
+    // 自会按需重传；设备侧双表位见 pimpl 契约注记（P2-4）。
+    if (tableLoadedB_ && srcHoldB_ && srcHoldB_.get() == table.get()) {
+        srcHold_.swap(srcHoldB_);
+        tempTable_.swap(tempTableB_);
+        std::swap(tableLoaded_, tableLoadedB_);
+        CALIB_LOG_DEBUG("SetTempTable(): slot B hit (host swap, no re-convert)");
+        return true;
+    }
+    // 新表（第三张起逐出 B 槽＝LRU-2；B 为空时直接入住）：旧活动槽内容让位
+    // 给 B 槽保留（若与新表同源则上面已命中），随后走原转换路径入活动槽。
+    if (srcHold_ && srcHold_.get() != table.get()) {
+        srcHoldB_ = srcHold_;
+        tempTableB_ = std::move(tempTable_);
+        tableLoadedB_ = tableLoaded_;
+    }
     srcHold_ = table;
     uploadedSrc_ = nullptr;   // 新表：GPU 上传状态失效（下次 SetCurrentTemperature 重传）
 
@@ -3569,7 +3586,7 @@ LaserMatchScanResultV3 LaserMatchScanCudaV3::Impl::process(
                     growOnly(d_grp_row_, leftCount, CV_32SC1);
                     growOnly(d_grp_sum_, leftCount, CV_64FC1);
                     growOnly(d_grp_cnt_, leftCount, CV_32SC1);
-                    d_grp_off_.create(1, segCount + 1, CV_32SC1);
+                    growOnly(d_grp_off_, segCount + 1, CV_32SC1);   // 【P0-c】定容防乒乓（原 create(1,segCount+1) 随帧波动逐帧重分配）
                     {
                         int grid = (segCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
                         kernelSegGroupCountsV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
@@ -3838,10 +3855,14 @@ LaserMatchScanResultV3 LaserMatchScanCudaV3::Impl::process(
                     cv::Mat sm(1, leftCount, CV_32SC1, h_segmap.data());
                     d_seg_map_.upload(sm, stream);
                 }
-                d_seg_votes_.create(1, segCount * V3_MAX_LIDS, CV_32SC1);
-                d_seg_res_.create(1, segCount * V3_MAX_LIDS, CV_32SC1);
-                d_seg_winner_.create(1, segCount, CV_32SC1);
-                d_seg_drop_.create(1, segCount, CV_32SC1);
+                if (d_seg_votes_.cols < segCount * V3_MAX_LIDS)   // 【P0-c】只增不减
+                    d_seg_votes_.create(1, segCount * V3_MAX_LIDS, CV_32SC1);
+                if (d_seg_res_.cols < segCount * V3_MAX_LIDS)
+                    d_seg_res_.create(1, segCount * V3_MAX_LIDS, CV_32SC1);
+                if (d_seg_winner_.cols < segCount)   // 【P0-c】只增不减防乒乓
+                    d_seg_winner_.create(1, segCount, CV_32SC1);
+                if (d_seg_drop_.cols < segCount)
+                    d_seg_drop_.create(1, segCount, CV_32SC1);
                 cudaMemsetAsync(d_seg_votes_.ptr<int>(), 0, segCount * V3_MAX_LIDS * sizeof(int), cuda_stream);
                 cudaMemsetAsync(d_seg_res_.ptr<int>(), 0, segCount * V3_MAX_LIDS * sizeof(int), cuda_stream);
                 cudaMemsetAsync(d_seg_winner_.ptr<int>(), -1, segCount * sizeof(int), cuda_stream);
@@ -3913,10 +3934,14 @@ LaserMatchScanResultV3 LaserMatchScanCudaV3::Impl::process(
                         d_seg_map_.upload(sm, stream);
                     }
                     // 重跑投票（原票算在异常段表上）——精确尺寸
-                    d_seg_votes_.create(1, segCount * V3_MAX_LIDS, CV_32SC1);
-                    d_seg_res_.create(1, segCount * V3_MAX_LIDS, CV_32SC1);
-                    d_seg_winner_.create(1, segCount, CV_32SC1);
-                    d_seg_drop_.create(1, segCount, CV_32SC1);
+                    if (d_seg_votes_.cols < segCount * V3_MAX_LIDS)   // 【P0-c】只增不减
+                        d_seg_votes_.create(1, segCount * V3_MAX_LIDS, CV_32SC1);
+                    if (d_seg_res_.cols < segCount * V3_MAX_LIDS)
+                        d_seg_res_.create(1, segCount * V3_MAX_LIDS, CV_32SC1);
+                    if (d_seg_winner_.cols < segCount)   // 【P0-c】只增不减防乒乓
+                        d_seg_winner_.create(1, segCount, CV_32SC1);
+                    if (d_seg_drop_.cols < segCount)
+                        d_seg_drop_.create(1, segCount, CV_32SC1);
                     cudaMemsetAsync(d_seg_votes_.ptr<int>(), 0,
                                     segCount * V3_MAX_LIDS * sizeof(int), cuda_stream);
                     cudaMemsetAsync(d_seg_res_.ptr<int>(), 0,
@@ -4160,21 +4185,25 @@ LaserMatchScanResultV3 LaserMatchScanCudaV3::Impl::process(
             }
             if (!noBd_) tBreakdown_ += fmt::format(" P7orP5={:.2f}", tSince_());
             {
+                // 【P0-c】防乒乓：容量只增不减＋hpin 直写 memcpyAsync
+                // （原 cv::Mat upload 会按 host 尺寸隐式缩容 GpuMat，
+                //  下帧前段 :3273 又 create(kSegCap) 扩容＝每帧 2×(malloc+free)）
                 if (d_seg_winner_.cols < segCount)
                     d_seg_winner_.create(1, segCount, CV_32SC1);
                 if (d_seg_drop_.cols < segCount)
                     d_seg_drop_.create(1, segCount, CV_32SC1);
-                // 【瘦身】pageable→pinned（cv::Mat upload 有驱动 staging＋隐式同步）
                 int* wPin = hpin_winner_.ensure(segCount);
                 for (int s = 0; s < segCount; ++s)
                     wPin[s] = winner[static_cast<size_t>(s)];
-                const cv::Mat w(1, segCount, CV_32SC1, wPin);
-                d_seg_winner_.upload(w, stream);
+                cudaMemcpyAsync(d_seg_winner_.ptr<int>(), wPin,
+                                static_cast<size_t>(segCount) * sizeof(int),
+                                cudaMemcpyHostToDevice, cuda_stream);
                 int* dPin = hpin_drop_.ensure(segCount);
                 for (int s = 0; s < segCount; ++s)
                     dPin[s] = dropped[static_cast<size_t>(s)] ? 1 : 0;
-                const cv::Mat d(1, segCount, CV_32SC1, dPin);
-                d_seg_drop_.upload(d, stream);
+                cudaMemcpyAsync(d_seg_drop_.ptr<int>(), dPin,
+                                static_cast<size_t>(segCount) * sizeof(int),
+                                cudaMemcpyHostToDevice, cuda_stream);
             }
         } else {
             // 【P0-1 修复】非 relect 路径：segCount 从 GPU 回读（此前恒 0 → grid=0 崩）

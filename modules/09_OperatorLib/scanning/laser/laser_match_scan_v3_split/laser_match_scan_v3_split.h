@@ -58,6 +58,19 @@ struct LaserMatchSplitFrontV3 {
     std::vector<int> cardRidx;           // totalCards：右排序系索引
 
     std::string timing;      // 前段阶段耗时串（观测用）
+
+    // 【批2·A1】字段级复位：与 `*this = LaserMatchSplitFrontV3{}` 逐字段等价，
+    // 唯一差别＝8 个 vector 只 clear() 不释放容量（string clear 亦不缩容）——
+    // 池化调用方（FcJob::resetForReuse）的容量复用不再被入口整体复位击穿，
+    // 稳态帧零堆分配（实测 copyout 0.6-0.7ms 中 malloc/缺页占大头）。
+    void resetKeepCapacity() {
+        success = false;
+        message.clear();
+        timing.clear();
+        leftCount = 0; rightCount = 0; segCount = 0; segOverflow = 0; totalCards = 0;
+        leftPts.clear(); leftTracks.clear(); segmap.clear(); leftStatus.clear();
+        cardPtr.clear(); cardLid.clear(); cardRx.clear(); cardRidx.clear();
+    }
 };
 
 // ============================================================================

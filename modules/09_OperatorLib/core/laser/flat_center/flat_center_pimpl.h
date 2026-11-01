@@ -10,6 +10,7 @@
 
 #include <opencv2/core/cuda.hpp>
 #include <cuda_runtime.h>
+#include <cstdint>
 #include <memory>
 #include <atomic>
 
@@ -17,11 +18,41 @@
 
 namespace calib {
 
+// 【P2-2 参数块】图模式动态参数块（host pinned 镜像 h_params_ ↔ 设备 d_params_）：
+// 图内首节点 memcpyAsync(h→d)，内核经 Block 壳单指针读——指针/标量/维度每次
+// graphLaunch 现读，lane 轮转输入指针随之自愈（烧死缺陷修复）；grid 维度仍
+// 需图外比对毁图重捕（维度烧进 gridDim，参数块救不了）。
+struct FlatParamsDev {
+    // 指针区（8B 对齐优先）
+    const unsigned char* g;        // 灰度
+    size_t gstep;
+    const unsigned char* mask;     // 二值掩膜（8U）
+    size_t mstep;
+    float* gs;                     // 预平滑缓冲（d_gsmooth_）
+    float2* coords;                // 出点
+    int* ids;                      // 出线号
+    int* stats;                    // [0]=count [1..6]=drop
+    // 维度区
+    int rows, cols;
+    int maxpts;
+    // 标量阈值区
+    float low_thresh, half_ratio, plateau_ratio;
+    int plateau_min_w;
+    float min_contrast, outlier_gate, max_line_width;
+    int min_run;
+    int smooth3;                   // 0/1（int 化保结构体布局确定）
+};
+
 struct FlatCenterExtractor::Impl {
     static constexpr int kLabelBins = 4096;   // K2 hist bins（照 steger 硬编码常量；
                                               // FlatCenterParams.maxLabels 仅契约兼容）
 
     FlatCenterParams params_;
+
+    // 【G′·C4′ paramsEpoch_】参数/缓冲代际（SetParams/ensureBuffers 扩容/freeAll
+    // 递增）——harness 大图签名聚合消费（F 批 fuseNeedRecapture_ 范式平移）；
+    // 稳态恒定零开销
+    uint64_t paramsEpoch_ = 0;
 
     // —— 设备缓冲（ensureBuffers 按 capacity 分配，grow-only）——
     float2* d_coords_ = nullptr;   // 源序出点 (x, cy)
@@ -56,6 +87,14 @@ struct FlatCenterExtractor::Impl {
     // JMW_FLATGRAPH=0 关闭（对照）；SetParams 触发重建
     cudaGraph_t flatGraph_ = nullptr;
     cudaGraphExec_t flatGraphExec_ = nullptr;
+
+    // 【P2-2 参数块】h_params_ pinned（memcpy 节点每次 launch 现读 src）；
+    // d_params_ lazy 分配（仅图模式首帧——默认关臂零开销 census 逐位不变），
+    // freeAll 释放（毁图同步）。图捕获时维度三元组记录：任一变化→毁图重捕。
+    FlatParamsDev* d_params_ = nullptr;
+    FlatParamsDev* h_params_ = nullptr;   // cudaMallocHost pinned 镜像
+    int graph_rows_ = 0, graph_cols_ = 0, graph_bands_ = 0;
+    bool paramsFailed_ = false;           // 参数块分配失败→本实例图模式永久回退
 
     bool bench_ = false;
     bool collectHostPoints_ = false;   // 默认 false（设计 §0：默认只出 GPU 视图）
@@ -96,6 +135,14 @@ struct FlatCenterExtractor::Impl {
     void ensureBuffers(int rows, int cols);
     void createEvents();
     void freeAll();
+
+    // 【G′·三合一大图】裸发射口（harness FrontBigGraph 捕获窗专用）
+    bool prepareBigGraph_(const cv::cuda::GpuMat& d_grayImage,
+                          const cv::cuda::GpuMat& d_binaryMask);
+    void refreshGraphParams_(const cv::cuda::GpuMat& d_grayImage,
+                             const cv::cuda::GpuMat& d_binaryMask);
+    bool emitGraphBody_(cudaStream_t cs);
+    StegerResult makeDeferredShell_();
 };
 
 } // namespace calib

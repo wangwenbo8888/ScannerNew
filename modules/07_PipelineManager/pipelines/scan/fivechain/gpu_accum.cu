@@ -155,8 +155,30 @@ __global__ void rleEmitKernel(const unsigned char* __restrict__ mask, int step, 
     }
 }
 
-// 【E7】公共段：两眼 RLE 内核发射＋counts D2H（整包版/窗口版共用；调用方
-// 线程常驻暂存——countsL/R、offsL/R、total）
+// 【E7】公共段：两眼 RLE 内核发射＋counts D2H（整包版/窗口版共用）
+// 【批C·K6 修复】线程暂存改按需增长（原 thread_local 只首见 H 分配——H 变更
+// 越界隐患）；图化后 realloc 由上层签名全毁重建防护（旧图持旧指针，H 变＝
+// 签名失配永不发射——fc_executor RleGraphSig 契约）
+namespace {
+struct RleScratch {
+    int* rows = nullptr;    // 4H ints（counts+offs ×2 眼）
+    int  allocH = 0;        // 已分配容量（行数）
+    int* total = nullptr;   // 2 ints（device）
+};
+thread_local RleScratch t_rle;
+} // namespace
+static bool rleEnsureScratch(int H) {
+    if (H > t_rle.allocH) {
+        int* n = nullptr;
+        if (cudaMalloc(&n, sizeof(int) * 4 * (size_t)H) != cudaSuccess) return false;
+        if (t_rle.rows) cudaFree(t_rle.rows);
+        t_rle.rows = n;
+        t_rle.allocH = H;
+    }
+    if (!t_rle.total && cudaMalloc(&t_rle.total, 2 * sizeof(int)) != cudaSuccess)
+        return false;
+    return t_rle.rows != nullptr && t_rle.total != nullptr;
+}
 static void rleEnqueueKernelsAndCounts(const cv::cuda::GpuMat& maskL,
                                        const cv::cuda::GpuMat& maskR,
                                        cv::cuda::GpuMat& runBufL,
@@ -164,30 +186,24 @@ static void rleEnqueueKernelsAndCounts(const cv::cuda::GpuMat& maskL,
                                        int capRuns, int* countsPinned,
                                        cudaStream_t cs) {
     const int H = maskL.rows, W = maskL.cols;
-    // 临时区：rowCounts/rowOffsets ×2 眼＋total ×2（调用方线程常驻）
-    static thread_local int* tRows = nullptr;     // 4H ints（counts+offs ×2 眼）
-    static thread_local int* tTotal = nullptr;    // 2 ints（device）
-    if (tRows == nullptr) {
-        cudaMalloc(&tRows, sizeof(int) * 4 * H);
-        cudaMalloc(&tTotal, 2 * sizeof(int));
-    }
-    int* countsL = tRows;
-    int* offsL = tRows + H;
-    int* countsR = tRows + 2 * H;
-    int* offsR = tRows + 3 * H;
+    if (!rleEnsureScratch(H)) return;   // 分配失败＝零发射（与旧版失败面同构）
+    int* countsL = t_rle.rows;
+    int* offsL = t_rle.rows + H;
+    int* countsR = t_rle.rows + 2 * H;
+    int* offsR = t_rle.rows + 3 * H;
     rleCountKernel<<<H, 256, 0, cs>>>(maskL.ptr<unsigned char>(),
                                       static_cast<int>(maskL.step), W, countsL);
     rleCountKernel<<<H, 256, 0, cs>>>(maskR.ptr<unsigned char>(),
                                       static_cast<int>(maskR.step), W, countsR);
-    rleScanKernel<<<1, 32, 0, cs>>>(countsL, offsL, H, tTotal + 0);
-    rleScanKernel<<<1, 32, 0, cs>>>(countsR, offsR, H, tTotal + 1);
+    rleScanKernel<<<1, 32, 0, cs>>>(countsL, offsL, H, t_rle.total + 0);
+    rleScanKernel<<<1, 32, 0, cs>>>(countsR, offsR, H, t_rle.total + 1);
     rleEmitKernel<<<H, 256, 0, cs>>>(maskL.ptr<unsigned char>(),
                                      static_cast<int>(maskL.step), W, offsL,
                                      runBufL.ptr<int>(), capRuns);
     rleEmitKernel<<<H, 256, 0, cs>>>(maskR.ptr<unsigned char>(),
                                      static_cast<int>(maskR.step), W, offsR,
                                      runBufR.ptr<int>(), capRuns);
-    cudaMemcpyAsync(countsPinned, tTotal, 2 * sizeof(int), cudaMemcpyDeviceToHost, cs);
+    cudaMemcpyAsync(countsPinned, t_rle.total, 2 * sizeof(int), cudaMemcpyDeviceToHost, cs);
 }
 
 bool gpuMaskRleBoth(const cv::cuda::GpuMat& maskL, const cv::cuda::GpuMat& maskR,
@@ -218,6 +234,55 @@ bool gpuMaskRleBothWindowed(const cv::cuda::GpuMat& maskL, const cv::cuda::GpuMa
                     sizeof(int) * 3 * w, cudaMemcpyDeviceToHost, cs);
     cudaMemcpyAsync(runsPinned + 3 * capRuns, runBufR.ptr<int>(),
                     sizeof(int) * 3 * w, cudaMemcpyDeviceToHost, cs);
+    return true;
+}
+
+// ============================================================================
+// 【批C·RLE 入图】槽图构建——与 gpuMaskRleBothWindowed 逐节点同构（9 节点：
+// 6 内核＋counts D2H＋窗口 runs D2H×2）。事件留图外（退守变体定案——头注释）。
+// ============================================================================
+bool gpuRleBuildSlotGraph(const cv::cuda::GpuMat& maskL, const cv::cuda::GpuMat& maskR,
+                          cv::cuda::GpuMat& runBufL, cv::cuda::GpuMat& runBufR,
+                          int capRuns, int window,
+                          int* countsPinned, int* runsPinned,
+                          cv::cuda::Stream& stream,
+                          cudaGraph_t* outGraph, cudaGraphExec_t* outExec) {
+    cudaStream_t cs = cv::cuda::StreamAccessor::getStream(stream);
+    const int H = maskL.rows;
+    // 捕获禁 malloc——暂存前置（K6 修复配套：按需增长）
+    if (!rleEnsureScratch(H)) return false;
+    // WDDM 铁规：捕获时刻本流不得在飞（调用点在飞＝本帧分离图×2＋lmask D2D
+    // ——impl:1138-1140 前科同形态）
+    if (cudaStreamSynchronize(cs) != cudaSuccess) return false;
+
+    *outGraph = nullptr;
+    *outExec = nullptr;
+    cudaGraph_t g = nullptr;
+    if (cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal) != cudaSuccess)
+        return false;
+    bool ok = true;
+    rleEnqueueKernelsAndCounts(maskL, maskR, runBufL, runBufR, capRuns, countsPinned, cs);
+    const int w = std::max(0, std::min(window, capRuns));
+    if (cudaMemcpyAsync(runsPinned, runBufL.ptr<int>(),
+                        sizeof(int) * 3 * w, cudaMemcpyDeviceToHost, cs) != cudaSuccess)
+        ok = false;
+    if (ok && cudaMemcpyAsync(runsPinned + 3 * (size_t)capRuns, runBufR.ptr<int>(),
+                              sizeof(int) * 3 * w, cudaMemcpyDeviceToHost, cs) != cudaSuccess)
+        ok = false;
+
+    cudaError_t endErr = cudaStreamEndCapture(cs, &g);
+    if (!ok || endErr != cudaSuccess || !g) {
+        if (g) cudaGraphDestroy(g);   // 残余图销毁（流已回常规态——零残留）
+        return false;
+    }
+    cudaGraphExec_t ge = nullptr;
+    if (cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0) != cudaSuccess || !ge) {
+        if (ge) cudaGraphExecDestroy(ge);
+        cudaGraphDestroy(g);
+        return false;
+    }
+    *outGraph = g;
+    *outExec = ge;
     return true;
 }
 

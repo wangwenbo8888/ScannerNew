@@ -7,6 +7,7 @@
 
 #include <opencv2/core/cuda.hpp>
 #include <atomic>
+#include <cstdint>
 #include <string>
 
 #include <cuda_runtime.h>
@@ -61,6 +62,11 @@ struct EpipolarInterpDualCuda::Impl {
     int warmup_count_ = 0;
     int old_device_id_ = 0;
 
+    // 【G′·C4′ paramsEpoch_】参数/缓冲代际（SetParams/ensureCapacity 扩容/Destroy
+    // 递增）——harness 大图签名聚合消费（F 批 fuseNeedRecapture_ 范式平移）；
+    // 稳态恒定零开销
+    uint64_t paramsEpoch_ = 0;
+
     // 【测速工具】最近一次 Execute 的阶段耗时串（gpu_stress 聚合用）
     std::string last_breakdown_;
     // 【速度优化】段链接计时事件持久化（原每圈 create/destroy）
@@ -113,6 +119,14 @@ struct EpipolarInterpDualCuda::Impl {
     // 逐位一致（链内核仅写自身槽位、valid 区父链索引恒 < 自身 < count，不读
     // 尾部）；false＝发射失败（调用方回退精确版）
     bool submitLinkAtCapacity(cudaStream_t cs);
+    /// 【P2-4】link 相位发射体（parent＋13 轮 jump，容量定值）——无分配、无
+    /// 中途错误检查（图捕获体内禁 cudaGetLastError 退出作废捕获）；逐发路径
+    /// 与图捕获体共用同一发射序＝零数值差异来源
+    void launchLinkPhase(cudaStream_t cs);
+    /// 【G′】大图裸发射体（捕获窗内）：scan 序列＋link 相位＋FinishInterp 上下文
+    bool emitDeferredBody(const cv::cuda::GpuMat& d_points,
+                          const int* d_deviceCount, cudaStream_t cs,
+                          EpipolarInterpResult& result);
 
     void Warmup(int pointCount);
     void SetParams(const EpipolarInterpDualParams& params);

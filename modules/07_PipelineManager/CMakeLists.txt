@@ -18,6 +18,7 @@ set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
 if(BUILD_CUDA)
     list(APPEND JMW_PM_PIPELINE_SRCS pipelines/scan/fivechain/fc_executor.cpp
          pipelines/scan/fivechain/gpu_accum.cu
+         pipelines/scan/fivechain/cuda_census.cpp
          pipelines/scan/fivechain/ccl_cpu.cpp
          pipelines/scan/fivechain/steger_dedup_merge.cpp
          pipelines/scan/fivechain/triangle_index.cpp)  # 五链执行器族
@@ -46,6 +47,28 @@ if(BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
     target_link_libraries(PipelineManager PUBLIC CUDA::cudart)
     target_compile_definitions(PipelineManager PUBLIC JMW_BUILD_CUDA=1)
+    # 261103 集成重放：CUDA API 协作探查（cuda_census——JMW_CENSUS=1 运行时
+    # 开关；CUPTI 头/库随 CUDA 12.6 extras，与沙盒 fullgpu 同法接线；运行时
+    # cupti64_*.dll 随构建拷至 bin/<配置>——缺则测试/运行 0xc0000135）
+    if(TARGET CUDA::cupti)
+        target_link_libraries(PipelineManager PUBLIC CUDA::cupti)
+    else()
+        target_include_directories(PipelineManager PUBLIC
+            "${CUDAToolkit_ROOT_DIR}/extras/CUPTI/include")
+        target_link_libraries(PipelineManager PUBLIC
+            "${CUDAToolkit_ROOT_DIR}/extras/CUPTI/lib64/cupti.lib")
+    endif()
+    file(GLOB JMW_CUPTI_DLL "${CUDAToolkit_ROOT_DIR}/extras/CUPTI/lib64/cupti64_*.dll")
+    if(NOT JMW_CUPTI_DLL)
+        file(GLOB JMW_CUPTI_DLL
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/extras/CUPTI/lib64/cupti64_*.dll")
+    endif()
+    if(JMW_CUPTI_DLL)
+        add_custom_command(TARGET PipelineManager POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${JMW_CUPTI_DLL}" "$<TARGET_FILE_DIR:PipelineManager>"
+            COMMENT "拷 CUPTI 运行时 DLL")
+    endif()
 endif()
 
 # ============================================================================

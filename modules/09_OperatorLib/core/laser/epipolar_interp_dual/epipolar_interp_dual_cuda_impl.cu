@@ -670,12 +670,21 @@ __global__ void dualScanLinkParent(
 }
 
 // pointer doubling 一轮（森林求根）
+// 【T0 附带修复 2026-10-28】容量发射尾闸：launchLinkPhase 版 n=capacity_，而
+// LinkParent 对 i≥*d_count 直退不写——label 尾区 [count,cap) 为未初始化垃圾，
+// 本内核 `d_label[d_label[i]]` 读垃圾索引＝野指针读（compute-sanitizer 实锤
+// dualScanLinkJump+0xa0，地址越界 4.6GB——RleOverflow 后内存复用带旧值触发；
+// 真实回放侥幸安全＝新鲜页零化＋cap 恒定）。P2-0 家族（脏显存类）。有效链
+// 恒在 [0,count)（parent 仅指向前方 j<i），尾闸零语义影响；nullptr＝精确 N
+// 路径行为逐字不变（n 即有效界）。
 __global__ void dualScanLinkJump(
     int* __restrict__ d_label,
-    int n)
+    int n,
+    const int* __restrict__ d_count = nullptr)
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+    if (d_count != nullptr && i >= *d_count) return;   // 尾闸（同 LinkParent）
     d_label[i] = d_label[d_label[i]];
 }
 
@@ -770,6 +779,7 @@ void EpipolarInterpDualCuda::Impl::ensureCapacity(int pointCount) {
     d_line_begin_.create(1, pointCount + 1, CV_32SC1);
     d_line_ids_map_.create(1, pointCount, CV_32SC1);
     capacity_ = pointCount;
+    ++paramsEpoch_;   // 【G′·C4′】容量扩容——GpuMat 重分配指针变化
 }
 
 // ============================================================================
@@ -811,13 +821,29 @@ EpipolarInterpResult EpipolarInterpDualCuda::Impl::ExecuteDeferred(
     const int gridN = (cap + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const float2* dPts = d_points.ptr<float2>();
 
-    // ══ 【G1·石头二】图路径（JMW_1BGRAPH=1；全定容→参数跨帧稳定→一次性捕获）══
-    static const bool gOn_ = (getenv("JMW_1BGRAPH") != nullptr
-                              && getenv("JMW_1BGRAPH")[0] != '0');
-    if (gOn_ && !graphDisabled_ && ++graphWarmCalls_ >= 2 && cap == capacity_
-        && radix_cap_ >= cap && d_radix_temp_ != nullptr && d_cub_temp_ != nullptr) {
+    // ══ 【G1·石头二】图路径（【批D·c2】默认开——JMW_1BGRAPH=0 显式关；
+    //    JMW_NOGRAPH=1 总闸优先；全定容→参数跨帧稳定→一次性捕获）══
+    // 【P2-1·2026-10-27】激活修复：原前置含 radix_cap_/d_radix_temp_/d_cub_temp_
+    // 三子句——三者仅在 legacy/同步路径分配，延迟链恒 nullptr → 图路径从未激活
+    // （死路径，档案在案）。删除三子句：graphWarmCalls_≥2 保证 scan 缓冲已建、
+    // cap==capacity_ 保证参数稳定；若延迟链内部确需 radix/cub，捕获会失败并走
+    // graphDisabled_ 永久回退（安全，有 WARN 日志可辨）。
+    static const bool gOn_ = [] {
+        const char* ng = getenv("JMW_NOGRAPH");
+        if (ng != nullptr && ng[0] == '1') return false;
+        const char* e = getenv("JMW_1BGRAPH");
+        return !(e != nullptr && e[0] == '0');   // 默认开；显式 =0 关
+    }();
+    if (gOn_ && !graphDisabled_ && params_.scan_link_dx > 0.0f
+        && ++graphWarmCalls_ >= 2 && cap == capacity_) {
         // 前置：缓冲已预热（graphWarmCalls_≥2 且无待分配分支）——捕获区内禁 cudaMalloc
         if (deferGraphExec_ == nullptr) {
+            // 【P2-4】link 缓冲前置（捕获窗内禁 create——grow-only 惰性建提前；
+            // cap==capacity_ 门保证与 submitLinkAtCapacity 同尺寸）
+            if (d_link_parent_.cols < cap) {
+                d_link_parent_.create(1, cap, CV_32SC1);
+                d_link_label_.create(1, cap, CV_32SC1);
+            }
             // 捕获（一次性）：ThreadLocal＋先排空本流（mask_sep 铁规：在飞前序与
             // BeginCapture 交叠＝驱动崩溃案在案）。排空含本帧 flat/undist——一次性代价。
             cudaStreamSynchronize(cs);
@@ -825,13 +851,18 @@ EpipolarInterpResult EpipolarInterpDualCuda::Impl::ExecuteDeferred(
             if (cerr == cudaSuccess)
                 cerr = submitScanSequence(cs, dPts, d_deviceCount, cap, gridN)
                            ? cudaSuccess : cudaErrorUnknown;
+            // 【P2-4 前置收割】link 相位并入捕获体（容量定值 1 parent＋13 jump＝
+            // 28 launches/帧图化；host 分支/回读依赖为零＝合法静态节点链；发射序
+            // 与逐发 submitLinkAtCapacity 同源 launchLinkPhase＝零数值差异）
+            if (cerr == cudaSuccess)
+                launchLinkPhase(cs);
             cudaGraph_t g = nullptr;
             if (cerr == cudaSuccess) cerr = cudaStreamEndCapture(cs, &g);
             if (cerr == cudaSuccess && g != nullptr)
                 cerr = cudaGraphInstantiate(&deferGraphExec_, g, nullptr, nullptr, 0);
             if (cerr == cudaSuccess && deferGraphExec_ != nullptr) {
                 deferGraph_ = g;
-                CALIB_LOG_INFO("ExecuteDeferred graph captured (nodes≈44, cap={})", cap);
+                CALIB_LOG_INFO("ExecuteDeferred graph captured (nodes≈58=scan44+link14, cap={})", cap);
             } else {
                 if (g != nullptr) cudaGraphDestroy(g);
                 deferGraphExec_ = nullptr;
@@ -844,9 +875,9 @@ EpipolarInterpResult EpipolarInterpDualCuda::Impl::ExecuteDeferred(
         if (deferGraphExec_ != nullptr) {
             cudaError_t lerr = cudaGraphLaunch(deferGraphExec_, cs);
             if (lerr == cudaSuccess) {
-                // 【WDDM 滴流修复】链接相位不在图内——图发射后按容量补提交
-                //（与逐发路径同藏进排水等待；失败则 FinishInterp 回退精确版）
-                lastLinkAtCap_ = submitLinkAtCapacity(cs);
+                // 【P2-4】link 相位已入图（图内 parent＋13 jump）——发射成功即在飞，
+                // FinishInterp 只建视图（lastLinkAtCap_ 语义与逐发版一致）
+                lastLinkAtCap_ = true;
                 result.success = true;
                 result.message = "Success (scan mode, deferred graph)";
                 result.interpCount = -1;
@@ -1038,10 +1069,10 @@ void EpipolarInterpDualCuda::Impl::FinishInterp(EpipolarInterpResult& result) {
 }
 
 // 【WDDM 滴流修复·2026-10-23】链接相位按容量提交：网格/轮数用 capacity_
-// （grow-only 缓冲提到容量）。正确性＝有效区 [0,count) 输出与精确 N 版逐位
+//（grow-only 缓冲提到容量）。正确性＝有效区 [0,count) 输出与精确 N 版逐位
 // 一致：dualScanLinkParent 仅写 d_parent[i]/d_label[i] 自身槽位、父候选
 // j<i 恒落在 valid 区（行序升序前提），尾部线程读写不越过自身；跳转轮
-// pointer-doublling 链深 ≤行数 8192→13 轮封顶与精确版同界。尾部 [count,cap)
+// pointer-doublLing 链深 ≤行数 8192→13 轮封顶与精确版同界。尾部 [count,cap)
 // 为陈旧数据，其标签演化无害——下游只消费 colRange(0,count)。
 bool EpipolarInterpDualCuda::Impl::submitLinkAtCapacity(cudaStream_t cs) {
     const int cap = capacity_;
@@ -1050,6 +1081,43 @@ bool EpipolarInterpDualCuda::Impl::submitLinkAtCapacity(cudaStream_t cs) {
         d_link_parent_.create(1, cap, CV_32SC1);
         d_link_label_.create(1, cap, CV_32SC1);
     }
+    launchLinkPhase(cs);
+    return cudaGetLastError() == cudaSuccess;
+}
+
+// ============================================================================
+// 【G′·三合一大图】裸发射体——harness FrontBigGraph 捕获窗专用
+// （submitScanSequence＋launchLinkPhase 与逐发/自图捕获体同源同序；前置＝
+// cap==capacity_（缓冲全建）＋link 缓冲已暖；捕获区禁分配故无惰性建）
+// ============================================================================
+bool EpipolarInterpDualCuda::Impl::emitDeferredBody(
+    const cv::cuda::GpuMat& d_points, const int* d_deviceCount, cudaStream_t cs,
+    EpipolarInterpResult& result) {
+    if (d_points.empty() || d_deviceCount == nullptr || d_points.type() != CV_32FC2)
+        return false;
+    const int cap = d_points.rows * d_points.cols;
+    if (cap < 2 || cap != capacity_) return false;   // 前置：定容（缓冲已建）
+    if (params_.scan_link_dx > 0.0f && d_link_parent_.cols < cap)
+        return false;                                 // 前置：link 缓冲已暖
+    const int gridN = (cap + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    lastCs_ = cs;
+    if (!submitScanSequence(cs, d_points.ptr<float2>(), d_deviceCount, cap, gridN))
+        return false;
+    if (params_.scan_link_dx > 0.0f) {
+        launchLinkPhase(cs);   // link 相位（容量定值；与自图捕获体同源）
+        lastLinkAtCap_ = true;
+    }
+    result.success = true;
+    result.message = "Success (scan mode, deferred big-graph)";
+    result.interpCount = -1;
+    return true;
+}
+
+// 【P2-4】link 相位发射体：与逐发路径同源同序（原中段错误检查移除——固定
+// 网格/无动态状态，发射配置错误由尾部 sticky 错误统一捕获，失败路径语义
+// 不变＝回退精确版）。
+void EpipolarInterpDualCuda::Impl::launchLinkPhase(cudaStream_t cs) {
+    const int cap = capacity_;
     const int gridL = (cap + 255) / 256;
     // 有效界＝扫描序列的设备输出计数（d_scan_ccount_——插值会补点，输出数可
     // 大于输入数，勿用 d_deviceCount！同流 FIFO 保证 parent 执行时计数已写好）
@@ -1058,13 +1126,12 @@ bool EpipolarInterpDualCuda::Impl::submitLinkAtCapacity(cudaStream_t cs) {
         params_.epipolar_row_step, params_.scan_link_dx,
         params_.scan_link_gap_rows, d_link_parent_.ptr<int>(),
         d_link_label_.ptr<int>(), d_scan_ccount_.ptr<int>());
-    if (cudaGetLastError() != cudaSuccess) return false;
     int rounds = 1;
     while ((1 << rounds) < cap) ++rounds;
     if (rounds > 13) rounds = 13;   // 与精确版同封顶（链深 ≤ 行数 8192）
     for (int r = 0; r < rounds; ++r)
-        dualScanLinkJump<<<gridL, 256, 0, cs>>>(d_link_label_.ptr<int>(), cap);
-    return cudaGetLastError() == cudaSuccess;
+        dualScanLinkJump<<<gridL, 256, 0, cs>>>(
+            d_link_label_.ptr<int>(), cap, d_scan_ccount_.ptr<int>());   // 【T0 修复】同 count 尾闸
 }
 
 // Scan 计数后共尾（精确 N 已知）：视图＋段链接＋result 填真值——Execute（legacy）
@@ -1158,6 +1225,23 @@ void EpipolarInterpDualCuda::Impl::Warmup(int pointCount) {
     if (warmed_up_ && warmup_count_ == pointCount) return;
 
     ensureCapacity(pointCount);
+    // 【G′·退役配套】Scan 行桶族/紧缩/link 缓冲一并预建（submitScanSequence 内
+    // 的惰性 create 提前——大图裸发射路径捕获区禁分配；对既有调用方零行为
+    // 变化＝同尺寸 create no-op）
+    d_rowb_hist_.create(1, kInterpRows + 1, CV_32SC1);
+    d_rowb_start_.create(1, kInterpRows + 1, CV_32SC1);
+    d_rowb_cursor_.create(1, kInterpRows, CV_32SC1);
+    d_rowb_cnt_.create(1, kInterpRows, CV_32SC1);
+    d_rowb_cbase_.create(1, kInterpRows, CV_32SC1);
+    d_scan_out_pts_.create(1, SCAN_MAX_ROWS * SCAN_SLOTS, CV_32FC2);
+    d_scan_out_fids_.create(1, SCAN_MAX_ROWS * SCAN_SLOTS, CV_32SC1);
+    d_scan_cpts_.create(1, SCAN_MAX_ROWS * SCAN_SLOTS, CV_32FC2);
+    d_scan_cfids_.create(1, SCAN_MAX_ROWS * SCAN_SLOTS, CV_32SC1);
+    d_scan_ccount_.create(1, 1, CV_32SC1);
+    if (d_link_parent_.cols < pointCount) {
+        d_link_parent_.create(1, pointCount, CV_32SC1);
+        d_link_label_.create(1, pointCount, CV_32SC1);
+    }
     warmed_up_ = true;
     warmup_count_ = pointCount;
     CALIB_LOG_INFO("Warmup(): ensured GPU capacity for {} points", pointCount);
@@ -1603,10 +1687,19 @@ void EpipolarInterpDualCuda::Impl::SetParams(const EpipolarInterpDualParams& par
         cudaSetDevice(params_.deviceId);
     }
 
+    // 【P2-4 加固】SetParams 后图内参数已陈旧（1B 图烧死 epipolar_row_step/
+    // window/max_x_diff/scan_x_gap；入图后含 scan_link_dx/gap_rows）——毁图
+    // 重捕＋暖机计数归零（惰性分配在捕获窗外重新摊平）。缓冲不毁（设备未变，
+    // 指针稳定，图重建即得新参数）。
+    if (deferGraphExec_) { cudaGraphExecDestroy(deferGraphExec_); deferGraphExec_ = nullptr; }
+    if (deferGraph_) { cudaGraphDestroy(deferGraph_); deferGraph_ = nullptr; }
+    graphWarmCalls_ = 0;
+
     warmed_up_ = false;
     warmup_count_ = 0;
+    ++paramsEpoch_;   // 【G′·C4′】SetParams——烧值标量变化（1B 自图已毁＋大图签名失配）
 
-    CALIB_LOG_INFO("SetParams(): params updated, warmup reset");
+    CALIB_LOG_INFO("SetParams(): params updated, graph destroyed for re-capture, warmup reset");
 }
 
 void EpipolarInterpDualCuda::Impl::Destroy() {
@@ -1654,5 +1747,6 @@ void EpipolarInterpDualCuda::Impl::Destroy() {
     lines_cap_ = 0;
     warmed_up_ = false;
     warmup_count_ = 0;
+    ++paramsEpoch_;   // 【G′·C4′】缓冲全释——指针失效
     CALIB_LOG_INFO("Destroy() completed");
 }

@@ -244,13 +244,20 @@ LaserReconstructResult LaserReconstructCuda::Impl::Execute(
 
         cudaStream_t cuda_stream = cv::cuda::StreamAccessor::getStream(stream);
 
-        cudaError_t cpy_err = cudaMemcpyToSymbolAsync(c_Qf, Qf, sizeof(Qf), 0,
-                                                       cudaMemcpyHostToDevice, cuda_stream);
-        if (cpy_err != cudaSuccess) {
-            result.success = false;
-            result.message = std::string("cudaMemcpyToSymbolAsync failed: ") + cudaGetErrorString(cpy_err);
-            CALIB_LOG_ERROR("Execute(): {}", result.message);
-            return result;
+        // 【P0-d】Q 内容比对缓存：会话级不变则零上传（原每帧 64B symbol 重传）。
+        // 变 Q 场景（--temp-compare 双温档/换标定）自动失效重传——正确性守卫。
+        // 实例级成员（非静态）：实例/上下文重建自动失效，防陈旧 symbol。
+        if (!q_cached_ || memcmp(q_cache_, Qf, sizeof(Qf)) != 0) {
+            cudaError_t cpy_err = cudaMemcpyToSymbolAsync(c_Qf, Qf, sizeof(Qf), 0,
+                                                           cudaMemcpyHostToDevice, cuda_stream);
+            if (cpy_err != cudaSuccess) {
+                result.success = false;
+                result.message = std::string("cudaMemcpyToSymbolAsync failed: ") + cudaGetErrorString(cpy_err);
+                CALIB_LOG_ERROR("Execute(): {}", result.message);
+                return result;
+            }
+            memcpy(q_cache_, Qf, sizeof(Qf));
+            q_cached_ = true;
         }
 
         const int grid = (count + BLOCK_SIZE - 1) / BLOCK_SIZE;

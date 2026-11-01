@@ -142,6 +142,17 @@ struct LaserMatchScanCudaV3::Impl {
     double uploadedTemp_ = 0.0;           // 已上传档温
     float uploadedRowStep_ = -1.0f;       // 已上传时 rowStep（setParams 改 rowStep 置失效）
 
+    // ── 【P0-e·双管表位·宿主半】第二槽转换缓存（2026-10-27 预埋）：
+    //    双管分表（cmttSidecarEven 启用）后逐帧 A/B 交替注入时，B 槽的 O(N)
+    //    转换结果驻留不重算——SetTempTable 仅做槽切换（host vector swap）。
+    //    【设备半的契约（P2-4 硬输入）】GPU 侧仍单表：切槽后 SetCurrentTemperature
+    //    会重传 140MB×2（uploadedSrc_ 全局唯一＝设备真值）——彻底免重传需 P2-4
+    //    建"每槽设备表＋设备侧 active 选择器"（图内按帧选位，签名只记表位集合）。
+    //    LRU-2 语义：第三张新表逐出最久未用槽。
+    std::shared_ptr<const LaserPlaneMapTempTable> srcHoldB_;      // 槽 B 源
+    std::vector<TempTableEntry> tempTableB_;                      // 槽 B 转换结果
+    bool tableLoadedB_ = false;                                   // 槽 B 有效位
+
     // ── 排序链（32bit 键：row<<19 | xq@1/256px）──
     cv::cuda::GpuMat d_left_keys_in_;        // CV_32SC1 (unsigned int)
     cv::cuda::GpuMat d_left_keys_out_;
@@ -280,10 +291,25 @@ cv::cuda::GpuMat d_seg_res_;            // segCount*V3_MAX_LIDS, CV_32SC1（段�
     cv::cuda::GpuMat d_tight_rx_;           // totalCards CV_32FC1（hitRx）
     cv::cuda::GpuMat d_tight_ridx_;         // totalCards CV_32SC1（右排序系索引）
     PinnedBuf<int> hpin_cardoff_;           // N
+    PinnedBuf<int> hpin_ccn_last_;          // 1（【批0·C(c)】card_count 末元素 4B 直拷）
     PinnedBuf<int> hpin_tight_lid_;         // T
     PinnedBuf<float> hpin_tight_rx_;        // T
     PinnedBuf<int> hpin_tight_ridx_;        // T
     PinnedBuf<int> hpin_lefttrack_;         // N（左点 track D2H）
+    // ── 【批N-1·D2H 交织】FinishFront 专用（3 笔 D2H→1 笔；数值同源仅布局改）：
+    //    统一交织暂存 d_ff_pack_ 三段布局（int 槽单位）：
+    //      [0, off1)                  = tight 段，off1=3*totalCards（0=空卡帧），
+    //                                 12B/card [lid, rx(__float_as_int), ridx]
+    //      [off1, off2)               = int 包段，off2=off1+3*leftCount，
+    //                                 12B/行 [segmap, leftStatus, track]
+    //      [off2a, off2a+2*leftCount) = 左点段，每 float2 占 2 int 槽；
+    //                                 off2a=(off2 奇数? off2+1 : off2)——段内 8B
+    //                                 对齐（GpuMat 基址 256B 对齐）；总槽数
+    //                                 totalInts=off2a+2*leftCount。
+    //    宿主读：左点段 reinterpret_cast<const cv::Point2f*>(h+off2a)；
+    //    legacy executeFront 路径仍用上方 SoA 三缓冲 ──
+    cv::cuda::GpuMat d_ff_pack_;            // 统一交织暂存（单笔 D2H 源）
+    PinnedBuf<int> hpin_ff_pack_;           // 同尺寸 pinned 镜像（单笔 D2H 宿主）
     // 【v3全GPU化·Step10 设备化】终局统计设备侧归约（替四路 D2H ~240KB＋宿主扫描）
     cv::cuda::GpuMat d_stats_;             // 1×8 CV_32SC1：[0]droppedSegs [1]noCard
     PinnedBuf<int> hpin_stats_;            //   [2]noMap [3]rightUsed [4]emptySegs [5]noWinnerCard [6]matched

@@ -53,6 +53,9 @@ void FlatCenterExtractor::Impl::freeAll() {
     if (h_stats_)   { cudaFreeHost(h_stats_); h_stats_ = nullptr; }
     if (h_coords_)  { cudaFreeHost(h_coords_); h_coords_ = nullptr; }
     if (h_ids_)     { cudaFreeHost(h_ids_); h_ids_ = nullptr; }
+    // 【P2-2 参数块】随容量缓冲同毁（freeAll⟺毁图绑定不变）
+    if (d_params_)  { cudaFree(d_params_); d_params_ = nullptr; }
+    if (h_params_)  { cudaFreeHost(h_params_); h_params_ = nullptr; }
     if (events_ready_) {
         cudaEventDestroy(ev_start_);
         cudaEventDestroy(ev_scan_);
@@ -60,6 +63,7 @@ void FlatCenterExtractor::Impl::freeAll() {
         events_ready_ = false;
     }
     capacity_ = 0;
+    ++paramsEpoch_;   // 【G′·C4′】freeAll——缓冲/参数块全释，指针失效
 }
 
 void FlatCenterExtractor::Impl::ensureBuffers(int rows, int cols) {
@@ -67,6 +71,8 @@ void FlatCenterExtractor::Impl::ensureBuffers(int rows, int cols) {
     if (cap <= capacity_) return;
     freeAll();
     capacity_ = cap;
+    ++paramsEpoch_;   // 【G′·C4′】容量扩容——输出/暂存指针全体重建（freeAll 已 +1，
+                      // 此处再 +1 显式标记「新容量就位」代际；重复递增无害）
     cudaMalloc(&d_coords_, capacity_ * sizeof(float2));
     cudaMalloc(&d_ids_, capacity_ * sizeof(int));
     cudaMalloc(&d_stats_, 7 * sizeof(int));
@@ -104,10 +110,11 @@ __device__ __forceinline__ float ReadGS(const unsigned char* g, size_t step,
 // 【flat 优化 C+D】全图预平滑（逐位同 ReadGS(smooth3)：三抽头＋边界钳位，
 // (a+b+c)*(1.f/3.f) 同式逐位一致）＋(0,0,0) 线程顺带清 d_stats_ 7 槽（吸收
 // 独立 memsetAsync——本内核无人碰 stats，K1 流序在后见零初值）
-__global__ void FlatPreSmoothKernel(const unsigned char* __restrict__ g,
-                                    size_t step, int rows, int cols,
-                                    float* __restrict__ out,
-                                    int* __restrict__ stats7) {
+// 【P2-2】体提公共函数：值参内核（逐发路径）与参数块内核（图路径）同源同体。
+__device__ __forceinline__ void flatPreSmoothBody(
+    const unsigned char* __restrict__ g, size_t step, int rows, int cols,
+    float* __restrict__ out, int* __restrict__ stats7)
+{
     if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
         for (int i = 0; i < 7; ++i) stats7[i] = 0;
     }
@@ -121,42 +128,58 @@ __global__ void FlatPreSmoothKernel(const unsigned char* __restrict__ g,
         * (1.f / 3.f);
 }
 
+__global__ void FlatPreSmoothKernel(const unsigned char* __restrict__ g,
+                                    size_t step, int rows, int cols,
+                                    float* __restrict__ out,
+                                    int* __restrict__ stats7) {
+    flatPreSmoothBody(g, step, rows, cols, out, stats7);
+}
+
+// 【P2-2 参数块壳】图路径用：全部实参经 d_params_ 现读（memcpy 节点刷新）
+__global__ void FlatPreSmoothKernelBlock(const FlatParamsDev* __restrict__ p) {
+    flatPreSmoothBody(p->g, p->gstep, p->rows, p->cols, p->gs, p->stats);
+}
+
+// 【P2-2】K1 上下文：值参壳（逐发路径，签名不变）与参数块壳（图路径）共用
+// 同一 flatCenterK1Body——单源保逐位一致。
+struct FlatK1Ctx {
+    const unsigned char* d_gray; const void* d_mask;
+    size_t gray_step, mask_step; int rows, cols;
+    float low_thresh, half_ratio, plateau_ratio; int plateau_min_w;
+    float min_contrast, outlier_gate, max_line_width; int min_run; bool smooth3;
+    const float* d_gs;
+    float2* d_coords; int* d_ids;
+    int* d_stats; int max_points;
+};
+
 template <bool MASK8>
-__global__ void FlatCenterK1(
-    const unsigned char* __restrict__ d_gray, const void* __restrict__ d_mask,
-    size_t gray_step, size_t mask_step, int rows, int cols,
-    float low_thresh, float half_ratio, float plateau_ratio, int plateau_min_w,
-    float min_contrast, float outlier_gate, float max_line_width, int min_run,
-    bool smooth3,
-    const float* __restrict__ d_gs,   /* 【flat 优化 C】预平滑缓冲（空＝现算） */
-    float2* __restrict__ d_coords, int* __restrict__ d_ids,
-    int* __restrict__ d_stats /*[0]=count [1..6]=六门 drop*/, int max_points)
+__device__ __forceinline__ void flatCenterK1Body(const FlatK1Ctx& c)
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    if (x >= cols) return;
+    if (x >= c.cols) return;
     // 【速度·列带切分（设计 §4 备选，规则钉死）】1 线程/列在 1400 行图像上仅
     // ~106 warp 全核延迟饥饿（实测 7.8ms/眼）；gridDim.y＝带数（8）：
     //   ① 段归段首所在带；② owner 向下走到段尾（越带无上界）；
     //   ③ 带首行若为上方延续段（maskAt(top−1)==label）跳到段尾不处理
     const int bands = gridDim.y;
-    const int bh = (rows + bands - 1) / bands;
+    const int bh = (c.rows + bands - 1) / bands;
     const int top = blockIdx.y * bh;
-    if (top >= rows) return;
-    const int bot = min(rows, top + bh);
-    int* d_count = d_stats;
-    int* d_drop  = d_stats + 1;   // [0]minRun [1]contrast [2]bright [3]edge [4]gate [5]width
+    if (top >= c.rows) return;
+    const int bot = min(c.rows, top + bh);
+    int* d_count = c.d_stats;
+    int* d_drop  = c.d_stats + 1;   // [0]minRun [1]contrast [2]bright [3]edge [4]gate [5]width
     // 列内段扫描（Flat：连续 mask>0；ByLabel：连续同 label，label 变化即断段）
     auto maskAt = [&](int y) -> int {
         if (MASK8)
             return reinterpret_cast<const unsigned char*>(
-                reinterpret_cast<const char*>(d_mask) + (size_t)y * mask_step)[x] > 0 ? 1 : 0;
+                reinterpret_cast<const char*>(c.d_mask) + (size_t)y * c.mask_step)[x] > 0 ? 1 : 0;
         return reinterpret_cast<const int*>(
-            reinterpret_cast<const char*>(d_mask) + (size_t)y * mask_step)[x];
+            reinterpret_cast<const char*>(c.d_mask) + (size_t)y * c.mask_step)[x];
     };
     // 【flat 优化 C】统一读口：预平滑缓冲优先（逐位同 ReadGS）；空＝原路径现算
     auto RD = [&](int yy) -> float {
-        if (d_gs) return d_gs[(size_t)yy * cols + x];
-        return ReadGS(d_gray, gray_step, rows, x, yy, smooth3);
+        if (c.d_gs) return c.d_gs[(size_t)yy * c.cols + x];
+        return ReadGS(c.d_gray, c.gray_step, c.rows, x, yy, c.smooth3);
     };
     int y = top;
     while (y < bot) {
@@ -164,14 +187,14 @@ __global__ void FlatCenterK1(
         if (label <= 0) { ++y; continue; }
         if (y == top && top > 0 && maskAt(top - 1) == label) {
             // 规则③：上方延续段（段首在上面的带）——跳到段尾，由 owner 处理
-            while (y < rows && maskAt(y) == label) ++y;
+            while (y < c.rows && maskAt(y) == label) ++y;
             continue;
         }
         const int y0 = y;
-        while (y < rows && maskAt(y) == label) ++y;          // 段=[y0, y)，段尾可越带
+        while (y < c.rows && maskAt(y) == label) ++y;          // 段=[y0, y)，段尾可越带
         const int y1 = y, len = y1 - y0;
         // —— 门1：minRun ——
-        if (len < min_run) { atomicAdd(&d_drop[0], 1); continue; }
+        if (len < c.min_run) { atomicAdd(&d_drop[0], 1); continue; }
         // —— 统计遍第一小趟：vmax/yPeak（自上而下严格 > 首个）/vmin ——
         float vmax = -1.f, vmin = 1e9f; int yPeak = y0;
         for (int k = y0; k < y1; ++k) {
@@ -180,24 +203,24 @@ __global__ void FlatCenterK1(
             if (v < vmin) vmin = v;
         }
         // —— 门2/3：bright / contrast（后者兼保 Σw>0 防除零）——
-        if (vmax < low_thresh) { atomicAdd(&d_drop[2], 1); continue; }
-        if (vmax - vmin < min_contrast) { atomicAdd(&d_drop[1], 1); continue; }
+        if (vmax < c.low_thresh) { atomicAdd(&d_drop[2], 1); continue; }
+        if (vmax - vmin < c.min_contrast) { atomicAdd(&d_drop[1], 1); continue; }
         // —— 统计遍第二小趟：pw 对最终 vmax ——
-        const float thr_p = plateau_ratio * vmax;
+        const float thr_p = c.plateau_ratio * vmax;
         int pw = 0;
         for (int k = y0; k < y1; ++k)
             if (RD(k) >= thr_p) ++pw;
         float cy;
         float yL = 0.f, yR = 0.f;
-        if (pw >= plateau_min_w) {
+        if (pw >= c.plateau_min_w) {
             // —— 平顶：半高中点。沿搜索界＝图像界 ∩ [yPeak−32, yPeak+33)（不钳段界：
             //    掩膜细缝/段端处越段读原始灰度找沿；±32 窗保证不跨入相邻线）——
-            const int lo = max(0, yPeak - 32), hi = min(rows, yPeak + 33);
+            const int lo = max(0, yPeak - 32), hi = min(c.rows, yPeak + 33);
             // 【链级对拍修正 2026-10-19】半高＝相对背景（vmin＋halfRatio×对比度）——
             // 真实帧背景 ≈110-120（非 0），绝对半高 0.5×vmax 只比背景高 ~12 灰度级，
             // 线稍暗/背景稍亮即找不到沿（edge 弃 30%）；背景基准后合成图（bg=0）
             // 数值不变，现有用例全部兼容。
-            const float half = vmin + half_ratio * (vmax - vmin);
+            const float half = vmin + c.half_ratio * (vmax - vmin);
             int k = yPeak;
             while (k >= lo && RD(k) >= half) --k;
             if (k < lo) { atomicAdd(&d_drop[3], 1); continue; }                  // edge
@@ -211,7 +234,7 @@ __global__ void FlatCenterK1(
             const float h0 = RD(j);
             yR = (j - 1) + (h1 - half) / (h1 - h0); // crossing ∈ [j-1, j)
             // —— 宽度门（v4.4）：半高全宽超限 → 弃点（0=off 不拦）——
-            if (max_line_width > 0.f && (yR - yL) > max_line_width) {
+            if (c.max_line_width > 0.f && (yR - yL) > c.max_line_width) {
                 atomicAdd(&d_drop[5], 1); continue;
             }
             cy = 0.5f * (yL + yR);
@@ -229,9 +252,9 @@ __global__ void FlatCenterK1(
         //    细缝不误杀；段内全剖面重心因半剖面偏移会误杀 ⑦）；尖峰＝改比锚点
         //    |yPeak−cy|（cy=段内重心，与重心比恒 0；兼捕侧翼亮斑拉锚构型）——
         float ref;
-        if (pw >= plateau_min_w) {
+        if (pw >= c.plateau_min_w) {
             float sw = 0.f, sy = 0.f;
-            const int b0 = max(0, (int)yL), b1 = min(rows - 1, (int)yR + 1);
+            const int b0 = max(0, (int)yL), b1 = min(c.rows - 1, (int)yR + 1);
             for (int k = b0; k <= b1; ++k) {
                 const float w = RD(k) - vmin;
                 if (w > 0.f) { sw += w; sy += k * w; }
@@ -240,16 +263,52 @@ __global__ void FlatCenterK1(
         } else {
             ref = static_cast<float>(yPeak);
         }
-        if (fabsf(cy - ref) > outlier_gate) { atomicAdd(&d_drop[4], 1); continue; } // gate
+        if (fabsf(cy - ref) > c.outlier_gate) { atomicAdd(&d_drop[4], 1); continue; } // gate
         // 防御（v4.3）：cy=两沿中点必在括号内，段界防御废除；留图像界＋NaN 防护
-        if (!(cy == cy) || cy < -1.f || cy > rows) { atomicAdd(&d_drop[4], 1); continue; }
+        if (!(cy == cy) || cy < -1.f || cy > c.rows) { atomicAdd(&d_drop[4], 1); continue; }
         // —— 出点 (x, cy)（整数格点口径，同 steger kernel px=x+t·nx）——
         const int idx = atomicAdd(d_count, 1);
-        if (idx < max_points) {
-            d_coords[idx] = make_float2(static_cast<float>(x), cy);
-            d_ids[idx] = label;
+        if (idx < c.max_points) {
+            c.d_coords[idx] = make_float2(static_cast<float>(x), cy);
+            c.d_ids[idx] = label;
         }
     }
+}
+
+template <bool MASK8>
+__global__ void FlatCenterK1(
+    const unsigned char* __restrict__ d_gray, const void* __restrict__ d_mask,
+    size_t gray_step, size_t mask_step, int rows, int cols,
+    float low_thresh, float half_ratio, float plateau_ratio, int plateau_min_w,
+    float min_contrast, float outlier_gate, float max_line_width, int min_run,
+    bool smooth3,
+    const float* __restrict__ d_gs,   /* 【flat 优化 C】预平滑缓冲（空＝现算） */
+    float2* __restrict__ d_coords, int* __restrict__ d_ids,
+    int* __restrict__ d_stats /*[0]=count [1..6]=六门 drop*/, int max_points)
+{
+    FlatK1Ctx c{d_gray, d_mask, gray_step, mask_step, rows, cols,
+                low_thresh, half_ratio, plateau_ratio, plateau_min_w,
+                min_contrast, outlier_gate, max_line_width, min_run, smooth3,
+                d_gs, d_coords, d_ids, d_stats, max_points};
+    flatCenterK1Body<MASK8>(c);
+}
+
+// 【P2-2 参数块壳】图路径用：全部实参经 d_params_ 现读（图内 memcpy 节点
+// 每次 launch 从 pinned h_params_ 刷新——lane 轮转输入指针随之自愈）
+template <bool MASK8>
+__global__ void FlatCenterK1Block(const FlatParamsDev* __restrict__ p) {
+    FlatK1Ctx c;
+    c.d_gray = p->g;   c.d_mask = p->mask;
+    c.gray_step = p->gstep; c.mask_step = p->mstep;
+    c.rows = p->rows;  c.cols = p->cols;
+    c.low_thresh = p->low_thresh; c.half_ratio = p->half_ratio;
+    c.plateau_ratio = p->plateau_ratio; c.plateau_min_w = p->plateau_min_w;
+    c.min_contrast = p->min_contrast; c.outlier_gate = p->outlier_gate;
+    c.max_line_width = p->max_line_width; c.min_run = p->min_run;
+    c.smooth3 = p->smooth3 != 0;
+    c.d_gs = p->gs; c.d_coords = p->coords; c.d_ids = p->ids;
+    c.d_stats = p->stats; c.max_points = p->maxpts;
+    flatCenterK1Body<MASK8>(c);
 }
 
 // ============================================================================
@@ -277,53 +336,103 @@ StegerResult FlatCenterExtractor::Impl::extractFlatSubmit(
     //（全参数跨帧稳定；首次捕获前排空本流——WDDM 规则）
     const bool usePre = params_.smooth3
                         && !(getenv("JMW_FLATPRE") && getenv("JMW_FLATPRE")[0] == '0');
-    // 【flat 优化·宏打包·裁定默认关】串行口径图化逐位一致且稳定，但多收尾
-    // lane 流水线下实测必崩（0xC0000005 ×3/3，与 JMW_V3GRAPH 1/8 崩溃同类
-    // ——WDDM 对 lane 流上图敏感，根因未归因）。默认关闭；JMW_FLATGRAPH=1
-    // 显式开启（串行/诊断用），崩溃压力测试归因后另行裁决
-    static const bool graphOn_ = (getenv("JMW_FLATGRAPH")
-                                  && getenv("JMW_FLATGRAPH")[0] == '1');
-    const bool useGraph = usePre && graphOn_;
+    // 【flat 优化·宏打包】【批D·c2 默认开】flat 图翻转放行——历史「多收尾 lane
+    // 必崩 0xC0000005 ×3/3」在现架构（P2-4 link 入图/B5 事件合一/C RLE 图后）
+    // 崩溃压力 20/20＋对照 10/10 零崩不复现（2026-10-28 批 D 收尾裁决）。
+    // JMW_FLATGRAPH=0 显式关；JMW_NOGRAPH=1 总闸优先。
+    static const bool graphOn_ = [] {
+        const char* ng = getenv("JMW_NOGRAPH");
+        if (ng != nullptr && ng[0] == '1') return false;
+        const char* e = getenv("JMW_FLATGRAPH");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    // 【批D·c2】legacy 默认流（cs==0，单测/无显式流调用方）禁图——捕获在 NULL
+    // 流上非法（"operation not permitted when stream is capturing" 家族），历史
+    // 默认关掩护了此路径；fivechain/产线均真流不受影响
+    const bool useGraph = usePre && graphOn_ && cs != nullptr;
     if (usePre) {
         const dim3 pb(128, 8);
         const dim3 pg(static_cast<unsigned>((cols + 127) / 128),
                       static_cast<unsigned>((rows + 7) / 8));
-        int nbandsG = 48;
+        int nbandsG = 96;   // 【BANDS 定界】nsys 30 帧实测：24→808/48→698/64→655/96→545/128→570µs
+                            // （avg/launch，96 最优；上限 128）
         if (const char* e = getenv("JMW_FLATBANDS"))
-            nbandsG = std::max(1, std::min(64, atoi(e)));
+            nbandsG = std::max(1, std::min(128, atoi(e)));
         const dim3 block(256),
             grid((cols + 255) / 256, static_cast<unsigned>(nbandsG));
         if (useGraph) {
-            cudaError_t gerr = cudaSuccess;
-            if (!flatGraphExec_) {
-                stream.waitForCompletion();   // 排空前序图闭包（WDDM 边界保险）
-                // 【261027 捕获毒化根治】Global→ThreadLocal（对齐 interp/v3 口径）：
-                // Global 捕获窗内任何线程 cudaMalloc 非法——撞上即流滞留捕获态、
-                // 全进程 CUDA 毒化（真机 18:44:57 崩溃链）；ThreadLocal 只录本流工作
-                gerr = cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal);
-                if (gerr == cudaSuccess) {
-                    FlatPreSmoothKernel<<<pg, pb, 0, cs>>>(
-                        d_grayImage.ptr<unsigned char>(), d_grayImage.step, rows, cols,
-                        d_gsmooth_, d_stats_);
-                    FlatCenterK1<true><<<grid, block, 0, cs>>>(
-                        d_grayImage.ptr<unsigned char>(), d_binaryMask.ptr<unsigned char>(),
-                        d_grayImage.step, d_binaryMask.step, rows, cols,
-                        params_.lowThreshold, params_.halfRatio, params_.plateauRatio,
-                        params_.plateauMinWidth, params_.minContrast, params_.outlierGatePx,
-                        params_.maxLineWidth, params_.minRunLength, params_.smooth3,
-                        d_gsmooth_, d_coords_, d_ids_, d_stats_, FlatCenterExtractor::kOutCap);   // 【E5】出点容量截断
-                    cudaGraph_t g = nullptr;
-                    gerr = cudaStreamEndCapture(cs, &g);
-                    if (gerr == cudaSuccess)
-                        gerr = cudaGraphInstantiate(&flatGraphExec_, g, nullptr, nullptr, 0);
-                    if (gerr == cudaSuccess && g) {
-                        flatGraph_ = g;
-                    } else {
-                        if (g) cudaGraphDestroy(g);
-                        flatGraphExec_ = nullptr;   // 捕获/实例化失败→回退逐发路径
-                    }
+        // 【P2-2 参数块】lazy 分配：仅图模式首用（默认关臂零开销——census 逐位
+        // 不变）；失败→本实例图模式永久回退（paramsFailed_）
+        if (!paramsFailed_ && !d_params_) {
+            cudaMalloc(&d_params_, sizeof(FlatParamsDev));
+            cudaMallocHost(&h_params_, sizeof(FlatParamsDev));
+            if (cudaGetLastError() != cudaSuccess || !d_params_ || !h_params_) {
+                CALIB_LOG_WARN("[flat] params block alloc failed; graph mode disabled");
+                if (d_params_) { cudaFree(d_params_); d_params_ = nullptr; }
+                if (h_params_) { cudaFreeHost(h_params_); h_params_ = nullptr; }
+                paramsFailed_ = true;
+            }
+        }
+        cudaError_t gerr = cudaSuccess;
+        if (!paramsFailed_ && d_params_ && h_params_) {
+        // 【P2-2 参数块】每帧 launch 前 host 写 pinned 镜像（图内 memcpy 节点每次
+        // 执行现读 src——lane 轮转的灰度/掩膜指针随之自愈，烧死缺陷根治）。
+        // 单缓冲安全前提：同实例相邻 graphLaunch 之间必有流排水（fivechain 唯一
+        // 排水点 gS2 waitForCompletion 每帧一次；双眼为独立实例各持私有块）——
+        // 在飞图不会再读 h_params_。合并图若需每帧动态参数再升级双缓冲。
+        h_params_->g = d_grayImage.ptr<unsigned char>();
+        h_params_->gstep = d_grayImage.step;
+        h_params_->mask = d_binaryMask.ptr<unsigned char>();
+        h_params_->mstep = d_binaryMask.step;
+        h_params_->gs = d_gsmooth_;
+        h_params_->coords = d_coords_;
+        h_params_->ids = d_ids_;
+        h_params_->stats = d_stats_;
+        h_params_->rows = rows;
+        h_params_->cols = cols;
+        h_params_->maxpts = FlatCenterExtractor::kOutCap;
+        h_params_->low_thresh = params_.lowThreshold;
+        h_params_->half_ratio = params_.halfRatio;
+        h_params_->plateau_ratio = params_.plateauRatio;
+        h_params_->plateau_min_w = params_.plateauMinWidth;
+        h_params_->min_contrast = params_.minContrast;
+        h_params_->outlier_gate = params_.outlierGatePx;
+        h_params_->max_line_width = params_.maxLineWidth;
+        h_params_->min_run = params_.minRunLength;
+        h_params_->smooth3 = params_.smooth3 ? 1 : 0;
+        // 【P2-2 维度守卫】rows/cols/bands 烧进 gridDim（图结构），参数块救不了：
+        // 任一变化→毁图重捕（此前完全无检测＝静默错数据洞）
+        if (flatGraphExec_ && (graph_rows_ != rows || graph_cols_ != cols
+                               || graph_bands_ != nbandsG)) {
+            cudaGraphExecDestroy(flatGraphExec_);
+            flatGraphExec_ = nullptr;
+            if (flatGraph_) { cudaGraphDestroy(flatGraph_); flatGraph_ = nullptr; }
+        }
+        if (!flatGraphExec_) {
+            stream.waitForCompletion();   // 捕获前必须排空本流（WDDM 驱动崩溃防线）
+            gerr = cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal);
+            if (gerr == cudaSuccess) {
+                // 【P2-2】捕获体＝参数块 memcpy 节点＋两个 Block 壳内核（免改参数）
+                cudaMemcpyAsync(d_params_, h_params_, sizeof(FlatParamsDev),
+                                cudaMemcpyHostToDevice, cs);
+                FlatPreSmoothKernelBlock<<<pg, pb, 0, cs>>>(d_params_);
+                FlatCenterK1Block<true><<<grid, block, 0, cs>>>(d_params_);
+                cudaGraph_t g = nullptr;
+                gerr = cudaStreamEndCapture(cs, &g);
+                if (gerr == cudaSuccess)
+                    gerr = cudaGraphInstantiate(&flatGraphExec_, g, nullptr, nullptr, 0);
+                if (gerr == cudaSuccess && g) {
+                    flatGraph_ = g;
+                    graph_rows_ = rows;
+                    graph_cols_ = cols;
+                    graph_bands_ = nbandsG;
+                } else {
+                    if (g) cudaGraphDestroy(g);
+                    flatGraphExec_ = nullptr;   // 捕获/实例化失败→回退逐发路径
                 }
             }
+        }
+        }
             if (flatGraphExec_) {
                 gerr = cudaGraphLaunch(flatGraphExec_, cs);
                 if (gerr != cudaSuccess) {
@@ -368,9 +477,9 @@ StegerResult FlatCenterExtractor::Impl::extractFlatSubmit(
     } else {
         // 【flat 优化 D】无预平滑路径：清零独立发射（stats 清零）
         cudaMemsetAsync(d_stats_, 0, 7 * sizeof(int), cs);
-        int nbands = 48;
+        int nbands = 96;   // 【BANDS 定界】同 nbandsG（nsys 实测 96 最优）
         if (const char* e = getenv("JMW_FLATBANDS"))
-            nbands = std::max(1, std::min(64, atoi(e)));
+            nbands = std::max(1, std::min(128, atoi(e)));
         const dim3 block(256),
             grid((cols + 255) / 256, static_cast<unsigned>(nbands));
         FlatCenterK1<true><<<grid, block, 0, cs>>>(
@@ -702,4 +811,96 @@ void FlatCenterExtractor::Impl::SetParams(const FlatCenterParams& params) {
     if (flatGraphExec_) { cudaGraphExecDestroy(flatGraphExec_); flatGraphExec_ = nullptr; }
     if (flatGraph_)     { cudaGraphDestroy(flatGraph_); flatGraph_ = nullptr; }
     params_ = params;
+    ++paramsEpoch_;   // 【G′·C4′】SetParams——阈值标量/维度上限变化（自图已毁＋大图签名失配）
+}
+
+// ============================================================================
+// 【G′·三合一大图】裸发射口三件——harness FrontBigGraph 捕获窗专用
+// （发射体＝flat 自图捕获体同源：参数块 memcpy＋PreSmooth/K1 Block 壳；差异＝
+//  stats 7 槽 D2H 并入发射体（大图节点化，anchor −2 mcaD2H/帧））
+// ============================================================================
+
+bool FlatCenterExtractor::Impl::prepareBigGraph_(
+    const cv::cuda::GpuMat& d_grayImage, const cv::cuda::GpuMat& d_binaryMask) {
+    if (paramsFailed_) return false;
+    if (!d_params_ || !h_params_) {
+        cudaMalloc(&d_params_, sizeof(FlatParamsDev));
+        cudaMallocHost(&h_params_, sizeof(FlatParamsDev));
+        if (cudaGetLastError() != cudaSuccess || !d_params_ || !h_params_) {
+            CALIB_LOG_WARN("[flat] params block alloc failed; big-graph disabled");
+            if (d_params_) { cudaFree(d_params_); d_params_ = nullptr; }
+            if (h_params_) { cudaFreeHost(h_params_); h_params_ = nullptr; }
+            paramsFailed_ = true;
+            return false;
+        }
+    }
+    // 维度守卫置位（与 extractFlatSubmit 同源的 nbands 环境口径）
+    int nbandsG = 96;
+    if (const char* e = getenv("JMW_FLATBANDS"))
+        nbandsG = std::max(1, std::min(128, atoi(e)));
+    graph_rows_ = d_grayImage.rows;
+    graph_cols_ = d_grayImage.cols;
+    graph_bands_ = nbandsG;
+    refreshGraphParams_(d_grayImage, d_binaryMask);
+    return true;
+}
+
+void FlatCenterExtractor::Impl::refreshGraphParams_(
+    const cv::cuda::GpuMat& d_grayImage, const cv::cuda::GpuMat& d_binaryMask) {
+    if (!h_params_) return;
+    h_params_->g = d_grayImage.ptr<unsigned char>();
+    h_params_->gstep = d_grayImage.step;
+    h_params_->mask = d_binaryMask.ptr<unsigned char>();
+    h_params_->mstep = d_binaryMask.step;
+    h_params_->gs = d_gsmooth_;
+    h_params_->coords = d_coords_;
+    h_params_->ids = d_ids_;
+    h_params_->stats = d_stats_;
+    h_params_->rows = d_grayImage.rows;
+    h_params_->cols = d_grayImage.cols;
+    h_params_->maxpts = FlatCenterExtractor::kOutCap;
+    h_params_->low_thresh = params_.lowThreshold;
+    h_params_->half_ratio = params_.halfRatio;
+    h_params_->plateau_ratio = params_.plateauRatio;
+    h_params_->plateau_min_w = params_.plateauMinWidth;
+    h_params_->min_contrast = params_.minContrast;
+    h_params_->outlier_gate = params_.outlierGatePx;
+    h_params_->max_line_width = params_.maxLineWidth;
+    h_params_->min_run = params_.minRunLength;
+    h_params_->smooth3 = params_.smooth3 ? 1 : 0;
+}
+
+bool FlatCenterExtractor::Impl::emitGraphBody_(cudaStream_t cs) {
+    // 前置：参数块就绪＋维度守卫值有效（PrepareBigGraph 置位）
+    if (paramsFailed_ || !d_params_ || !h_params_ || graph_rows_ <= 0) return false;
+    const int rows = graph_rows_, cols = graph_cols_, nbandsG = graph_bands_;
+    const dim3 pb(128, 8);
+    const dim3 pg(static_cast<unsigned>((cols + 127) / 128),
+                  static_cast<unsigned>((rows + 7) / 8));
+    const dim3 block(256),
+        grid((cols + 255) / 256, static_cast<unsigned>(nbandsG));
+    cudaError_t err = cudaMemcpyAsync(d_params_, h_params_, sizeof(FlatParamsDev),
+                                      cudaMemcpyHostToDevice, cs);
+    if (err != cudaSuccess) return false;
+    FlatPreSmoothKernelBlock<<<pg, pb, 0, cs>>>(d_params_);
+    FlatCenterK1Block<true><<<grid, block, 0, cs>>>(d_params_);
+    // stats 7 槽 D2H 并入图体（大图专属——自图路径该笔在图外逐帧发射）
+    err = cudaMemcpyAsync(h_stats_, d_stats_, 7 * sizeof(int),
+                          cudaMemcpyDeviceToHost, cs);
+    return err == cudaSuccess;
+}
+
+StegerResult FlatCenterExtractor::Impl::makeDeferredShell_() {
+    StegerResult result;
+    d_out_cp_ = cv::cuda::GpuMat(1, FlatCenterExtractor::kOutCap, CV_32FC2, d_coords_);
+    d_out_pl_ = cv::cuda::GpuMat(1, FlatCenterExtractor::kOutCap, CV_32SC1, d_ids_);
+    result.d_centerPoints = std::make_shared<cv::cuda::GpuMat>(
+        d_out_cp_, cv::Rect(0, 0, FlatCenterExtractor::kOutCap, 1));
+    result.d_line_ids = std::make_shared<cv::cuda::GpuMat>(
+        d_out_pl_, cv::Rect(0, 0, FlatCenterExtractor::kOutCap, 1));
+    result.totalPointCount = -1;
+    result.lineCount = 1;
+    result.mergedCount = 0;
+    result.success = true;
+    return result;
 }

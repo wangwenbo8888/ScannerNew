@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file laser_match_scan_v3_split_front.cu
  * @brief 激光线匹配扫描 V3 流水线拆分 — GPU 前段实现（Step0-6＋紧缩＋D2H＋同步）
  *
@@ -28,6 +28,9 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <immintrin.h>   // 【JMW_PSPIN】_mm_pause 省力轮询
+#endif
 
 using namespace calib;
 
@@ -126,7 +129,7 @@ constexpr int kV3ListCap = 8192;            // 【B2】非空桶清单容量（�
 
 // 【B2 两步法·核 A】Hist 首增者收桶号（探针 probe_v3.cu 78/78 逐位一致＋产线
 // d_n 尾闸）。hist 拼槽布局：[0,262144)=计数（262144=守卫桶）；[262145]=listCnt
-//（帧首 memset 承重——快径不自清 hist）。首增者恰每桶一次→清单＝非空桶集合。
+//（【批0·C(d)】快径已自清 hist——帧首 memset 仅扩容当帧兜底）。首增者恰每桶一次→清单＝非空桶集合。
 __global__ void kernelLabelHistCollectV3(
     const int* __restrict__ labels,
     int count,
@@ -170,6 +173,8 @@ __global__ void kernelLabelRankV3(
             for (int j = 0; j < n; ++j)
                 if (list[j] < b) ++r;
             segId[b] = r;
+            hist[b] = 0;   // 【批0·C(d)】快径自清——首增者必入 list，清单覆盖全部
+                           // 非零桶（含守卫桶）；帧首 memset 仅扩容当帧兜底
         }
         if (threadIdx.x == 0) {
             cntOut[0] = n;                        // counts[2]=segCount（raw，同 BaseScan）
@@ -354,6 +359,161 @@ __global__ void kernelRightMemberScatterV3(
     members[slot] = i;
 }
 
+// ============================================================================
+// 【批3·配对融合】右链×标签链互不依赖（缓冲集无交集）→ 三对两两合一：
+//   [直方图] RightRowHist+LabelHistCollect → kernelFusedRightLabelHistV3
+//   [扫描+定秩] RightRowScan+LabelRank → kernelFusedScanRankV3（单块）
+//   [散射+段写] RightMemberScatter+SegMapWrite → kernelFusedMemberSegV3
+// 每核内两半各自原子/只写自家缓冲——语义逐位等价；JMW_V3FUSE=0 回退分离发射。
+// ⚠ 融合单块核块宽 ≤256（B2 饿死红线：满占用 1024 单块探针 535→1134µs）。
+// ============================================================================
+__global__ void kernelFusedRightLabelHistV3(
+    const float2* __restrict__ pts, int rcount, float step,
+    int* __restrict__ rhist,              // [8193]
+    const int* __restrict__ labels, int lcount,
+    int* __restrict__ lhist,              // [kV3LabelDomain+2]
+    int* __restrict__ list,               // [kV3ListCap]
+    const int* __restrict__ d_rn = nullptr,
+    const int* __restrict__ d_ln = nullptr)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    // 右半：行直方图（原 kernelRightRowHistV3 体）
+    if (i < rcount && !(d_rn != nullptr && i >= *d_rn))
+        atomicAdd(&rhist[v3RightRowOf(pts[i].y, step)], 1);
+    // 左半：标签直方图＋首增者清单（原 kernelLabelHistCollectV3 体）
+    if (i < lcount && !(d_ln != nullptr && i >= *d_ln)) {
+        int lb = labels[i];
+        if (lb < 0 || lb >= kV3LabelDomain) lb = kV3LabelDomain;
+        int old = atomicAdd(&lhist[lb], 1);
+        if (old == 0) {
+            int p = atomicAdd(&lhist[kV3LabelDomain + 1], 1);
+            if (p < kV3ListCap) list[p] = lb;
+        }
+    }
+}
+
+__global__ void kernelFusedScanRankV3(
+    int* __restrict__ rhist,              // [8193] 入＝计数/出＝全零
+    int* __restrict__ row_start,          // [8192] 出
+    int* __restrict__ row_count,          // [8192] 出
+    int* __restrict__ cursor,             // [8192] 出（=row_start 副本）
+    int* __restrict__ lhist,              // [kV3LabelDomain+2]（尾槽＝listCnt）
+    const int* __restrict__ list,         // [kV3ListCap]
+    int* __restrict__ segId,              // [kV3LabelDomain+1]
+    int* __restrict__ cntOut)             // &counts[2]
+{
+    __shared__ int scan[1024];
+    // ── 相 A：右行扫描（原 kernelRightRowScanV3 体，bdim 动态）──
+    {
+        const int tid = threadIdx.x;
+        const int bdim = blockDim.x;
+        const int domain = kV3RightRows;
+        const int chunk = (domain + bdim - 1) / bdim;
+        const int begin = tid * chunk;
+        const int end = min(begin + chunk, domain);
+        int localCnt = 0;
+        for (int b = begin; b < end; ++b) localCnt += rhist[b];
+        scan[tid] = localCnt;
+        __syncthreads();
+        for (int off = 1; off < bdim; off <<= 1) {
+            int v = (tid >= off) ? scan[tid - off] : 0;
+            __syncthreads();
+            scan[tid] += v;
+            __syncthreads();
+        }
+        const int prefix = (tid == 0) ? 0 : scan[tid - 1];
+        int running = prefix;
+        for (int b = begin; b < end; ++b) {
+            const int c = rhist[b];
+            row_start[b] = running;
+            row_count[b] = c;
+            cursor[b] = running;
+            running += c;
+            rhist[b] = 0;
+        }
+        if (tid == bdim - 1) rhist[kV3RightRows] = 0;
+    }
+    __syncthreads();
+    // ── 相 B：标签定秩（原 kernelLabelRankV3 体，bdim 动态）──
+    {
+        __shared__ int sh_n;
+        if (threadIdx.x == 0) sh_n = lhist[kV3LabelDomain + 1];
+        __syncthreads();
+        const int n = sh_n;
+        if (n <= kV3ListCap) {
+            for (int i = threadIdx.x; i < n; i += blockDim.x) {
+                const int b = list[i];
+                int r = 0;
+                for (int j = 0; j < n; ++j)
+                    if (list[j] < b) ++r;
+                segId[b] = r;
+                lhist[b] = 0;
+            }
+            if (threadIdx.x == 0) {
+                cntOut[0] = n;
+                cntOut[1] = (n > 4096) ? 1 : 0;
+            }
+        } else {
+            const int tid = threadIdx.x;
+            const int bdim = blockDim.x;
+            const int domain = kV3LabelDomain + 1;
+            const int chunk = (domain + bdim - 1) / bdim;
+            const int begin = tid * chunk;
+            const int end = min(begin + chunk, domain);
+            int localCnt = 0;
+            for (int b = begin; b < end; ++b)
+                if (lhist[b] > 0) ++localCnt;
+            scan[tid] = localCnt;
+            __syncthreads();
+            for (int off = 1; off < bdim; off <<= 1) {
+                int v = (tid >= off) ? scan[tid - off] : 0;
+                __syncthreads();
+                scan[tid] += v;
+                __syncthreads();
+            }
+            const int prefix = (tid == 0) ? 0 : scan[tid - 1];
+            const int total = scan[bdim - 1];
+            int running = prefix;
+            for (int b = begin; b < end; ++b) {
+                if (lhist[b] > 0) segId[b] = running++;
+                lhist[b] = 0;
+            }
+            if (tid == 0) {
+                cntOut[0] = total;
+                cntOut[1] = (total > 4096) ? 1 : 0;
+            }
+        }
+        if (threadIdx.x == 0) lhist[kV3LabelDomain + 1] = 0;
+    }
+}
+
+__global__ void kernelFusedMemberSegV3(
+    const float2* __restrict__ pts, int rcount, float step,
+    int* __restrict__ cursor,              // [8192]
+    int* __restrict__ members,             // [validCount]（origIdx）
+    const int* __restrict__ labels, int lcount,
+    const int* __restrict__ segId,         // [kV3LabelDomain+1]
+    int* __restrict__ segMap,
+    const int* __restrict__ d_rn = nullptr,
+    const int* __restrict__ d_ln = nullptr)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    // 右半：行员散射（原 kernelRightMemberScatterV3 体）
+    if (i < rcount && !(d_rn != nullptr && i >= *d_rn)) {
+        const int row = v3RightRowOf(pts[i].y, step);
+        if (row < kV3RightRows) {
+            const int slot = atomicAdd(&cursor[row], 1);
+            members[slot] = i;
+        }
+    }
+    // 左半：段表直写（原 kernelSegMapWriteV3 体）
+    if (i < lcount && !(d_ln != nullptr && i >= *d_ln)) {
+        int lb = labels[i];
+        if (lb < 0 || lb >= kV3LabelDomain) lb = kV3LabelDomain;
+        segMap[i] = segId[lb];
+    }
+}
+
 // 行内排序＋直写 sorted_pts/lids：键＝(xq<<32)|origIdx 严格全序＝radix 稳定序。
 // 块/行；smem 位序（≤2048）；超界行（物理不现）退线程 0 插入序保正确
 __device__ __forceinline__ unsigned long long v3RightSortKey(const float2& p, int idx) {
@@ -463,12 +623,56 @@ __global__ void kernelTightenCardsSplitV3(
     }
 }
 
+// 【批N-1·D2H 交织】FinishFront 专用紧缩＋打包一体内核（批E 版扩体：3 笔→1 笔）：
+// ①卡表紧缩交织写出 base[0, 3*totalCards)（12B/card：[lid, rx(__float_as_int), ridx]）
+// ②左行 int 族交织打包 base+intPackOff（12B/行：[segmap, leftStatus, track]）
+// ③左点 float2 追加写入 base+leftPtsBaseInt（每点 2 int 槽，int2 别名——
+//   leftPtsBaseInt 恒偶数→段内 8B 对齐安全）
+// ——每线程一行；totalCards==0 帧紧缩段空转（nc<=0 守卫）、打包段照常。
+// 数值同源仅布局改（逐位对拍保障）；grid=leftCount 与原紧缩内核同式。
+__global__ void kernelTightenPackSplitV3(
+    const int*   __restrict__ d_card_lid,       // [i*32 + c]
+    const float* __restrict__ d_card_hitRx,
+    const int*   __restrict__ d_card_hitRidx,
+    const int*   __restrict__ d_card_count,     // N
+    const int*   __restrict__ d_card_off,       // N（ExclusiveSum 前置）
+    int leftCount,
+    int*   __restrict__ d_pack_base,            // 统一暂存基址（三段：tight|int 包|左点）
+    int   intPackOff,                           // int 包段起始槽（=3*totalCards；0=空卡帧）
+    const float2* __restrict__ d_left_pts,      // N（提交段保存视图——左点源）
+    int   leftPtsBaseInt,                       // 左点段起始槽（8B 对齐后，恒偶数）
+    const int*   __restrict__ d_seg_map,        // N
+    const int*   __restrict__ d_left_status,    // N（当前 gen）
+    const int*   __restrict__ d_left_track)     // N（提交段保存视图）
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= leftCount) return;
+    int* lp = d_pack_base + intPackOff + 3 * i;
+    lp[0] = d_seg_map[i];
+    lp[1] = d_left_status[i];
+    lp[2] = d_left_track[i];
+    // 左点段：float2 以 int 槽承载（int2 别名写）
+    reinterpret_cast<int2*>(d_pack_base + leftPtsBaseInt)[i] =
+        reinterpret_cast<const int2*>(d_left_pts)[i];
+    const int nc = d_card_count[i];
+    if (nc <= 0) return;
+    const int off = d_card_off[i];
+    const int base = i * V3_MAX_CARDS;
+    for (int c = 0; c < nc; ++c) {
+        int* o = d_pack_base + 3 * (off + c);
+        o[0] = d_card_lid[base + c];
+        o[1] = __float_as_int(d_card_hitRx[base + c]);
+        o[2] = d_card_hitRidx[base + c];
+    }
+}
+
 // ============================================================================
 // 文件级小工具（同值拷贝自 impl.cu static——勿漂移）
 // ============================================================================
 
-static void splitFrontGrowOnly(cv::cuda::GpuMat& m, int cols, int type) {
-    if (m.cols < cols || m.type() != type) m.create(1, cols, type);
+static bool splitFrontGrowOnly(cv::cuda::GpuMat& m, int cols, int type) {
+    if (m.cols < cols || m.type() != type) { m.create(1, cols, type); return true; }
+    return false;   // 【批0】true＝本帧新分配（自清不变量的「扩容帧」判据）
 }
 
 #ifndef NDEBUG
@@ -514,7 +718,7 @@ void LaserMatchScanCudaV3::Impl::executeFront(
     };
     std::string bd;
 
-    out = LaserMatchSplitFrontV3{};   // 复位（含失败缺省）
+    out.resetKeepCapacity();   // 【批2·A1】保容量复位（字段语义与整体复位逐项等价）
 
     try {
         if (!tempSet_) {
@@ -554,10 +758,17 @@ void LaserMatchScanCudaV3::Impl::executeFront(
         cudaError_t kernel_err;
         const int gen = status_gen_ & 1;
 
-        // ── Step 0: 计数/诊断清零（counts[2]=segCount、[3]=overflow 由 SegMapBack 写）──
-        cudaMemsetAsync(d_counts_.ptr<int>(), 0, 4 * sizeof(int), cuda_stream);
-        cudaMemsetAsync(d_diag_.ptr<int>(), 0, 4 * sizeof(int), cuda_stream);
-
+        // ── Step 0【批0·C(b)·删除】原 counts/diag 两笔 memset 已删：counts[0]/[1]
+        //    拆分路径无写无读、[2]/[3] 被段表内核无条件覆写（快慢两臂均然）；
+        //    diag 仅 +1 槽被发卡 atomicMax 写、下载后无人读——陈值无害。
+        //    d_diag_ 缓冲本体保留（原版单体 Execute 路径仍在用）。──
+        // 【批3·融合开关】默认关——WDDM 下减发射≠提速（ABBA 健康对 −5.5 FPS/
+        // wall1b +214µs 一致回退，链相位打包对发射序敏感）；JMW_V3FUSE=1 显式
+        // 开启（批6 全异步环税基铺垫的实验臂）。static 读：图捕获/延迟路一致。
+        static const bool v3FuseOn_ = [] {
+            const char* e = getenv("JMW_V3FUSE");
+            return (e != nullptr && e[0] == '1');
+        }();
         // ---- Step 1-4【刀二B：右路行桶＋行内排序——11 次 API→5；
         //      (xq,origIdx) 严格全序＝radix 稳定序 → sorted_pts/lids/CSR 逐位一致；
         //      死桶点不进有效槽（radix 中沉尾且 CSR 丢弃——IssueCards 只读 rCnt>0
@@ -591,24 +802,62 @@ void LaserMatchScanCudaV3::Impl::executeFront(
                 rightCount, MAX_EPIPOLAR_ROWS,
                 d_right_row_start_.ptr<int>(), d_right_row_count_.ptr<int>());
         } else {
-            splitFrontGrowOnly(d_right_hist_, kV3RightRows + 1, CV_32SC1);
+            // 【批0·C③】右直方图清零只在扩容当帧——kernelRightRowScanV3 尾部
+            //    整域自清（含死桶守卫槽），稳态帧首免 32KB memset
+            if (splitFrontGrowOnly(d_right_hist_, kV3RightRows + 1, CV_32SC1))
+                cudaMemsetAsync(d_right_hist_.ptr<int>(), 0,
+                                (kV3RightRows + 1) * sizeof(int), cuda_stream);
             splitFrontGrowOnly(d_right_cursor_, kV3RightRows, CV_32SC1);
             splitFrontGrowOnly(d_right_members_, rightCount, CV_32SC1);
+            // 【批3】标签链三缓冲前置分配（融合发射需与右链同点就绪；与发卡/
+            //  右链缓冲集无交集——原在发卡后 memset 的时机前移是流序安全的）
+            const bool growLHist =
+                splitFrontGrowOnly(d_label_hist_, kV3LabelDomain + 2, CV_32SC1);
+            splitFrontGrowOnly(d_label_seg_, kV3LabelDomain + 1, CV_32SC1);
+            splitFrontGrowOnly(d_label_list_, kV3ListCap, CV_32SC1);
+            splitFrontGrowOnly(d_seg_map_, leftCount, CV_32SC1);
             const int grid = (rightCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            cudaMemsetAsync(d_right_hist_.ptr<int>(), 0,
-                            (kV3RightRows + 1) * sizeof(int), cuda_stream);
-            kernelRightRowHistV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
-                d_right_points.ptr<float2>(), rightCount,
-                params_.epipolar_row_step, d_right_hist_.ptr<int>());
-            kernelRightRowScanV3<<<1, 1024, 0, cuda_stream>>>(
-                d_right_hist_.ptr<int>(),
-                d_right_row_start_.ptr<int>(),
-                d_right_row_count_.ptr<int>(),
-                d_right_cursor_.ptr<int>());
-            kernelRightMemberScatterV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
-                d_right_points.ptr<float2>(), rightCount,
-                params_.epipolar_row_step, d_right_cursor_.ptr<int>(),
-                d_right_members_.ptr<int>());
+            const int gridLh = (leftCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            if (v3FuseOn_) {
+                // 【批3·配对融合】9 发射→6：Hist 对→单块 ScanRank 对→MemberSeg 对
+                // （SortScatter/IssueCards/CUB/Tighten 不变）；标签链缓冲集与右链/
+                // 发卡无交集——语义逐位等价。单块核 256（B2 饿死红线）。
+                if (growLHist)
+                    cudaMemsetAsync(d_label_hist_.ptr<int>(), 0,
+                                    (kV3LabelDomain + 2) * sizeof(int), cuda_stream);
+                const int gridF = grid > gridLh ? grid : gridLh;
+                kernelFusedRightLabelHistV3<<<gridF, BLOCK_SIZE, 0, cuda_stream>>>(
+                    d_right_points.ptr<float2>(), rightCount,
+                    params_.epipolar_row_step, d_right_hist_.ptr<int>(),
+                    d_left_line_ids.ptr<int>(), leftCount,
+                    d_label_hist_.ptr<int>(), d_label_list_.ptr<int>());
+                kernelFusedScanRankV3<<<1, 256, 0, cuda_stream>>>(
+                    d_right_hist_.ptr<int>(),
+                    d_right_row_start_.ptr<int>(),
+                    d_right_row_count_.ptr<int>(),
+                    d_right_cursor_.ptr<int>(),
+                    d_label_hist_.ptr<int>(), d_label_list_.ptr<int>(),
+                    d_label_seg_.ptr<int>(), d_counts_.ptr<int>() + 2);
+                kernelFusedMemberSegV3<<<gridF, BLOCK_SIZE, 0, cuda_stream>>>(
+                    d_right_points.ptr<float2>(), rightCount,
+                    params_.epipolar_row_step,
+                    d_right_cursor_.ptr<int>(), d_right_members_.ptr<int>(),
+                    d_left_line_ids.ptr<int>(), leftCount,
+                    d_label_seg_.ptr<int>(), d_seg_map_.ptr<int>());
+            } else {
+                kernelRightRowHistV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
+                    d_right_points.ptr<float2>(), rightCount,
+                    params_.epipolar_row_step, d_right_hist_.ptr<int>());
+                kernelRightRowScanV3<<<1, 1024, 0, cuda_stream>>>(
+                    d_right_hist_.ptr<int>(),
+                    d_right_row_start_.ptr<int>(),
+                    d_right_row_count_.ptr<int>(),
+                    d_right_cursor_.ptr<int>());
+                kernelRightMemberScatterV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
+                    d_right_points.ptr<float2>(), rightCount,
+                    params_.epipolar_row_step, d_right_cursor_.ptr<int>(),
+                    d_right_members_.ptr<int>());
+            }
             kernelRightRowSortScatterV3<<<kV3RightRows, 256, 0, cuda_stream>>>(
                 d_right_points.ptr<float2>(),
                 d_right_line_ids.ptr<int>(),
@@ -618,8 +867,8 @@ void LaserMatchScanCudaV3::Impl::executeFront(
                 d_right_sorted_pts_.ptr<float2>(),
                 d_right_sorted_lids_.ptr<int>());
         }
-        cudaMemsetAsync(d_right_status_[gen].ptr<int>(), 0,
-                        rightCount * sizeof(int), cuda_stream);
+        // 【批0·C(a)·删除】右状态清零已删——拆分路径零消费者（唯一写者/读者均在
+        // 原版单体 Execute 路径；FrontOutput 无右状态字段，后段用自家宿主数组）
 
         // ---- Step 5: 发卡（【B3】TP2 网格＋useB 三态统一助手）----
         {
@@ -665,7 +914,9 @@ void LaserMatchScanCudaV3::Impl::executeFront(
         // ---- Step 6: GPU 段表【刀二A：标签桶分类——11 次发射→3＋1 memset；
         //      段号分配序＝radix 升标签游程序 → segMap 逐位一致（静态论证）。
         //      JMW_K2_LEGACY=1 回退旧 radix 路径（A/B 专用）】----
-        {
+        // 【批3】融合开启时标签链（Collect/Rank/SegMapWrite）已随右链两两合一
+        //      在 Step 1-4 前置完成（缓冲集与右链/发卡无交集）——本步整体跳过。
+        if (!v3FuseOn_) {
             splitFrontGrowOnly(d_seg_map_, leftCount, CV_32SC1);
             int grid = (leftCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
             // 诊断拆分：JMW_K2A_LEGACY 仅回退段表路径（B 用 JMW_K2_LEGACY）
@@ -705,12 +956,17 @@ void LaserMatchScanCudaV3::Impl::executeFront(
             } else {
                 // 【B2 两步法】Collect(首增者收桶号)→Rank(计数定秩/兜底全域扫)→SegMapWrite
                 // 不变量：counts[2]=segCount、counts[3]=(>4096)、segId 只写非空桶、
-                // segmap 逐位一致；hist 帧首 memset 承重（Rank 快径不自清洁）勿删
+                // segmap 逐位一致
+                // 【P2-0·2026-10-27 修复】恢复无条件帧首 hist 清零（原"批0·C(d) 已删
+                // 帧首 memset、依赖 Rank 自清"的优化存在正确性洞：Collect 只写触碰过的
+                // 桶，脏显存复用场景下未触碰桶的残留值泄入 segCount——实测 2 测组合
+                // 确定性复现 segCount=193629（应为 ≤2），且与老崩溃族窗口相关性一致。
+                // 成本 1MB memset≈几十 µs/帧，正确性优先）
                 splitFrontGrowOnly(d_label_hist_, kV3LabelDomain + 2, CV_32SC1);
-                splitFrontGrowOnly(d_label_seg_, kV3LabelDomain + 1, CV_32SC1);
-                splitFrontGrowOnly(d_label_list_, kV3ListCap, CV_32SC1);
                 cudaMemsetAsync(d_label_hist_.ptr<int>(), 0,
                                 (kV3LabelDomain + 2) * sizeof(int), cuda_stream);
+                splitFrontGrowOnly(d_label_seg_, kV3LabelDomain + 1, CV_32SC1);
+                splitFrontGrowOnly(d_label_list_, kV3ListCap, CV_32SC1);
                 kernelLabelHistCollectV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
                     d_left_line_ids.ptr<int>(), leftCount,
                     d_label_hist_.ptr<int>(), d_label_list_.ptr<int>());
@@ -743,12 +999,14 @@ void LaserMatchScanCudaV3::Impl::executeFront(
         }
         bd += fmt::format(" step6={:.2f}", tSince());
 
-        // ── sync#1：小批量（counts/diag/cardOff/cardCnt）→ 段数/总卡数 ──
+        // ── sync#1：小批量（counts/cardOff/cardCnt 末元素）→ 段数/总卡数 ──
+        // 【批0·C(b)/(c)】diag 下载删除（无人读）；card_count 整组 N×4B 下载
+        //    只读末元素→改 4B 单元素拷贝（延迟/图路径仍按容量整组——宿主提交
+        //    时不知 N，此差异为有意保留；对拍口径不变）
         int* h_cnt = hpin_counts_.ensure(4);
-        int* h_dia = hpin_diag_.ensure(4);
+        int* h_ccn_last = hpin_ccn_last_.ensure(1);
         int* h_off = hpin_cardoff_.ensure(static_cast<size_t>(leftCount));
-        int* h_ccn = hpin_cardcnt_.ensure(static_cast<size_t>(leftCount));
-        if (!h_cnt || !h_dia || !h_off || !h_ccn) {
+        if (!h_cnt || !h_ccn_last || !h_off) {
             out.success = false;
             out.message = "pinned host buffer alloc failed (sync1)";
             CALIB_LOG_ERROR("executeFront(): {}", out.message);
@@ -756,12 +1014,34 @@ void LaserMatchScanCudaV3::Impl::executeFront(
         }
         cudaMemcpyAsync(h_cnt, d_counts_.ptr<int>(), 4 * sizeof(int),
                         cudaMemcpyDeviceToHost, cuda_stream);
-        cudaMemcpyAsync(h_dia, d_diag_.ptr<int>(), 4 * sizeof(int),
-                        cudaMemcpyDeviceToHost, cuda_stream);
         cudaMemcpyAsync(h_off, d_card_off_.ptr<int>(),
                         static_cast<size_t>(leftCount) * sizeof(int),
                         cudaMemcpyDeviceToHost, cuda_stream);
-        cudaMemcpyAsync(h_ccn, d_card_count_.ptr<int>(),
+        cudaMemcpyAsync(h_ccn_last, d_card_count_.ptr<int>() + (leftCount - 1),
+                        sizeof(int), cudaMemcpyDeviceToHost, cuda_stream);
+        // 【批2·B1】主批 D2H 前移：四笔只依赖入口已知的 leftCount，提前入队——
+        //    ~675KB 传输与 sync#1 等待窗重叠（纯函数内重排、非跨相位提交——
+        //    与已证伪 JMW_V3DEFER 的边界：本改动不越出本函数末尾同步点）
+        int* h_segmap = hpin_segmap_.ensure(static_cast<size_t>(leftCount));
+        int* h_lstat = hpin_leftstat_.ensure(static_cast<size_t>(leftCount));
+        float2* h_left = hpin_left_.ensure(static_cast<size_t>(leftCount));
+        int* h_ltrack = hpin_lefttrack_.ensure(static_cast<size_t>(leftCount));
+        if (!h_segmap || !h_lstat || !h_left || !h_ltrack) {
+            out.success = false;
+            out.message = "pinned host buffer alloc failed (main)";
+            CALIB_LOG_ERROR("executeFront(): {}", out.message);
+            return;
+        }
+        cudaMemcpyAsync(h_segmap, d_seg_map_.ptr<int>(),
+                        static_cast<size_t>(leftCount) * sizeof(int),
+                        cudaMemcpyDeviceToHost, cuda_stream);
+        cudaMemcpyAsync(h_lstat, d_left_status_[gen].ptr<int>(),
+                        static_cast<size_t>(leftCount) * sizeof(int),
+                        cudaMemcpyDeviceToHost, cuda_stream);
+        cudaMemcpyAsync(h_left, d_left_points.ptr<float2>(),
+                        static_cast<size_t>(leftCount) * sizeof(float2),
+                        cudaMemcpyDeviceToHost, cuda_stream);
+        cudaMemcpyAsync(h_ltrack, d_left_line_ids.ptr<int>(),
                         static_cast<size_t>(leftCount) * sizeof(int),
                         cudaMemcpyDeviceToHost, cuda_stream);
         cudaStreamSynchronize(cuda_stream);
@@ -769,7 +1049,7 @@ void LaserMatchScanCudaV3::Impl::executeFront(
 
         out.segCount = h_cnt[2] > 0 ? h_cnt[2] : 0;
         out.segOverflow = h_cnt[3];
-        out.totalCards = h_off[leftCount - 1] + h_ccn[leftCount - 1];
+        out.totalCards = h_off[leftCount - 1] + h_ccn_last[0];
         const int totalCards = out.totalCards;
 
         // ── 主批次：紧缩卡（totalCards==0 时跳过——空 GpuMat ptr() 在 Debug 下断言）＋
@@ -807,28 +1087,7 @@ void LaserMatchScanCudaV3::Impl::executeFront(
                             static_cast<size_t>(totalCards) * sizeof(int),
                             cudaMemcpyDeviceToHost, cuda_stream);
         }
-        int* h_segmap = hpin_segmap_.ensure(static_cast<size_t>(leftCount));
-        int* h_lstat = hpin_leftstat_.ensure(static_cast<size_t>(leftCount));
-        float2* h_left = hpin_left_.ensure(static_cast<size_t>(leftCount));
-        int* h_ltrack = hpin_lefttrack_.ensure(static_cast<size_t>(leftCount));
-        if (!h_segmap || !h_lstat || !h_left || !h_ltrack) {
-            out.success = false;
-            out.message = "pinned host buffer alloc failed (main)";
-            CALIB_LOG_ERROR("executeFront(): {}", out.message);
-            return;
-        }
-        cudaMemcpyAsync(h_segmap, d_seg_map_.ptr<int>(),
-                        static_cast<size_t>(leftCount) * sizeof(int),
-                        cudaMemcpyDeviceToHost, cuda_stream);
-        cudaMemcpyAsync(h_lstat, d_left_status_[gen].ptr<int>(),
-                        static_cast<size_t>(leftCount) * sizeof(int),
-                        cudaMemcpyDeviceToHost, cuda_stream);
-        cudaMemcpyAsync(h_left, d_left_points.ptr<float2>(),
-                        static_cast<size_t>(leftCount) * sizeof(float2),
-                        cudaMemcpyDeviceToHost, cuda_stream);
-        cudaMemcpyAsync(h_ltrack, d_left_line_ids.ptr<int>(),
-                        static_cast<size_t>(leftCount) * sizeof(int),
-                        cudaMemcpyDeviceToHost, cuda_stream);
+        // 【批2·B1】主批四笔已前移至 sync#1 前（见上）——此处仅剩紧缩批
         cudaStreamSynchronize(cuda_stream);
         bd += fmt::format(" dl2+sync2={:.2f}", tSince());
 
@@ -901,7 +1160,7 @@ void LaserMatchScanCudaV3::Impl::executeFrontDeferred(
     cv::cuda::Stream& stream,
     LaserMatchSplitFrontV3& out)
 {
-    out = LaserMatchSplitFrontV3{};
+    out.resetKeepCapacity();   // 【批2·A1】
     deferActive_ = false;
     try {
         if (!tempSet_) {
@@ -935,29 +1194,71 @@ void LaserMatchScanCudaV3::Impl::executeFrontDeferred(
         cudaStream_t cuda_stream = cv::cuda::StreamAccessor::getStream(stream);
         const int gen = status_gen_ & 1;
 
-        // ── Step 0：计数/诊断清零 ──
-        cudaMemsetAsync(d_counts_.ptr<int>(), 0, 4 * sizeof(int), cuda_stream);
-        cudaMemsetAsync(d_diag_.ptr<int>(), 0, 4 * sizeof(int), cuda_stream);
+        // ── Step 0【批0·C(b)·删除】counts/diag memset 已删（同 executeFront 口径；
+        //    图捕获节点集随之 -2，签名 memcmp 机制自然处理）──
+        // 【批3】融合开关同主路径（v3FuseOn_ 语义：static 一次读，两路径一致）
+        static const bool v3FuseDfn_ = [] {
+            const char* e = getenv("JMW_V3FUSE");
+            return (e != nullptr && e[0] == '1');
+        }();
+        const bool v3FuseOn = v3FuseDfn_;
 
         // ── Step 1-4：右路行桶（容量网格＋右计数尾闸；SortScatter 行表驱动天然安全）──
-        splitFrontGrowOnly(d_right_hist_, kV3RightRows + 1, CV_32SC1);
+        // 【批0·C③】清零只在扩容当帧（RowScan 尾部整域自清）
+        if (splitFrontGrowOnly(d_right_hist_, kV3RightRows + 1, CV_32SC1))
+            cudaMemsetAsync(d_right_hist_.ptr<int>(), 0,
+                            (kV3RightRows + 1) * sizeof(int), cuda_stream);
         splitFrontGrowOnly(d_right_cursor_, kV3RightRows, CV_32SC1);
         splitFrontGrowOnly(d_right_members_, capR, CV_32SC1);
+        // 【批3】标签链缓冲前置（融合路径；缓冲集与右链/发卡无交集）
+        const bool growLHistD =
+            splitFrontGrowOnly(d_label_hist_, kV3LabelDomain + 2, CV_32SC1);
+        splitFrontGrowOnly(d_label_seg_, kV3LabelDomain + 1, CV_32SC1);
+        splitFrontGrowOnly(d_label_list_, kV3ListCap, CV_32SC1);
+        splitFrontGrowOnly(d_seg_map_, capL, CV_32SC1);
         const int gridR = (capR + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        cudaMemsetAsync(d_right_hist_.ptr<int>(), 0,
-                        (kV3RightRows + 1) * sizeof(int), cuda_stream);
-        kernelRightRowHistV3<<<gridR, BLOCK_SIZE, 0, cuda_stream>>>(
-            d_right_points_cap.ptr<float2>(), capR,
-            params_.epipolar_row_step, d_right_hist_.ptr<int>(), d_rightCount);
-        kernelRightRowScanV3<<<1, 1024, 0, cuda_stream>>>(
-            d_right_hist_.ptr<int>(),
-            d_right_row_start_.ptr<int>(),
-            d_right_row_count_.ptr<int>(),
-            d_right_cursor_.ptr<int>());
-        kernelRightMemberScatterV3<<<gridR, BLOCK_SIZE, 0, cuda_stream>>>(
-            d_right_points_cap.ptr<float2>(), capR,
-            params_.epipolar_row_step, d_right_cursor_.ptr<int>(),
-            d_right_members_.ptr<int>(), d_rightCount);
+        const int gridLD = (capL + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        if (v3FuseOn) {
+            // 【批3·配对融合】同主路径：Hist 对→单块 ScanRank 对→MemberSeg 对
+            //（容量网格＋双计数尾闸）
+            // 【P2-0·2026-10-27】无条件帧首清零（同主路径修复：脏显存泄入 segCount）
+            cudaMemsetAsync(d_label_hist_.ptr<int>(), 0,
+                            (kV3LabelDomain + 2) * sizeof(int), cuda_stream);
+            const int gridF = gridR > gridLD ? gridR : gridLD;
+            kernelFusedRightLabelHistV3<<<gridF, BLOCK_SIZE, 0, cuda_stream>>>(
+                d_right_points_cap.ptr<float2>(), capR,
+                params_.epipolar_row_step, d_right_hist_.ptr<int>(),
+                d_left_line_ids_cap.ptr<int>(), capL,
+                d_label_hist_.ptr<int>(), d_label_list_.ptr<int>(),
+                d_rightCount, d_leftCount);
+            kernelFusedScanRankV3<<<1, 256, 0, cuda_stream>>>(
+                d_right_hist_.ptr<int>(),
+                d_right_row_start_.ptr<int>(),
+                d_right_row_count_.ptr<int>(),
+                d_right_cursor_.ptr<int>(),
+                d_label_hist_.ptr<int>(), d_label_list_.ptr<int>(),
+                d_label_seg_.ptr<int>(), d_counts_.ptr<int>() + 2);
+            kernelFusedMemberSegV3<<<gridF, BLOCK_SIZE, 0, cuda_stream>>>(
+                d_right_points_cap.ptr<float2>(), capR,
+                params_.epipolar_row_step,
+                d_right_cursor_.ptr<int>(), d_right_members_.ptr<int>(),
+                d_left_line_ids_cap.ptr<int>(), capL,
+                d_label_seg_.ptr<int>(), d_seg_map_.ptr<int>(),
+                d_rightCount, d_leftCount);
+        } else {
+            kernelRightRowHistV3<<<gridR, BLOCK_SIZE, 0, cuda_stream>>>(
+                d_right_points_cap.ptr<float2>(), capR,
+                params_.epipolar_row_step, d_right_hist_.ptr<int>(), d_rightCount);
+            kernelRightRowScanV3<<<1, 1024, 0, cuda_stream>>>(
+                d_right_hist_.ptr<int>(),
+                d_right_row_start_.ptr<int>(),
+                d_right_row_count_.ptr<int>(),
+                d_right_cursor_.ptr<int>());
+            kernelRightMemberScatterV3<<<gridR, BLOCK_SIZE, 0, cuda_stream>>>(
+                d_right_points_cap.ptr<float2>(), capR,
+                params_.epipolar_row_step, d_right_cursor_.ptr<int>(),
+                d_right_members_.ptr<int>(), d_rightCount);
+        }
         kernelRightRowSortScatterV3<<<kV3RightRows, 256, 0, cuda_stream>>>(
             d_right_points_cap.ptr<float2>(),
             d_right_line_ids_cap.ptr<int>(),
@@ -966,8 +1267,7 @@ void LaserMatchScanCudaV3::Impl::executeFrontDeferred(
             d_right_members_.ptr<int>(),
             d_right_sorted_pts_.ptr<float2>(),
             d_right_sorted_lids_.ptr<int>());
-        cudaMemsetAsync(d_right_status_[gen].ptr<int>(), 0,
-                        static_cast<size_t>(capR) * sizeof(int), cuda_stream);
+        // 【批0·C(a)·删除】右状态清零已删（拆分路径零消费者；图节点集 -1）
 
         // ── Step 5：发卡（容量网格＋左计数尾闸）──
         const int gridL = issueGrid_(capL);
@@ -1000,21 +1300,25 @@ void LaserMatchScanCudaV3::Impl::executeFrontDeferred(
             d_leftCount);
 
         // ── Step 6：GPU 段表【B2 两步法】（容量网格＋左计数尾闸；Rank 全域安全）──
+        // 【批3】融合开启时标签链已随右链前置完成（同主路径）——本步跳过。
+        if (!v3FuseOn) {
         splitFrontGrowOnly(d_seg_map_, capL, CV_32SC1);
+        // 【P2-0·2026-10-27】无条件帧首清零（同主路径修复：脏显存泄入 segCount）
         splitFrontGrowOnly(d_label_hist_, kV3LabelDomain + 2, CV_32SC1);
-        splitFrontGrowOnly(d_label_seg_, kV3LabelDomain + 1, CV_32SC1);
-        splitFrontGrowOnly(d_label_list_, kV3ListCap, CV_32SC1);
         cudaMemsetAsync(d_label_hist_.ptr<int>(), 0,
                         (kV3LabelDomain + 2) * sizeof(int), cuda_stream);
-        kernelLabelHistCollectV3<<<gridL, BLOCK_SIZE, 0, cuda_stream>>>(
+        splitFrontGrowOnly(d_label_seg_, kV3LabelDomain + 1, CV_32SC1);
+        splitFrontGrowOnly(d_label_list_, kV3ListCap, CV_32SC1);
+        kernelLabelHistCollectV3<<<gridLD, BLOCK_SIZE, 0, cuda_stream>>>(
             d_left_line_ids_cap.ptr<int>(), capL,
             d_label_hist_.ptr<int>(), d_label_list_.ptr<int>(), d_leftCount);
         kernelLabelRankV3<<<1, 256, 0, cuda_stream>>>(
             d_label_hist_.ptr<int>(), d_label_list_.ptr<int>(),
             d_label_seg_.ptr<int>(), d_counts_.ptr<int>() + 2);
-        kernelSegMapWriteV3<<<gridL, BLOCK_SIZE, 0, cuda_stream>>>(
+        kernelSegMapWriteV3<<<gridLD, BLOCK_SIZE, 0, cuda_stream>>>(
             d_left_line_ids_cap.ptr<int>(), d_label_seg_.ptr<int>(), capL,
             d_seg_map_.ptr<int>(), d_leftCount);
+        }
 
         // ── 卡表偏移前缀（容量界——[0,count) 前缀与精确版逐位一致）──
         splitFrontGrowOnly(d_card_off_, capL, CV_32SC1);
@@ -1030,18 +1334,17 @@ void LaserMatchScanCudaV3::Impl::executeFrontDeferred(
             d_card_count_.ptr<int>(), d_card_off_.ptr<int>(), capL, cuda_stream);
 
         // ── sync#1 小批 D2H（容量尺寸；宿主只读 [0,count)）──
+        // 【批0·C(b)】diag 下载已删（无人读）；counts/cardOff/cardCnt(整组)保留
+        //（finishFront 读 h_ccn[N-1]——容量界整组，本路径不改 4B 口径）
         int* h_cnt = hpin_counts_.ensure(4);
-        int* h_dia = hpin_diag_.ensure(4);
         int* h_off = hpin_cardoff_.ensure(static_cast<size_t>(capL));
         int* h_ccn = hpin_cardcnt_.ensure(static_cast<size_t>(capL));
-        if (!h_cnt || !h_dia || !h_off || !h_ccn) {
+        if (!h_cnt || !h_off || !h_ccn) {
             out.success = false;
             out.message = "pinned host buffer alloc failed (deferred sync1)";
             return;
         }
         cudaMemcpyAsync(h_cnt, d_counts_.ptr<int>(), 4 * sizeof(int),
-                        cudaMemcpyDeviceToHost, cuda_stream);
-        cudaMemcpyAsync(h_dia, d_diag_.ptr<int>(), 4 * sizeof(int),
                         cudaMemcpyDeviceToHost, cuda_stream);
         cudaMemcpyAsync(h_off, d_card_off_.ptr<int>(),
                         static_cast<size_t>(capL) * sizeof(int),
@@ -1077,7 +1380,8 @@ void LaserMatchScanCudaV3::Impl::executeFrontDeferred(
 }
 
 // ============================================================================
-// 【B4·前段提交图化】executeFrontGraph——JMW_V3FRONTGRAPH=1 显式开（默认关）。
+// 【B4·前段提交图化】executeFrontGraph——【批D·c2】默认开（JMW_V3FRONTGRAPH=0
+// 显式关；JMW_NOGRAPH=1 总闸优先）。
 // 机理：容量视图下提交段全参数跨帧稳定→单图发射消灭 ~19 笔 WDDM 逐内核放行
 //（前段窗 1.9ms 空隙主源）。发射相位＝排水后（fcV3Front else 分支——不是已证伪
 // 的 H2 defer 相位）。安全形态对齐 mask_sep 生产图：捕获前排空本流/零逐帧
@@ -1093,10 +1397,12 @@ void LaserMatchScanCudaV3::Impl::executeFrontGraph(
     cv::cuda::Stream& stream,
     LaserMatchSplitFrontV3& out)
 {
-    out = LaserMatchSplitFrontV3{};
+    out.resetKeepCapacity();   // 【批2·A1】
     static const bool fgFrontOn_ = [] {
+        const char* ng = getenv("JMW_NOGRAPH");
+        if (ng != nullptr && ng[0] == '1') return false;
         const char* e = getenv("JMW_V3FRONTGRAPH");
-        return e != nullptr && e[0] == '1';
+        return !(e != nullptr && e[0] == '0');   // 默认开；显式 =0 关
     }();
     if (!fgFrontOn_ || fgFrontDisabled_) {
         executeFrontDeferred(d_left_points_cap, d_left_line_ids_cap, d_leftCount,
@@ -1235,12 +1541,58 @@ void LaserMatchScanCudaV3::Impl::executeFrontGraph(
                          stream, out);
 }
 
+// 【诊断臂→默认开·2026-10-29】1b 局部等待姿势：
+//   默认＝省力空转（PAUSE 批轮询；帧率中位 −1.71 噪声级中性、理论省 4-7W）
+//   JMW_PSPIN=0 → 显式关回纯自旋（A/B 对照臂）
+//   JMW_BSONLY=1 → 挂起等待（已证伪 −16.1，仅存档）
+// finishFront 的两处 stream 同步在 fivechain 默认态仅由 1b 线程调用。
+// 归档：1b高占用归因-自旋等GPU-2026-10-29.md §三.6。
+static inline void bsonlyStreamSync(cudaStream_t s) {
+    static const int mode = [] {
+        const char* b = getenv("JMW_BSONLY");
+        if (b != nullptr && b[0] == '1') return 1;
+        const char* p = getenv("JMW_PSPIN");
+        if (p != nullptr && p[0] == '0') return 0;
+        return 2;
+    }();
+    if (mode == 0) {
+        cudaStreamSynchronize(s);
+        return;
+    }
+    static cudaEvent_t ev = [] {
+        cudaEvent_t e2 = nullptr;
+        cudaEventCreateWithFlags(&e2, cudaEventDisableTiming);
+        return e2;
+    }();
+    static cudaEvent_t evBlock = [] {
+        cudaEvent_t e2 = nullptr;
+        cudaEventCreateWithFlags(&e2, cudaEventBlockingSync);
+        return e2;
+    }();
+    if (mode == 1) {
+        cudaEventRecord(evBlock, s);
+        cudaEventSynchronize(evBlock);
+        return;
+    }
+    cudaEventRecord(ev, s);
+    for (;;) {
+        const cudaError_t q = cudaEventQuery(ev);
+        if (q == cudaSuccess) return;
+        if (q != cudaErrorNotReady) {   // 查询出错→兜底原样同步
+            cudaGetLastError();
+            cudaEventSynchronize(ev);
+            return;
+        }
+        for (int i = 0; i < 96; ++i) _mm_pause();
+    }
+}
+
 void LaserMatchScanCudaV3::Impl::finishFront(int leftCount, int rightCount,
                                              cv::cuda::Stream& stream,
                                              LaserMatchSplitFrontV3& out)
 {
     if (!deferActive_) {
-        out = LaserMatchSplitFrontV3{};
+        out.resetKeepCapacity();   // 【批2·A1】
         out.success = false;
         out.message = "finishFront: no deferred context";
         CALIB_LOG_ERROR("finishFront(): {}", out.message);
@@ -1250,10 +1602,10 @@ void LaserMatchScanCudaV3::Impl::finishFront(int leftCount, int rightCount,
     cudaStream_t cuda_stream = cv::cuda::StreamAccessor::getStream(stream);
     const int gen = deferGen_;
     // 提交段产物（含 sync#1 小批 D2H）由调用方排水保证就绪——防御性同步
-    //（已 drained 时即时返回）
-    cudaStreamSynchronize(cuda_stream);
+    //（已 drained 时即时返回；JMW_BSONLY 臂改挂起事件）
+    bsonlyStreamSync(cuda_stream);
     if (leftCount <= 0 || rightCount <= 0) {
-        out = LaserMatchSplitFrontV3{};
+        out.resetKeepCapacity();   // 【批2·A1】
         out.success = true;
         out.message = "No points to match";
         status_gen_++;
@@ -1272,64 +1624,38 @@ void LaserMatchScanCudaV3::Impl::finishFront(int leftCount, int rightCount,
         const int totalCards = h_off[leftCount - 1] + h_ccn[leftCount - 1];
         out.totalCards = totalCards;
 
-        // ── 主批次：紧缩（精确网格）＋tight/main D2H＋sync#2（与旧路径同式）──
-        int* h_tlid = nullptr;
-        float* h_trx = nullptr;
-        int* h_tridx = nullptr;
-        if (totalCards > 0) {
-            splitFrontGrowOnly(d_tight_lid_, totalCards, CV_32SC1);
-            splitFrontGrowOnly(d_tight_rx_, totalCards, CV_32FC1);
-            splitFrontGrowOnly(d_tight_ridx_, totalCards, CV_32SC1);
+        // ── 主批次：紧缩＋int 族＋左点统一交织打包（单内核）＋1 笔 D2H＋sync#2 ──
+        // 【批N-1·D2H 交织】批E 的 3 笔（tight 包＋int 包＋左点）→ 1 笔：统一
+        //   暂存 d_ff_pack_ 三段 [tight | int 包 | 左点 float2(int×2)]；左点段
+        //   起始 off2a 8B 对齐（奇数 +1 填充槽）。数值同源仅布局改。
+        const int off1 = 3 * totalCards;                      // int 包段起始（0=空卡帧）
+        const int off2 = off1 + 3 * leftCount;
+        const int off2a = (off2 & 1) ? off2 + 1 : off2;       // 左点段起始（恒偶）
+        const int totalInts = off2a + 2 * leftCount;
+        splitFrontGrowOnly(d_ff_pack_, totalInts, CV_32SC1);
+        int* h_ff = hpin_ff_pack_.ensure(static_cast<size_t>(totalInts));
+        if (!h_ff) {
+            out.success = false;
+            out.message = "pinned host buffer alloc failed (ff pack)";
+            return;
+        }
+        {
             int grid = (leftCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            kernelTightenCardsSplitV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
+            kernelTightenPackSplitV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
                 d_card_lid_.ptr<int>(), d_card_hitRx_.ptr<float>(),
                 d_card_hitRidx_.ptr<int>(), d_card_count_.ptr<int>(),
                 d_card_off_.ptr<int>(), leftCount,
-                d_tight_lid_.ptr<int>(), d_tight_rx_.ptr<float>(),
-                d_tight_ridx_.ptr<int>());
-            h_tlid = hpin_tight_lid_.ensure(static_cast<size_t>(totalCards));
-            h_trx = hpin_tight_rx_.ensure(static_cast<size_t>(totalCards));
-            h_tridx = hpin_tight_ridx_.ensure(static_cast<size_t>(totalCards));
-            if (!h_tlid || !h_trx || !h_tridx) {
-                out.success = false;
-                out.message = "pinned host buffer alloc failed (tight)";
-                return;
-            }
-            cudaMemcpyAsync(h_tlid, d_tight_lid_.ptr<int>(),
-                            static_cast<size_t>(totalCards) * sizeof(int),
-                            cudaMemcpyDeviceToHost, cuda_stream);
-            cudaMemcpyAsync(h_trx, d_tight_rx_.ptr<float>(),
-                            static_cast<size_t>(totalCards) * sizeof(float),
-                            cudaMemcpyDeviceToHost, cuda_stream);
-            cudaMemcpyAsync(h_tridx, d_tight_ridx_.ptr<int>(),
-                            static_cast<size_t>(totalCards) * sizeof(int),
-                            cudaMemcpyDeviceToHost, cuda_stream);
+                d_ff_pack_.ptr<int>(), off1,
+                d_defer_ptsL_.ptr<float2>(), off2a,
+                d_seg_map_.ptr<int>(), d_left_status_[gen].ptr<int>(),
+                d_defer_idsL_.ptr<int>());
         }
-        int* h_segmap = hpin_segmap_.ensure(static_cast<size_t>(leftCount));
-        int* h_lstat = hpin_leftstat_.ensure(static_cast<size_t>(leftCount));
-        float2* h_left = hpin_left_.ensure(static_cast<size_t>(leftCount));
-        int* h_ltrack = hpin_lefttrack_.ensure(static_cast<size_t>(leftCount));
-        if (!h_segmap || !h_lstat || !h_left || !h_ltrack) {
-            out.success = false;
-            out.message = "pinned host buffer alloc failed (main)";
-            return;
-        }
-        // 主批 4 笔按精确 N（此刻宿主已知）；源＝容量视图基址（前 count 元素
-        // 与精确视图同址——colRange 语义）
-        cudaMemcpyAsync(h_segmap, d_seg_map_.ptr<int>(),
-                        static_cast<size_t>(leftCount) * sizeof(int),
+        // 主批单笔 D2H 按精确 totalInts（此刻宿主已知）；左点源＝提交段保存的
+        // 容量视图（前 count 元素与精确视图同址）
+        cudaMemcpyAsync(h_ff, d_ff_pack_.ptr<int>(),
+                        static_cast<size_t>(totalInts) * sizeof(int),
                         cudaMemcpyDeviceToHost, cuda_stream);
-        cudaMemcpyAsync(h_lstat, d_left_status_[gen].ptr<int>(),
-                        static_cast<size_t>(leftCount) * sizeof(int),
-                        cudaMemcpyDeviceToHost, cuda_stream);
-        // 左点/track 从提交段保存的容量视图取——deferCtx 视图由桥接层持有
-        cudaMemcpyAsync(h_ltrack, d_defer_idsL_.ptr<int>(),
-                        static_cast<size_t>(leftCount) * sizeof(int),
-                        cudaMemcpyDeviceToHost, cuda_stream);
-        cudaMemcpyAsync(h_left, d_defer_ptsL_.ptr<float2>(),
-                        static_cast<size_t>(leftCount) * sizeof(float2),
-                        cudaMemcpyDeviceToHost, cuda_stream);
-        cudaStreamSynchronize(cuda_stream);
+        bsonlyStreamSync(cuda_stream);   // sync#2（JMW_BSONLY 臂挂起等待）
         cudaError_t kernel_err;
         if ((kernel_err = cudaGetLastError()) != cudaSuccess) {
             out.success = false;
@@ -1339,19 +1665,32 @@ void LaserMatchScanCudaV3::Impl::finishFront(int leftCount, int rightCount,
             return;
         }
 
-        // ── 值语义拷出（与旧路径同式）──
+        // ── 值语义拷出（与旧路径同式；单 pinned 暂存按段解交织）──
         out.leftPts.resize(static_cast<size_t>(leftCount));
-        std::memcpy(out.leftPts.data(), h_left,
+        std::memcpy(out.leftPts.data(),
+                    reinterpret_cast<const cv::Point2f*>(h_ff + off2a),
                     sizeof(cv::Point2f) * static_cast<size_t>(leftCount));
-        out.leftTracks.assign(h_ltrack, h_ltrack + leftCount);
-        out.segmap.assign(h_segmap, h_segmap + leftCount);
-        out.leftStatus.assign(h_lstat, h_lstat + leftCount);
+        const int* h_ipack = h_ff + off1;              // int 包段基址
+        out.segmap.resize(static_cast<size_t>(leftCount));
+        out.leftStatus.resize(static_cast<size_t>(leftCount));
+        out.leftTracks.resize(static_cast<size_t>(leftCount));
+        for (int i = 0; i < leftCount; ++i) {
+            out.segmap[static_cast<size_t>(i)] = h_ipack[3 * i + 0];
+            out.leftStatus[static_cast<size_t>(i)] = h_ipack[3 * i + 1];
+            out.leftTracks[static_cast<size_t>(i)] = h_ipack[3 * i + 2];
+        }
         out.cardPtr.assign(h_off, h_off + leftCount);
         out.cardPtr.push_back(totalCards);
         if (totalCards > 0) {
-            out.cardLid.assign(h_tlid, h_tlid + totalCards);
-            out.cardRx.assign(h_trx, h_trx + totalCards);
-            out.cardRidx.assign(h_tridx, h_tridx + totalCards);
+            const float* h_tpackF = reinterpret_cast<const float*>(h_ff);  // tight 段基址=0
+            out.cardLid.resize(static_cast<size_t>(totalCards));
+            out.cardRx.resize(static_cast<size_t>(totalCards));
+            out.cardRidx.resize(static_cast<size_t>(totalCards));
+            for (int i = 0; i < totalCards; ++i) {
+                out.cardLid[static_cast<size_t>(i)] = h_ff[3 * i + 0];
+                out.cardRx[static_cast<size_t>(i)] = h_tpackF[3 * i + 1];
+                out.cardRidx[static_cast<size_t>(i)] = h_ff[3 * i + 2];
+            }
         } else {
             out.cardLid.clear();
             out.cardRx.clear();

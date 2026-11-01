@@ -116,6 +116,17 @@ public:
     LaserCloudFuseCudaResult Execute(const cv::cuda::GpuMat& d_points3d,
                  const cv::Matx33d& R, const cv::Vec3d& T);
 
+    // 【P0-b·滞后读】两段式融合：ExecuteDeferred 只发射 kernel＋异步 D2H
+    // （不同步不阻塞；返回 result 仅 success/inputCount 有效，计数=-1）。
+    // Finish() 落地计数（同步＋rehash 判定＋质量旗）——逐帧流水线可用
+    // "本帧 Deferred＋下帧 Finish" 消除中途阻塞；rehash 判定随之滞后一帧
+    // （voxelReserve 12M vs 峰值 5.7M 双倍余量，audit 裁决可接受）。
+    // removePoints/Clear 前自动 Finish 保证镜像新鲜。无 pending 时 Finish 幂等失败。
+    LaserCloudFuseCudaResult ExecuteDeferred(const cv::cuda::GpuMat& d_points3d,
+                 const cv::Matx33d& R, const cv::Vec3d& T,
+                 cv::cuda::Stream& stream);
+    LaserCloudFuseCudaResult Finish();
+
     /// 编辑账本移除（05 D4 双账本·激光云侧，实施计划 P2）：按下标移除融合点
     /// ——设备端压缩（点/法线同映射保全关联、幸存体素饱和计数保留、体素随
     /// 代表点整体摘除）。indices 为融合点下标（GetDeviceContext()

@@ -57,11 +57,9 @@ FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
                 "[FiveChainAdapter] mask_separation 参数解析失败（用默认）: {}", e.what());
         }
     }
-    // 261028 确定性开关：禁用 CUDA Graph（走 legacy 逐核路径）。
-    // 【261029 复位 true：CONT4 实证 legacy 路径 FPS 289→250/CV 3.7%→16%——
-    // 261028 conic 8→0 的真根因是捕获模式毒化（已由 flat ThreadLocal＋sep
-    // Relaxed 根治），sep 图本身确定性无恙。JMW_FC_SEPNOGRAPH=1 可再禁（诊断）】
-    sepParams.useCudaGraph = getenv("JMW_FC_SEPNOGRAPH") == nullptr;
+    // 261103 集成重放：新分离算子（sep epoch 签名族）CUDA Graph 改为内部
+    // 自管理——原 useCudaGraph 外部开关与 JMW_FC_SEPNOGRAPH 诊断开关退役
+    //（CONT4 结论「图路径确定性无恙」仍有效，内部默认即图路径）
     sepL_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
     sepR_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
     calib::LaserCloudFuseCUDAParams fp;
@@ -124,10 +122,17 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
         fail("steger_fast", p, "d_laserMask 为空（本帧激光线未分离出）");
         return 0;
     }
-    // 261028 根修：标点模式激光掩膜非空但全零——在入口拦截（不做任何 GPU
-    // 提交），彻底避免 flat/undistort/interp/v3 在垃圾数据上操作后崩溃。
-    // cv::cuda::sum 是 GPU 归约（~0.1ms，标量回传）——成本可忽略
-    {
+    // 261028 根修：标点模式激光掩膜非空但全零——入口拦截。
+    // 261103 集成重放【G′ 同族修复】：cv::cuda::sum 无流重载走 legacy(NULL)
+    // 流同步，与 1a sep 大图捕获窗互斥＝cudaErrorStreamCaptureUnsupported
+    //（对拍首轮即崩实锤）。新代沙盒算子已硬化（空掩膜由 flat 0 线→下游
+    // 逐级优雅跳过），本检查降级为诊断件：env JMW_FC_MASKCHECK=1 启用
+    //（启用时与图捕获存在互斥风险——仅离线诊断用）
+    static const bool sMaskCheck = [] {
+        const char* e = getenv("JMW_FC_MASKCHECK");
+        return e && atoi(e) != 0;
+    }();
+    if (sMaskCheck) {
         const cv::Scalar s = cv::cuda::sum(*p.sepL.d_laserMask);
         if (s[0] < 1.0) {
             fail("steger_fast", p, "laser mask 全零（标点模式/无激光帧）");
@@ -773,6 +778,8 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
                     prevState_.T = p.regFuse.T;
                     constexpr double kMergeRadiusMm = 2.0;   // 与 verifyGate 同口径
                     int gi = 0;
+                    p.fuseMarkerGids.clear();
+                    p.fuseMarkerGids.reserve(p.conic.markers.size());
                     for (const auto& m : p.conic.markers) {
                         if (!m.validCircle) continue;
                         int gid = -1;
@@ -818,6 +825,7 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
                             else
                                 gid = nextGid_++;
                         }
+                        p.fuseMarkerGids.push_back(gid);   // 261103 fuse 帧观测入链旁路
                         // 写库体检：非有限值不入库（NaN 毒点致索引静默弃组）
                         const bool finiteOk = std::isfinite(gpos.x) && std::isfinite(gpos.y)
                             && std::isfinite(gpos.z) && std::isfinite(gnorm(0))
@@ -914,7 +922,17 @@ void FcHarnessCompat::adoptRegistration(calib::MarkerOpticalFlowFuseCPUResult& r
             if (nearGid >= 0) {
                 m.globalId = nearGid;
             } else {
-                // 候选期：新点连续 3 次重观测一致才转正入图（防瞬态假点）
+                // 候选期：新点连续 N 次重观测一致才转正入图（防瞬态假点）。
+                // 261103 阈值 3→2（env JMW_FC_PROMOTE 可调）：白板 26 真点
+                // 实测丢 3——检出枯竭期（断档段）边缘真点仅被复观测 1-2 次，
+                // 门槛 3 ＋候选池清理（count<2 弃）＝永远转不了正→无 globalId
+                // →不进 GBA 观测链→「优化后少 3 个」。降 2 后：2mm 内两次
+                // 一致复现即真（假点几乎不会同位置重复）；假阳性兜底＝GBA
+                // chi2 剔除＋近距合并
+                static const int sPromote = [] {
+                    const char* e = getenv("JMW_FC_PROMOTE");
+                    return e ? std::max(2, atoi(e)) : 2;
+                }();
                 bool promoted = false;
                 for (auto& cand : candidates_) {
                     const double dx = m.transformedPosition.x - cand.position.x;
@@ -925,7 +943,7 @@ void FcHarnessCompat::adoptRegistration(calib::MarkerOpticalFlowFuseCPUResult& r
                         ++cand.count;
                         cand.position = m.transformedPosition;   // 最新坐标
                         cand.normal = m.transformedNormal;
-                        if (cand.count >= kPromoteThreshold) {
+                        if (cand.count >= sPromote) {
                             m.globalId = nextGid_++;
                             promoted = true;
                         }
@@ -1843,6 +1861,26 @@ void FiveChainAdapter::collectorLoop() {
                 mo.globalId = m.globalId;
                 fo.markerObs.push_back(mo);
             }
+        } else if (prod.regSource == "fuse" && !prod.fuseMarkerGids.empty()) {
+            // 261103 fuse 帧观测入链（此前只记匿名 -1——GBA 关联挂不上
+            // fuse 转正的晚生 id＝「优化后少 3 点」根因）：fuseMarkerGids 按
+            // conic validCircle 顺序携已解 id；fuse 位姿＝对地图绝对锚定解，
+            // 观测质量不低于 flow
+            fo.markerObs.reserve(prod.fuseMarkerGids.size());
+            int vi = 0;
+            for (const auto& m : prod.conic.markers) {
+                if (!m.validCircle) continue;
+                if (vi >= static_cast<int>(prod.fuseMarkerGids.size())) break;
+                const int gid = prod.fuseMarkerGids[static_cast<size_t>(vi)];
+                ++vi;
+                if (gid < 0) continue;
+                MarkerObs mo;
+                mo.xyz[0] = m.centerX;
+                mo.xyz[1] = m.centerY;
+                mo.xyz[2] = m.centerZ;
+                mo.globalId = gid;
+                fo.markerObs.push_back(mo);
+            }
         } else if (prod.conic.success && prod.markersValid > 0) {
             // 261028 配准失败时 conic 结果也落账（GBA 全局匹配不依赖逐帧
             // 光流——conic 有效圆 3D 位置就是观测，globalId=-1 待 GBA 关联）
@@ -2063,6 +2101,35 @@ void FiveChainAdapter::stopRealtime() {
             executor_ ? executor_->zGateDrops() : 0,
             executor_ ? executor_->zLinePruned() : 0,
             executor_ ? executor_->linePlaneGateMm() : 0);
+        // 261103 候选池验尸（丢点定位）：会话结束仍未转正的候选逐个对账——
+        // 距最近地图点 >10mm＝真点丢失（复现不足/断档期独见）；<5mm＝既有
+        // 点的鬼影（重复簇，丢了无妨）；count=1＝只被见过一次（第二次从未
+        // 到来——检出率域）；count≥2 未转正＝半径/时序问题（2mm 内未配上）
+        if (!harness_->candidates_.empty()) {
+            JMW_LOG_WARN("07-FiveChain",
+                "[CAND-AUTOPSY] 发号总数={} 地图={} 点 | 未转正候选 {} 个：",
+                harness_->nextGid_, harness_->globalSet_.positions.size(),
+                harness_->candidates_.size());
+            int ci = 0;
+            for (const auto& c : harness_->candidates_) {
+                if (++ci > 8) break;   // 日志容量
+                double bestD = 1e30;
+                for (const auto& g : harness_->globalSet_.positions) {
+                    const double dx = c.position.x - g.x;
+                    const double dy = c.position.y - g.y;
+                    const double dz = c.position.z - g.z;
+                    bestD = std::min(bestD, std::sqrt(dx * dx + dy * dy + dz * dz));
+                }
+                const char* verdict = bestD > 10.0 ? "真点丢失"
+                                    : bestD < 5.0  ? "鬼影(近既有)"
+                                                   : "边缘";
+                JMW_LOG_WARN("07-FiveChain",
+                    "[CAND-AUTOPSY] #{} count={} pos=({:.1f},{:.1f},{:.1f}) "
+                    "距最近地图点 {:.1f}mm → {}",
+                    ci, c.count, c.position.x, c.position.y, c.position.z,
+                    bestD, verdict);
+            }
+        }
     }
     JMW_LOG_INFO("07-FiveChain",
         "[FiveChainAdapter] 实时链停止: 服务 {} 帧（过载跳帧 {}/裁剪 {}）/融合云 {} 点",

@@ -86,6 +86,30 @@ LaserMarkingSeparationResult LaserMarkingSeparationCUDA::Execute(
     return pImpl_->separateDev(d_grayImage, stream);
 }
 
+// 【N-6·1a 三合一大图】裸发射口/结果壳/epoch/指针锚——转发 Impl
+void LaserMarkingSeparationCUDA::EmitPipelineBody(
+    const cv::cuda::GpuMat& d_grayImage, cv::cuda::Stream& stream) {
+    pImpl_->emitPipelineBody(d_grayImage, stream);
+}
+
+LaserMarkingSeparationResult LaserMarkingSeparationCUDA::MakeShell() const {
+    return pImpl_->makeShell();
+}
+
+uint64_t LaserMarkingSeparationCUDA::GetParamsEpoch() const {
+    return pImpl_->paramsEpoch_;
+}
+
+const void* LaserMarkingSeparationCUDA::InputBufferPtr() const {
+    return pImpl_->inputBufferPtr();
+}
+const void* LaserMarkingSeparationCUDA::LaserMaskPtr() const {
+    return pImpl_->laserMaskPtr();
+}
+const void* LaserMarkingSeparationCUDA::MarkingMaskPtr() const {
+    return pImpl_->markingMaskPtr();
+}
+
 void LaserMarkingSeparationCUDA::Destroy() {
     pImpl_.reset();
 }

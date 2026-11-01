@@ -58,10 +58,6 @@ struct LaserMarkingSeparationParams {
     /// 调试开关：结果额外携带分步中间掩膜（GPU 克隆；生产保持 false）
     bool dumpAllSteps = false;
 
-    /// 261028 确定性开关：禁用 CUDA Graph（走 legacy 逐核路径）。
-    /// CUDA Graph 在多会话场景下捕获不确定（conic 8/帧 vs 0-1/帧）。
-    bool useCudaGraph = true;
-
     void validate() const {
         if (threshold < 0 || threshold > 255)
             throw std::invalid_argument(
@@ -202,6 +198,16 @@ public:
     /// H2D 上传；逐内核序列与 Host 版一致 → 结果逐位一致
     LaserMarkingSeparationResult Execute(const cv::cuda::GpuMat& d_grayImage,
                                          cv::cuda::Stream& stream);
+
+    /// 【N-6·1a 三合一大图】裸发射口（executor 捕获窗专用——D2D 入驻＋
+    /// executePipeline 纯核序列，与 separateDev 图体同源）；结果壳（视图＋
+    /// success）；参数/缓冲代际（大图签名）；关键缓冲指针（签名锚）
+    void EmitPipelineBody(const cv::cuda::GpuMat& d_grayImage, cv::cuda::Stream& stream);
+    LaserMarkingSeparationResult MakeShell() const;
+    uint64_t GetParamsEpoch() const;
+    const void* InputBufferPtr() const;
+    const void* LaserMaskPtr() const;
+    const void* MarkingMaskPtr() const;
 
     void Destroy();
 
