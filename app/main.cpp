@@ -1,6 +1,6 @@
 #include "MainWindow.h"
 #include "AppContext.h"
-#include "modules/DeviceManager/DeviceManager.h"   // setWireTap（串口监视弹窗）
+#include "modules/08_DeviceManager/DeviceManager.h"   // setWireTap（串口监视弹窗）
 #include "ObsLogger.h"
 #include "CrashHandler.h"
 #include "jmw_logging.h"
@@ -20,6 +20,10 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <string>
+#include <string_view>
+
+#include "jmw_pm_contract.h"       // 261031 契约护栏（07 替换守护）
+#include "jmw_pm_contract_hash.h"  // 编译期期望指纹（构建期生成）
 
 int main(int argc, char *argv[])
 {
@@ -35,6 +39,22 @@ int main(int argc, char *argv[])
         Scanner::service::obsExportDiagnosticsPackage(residual);
     }
     JMW_LOG_INFO("app", "=== ScannerFramework 启动 ===");
+
+    // 261031 D1-lite 契约护栏：PipelineManager.dll 实时指纹 vs exe 编译期
+    // 期望（07/09 DLL 单独替换更新算法时，公共头未变才放行；头已变＝
+    // 换 DLL 不安全，拒绝启动并要求全量重编）
+    {
+        const char* live = jmw_pm_contract_hash();
+        if (std::string_view(live) != jmw::contract::pm::hash) {
+            JMW_LOG_ERROR("app",
+                "[契约] PipelineManager.dll 指纹不一致：DLL={} 期望={} —— "
+                "公共头已变，单纯替换 DLL 不安全，需全量重编",
+                live, jmw::contract::pm::hash);
+            return 1;
+        }
+        JMW_LOG_INFO("app", "[契约] PipelineManager abi={} 指纹={}",
+                     jmw_pm_abi_version(), live);
+    }
 
     _putenv_s("OSG_PLUGIN_PATH", "F:/osg3.6.5/install/bin/osgPlugins-3.6.5");
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);

@@ -28,9 +28,18 @@ endif()
 add_library(PipelineManager ${JMW_MODULE_LIB_TYPE} sched/FrameResultQueue.cpp sched/PCoreBroker.cpp
     sched/GpuSlotService.cpp sched/CpuTopology.cpp sched/SchedulerRuntime.cpp
     ${JMW_PM_PIPELINE_SRCS})
-target_include_directories(PipelineManager PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(PipelineManager PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/api)     # #include "jmw_pm_contract.h"（发布契约面）
 target_link_libraries(PipelineManager PUBLIC base DataManager OperatorLib
     spdlog::spdlog ${OpenCV_LIBS})
+# 261031 D1-lite 契约指纹：闭包＝自身＋base＋06＋09（ScanPipeline.h 直接
+# include 06 的 SlotRing/EnhancedFrame 与 09 的 calib_result_types.h，
+# 导出 ABI 由多层头共同构成）
+jmw_add_contract(PipelineManager pm ${CMAKE_CURRENT_SOURCE_DIR}
+    EXTRA_DIRS ${CMAKE_SOURCE_DIR}/base
+              ${CMAKE_SOURCE_DIR}/modules/06_DataManager
+              ${CMAKE_SOURCE_DIR}/modules/09_OperatorLib)
 if(BUILD_CUDA)
     # CUDAToolkit v12.6 pin/守卫已上移根 CMakeLists（enable_language 后、任何消费方之前，
     # 原 P1-T1 模块内块于 T31 清偿）；此处仅消费其缓存结果（REQUIRED 保证未找到即失败）

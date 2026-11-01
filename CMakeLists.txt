@@ -68,7 +68,7 @@ endif()
 # 自行从注册表解析到 v12.4 并以普通变量 CMAKE_CUDA_COMPILER 遮蔽 CACHE 中的 pin 值
 #（PATH/CUDA_PATH/VS CUDA props 均只有 12.6，实际编译与 OpenCV-CUDA 都是 12.6）。
 # 故用 $CACHE{} 直读上方写入的 pin 原值，反推工具链根并覆写检测变量。
-#（原置 modules/PipelineManager（P1-T1）；上移至此（T31 技术债）——统一在
+#（原置 modules/07_PipelineManager（P1-T1）；上移至此（T31 技术债）——统一在
 #   enable_language(CUDA) 之后、任何 find_package(CUDAToolkit) 之前解析一次，
 #   保护全部消费方、与目录遍历序无关；模块侧仅剩消费。）
 if(BUILD_CUDA)
@@ -183,9 +183,9 @@ endfunction()
 
 # base/ 共享内核（Phase 1 新增；framework/* 转发壳引用 "base/*.h"，需项目根在全局 include 路径）
 include_directories(${CMAKE_SOURCE_DIR})
-include_directories(${CMAKE_SOURCE_DIR}/modules/DataManager)
-include_directories(${CMAKE_SOURCE_DIR}/modules/DeviceManager)
-include_directories(${CMAKE_SOURCE_DIR}/modules/Observability)
+include_directories(${CMAKE_SOURCE_DIR}/modules/06_DataManager)
+include_directories(${CMAKE_SOURCE_DIR}/modules/08_DeviceManager)
+include_directories(${CMAKE_SOURCE_DIR}/modules/10_Observability)
 
 # Qt5 搜索路径前置（modules/08 的 find_package(Qt5 SerialPort) 先于 app 配置，
 # CMAKE_PREFIX_PATH 必须在首个 add_subdirectory 前就位，不依赖 cache 残留）
@@ -193,6 +193,8 @@ set(JMW_QT5_PREFIX "C:/Qt/Qt5.15.2/5.15.2/msvc2019_64" CACHE PATH "Qt5 安装前
 list(APPEND CMAKE_PREFIX_PATH "${JMW_QT5_PREFIX}")
 
 add_subdirectory(base)
+# 261031 D1-lite 契约指纹（07/09 DLL 直接替换的 ABI 守护），详见 cmake/JmwContract.cmake
+include(cmake/JmwContract.cmake)
 add_subdirectory(modules)
 add_subdirectory(app)
 
@@ -210,7 +212,7 @@ if(BUILD_SCAN_REPLAY AND NOT CMAKE_DEBUG_CONFIG IN_LIST CMAKE_CONFIGURATION_TYPE
     # 由子工程自守（其 CMake 已按 Release-only 语义构建）
 endif()
 if(BUILD_SCAN_REPLAY)
-    add_subdirectory(modules/09_operatorlib/TEST/speed_optimize)
+    add_subdirectory(modules/09_OperatorLib/TEST/speed_optimize)
 endif()
 
 # VS 生成器默认启动项目为 ALL_BUILD（不可运行）；改设 LeadScannerK2 为 sln 首个工程

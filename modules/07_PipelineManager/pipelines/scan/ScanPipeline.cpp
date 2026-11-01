@@ -6,11 +6,14 @@
 #include "pipelines/scan/ScanPipeline.h"
 
 #include "pipelines/scan/fivechain/FiveChainAdapter.h"
-#include "scanning/laser/laser_match_scan_v3/cmtt_table_loader.h"   // 五链 v3 CMTT 曲线表装载
+#include "scanning/laser/laser_match_scan_v3/cmtt_table_loader.h"   // 原生 v3 CMTT
+#include "jmw_op_contract.h"        // 261031 契约护栏（09 替换守护）
+#include "jmw_op_contract_hash.h"   // 编译期期望指纹（构建期生成）
 
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <string_view>
 
 #include "jmw_logging.h"
 
@@ -70,6 +73,21 @@ FrameObsAccumulator& ScanPipeline::obs() { return obs_; }
 Scanner::Result ScanPipeline::configure(const PipelineDeps& deps) {
     if (state_.load() != State::Idle)
         return Result::fail("ScanPipeline::configure: 会话私有件，须新对象");
+    // 261031 D1-lite 契约护栏：OperatorLib.dll 实时指纹 vs 本模块编译期
+    // 期望（09 单独替换时若公共头已变，此处拒绝——换 DLL 不安全，需全量重编）
+    {
+        const char* live = jmw_op_contract_hash();
+        if (std::string_view(live) != jmw::contract::op::hash) {
+            JMW_LOG_ERROR("07-ScanPipeline",
+                "[契约] OperatorLib.dll 指纹不一致：DLL={} 期望={} —— "
+                "公共头已变，单纯替换 DLL 不安全，需全量重编",
+                live, jmw::contract::op::hash);
+            return Result::fail("OperatorLib contract hash mismatch "
+                                "(重建 exe+07 或还原 OperatorLib.dll)");
+        }
+        JMW_LOG_INFO("07-ScanPipeline", "[契约] OperatorLib abi={} 指纹={}",
+                     jmw_op_abi_version(), live);
+    }
     cloudWarehouse_ = deps.cloudWarehouse;        // 仓库直写口（可空）
     sceneFeed_ = deps.sceneFeed;                  // 点云显示口（可空）
     sink_ = std::make_unique<EventBusEventSink>(nullptr);   // 事件上报（no-op 底座）

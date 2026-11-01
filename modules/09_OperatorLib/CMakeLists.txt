@@ -50,10 +50,14 @@ endif()
 add_library(OperatorLib ${JMW_MODULE_LIB_TYPE} ${OP_SOURCES})
 target_include_directories(OperatorLib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}          # #include "core/common/calib_types.h"
+    ${CMAKE_CURRENT_SOURCE_DIR}/api      # #include "jmw_op_contract.h"（发布契约面）
     ${CMAKE_CURRENT_SOURCE_DIR}/core     # #include "common/calib_types.h"（3DSCANNER 风格）
     ${CMAKE_SOURCE_DIR}                  # 工程根
     ${OP_INC_DIRS}                       # 各算子自目录（跨算子 include）
 )
+# 261031 D1-lite 契约指纹：闭包＝自身＋base（exe→07→09 守护链的末梢）
+jmw_add_contract(OperatorLib op ${CMAKE_CURRENT_SOURCE_DIR}
+    EXTRA_DIRS ${CMAKE_SOURCE_DIR}/base)
 
 target_link_libraries(OperatorLib PUBLIC
     ${OpenCV_LIBS}
