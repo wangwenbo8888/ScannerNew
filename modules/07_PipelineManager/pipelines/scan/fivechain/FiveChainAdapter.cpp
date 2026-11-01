@@ -489,6 +489,25 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
                 fprintf(stderr, "[Q-BASIS] replaced=%d skipped=%d\n", replaced, skipped);
         }
     }
+    // ── 261031 标志点-激光坐标系对齐（B 方案：经验 Z 校正）──
+    // 根因：激光链 undistGR 用 P2_tx0（tx 置零）vs 标志点链 undistCpu 用原始
+    // P2 → 两条链在不同坐标系 → GBA 拟合标志点坐标系的位姿 → 激光重放被拉偏。
+    // 校正：DUAL-Z 实测两链系统偏差（标志点比激光近 ~3.2mm），给标志点 Z 加
+    // 偏差补偿 → GBA 观测在统一坐标系 → 位姿对两条链同时正确。
+    // env JMW_FC_MKZ=<mm> 可调（默认 3.2——399 帧 DUAL-Z 中位）
+    {
+        static const double sMkZ = [] {
+            const char* e = getenv("JMW_FC_MKZ");
+            return e ? atof(e) : 3.2;
+        }();
+        if (sMkZ != 0.0) {
+            for (auto& m : p.conic.markers) {
+                if (!m.validCircle) continue;
+                m.centerZ += sMkZ;
+            }
+        }
+    }
+
     // 逐级诊断计数（split/ellipse/match 成功帧）
     if (p.splitL.success && p.splitR.success)
         diagSplit_.fetch_add(1, std::memory_order_relaxed);
