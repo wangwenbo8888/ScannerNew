@@ -7,6 +7,8 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
+#include <cuda_runtime.h>   // G′ 大图（cudaGraph_t/exec/launch）
+#include <cstring>          // G′ 签名 memcmp
 #include <string>
 #include <vector>
 #include <memory>
@@ -404,6 +406,38 @@ public:
     calib::PrevFrameState prevState_;
     // 光流配准算子（runRegistration 消费——构造期创建）
     std::unique_ptr<calib::MarkerOpticalFlowFuseCPU> flowOp_;
+
+    // ========================================================================
+    // 【G′·三合一大图】261103 自 fullgpu 移植——1b 段（flat 延迟块＋undistort＋
+    // interp scan+link）单图捕获/发射。暖机 2 帧走常规路径→第 3 帧捕获→
+    // 稳态签名校验通过即 graphLaunch（省 ~28 launch/帧）。epoch 签名任一
+    // 实例变化（SetParams/缓冲扩容）→毁图重捕。env JMW_NOGRAPH=1 或
+    // JMW_1BBIGGRAPH=0 关闭。
+    // ========================================================================
+    struct FrontBigGraph {
+        cudaGraph_t graph = nullptr;
+        cudaGraphExec_t exec = nullptr;
+        int warm = 0;
+        bool disabled = false;
+        int attempts = 0;
+        struct Sig {                      // 全 POD 无 padding，memcmp 签名用
+            uint64_t epFlatL, epFlatR, epUndL, epUndR, epIntL, epIntR;
+            int rows, cols, nbands;
+        };
+        Sig sig{};
+        bool sigValid = false;
+        void destroy() {
+            if (exec) { cudaGraphExecDestroy(exec); exec = nullptr; }
+            if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+            sigValid = false;
+        }
+    };
+    FrontBigGraph bigGraph_;
+    /// 大图提交（deferred 分支专用。返回 true＝提交完成（p.* 已填）；
+    /// false＝本帧走常规路径（warm<2 或捕获/发射失败）
+    bool trySubmitBigGraph_(LaserOps& L, scr::CycleProductsCompat& p,
+                            const cv::cuda::GpuMat& gL, const cv::cuda::GpuMat& gR,
+                            cv::cuda::Stream& ls);
 
     // ========================================================================
     // 261025 对拍补全：配准三级降级状态机（沙盒 harness.h L317-348 同款——

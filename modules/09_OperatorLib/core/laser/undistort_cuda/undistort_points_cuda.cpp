@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file undistort_points_cuda.cpp
  * @brief 婵€鍏変腑蹇冧簹鍍忕礌鐐归泦鍘荤暩鍙?绔嬩綋鐭绠楀瓙 - 妗ユ帴瀹炵幇锛堟瀯閫?鏋愭瀯/warmup/setParams锛?
  *
@@ -9,6 +9,7 @@
 #include "common/calib_logging.h"
 #include "common/calib_warmup_config.h"
 #include <opencv2/core/cuda.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>   // G' EmitAtCapacity 流句柄
 #include <stdexcept>
 
 using namespace calib;
@@ -137,6 +138,21 @@ void UndistortPointsCuda::SetParams(const UndistortPointsParams& params) {
     pImpl_->SetParams(params);
 }
 
+// 【G′·三合一大图】261103 自 fullgpu 移植
+UndistortPointsResult UndistortPointsCuda::EmitAtCapacity(
+    const cv::cuda::GpuMat& d_points, cv::cuda::Stream& stream) {
+    return pImpl_->EmitAtCapacity(
+        d_points, cv::cuda::StreamAccessor::getStream(stream));
+}
+
+UndistortPointsResult UndistortPointsCuda::MakeCapacityShell() const {
+    return pImpl_->MakeCapacityShell();
+}
+
+uint64_t UndistortPointsCuda::GetParamsEpoch() const {
+    return pImpl_->GetParamsEpoch();
+}
+
 const UndistortPointsParams& UndistortPointsCuda::GetParams() const {
     return pImpl_->GetParams();
 }
@@ -168,6 +184,19 @@ UndistortPointsResult UndistortPointsCuda::Execute(const cv::cuda::GpuMat&, cv::
 
 UndistortPointsResult UndistortPointsCuda::Execute(const cv::cuda::GpuMat&) {
     throw std::runtime_error("[11-UndistortPointsCuda] CUDA not available (BUILD_CUDA=OFF)");
+}
+
+// 【G′·三合一大图】BUILD_CUDA=OFF 桩（261103）
+UndistortPointsResult UndistortPointsCuda::EmitAtCapacity(const cv::cuda::GpuMat&, cv::cuda::Stream&) {
+    throw std::runtime_error("[11-UndistortPointsCuda] CUDA not available (BUILD_CUDA=OFF)");
+}
+
+UndistortPointsResult UndistortPointsCuda::MakeCapacityShell() const {
+    throw std::runtime_error("[11-UndistortPointsCuda] CUDA not available (BUILD_CUDA=OFF)");
+}
+
+uint64_t UndistortPointsCuda::GetParamsEpoch() const {
+    return 0;
 }
 
 void UndistortPointsCuda::Destroy() {

@@ -111,6 +111,170 @@ void FiveChainAdapter::onFrameDone(uint64_t frameId, const double R[9], const do
 // FcHarnessCompat 方法实现（从沙盒 harness.cpp 提取的算法体——逐段对应）
 // ============================================================================
 
+// ============================================================================
+// 【G′·三合一大图】261103 自 fullgpu harness trySubmitBigGraph_ 移植——
+// 1b 段（flat 延迟块＋undistort＋interp scan+link）单图捕获/发射。
+// 暖机 2 帧（走常规路径保证缓冲面世）→第 3 帧 ThreadLocal 捕获→稳态签名
+// 校验通过 graphLaunch（省 ~28 launch/帧）。epoch 签名（六实例＋几何）变化
+// →毁图重捕。失败＝本帧走常规路径（大图臂整体放弃）。
+// ============================================================================
+bool FcHarnessCompat::trySubmitBigGraph_(LaserOps& L, scr::CycleProductsCompat& p,
+                                         const cv::cuda::GpuMat& gL,
+                                         const cv::cuda::GpuMat& gR,
+                                         cv::cuda::Stream& ls) {
+    cudaStream_t cs = cv::cuda::StreamAccessor::getStream(ls);
+    if (cs == nullptr || bigGraph_.disabled) return false;
+
+    // ① 首帧暖机——Warmup 预建全缓冲体（flat/undist/interp——大图捕获的
+    //    前置，否则捕获窗内扩容＝图损坏）
+    if (bigGraph_.warm == 0) {
+        L.flatL_->Warmup(gL.rows, gL.cols);
+        L.flatR_->Warmup(gR.rows, gR.cols);
+        L.undistGL_->Warmup(calib::FlatCenterExtractor::kOutCap);
+        L.undistGR_->Warmup(calib::FlatCenterExtractor::kOutCap);
+        L.interpL_->Warmup(calib::FlatCenterExtractor::kOutCap);
+        L.interpR_->Warmup(calib::FlatCenterExtractor::kOutCap);
+    }
+
+    // ② 参数面刷（每帧图外 memcpy——lane 灰度/lmask 指针变化后须维护）
+    if (!L.flatL_->PrepareBigGraph(gL, *p.sepL.d_laserMask)
+        || !L.flatR_->PrepareBigGraph(gR, *p.sepR.d_laserMask)) {
+        bigGraph_.disabled = true;   // 永久闸（不可恢复）
+        return false;
+    }
+    FrontBigGraph::Sig cur{};
+    cur.epFlatL = L.flatL_->GetParamsEpoch();
+    cur.epFlatR = L.flatR_->GetParamsEpoch();
+    cur.epUndL = L.undistGL_->GetParamsEpoch();
+    cur.epUndR = L.undistGR_->GetParamsEpoch();
+    cur.epIntL = L.interpL_->GetParamsEpoch();
+    cur.epIntR = L.interpR_->GetParamsEpoch();
+    if (!L.flatL_->GraphDims(cur.rows, cur.cols, cur.nbands)) return false;
+
+    // ③ 签名失效（SetParams/参数变化/缓冲重建——epoch 变）→毁图
+    if (bigGraph_.sigValid
+        && std::memcmp(&cur, &bigGraph_.sig, sizeof(cur)) != 0) {
+        bigGraph_.destroy();
+    }
+
+    // ④ 稳态签名通过→graphLaunch（+28 launch/帧常规路径省）
+    if (bigGraph_.exec && bigGraph_.sigValid) {
+        if (cudaGraphLaunch(bigGraph_.exec, cs) == cudaSuccess) {
+            L.interpL_->MarkBigInFlight(ls);
+            L.interpR_->MarkBigInFlight(ls);
+            p.stegerL = L.flatL_->MakeDeferredShell();
+            p.stegerR = L.flatR_->MakeDeferredShell();
+            p.undistCudaL = L.undistGL_->MakeCapacityShell();
+            p.undistCudaR = L.undistGR_->MakeCapacityShell();
+            p.undistCudaL.d_line_ids = p.stegerL.d_line_ids;
+            p.undistCudaR.d_line_ids = p.stegerR.d_line_ids;
+            p.interpL = L.interpL_->MakeBigShell();
+            p.interpR = L.interpR_->MakeBigShell();
+            return true;
+        }
+        cudaGetLastError();
+        bigGraph_.destroy();
+        bigGraph_.disabled = true;
+        return false;
+    }
+
+    // ⑤ 暖机帧 0/1——常规同源发射（不捕获；缓冲面世保证）
+    if (bigGraph_.warm < 2) {
+        ++bigGraph_.warm;
+        calib::StegerResult shellL = L.flatL_->MakeDeferredShell();
+        calib::StegerResult shellR = L.flatR_->MakeDeferredShell();
+        if (!L.flatL_->EmitGraphBody(ls) || !L.flatR_->EmitGraphBody(ls))
+            return false;
+        auto uL = L.undistGL_->EmitAtCapacity(*shellL.d_centerPoints, ls);
+        auto uR = L.undistGR_->EmitAtCapacity(*shellR.d_centerPoints, ls);
+        if (!uL.success || !uR.success) return false;
+        calib::EpipolarInterpResult iL, iR;
+        if (!L.interpL_->EmitDeferredBody(*uL.d_rectifiedPoints,
+                                          L.flatL_->GetDeviceCountPtr(), ls, iL)
+            || !L.interpR_->EmitDeferredBody(*uR.d_rectifiedPoints,
+                                             L.flatR_->GetDeviceCountPtr(), ls, iR))
+            return false;
+        L.interpL_->MarkBigInFlight(ls);
+        L.interpR_->MarkBigInFlight(ls);
+        p.stegerL = std::move(shellL);
+        p.stegerR = std::move(shellR);
+        p.undistCudaL = std::move(uL);
+        p.undistCudaR = std::move(uR);
+        p.undistCudaL.d_line_ids = p.stegerL.d_line_ids;
+        p.undistCudaR.d_line_ids = p.stegerR.d_line_ids;
+        p.interpL = std::move(iL);
+        p.interpR = std::move(iR);
+        return true;
+    }
+    ++bigGraph_.warm;
+
+    // ⑥ 暖机完 2 帧→捕获（mask_sep 屏障后——WDDM 排空防线）
+    cudaStreamSynchronize(cs);
+    cudaError_t cerr = cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal);
+    bool bodyOk = (cerr == cudaSuccess);
+    calib::StegerResult shellL, shellR;
+    calib::UndistortPointsResult uL, uR;
+    if (bodyOk) {
+        bodyOk = L.flatL_->EmitGraphBody(ls) && L.flatR_->EmitGraphBody(ls);
+        shellL = L.flatL_->MakeDeferredShell();
+        shellR = L.flatR_->MakeDeferredShell();
+    }
+    if (bodyOk) {
+        uL = L.undistGL_->EmitAtCapacity(*shellL.d_centerPoints, ls);
+        uR = L.undistGR_->EmitAtCapacity(*shellR.d_centerPoints, ls);
+        bodyOk = uL.success && uR.success;
+    }
+    if (bodyOk) {
+        calib::EpipolarInterpResult iL, iR;
+        bodyOk = L.interpL_->EmitDeferredBody(*uL.d_rectifiedPoints,
+                                              L.flatL_->GetDeviceCountPtr(), ls, iL)
+              && L.interpR_->EmitDeferredBody(*uR.d_rectifiedPoints,
+                                              L.flatR_->GetDeviceCountPtr(), ls, iR);
+    }
+    // EndCapture 大关（任一失败→僵尸图销毁）
+    cudaGraph_t g = nullptr;
+    const cudaError_t eerr = cudaStreamEndCapture(cs, &g);
+    if (!bodyOk || eerr != cudaSuccess || !g) {
+        if (g) cudaGraphDestroy(g);
+        cudaGetLastError();
+        if (++bigGraph_.attempts > 8) bigGraph_.disabled = true;
+        return false;
+    }
+    cudaGraphExec_t ge = nullptr;
+    if (cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0) != cudaSuccess || !ge) {
+        if (ge) cudaGraphExecDestroy(ge);
+        cudaGraphDestroy(g);
+        cudaGetLastError();
+        if (++bigGraph_.attempts > 8) bigGraph_.disabled = true;
+        return false;
+    }
+    bigGraph_.destroy();
+    bigGraph_.graph = g;
+    bigGraph_.exec = ge;
+    bigGraph_.sig = cur;
+    bigGraph_.sigValid = true;
+    size_t nn = 0;
+    cudaGraphGetNodes(g, nullptr, &nn);
+    JMW_LOG_INFO("07-FiveChain", "[FrontBigGraph] 捕获成功（flat+undist+1B, nodes={}）", nn);
+    if (cudaGraphLaunch(bigGraph_.exec, cs) == cudaSuccess) {
+        L.interpL_->MarkBigInFlight(ls);
+        L.interpR_->MarkBigInFlight(ls);
+        p.stegerL = L.flatL_->MakeDeferredShell();
+        p.stegerR = L.flatR_->MakeDeferredShell();
+        p.undistCudaL = L.undistGL_->MakeCapacityShell();
+        p.undistCudaR = L.undistGR_->MakeCapacityShell();
+        p.undistCudaL.d_line_ids = p.stegerL.d_line_ids;
+        p.undistCudaR.d_line_ids = p.stegerR.d_line_ids;
+        p.interpL = L.interpL_->MakeBigShell();
+        p.interpR = L.interpR_->MakeBigShell();
+        return true;
+    }
+    cudaGetLastError();
+    bigGraph_.destroy();
+    bigGraph_.disabled = true;
+    return false;
+}
+
 int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
                                         bool record, bool tubeOdd, int laneIdx,
                                         cv::cuda::Stream& ls) {
@@ -142,6 +306,23 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
     try {
         timeBegin();
         bool deferred = false;
+        // 【G′·三合一大图】261103 自 fullgpu 移植——暖机 2 帧→捕获→稳态
+        // graphLaunch（省 ~28 launch/帧）；JMW_NOGRAPH/JMW_1BBIGGRAPH=0 关
+        const bool bigOn = [] {
+            const char* ng = getenv("JMW_NOGRAPH");
+            if (ng != nullptr && ng[0] == '1') return false;
+            const char* e = getenv("JMW_1BBIGGRAPH");
+            return !(e != nullptr && e[0] == '0');
+        }();
+        bool bigDone = false;
+        if (bigOn && L.flatL_ && L.flatR_)
+            bigDone = trySubmitBigGraph_(L, p, gL, gR, ls);
+        if (bigDone) {
+            // 大图整段完成（flat+undist+interp）；壳已填——undistort/interp
+            // 常规段整段跳过（沙盒同款）
+            return 1;   // deferred 口径：仍走排水（FinishInterp 幂等——图路径
+                        // 只落精确 N/延迟段排水语义同构）
+        }
         if (L.flatL_ && L.flatR_) {
             // flat 路径（沙盒 extractor=flat）：延迟提交——双眼连续入队
             // 不同步（stats 28B D2H 在飞，完成段排水）。分眼实例（计数器私有）

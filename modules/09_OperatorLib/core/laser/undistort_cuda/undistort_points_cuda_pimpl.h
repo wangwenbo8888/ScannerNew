@@ -9,6 +9,7 @@
 #pragma once
 
 #include <opencv2/core/cuda.hpp>
+#include <cuda_runtime.h>
 #include <memory>
 #include <atomic>
 #include <vector>
@@ -46,10 +47,17 @@ struct UndistortPointsCuda::Impl {
     UndistortPointsResult Execute(const cv::cuda::GpuMat& d_points,
                                    const cv::cuda::GpuMat& d_line_ids,
                                    cv::cuda::Stream& stream);
+    // 【G′·三合一大图】261103 自 fullgpu 移植（C4 代际＋容量裸发射＋容量壳）
+    UndistortPointsResult EmitAtCapacity(const cv::cuda::GpuMat& d_points,
+                                         cudaStream_t cs);
+    UndistortPointsResult MakeCapacityShell() const;
+    uint64_t GetParamsEpoch() const { return paramsEpoch_; }
     void Destroy();
     void Warmup(int maxPointCount);
     void SetParams(const UndistortPointsParams& params);
     const UndistortPointsParams& GetParams() const { return params_; }
+    // 【G′·C4】参数/缓冲代际（Warmup/d_R_ 重传/d_output_ 扩容/SetParams 递增）
+    uint64_t paramsEpoch_ = 0;
 
     void extractCalibParams();
 };

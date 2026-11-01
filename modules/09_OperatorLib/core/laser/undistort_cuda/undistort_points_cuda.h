@@ -172,11 +172,28 @@ public:
 
     UndistortPointsResult Execute(const cv::cuda::GpuMat& d_points);
 
+    /// 【G′·三合一大图】容量网格裸发射（harness FrontBigGraph 捕获窗专用）——
+    /// 前置＝d_R_ 已上传＋d_output_ 容量到位（暖机帧走常规路径保证）；失败返
+    /// 回 success=false（调用方大图臂回退/放弃本帧）。结果壳与 Execute 同构
+    ///（持久缓冲 ROI——图发射无逐帧计数，壳＝容量视图）。【261103 自
+    /// fullgpu 移植——kernel 签名同源，15×double 精度不变】
+    UndistortPointsResult EmitAtCapacity(const cv::cuda::GpuMat& d_points,
+                                         cv::cuda::Stream& stream);
+
+    /// 【G′】容量结果壳（不发射——大图稳态帧 graphLaunch 后填 p.undistCuda*；
+    /// 与 Execute/EmitAtCapacity 返回同构持久缓冲 ROI。前置＝暖机）
+    UndistortPointsResult MakeCapacityShell() const;
+
     void Destroy();
     void Warmup(int maxPointCount);
     void Warmup(const WarmupConfig& config);
     void SetParams(const UndistortPointsParams& params);
     const UndistortPointsParams& GetParams() const;
+    /// 【G′·C4】 paramsEpoch_ 参数/缓冲代际计数（F 的 fuseNeedRecapture_ 范式平移）：
+    /// SetParams／d_R_ 重传／d_output_ 扩容／Warmup 分配时递增——harness 大图签名
+    /// 聚合消费（任一实例 epoch 变→毁图重捕）。回放运行期恒定（SetParams 零扩容
+    /// →稳态恒定）
+    uint64_t GetParamsEpoch() const;
 
 private:
     struct Impl;

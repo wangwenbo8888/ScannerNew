@@ -199,7 +199,7 @@ void UndistortPointsCuda::Impl::Warmup(int maxPointCount) {
     }
 
     d_output_.create(1, maxPointCount, CV_32FC2);
-
+    ++paramsEpoch_;   // 【G′·C4】Warmup 分配（d_output_/d_R_ 缓冲指针面世）
     float h_R[9];
     for (int i = 0; i < 9; ++i) h_R[i] = R_[i];
     d_R_.create(1, 9, CV_32FC1);
@@ -240,10 +240,12 @@ UndistortPointsResult UndistortPointsCuda::Impl::Execute(
             float h_R[9];
             for (int i = 0; i < 9; ++i) h_R[i] = R_[i];
             d_R_.upload(cv::Mat(1, 9, CV_32FC1, h_R), stream);
+            ++paramsEpoch_;   // 【G′·C4】d_R_ 首次上载（设备指针面世）
             CALIB_LOG_INFO("Execute(): R matrix uploaded once (persistent)");
         }
         if (d_output_.cols < pointCount) {
             d_output_.create(1, pointCount, CV_32FC2);
+            ++paramsEpoch_;   // 【G′·C4】输出缓冲扩容（d_dst 指针变化）
             CALIB_LOG_INFO("Execute(): output buffer grown to {} points", pointCount);
         }
 
@@ -311,7 +313,62 @@ void UndistortPointsCuda::Impl::Destroy() {
     d_R_.release();
     warmed_up_ = false;
     warmup_pointCount_ = 0;
+    ++paramsEpoch_;   // 【G′·C4】缓冲全灭（旧指针失效）
     CALIB_LOG_INFO("Destroy() completed");
+}
+
+// ============================================================================
+// 【G′·三合一大图】容量网格裸发射——捕获窗专用（261103 自 fullgpu 移植；
+// 与 Execute 内核同源同签名——15×double 精度不变，仅免 host 侧逐帧计数壳）
+// ============================================================================
+UndistortPointsResult UndistortPointsCuda::Impl::EmitAtCapacity(
+    const cv::cuda::GpuMat& d_points, cudaStream_t cs) {
+    UndistortPointsResult result;
+    const int pointCount = d_points.rows * d_points.cols;
+    if (d_R_.empty() || d_output_.cols < pointCount || pointCount <= 0
+        || d_points.type() != CV_32FC2) {
+        result.success = false;
+        result.message = "EmitAtCapacity: precondition failed (R/output buffer not warm)";
+        return result;
+    }
+    const float2* d_src_ptr = d_points.ptr<float2>();
+    float2* d_dst_ptr = d_output_.ptr<float2>();
+    const float* d_R_ptr = d_R_.ptr<float>();
+    int blockSize = 256;
+    int gridSize = (pointCount + blockSize - 1) / blockSize;
+    UndistortRectifyKernel<<<gridSize, blockSize, 0, cs>>>(
+        d_src_ptr, d_dst_ptr, pointCount,
+        fx_, fy_, cx_, cy_,
+        k1_, k2_, p1_, p2_, k3_, k4_, k5_, k6_,
+        d_R_ptr,
+        fx_p_, fy_p_, cx_p_, cy_p_, tx_p_);
+    const cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        result.success = false;
+        result.message = std::string("EmitAtCapacity launch failed: ")
+                         + cudaGetErrorString(err);
+        CALIB_LOG_ERROR("EmitAtCapacity(): {}", result.message);
+        return result;
+    }
+    result.success = true;
+    result.message = "Success";
+    result.d_rectifiedPoints = std::make_shared<cv::cuda::GpuMat>(
+        d_output_.colRange(0, pointCount));
+    return result;
+}
+
+UndistortPointsResult UndistortPointsCuda::Impl::MakeCapacityShell() const {
+    UndistortPointsResult result;
+    if (d_output_.empty() || d_R_.empty()) {
+        result.success = false;
+        result.message = "MakeCapacityShell: buffers not warm";
+        return result;
+    }
+    result.success = true;
+    result.message = "Success";
+    result.d_rectifiedPoints = std::make_shared<cv::cuda::GpuMat>(
+        d_output_.colRange(0, d_output_.cols));
+    return result;
 }
 
 void UndistortPointsCuda::Impl::SetParams(const UndistortPointsParams& params) {
@@ -328,6 +385,7 @@ void UndistortPointsCuda::Impl::SetParams(const UndistortPointsParams& params) {
 
     params_ = params;
     extractCalibParams();
+    ++paramsEpoch_;   // 【G′·C4】SetParams（参数全换＋d_R_ 重传面世）
 
     if (deviceChanged) {
         cudaSetDevice(params_.deviceId);
