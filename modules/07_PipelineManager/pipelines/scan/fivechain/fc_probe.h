@@ -39,6 +39,8 @@ public:
 
 private:
     ProbeConfig cfg_;
+    bool dirEnsured_ = false;   // appendRt 目标目录只建一次（首帧）
+    bool rtStarted_ = false;    // rt.csv 首帧 trunc 覆盖旧表，此后只 append
 };
 
 } // namespace jmw::probe

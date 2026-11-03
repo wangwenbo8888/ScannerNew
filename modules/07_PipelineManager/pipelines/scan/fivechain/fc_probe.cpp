@@ -16,7 +16,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <sstream>
+#include <vector>
 
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/imgproc.hpp>
@@ -114,6 +116,12 @@ void drawPts(cv::Mat& canvas, const std::vector<cv::Point2f>& pts,
     }
 }
 
+/// 路径串取文件名（落盘回执日志用；兼容 / 与 \）
+std::string fileNameOf(const std::string& path) {
+    const size_t pos = path.find_last_of("/\\");
+    return pos == std::string::npos ? path : path.substr(pos + 1);
+}
+
 /// ROI 子图网格拼贴（M2/M3 用；等比缩进 cell 方格，深底）
 cv::Mat makeCollage(const std::vector<cv::Mat>& tiles, int cell, int maxTiles) {
     cv::Mat canvas;
@@ -124,6 +132,7 @@ cv::Mat makeCollage(const std::vector<cv::Mat>& tiles, int cell, int maxTiles) {
     canvas.create(rows * cell, cols * cell, CV_8UC3);
     canvas.setTo(cv::Scalar(30, 30, 30));
     for (size_t i = 0; i < n; ++i) {
+        if (tiles[i].empty()) continue;   // 空 tile 跳过（防 side=0 → scale=inf）
         cv::Mat t;
         if (tiles[i].channels() == 1) cv::cvtColor(tiles[i], t, cv::COLOR_GRAY2BGR);
         else t = tiles[i];
@@ -175,8 +184,18 @@ ProbeConfig ProbeConfig::load() {
         c.enabled = pr.value("enabled", false);
         c.maxFrames = pr.value("maxFrames", c.maxFrames);
         if (pr.contains("frames") && pr.at("frames").is_array())
-            for (const auto& e : pr.at("frames"))
-                if (e.is_number_integer()) c.frames.insert(e.get<long>());
+            for (const auto& e : pr.at("frames")) {
+                // 单个坏值只跳过本值，不弃整配置（审查#9）；帧号合法域 [1, 1e7]
+                if (!e.is_number_integer()) continue;
+                long v = 0;
+                try {
+                    v = e.get<long>();
+                } catch (...) {
+                    continue;   // 超出 long 的无符号整数等——按非法值跳过
+                }
+                if (v < 1 || v > 10000000L) continue;
+                c.frames.insert(v);
+            }
     } catch (...) {
         // 开关/配置件失败静默回默认（关）——诊断件不得影响主链装配
         return ProbeConfig{};
@@ -201,21 +220,81 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
 
-        // 段级守护：单类产物失败只告警一次，不牵连其余产物
+        // dump 专用流（ROI 视图先物化后下载——沙箱同法）
+        cv::cuda::Stream cs;
+
+        // 落盘回执（审查#1）：全部 save* 检查返回值，失败 WARN（含产物文件名）
+        // 并计入 failCount——末尾"已落盘"INFO 仅全数成功时打
+        unsigned failCount = 0;
+        auto savePngW = [&](const std::string& path, const cv::Mat& img) {
+            if (!scr::savePng(path, img)) {
+                ++failCount;
+                JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
+                             frameNo, fileNameOf(path));
+            }
+        };
+        auto saveJsonW = [&](const std::string& path, const nlohmann::json& j) {
+            if (!scr::saveJson(path, j)) {
+                ++failCount;
+                JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
+                             frameNo, fileNameOf(path));
+            }
+        };
+        auto saveGpuP2W = [&](const std::string& path, const cv::cuda::GpuMat& m,
+                              cv::cuda::Stream& s) {
+            if (!scr::saveGpuMatP2(path, m, s)) {
+                ++failCount;
+                JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
+                             frameNo, fileNameOf(path));
+            }
+        };
+        auto saveCsvP2fW = [&](const std::string& path,
+                               const std::vector<cv::Point2f>& pts) {
+            if (!scr::saveCsvP2f(path, pts)) {
+                ++failCount;
+                JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
+                             frameNo, fileNameOf(path));
+            }
+        };
+        auto saveCsvEdgeW = [&](const std::string& path,
+                                const std::vector<scr::EdgePointCsv>& pts) {
+            if (!scr::saveCsvEdgePoints(path, pts)) {
+                ++failCount;
+                JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
+                             frameNo, fileNameOf(path));
+            }
+        };
+        auto savePlyFW = [&](const std::string& path,
+                             const std::vector<cv::Point3f>& pts) {
+            if (!scr::savePlyXYZf(path, pts)) {
+                ++failCount;
+                JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
+                             frameNo, fileNameOf(path));
+            }
+        };
+        auto savePlyDW = [&](const std::string& path,
+                             const std::vector<cv::Point3d>& pts) {
+            if (!scr::savePlyXYZd(path, pts)) {
+                ++failCount;
+                JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
+                             frameNo, fileNameOf(path));
+            }
+        };
+
+        // 段级守护：单类产物失败只告警并计数，不牵连其余产物
         auto step = [&, frameNo](const char* name, auto&& fn) {
             try {
                 fn();
             } catch (const std::exception& e) {
+                ++failCount;
                 JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} {} 落盘失败: {}",
                              frameNo, name, e.what());
             } catch (...) {
+                ++failCount;
                 JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} {} 落盘未知异常",
                              frameNo, name);
             }
         };
-
-        // dump 专用流（ROI 视图先物化后下载——沙箱同法）
-        cv::cuda::Stream cs;
 
         // ------------------------------------------------------------
         // summary.json（恒写——沙箱口径；07 侧无 stepMs/stepSource 字段，略）
@@ -257,7 +336,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             }
             // 07 专属增列：真实帧号对照（fc idx ≠ 采集帧号——在线对拍定位用）
             sum["metaFrameId"] = p.metaFrameId;
-            scr::saveJson((dir / "summary.json").string(), sum);
+            saveJsonW((dir / "summary.json").string(), sum);
         });
 
         // ------------------------------------------------------------
@@ -265,7 +344,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         // ------------------------------------------------------------
         step("0-frames.png", [&] {
             cv::Mat img = mergeLR(p.frameGrayL, p.frameGrayR);
-            if (!img.empty()) scr::savePng((dir / "0-frames.png").string(), img);
+            if (!img.empty()) savePngW((dir / "0-frames.png").string(), img);
         });
 
         // ------------------------------------------------------------
@@ -290,7 +369,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                 } catch (...) {
                 }
                 cv::Mat img = mergeLR(hl, hr);
-                if (!img.empty()) scr::savePng((dir / name).string(), img);
+                if (!img.empty()) savePngW((dir / name).string(), img);
             };
             maskLR("L0-laser_mask.png", p.sepL.d_laserMask, p.sepR.d_laserMask);
             maskLR("M0-marking_mask.png", p.sepL.d_markingPointMask, p.sepR.d_markingPointMask);
@@ -303,23 +382,25 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         //     host centerPoints map（同点集同序）
         // ------------------------------------------------------------
         step("L1-steger", [&] {
-            if (!p.stegerL.d_centerPoints && p.stegerL.centerPoints.empty()) return;
+            // CSV（沙箱口径仅左）：左目有源即写——GPU 视图优先，空则摊平 host map
             if (p.stegerL.d_centerPoints) {
-                scr::saveGpuMatP2((dir / "L1-steger_L.csv").string(),
-                                  *p.stegerL.d_centerPoints, cs);
-            } else {
+                saveGpuP2W((dir / "L1-steger_L.csv").string(),
+                           *p.stegerL.d_centerPoints, cs);
+            } else if (!p.stegerL.centerPoints.empty()) {
                 std::vector<cv::Point2f> flat;
                 for (const auto& kv : p.stegerL.centerPoints)
                     flat.insert(flat.end(), kv.second.begin(), kv.second.end());
-                scr::saveCsvP2f((dir / "L1-steger_L.csv").string(), flat);
+                saveCsvP2fW((dir / "L1-steger_L.csv").string(), flat);
             }
+            // PNG：左右独立判断（审查#6——左失败/空而右有效时仍出右）
             auto stgL = stegerPoints(p.stegerL, cs);
             auto stgR = stegerPoints(p.stegerR, cs);
+            if (stgL.empty() && stgR.empty()) return;
             cv::Mat cl = toBgr(p.frameGrayL), cr = toBgr(p.frameGrayR);
             drawPts(cl, stgL, cv::Scalar(0, 255, 0), 1);
             drawPts(cr, stgR, cv::Scalar(0, 255, 0), 1);
             cv::Mat img = mergeLR(cl, cr);
-            if (!img.empty()) scr::savePng((dir / "L1-steger.png").string(), img);
+            if (!img.empty()) savePngW((dir / "L1-steger.png").string(), img);
         });
 
         // ------------------------------------------------------------
@@ -327,16 +408,21 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         //     原帧），L|R 并合（沙箱原名 L2-undistort_cuda.png）
         // ------------------------------------------------------------
         step("L2-undistort", [&] {
-            if (!p.undistCudaL.success) return;
-            auto rl = downloadP2(p.undistCudaL.d_rectifiedPoints, cs);
-            auto rr = downloadP2(p.undistCudaR.d_rectifiedPoints, cs);
+            // 左右独立判断（审查#6——沙箱仅看左 success，07 侧单目失败不少见：
+            // 失败侧不取点，另一侧有效仍出图）
+            auto rl = p.undistCudaL.success
+                          ? downloadP2(p.undistCudaL.d_rectifiedPoints, cs)
+                          : std::vector<cv::Point2f>();
+            auto rr = p.undistCudaR.success
+                          ? downloadP2(p.undistCudaR.d_rectifiedPoints, cs)
+                          : std::vector<cv::Point2f>();
             if (rl.empty() && rr.empty()) return;
             cv::Mat cl(p.frameGrayL.rows, p.frameGrayL.cols, CV_8UC3,
                        cv::Scalar(20, 20, 20));
             cv::Mat cr = cl.clone();
             drawPts(cl, rl, cv::Scalar(0, 255, 0), 1);
             drawPts(cr, rr, cv::Scalar(0, 255, 0), 1);
-            scr::savePng((dir / "L2-undistort.png").string(), mergeLR(cl, cr));
+            savePngW((dir / "L2-undistort.png").string(), mergeLR(cl, cr));
         });
 
         // ------------------------------------------------------------
@@ -344,10 +430,10 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         // ------------------------------------------------------------
         step("L3-interp", [&] {
             if (!p.interpL.d_interpPoints) return;
-            scr::saveGpuMatP2((dir / "L3-interp_L.csv").string(),
+            saveGpuP2W((dir / "L3-interp_L.csv").string(),
                               *p.interpL.d_interpPoints, cs);
             if (p.interpR.d_interpPoints)
-                scr::saveGpuMatP2((dir / "L3-interp_R.csv").string(),
+                saveGpuP2W((dir / "L3-interp_R.csv").string(),
                                   *p.interpR.d_interpPoints, cs);
             auto il = downloadP2(p.interpL.d_interpPoints, cs);
             auto ir = downloadP2(p.interpR.d_interpPoints, cs);
@@ -355,7 +441,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             drawPts(cl, il, cv::Scalar(0, 255, 255), 1);
             drawPts(cr, ir, cv::Scalar(0, 255, 255), 1);
             cv::Mat img = mergeLR(cl, cr);
-            if (!img.empty()) scr::savePng((dir / "L3-interp.png").string(), img);
+            if (!img.empty()) savePngW((dir / "L3-interp.png").string(), img);
         });
 
         // ------------------------------------------------------------
@@ -365,10 +451,10 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         // ------------------------------------------------------------
         step("L4-match", [&] {
             if (!p.matchV3.d_matched_left) return;
-            scr::saveGpuMatP2((dir / "L4-match_L.csv").string(),
+            saveGpuP2W((dir / "L4-match_L.csv").string(),
                               *p.matchV3.d_matched_left, cs);
             if (p.matchV3.d_matched_right)
-                scr::saveGpuMatP2((dir / "L4-match_R.csv").string(),
+                saveGpuP2W((dir / "L4-match_R.csv").string(),
                                   *p.matchV3.d_matched_right, cs);
             auto ml = downloadP2(p.matchV3.d_matched_left, cs);
             auto mr = downloadP2(p.matchV3.d_matched_right, cs);
@@ -381,10 +467,18 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             drawPts(cl, il, cv::Scalar(255, 255, 255), 2);      // 白=未匹配左点
             drawPts(cr, ir, cv::Scalar(255, 255, 255), 2);      // 白=未匹配右点
             const size_t n = std::min({ml.size(), mr.size(), ids.size()});
+            // 颜色缓存（审查#4）：万级点逐点 paletteColor＝逐点 1×1 Mat 分配——
+            // 按 line id 缓存后每线只算一次
+            std::map<int, cv::Scalar> colorOf;
+            auto colorById = [&colorOf](int id) -> const cv::Scalar& {
+                auto it = colorOf.find(id);
+                if (it != colorOf.end()) return it->second;
+                return colorOf.emplace(id, paletteColor(id)).first->second;
+            };
             // 编号稀疏化：每条线号首点＋每隔 60 点标一次（万级点全标会糊成一片）
             std::map<int, int> lidSeen;
             for (size_t i = 0; i < n; ++i) {
-                const cv::Scalar c = paletteColor(ids[i]);   // 同线号同色
+                const cv::Scalar& c = colorById(ids[i]);   // 同线号同色
                 cv::circle(cl, cv::Point(cvRound(ml[i].x), cvRound(ml[i].y)), 3, c, -1);
                 cv::circle(cr, cv::Point(cvRound(mr[i].x), cvRound(mr[i].y)), 3, c, -1);
                 const int seen = lidSeen[ids[i]]++;
@@ -397,7 +491,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                                 c, 2);   // 右目同号（左右同色同编号对应）
                 }
             }
-            scr::savePng((dir / "L4-match.png").string(), mergeLR(cl, cr));
+            savePngW((dir / "L4-match.png").string(), mergeLR(cl, cr));
         });
 
         // ------------------------------------------------------------
@@ -413,7 +507,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             std::vector<cv::Point3f> pts;
             if (!h.empty() && h.type() == CV_32FC3)
                 pts.assign(h.begin<cv::Point3f>(), h.end<cv::Point3f>());
-            scr::savePlyXYZf((dir / "L5-laser3d.ply").string(), pts);
+            savePlyFW((dir / "L5-laser3d.ply").string(), pts);
         });
 
         // ------------------------------------------------------------
@@ -455,7 +549,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                 return canvas;
             };
             cv::Mat img = mergeLR(cclCanvas(p.cclL), cclCanvas(p.cclR));
-            if (!img.empty()) scr::savePng((dir / "M1-ccl.png").string(), img);
+            if (!img.empty()) savePngW((dir / "M1-ccl.png").string(), img);
         });
 
         // ------------------------------------------------------------
@@ -465,7 +559,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             const cv::Mat colL = makeCollage(p.splitL.splitImages, 160, 36);
             const cv::Mat colR = makeCollage(p.splitR.splitImages, 160, 36);
             cv::Mat img = mergeLR(colL, colR);
-            if (!img.empty()) scr::savePng((dir / "M2-split.png").string(), img);
+            if (!img.empty()) savePngW((dir / "M2-split.png").string(), img);
         });
 
         // ------------------------------------------------------------
@@ -477,7 +571,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             for (const auto& z : p.zernL)
                 for (const auto& e : z.edgePoints)
                     eps.push_back({e.x, e.y, e.angle, e.amplitude, e.pixelX, e.pixelY});
-            scr::saveCsvEdgePoints((dir / "M3-zern_L.csv").string(), eps);
+            saveCsvEdgeW((dir / "M3-zern_L.csv").string(), eps);
             auto zernCollage = [&](const std::vector<calib::ZernikeEdgeCPUResult>& zs,
                                    const std::vector<cv::Mat>& tiles) {
                 std::vector<cv::Mat> drawn;
@@ -495,14 +589,21 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             };
             cv::Mat img = mergeLR(zernCollage(p.zernL, p.splitL.splitImages),
                                   zernCollage(p.zernR, p.splitR.splitImages));
-            if (!img.empty()) scr::savePng((dir / "M3-zernike.png").string(), img);
+            if (!img.empty()) savePngW((dir / "M3-zernike.png").string(), img);
         });
 
         // ------------------------------------------------------------
         // 10- image_merge：合并后边缘点按组着色叠原帧（大图系），L|R 并合
         // ------------------------------------------------------------
         step("M4-merge", [&] {
-            if (!p.mergeL.success) return;
+            if (!p.mergeL.success && !p.mergeR.success) return;   // 左右独立（同 #6 口径）
+            // 颜色缓存：mergedEdgePoints 亦可达千级点——按 groupId 缓存（同 #4）
+            std::map<int, cv::Scalar> colorOf;
+            auto colorByGroup = [&colorOf](int id) -> const cv::Scalar& {
+                auto it = colorOf.find(id);
+                if (it != colorOf.end()) return it->second;
+                return colorOf.emplace(id, paletteColor(id)).first->second;
+            };
             auto mergeCanvas = [&](const calib::ImageMergeCPUResult& m,
                                    const cv::Mat& gray) {
                 cv::Mat canvas = toBgr(gray);
@@ -511,13 +612,13 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                     const int g = (i < m.groupIds.size()) ? m.groupIds[i] : 0;
                     const int x = cvRound(e.x), y = cvRound(e.y);
                     if (x >= 0 && y >= 0 && x < canvas.cols && y < canvas.rows)
-                        cv::circle(canvas, cv::Point(x, y), 1, paletteColor(g), -1);
+                        cv::circle(canvas, cv::Point(x, y), 1, colorByGroup(g), -1);
                 }
                 return canvas;
             };
             cv::Mat img = mergeLR(mergeCanvas(p.mergeL, p.frameGrayL),
                                   mergeCanvas(p.mergeR, p.frameGrayR));
-            if (!img.empty()) scr::savePng((dir / "M4-merge.png").string(), img);
+            if (!img.empty()) savePngW((dir / "M4-merge.png").string(), img);
         });
 
         // ------------------------------------------------------------
@@ -535,7 +636,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             for (const auto& q : p.undistCpu.rectifiedPoints2) rpts.emplace_back(float(q.x), float(q.y));
             drawPts(canvas, lpts, cv::Scalar(255, 0, 0), 1);
             drawPts(canvas, rpts, cv::Scalar(0, 0, 255), 1);
-            scr::savePng((dir / "M5-undistort_cpu.png").string(), canvas);
+            savePngW((dir / "M5-undistort_cpu.png").string(), canvas);
         });
 
         // ------------------------------------------------------------
@@ -550,7 +651,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                         arr.push_back({{"groupId", e.groupId}, {"cx", e.centerX}, {"cy", e.centerY},
                                        {"major", e.majorAxis}, {"minor", e.minorAxis},
                                        {"angle", e.angle}, {"inliers", e.inlierCount}});
-                scr::saveJson((dir / jsonName).string(), arr);
+                saveJsonW((dir / jsonName).string(), arr);
             };
             dumpSide(p.ellL, "M6-ellipse_L.json");
             dumpSide(p.ellR, "M6-ellipse_R.json");
@@ -573,7 +674,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                 return canvas;
             };
             cv::Mat img = mergeLR(ellipseCanvas(p.ellL), ellipseCanvas(p.ellR));
-            if (!img.empty()) scr::savePng((dir / "M6-ellipse.png").string(), img);
+            if (!img.empty()) savePngW((dir / "M6-ellipse.png").string(), img);
         });
 
         // ------------------------------------------------------------
@@ -621,7 +722,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                 cv::putText(canvasR, cv::format("d=%.1f", cl[i].x - cr[j].x),
                             cv::Point(cvRound(cr[j].x) + 6, cvRound(cr[j].y) + 30), 0, 0.45, c, 1);
             }
-            scr::savePng((dir / "M7-marker_match.png").string(), mergeLR(canvasL, canvasR));
+            savePngW((dir / "M7-marker_match.png").string(), mergeLR(canvasL, canvasR));
         });
 
         // ------------------------------------------------------------
@@ -635,7 +736,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                 for (const auto& q : m.reconstructedPoints)
                     pts.emplace_back(q.x, q.y, q.z);
             }
-            scr::savePlyXYZd((dir / "M10-markers3d.ply").string(), pts);
+            savePlyDW((dir / "M10-markers3d.ply").string(), pts);
         });
 
         // ------------------------------------------------------------
@@ -658,11 +759,19 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                 reg["globalIds"] = p.regFlow.getGlobalIds();   // 沙箱 prevState_.globalIds 同源（光流帧）
             if (!p.fuseMarkerGids.empty())
                 reg["fuseMarkerGids"] = p.fuseMarkerGids;      // 07 增列：fuse 帧逐点 gid（-1=未关联）
-            scr::saveJson((dir / "M11-registration.json").string(), reg);
+            saveJsonW((dir / "M11-registration.json").string(), reg);
         });
 
-        JMW_LOG_INFO("07-FiveChain", "[fc_probe] cycle {} 全链中间产物已落盘 → {}",
-                     frameNo, dir.string());
+        // 回执汇总（审查#1）：全部 step 且全部写盘成功才报"已落盘"；
+        // 有失败则只报一条汇总（逐文件/逐段告警已在上方打）
+        if (failCount == 0) {
+            JMW_LOG_INFO("07-FiveChain", "[fc_probe] cycle {} 全链中间产物已落盘 → {}",
+                         frameNo, dir.string());
+        } else {
+            JMW_LOG_WARN("07-FiveChain",
+                         "[fc_probe] cycle {} 落盘完成（{} 类失败，详见上方告警）→ {}",
+                         frameNo, failCount, dir.string());
+        }
     } catch (const std::exception& e) {
         JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 落盘异常: {}", frameNo, e.what());
     } catch (...) {
@@ -680,10 +789,19 @@ void FrameProbe::appendRt(long idx, const scr::CycleProductsCompat& p) {
     try {
         const std::filesystem::path root =
             std::filesystem::path("diagnostics") / "fc_probe";
-        std::error_code ec;
-        std::filesystem::create_directories(root, ec);
+        if (!dirEnsured_) {   // 目录只建一次（审查#3——原每帧建目录）
+            std::error_code ec;
+            std::filesystem::create_directories(root, ec);
+            dirEnsured_ = true;
+        }
+        if (!rtStarted_) {    // 首帧 trunc 覆盖旧会话残留表（审查#2——原只 append
+            std::ofstream trunc((root / "rt.csv").string(), std::ios::trunc);
+            rtStarted_ = true;   // 永不截断＝跨会话脏数据混入）；此后只 append
+        }
         std::ofstream rt((root / "rt.csv").string(), std::ios::app);
         if (!rt) return;
+        // 口径注（审查#8）：帧列＝idx+1（与 cycle_NNNN 目录号/probe.frames 同基）；
+        // 旧 JMW_FC_FRAME_DUMPS 的 rt.csv 写 j->idx（0 基）——两表帧号相差 1，对拍勿混
         rt << (idx + 1) << ',' << p.regSource << ','
            << p.R[0] << ',' << p.R[1] << ',' << p.R[2] << ','
            << p.R[3] << ',' << p.R[4] << ',' << p.R[5] << ','
