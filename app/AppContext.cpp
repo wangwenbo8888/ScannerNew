@@ -775,6 +775,16 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
         // 按钮未点启停即冒 3000+ 点）。isCapturing＝设备采集记账（M 开 M 关），
         // 停采保活期同弃（与 fusion 暂停语义一致）；预览①/调试③不受影响
         if (scanWf_ && dm->isCapturing()) {
+            // 抽检转储限量停采（exe 侧开关收口）：采满 probe.maxFrames 自动停采
+            // 保会话——与设备 M 键停采同一收口（灯灭、会话保活）；07 侧命中帧
+            // （probe.frames）的全部中间结果已随帧落盘 diagnostics/fc_probe
+            if (probeEnabled_.load(std::memory_order_relaxed)
+                && ++probeFrameCount_ >= probeMaxFrames_) {
+                JMW_LOG_WARN("app-AppContext",
+                    "[probe] 限量停采: 已采 {} 帧达上限 {}——停采集保会话",
+                    probeFrameCount_, probeMaxFrames_);
+                dm->stopCapture();   // 与设备 M 键停采同一收口（灯灭、会话保活）
+            }
             const auto t = dm->getLastTemperatures();
             const double tempC = (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
             scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId,
@@ -812,6 +822,33 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
     // 260831 口径（面片 T1V1/精细 D/深孔 C）
     // 260927 就绪流程：只设模式不启采（原 dm->startCapture 挪至 M 键路径/
     // startScanSession 直启兼容口）——四管掩码 N10/N11H1 推迟到设备 M 键按下
+    // 抽检转储会话初始化（与 07 FiveChainAdapter 同源 config/fc_dump.json）：
+    // 装配时读 probe 段定本会话口径——enabled/maxFrames（缺省关/1000），帧计数
+    // 清零（帧回调按 maxFrames 计数，采满自动停采保会话）。直接用 nlohmann 读，
+    // 不引 07 内部头（fc_probe.h 带 CUDA 依赖，禁入 exe 编译）
+    {
+        try {
+            std::ifstream fin("config/fc_dump.json");
+            if (fin.is_open()) {
+                nlohmann::json j;
+                fin >> j;
+                const auto& p = j.at("probe");
+                probeEnabled_ = p.value("enabled", false);
+                probeMaxFrames_ = p.value("maxFrames", 1000L);
+            } else {
+                probeEnabled_ = false;   // 缺文件——缺省口径（不抽检/上限 1000）
+                probeMaxFrames_ = 1000;
+            }
+        } catch (const std::exception&) {
+            probeEnabled_ = false;       // 缺节/损坏——缺省口径兜底（不拦扫描装配）
+            probeMaxFrames_ = 1000;
+        }
+        if (probeMaxFrames_ <= 0) probeMaxFrames_ = 1000;   // 非法上限回退缺省
+        probeFrameCount_ = 0;
+        JMW_LOG_INFO("app-AppContext",
+                     "[AppContext] 抽检转储会话口径: enabled={} maxFrames={}（config/fc_dump.json）",
+                     probeEnabled_.load(std::memory_order_relaxed) ? 1 : 0, probeMaxFrames_);
+    }
     dm->setCaptureMode(mode);
     }   // ← 设备段结束（真机前端——中段模拟提取时设备照常采集，提取结果在 07 链内替换）
 
@@ -1205,6 +1242,43 @@ bool loadPointCloud100MLimited(const std::string& path, size_t maxPts,
     return !out.empty();
 }
 } // namespace
+
+// ============================================================================
+// 抽检转储开关（五链中间结果抽检转储，07 probe 挂钩）：
+// 内存态置位＋即时回写 config/fc_dump.json（读改写保住 count/frames 等其他
+// 字段——07 FiveChainAdapter 装配时同源读取，两端口径一致）；文件不存在则从
+// 空 json 起步建 probe 段。整体 try-catch：文件失败仅内存态生效（不拦 UI）
+// ============================================================================
+void AppContext::setProbeEnabled(bool on) {
+    probeEnabled_.store(on, std::memory_order_relaxed);
+    try {
+        nlohmann::json j = nlohmann::json::object();
+        {
+            std::ifstream fin("config/fc_dump.json");
+            if (fin.is_open()) {
+                try {
+                    fin >> j;   // 读改写：保住 probe.frames/count 等既有字段
+                } catch (const std::exception&) {
+                    j = nlohmann::json::object();   // 损坏/空文件——从空 json 起步重建
+                }
+                if (!j.is_object()) j = nlohmann::json::object();
+            }   // 文件不存在：保持空 json，下方建 probe 段
+        }
+        j["probe"]["enabled"] = on;
+        std::ofstream fout("config/fc_dump.json");
+        if (!fout.is_open())
+            throw std::runtime_error("config/fc_dump.json 打不开（写）");
+        fout << j.dump(2) << '\n';
+        JMW_LOG_INFO("app-AppContext",
+                     "[AppContext] 抽检转储: {}（已回写 config/fc_dump.json）",
+                     on ? "开" : "关");
+    } catch (const std::exception& e) {
+        JMW_LOG_WARN("app-AppContext",
+                     "[AppContext] 抽检转储回写 config/fc_dump.json 失败（{}）——"
+                     "内存态开关仍生效，下个会话装配按文件缺省口径", e.what());
+    }
+}
+
 void AppContext::assembleSimSource() {
     // 场景组装：标志点←PLY（JMW_SIM_MARKERS_PLY 覆写，缺省 D:/markers_30.ply）；
     // 激光←「导入点云」stash；两者缺一 builtin fallback（保链路可用，warn 留痕）

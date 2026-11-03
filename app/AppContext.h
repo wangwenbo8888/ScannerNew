@@ -156,6 +156,12 @@ public:
     }
 void setSimExtract(bool on) { simExtract_.store(on, std::memory_order_relaxed); }
     bool simExtract() const { return simExtract_.load(std::memory_order_relaxed); }
+    // —— 抽检转储（五链中间结果抽检转储，07 probe 挂钩）——
+    /// 开关置位：内存态更新＋即时回写 config/fc_dump.json 的 probe.enabled
+    /// （07 FiveChainAdapter 会话装配同源读取，两端保持一致）；采满 probe.maxFrames
+    /// 自动停采保会话（帧回调计数收口）
+    void setProbeEnabled(bool on);
+    bool probeEnabled() const { return probeEnabled_.load(std::memory_order_relaxed); }
     /// 「导入点云」stash：模拟扫描的激光数据源（导入点云菜单写入；sim 启动读取）
     void setLastImportedCloud(std::vector<cv::Point3f> pts) { lastImportedCloud_ = std::move(pts); }
     const std::vector<cv::Point3f>& lastImportedCloud() const { return lastImportedCloud_; }
@@ -238,6 +244,13 @@ private:
     std::unique_ptr<Scanner::pipeline::SimScanSource> simSource_;  // 会话期持有（start 建/stop 弃）
     std::atomic<bool> simExtract_{false};         // UI「模拟数据」开关（start_scan 时读取）
     std::vector<cv::Point3f> lastImportedCloud_;  // 「导入点云」stash（导入线程写/sim 启动读）
+
+    // —— 抽检转储（五链中间结果抽检转储；exe 侧：UI 开关＋限量停采）——
+    // config/fc_dump.json 的 probe 段与 07 侧同源：会话装配（armScanSession）读
+    // enabled/maxFrames 定会话口径；帧回调按 maxFrames 计数，采满自动停采保会话
+    std::atomic<bool> probeEnabled_{false};       // 「抽检转储」开关（置位即时回写配置文件）
+    long probeMaxFrames_ = 1000;                  // 抽检采集帧上限（probe.maxFrames，缺省 1000）
+    long probeFrameCount_ = 0;                    // 会话内采集帧计数（arm 时清零，帧回调累加）
 
     // —— 08 故障桥（P0-2）：EventBus FaultOccurred(Error+) → S7 安全停机链 ——
     Scanner::infra::SubscriberId faultBridgeSubId_ = 0;
