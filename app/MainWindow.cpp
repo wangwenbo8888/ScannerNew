@@ -58,6 +58,8 @@
 #include <QGridLayout>     // 虚拟按键表盘（261002 临时测试机）
 #include <cstdio>
 #include <cstring>   // 261017 STL 三角面计数（二进制头 uint32 读取）
+#include <fstream>                                          // 261103 display_push 旋钮
+#include <nlohmann/json.hpp>                                // 261103 display_push 旋钮
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -344,13 +346,35 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                 JMW_LOG_INFO("app-MainWindow",
                     "[3D激光渲染] laserCloudUpdated 推送 {} 点——261004 排障插桩", pts.size());
                 // 显示/导出减负（260919：全域扫描后融合云至数百万点——全量 VBO
-                // 重传＋数千万字节文本 PLY 每 30 拍写盘拖死 UI；>150 万点按步长
-                // 抽样至 ~150 万（仓库/日志计数仍为全量真值）
-                const size_t kDispMax = 1500000;
+                // 重传＋数千万字节文本 PLY 每 30 拍写盘拖死 UI；>上限点按步长
+                // 抽样（仓库/日志计数仍为全量真值）
+                // 261103 旋钮 JSON 化：display_push.plyEvery / displayMaxPoints
+                //（config/fivechain_operators.json——改配置重启生效；缺省同旧常量）
+                static const auto s_dispKnobs = [] {
+                    long long plyEvery = 30, dispMax = 1500000;
+                    try {
+                        std::ifstream kf("config/fivechain_operators.json");
+                        if (kf) {
+                            nlohmann::json jf; kf >> jf;
+                            if (jf.contains("operators")
+                                && jf["operators"].contains("display_push")) {
+                                const auto& dp = jf["operators"]["display_push"];
+                                if (dp.value("plyEvery", -1) >= 0)
+                                    plyEvery = dp.value("plyEvery", 30);
+                                if (dp.value("displayMaxPoints", 0) > 0)
+                                    dispMax = dp.value("displayMaxPoints", 1500000);
+                            }
+                        }
+                    } catch (...) { /* 坏值回默认 */ }
+                    return std::pair<long long, long long>{plyEvery, dispMax};
+                }();
+                const size_t kDispMax = static_cast<size_t>(s_dispKnobs.second);
                 const size_t stride = pts.size() > kDispMax ? (pts.size() + kDispMax - 1) / kDispMax : 1;
                 // 节流导出（exe 目录 laser_snapshot.ply——人工导入核对用）
                 static std::atomic<uint64_t> s_lRecv{0};
-                if (const auto k = s_lRecv.fetch_add(1); k % 30 == 0 && !pts.empty()) {
+                if (const auto k = s_lRecv.fetch_add(1);
+                    s_dispKnobs.first > 0 && k % static_cast<uint64_t>(s_dispKnobs.first) == 0
+                    && !pts.empty()) {
                     if (QFile f(QStringLiteral("laser_snapshot.ply"));
                         f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
                         QByteArray out;

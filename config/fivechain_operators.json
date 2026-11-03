@@ -1,6 +1,17 @@
 {
   "operators": {
     "_comment": "16 算子全部可设字段显式列出（值＝调定值或默认值，逐字段 `_c_` 注释）。⚠ 标定派生参数不进本节（undistort_cpu 的 K/D/R/T＋矫正矩阵、undistort_cuda 的 K/D/R/P、conic_reconstruct 的 K1/K2/C2——由 camera_calib.json 档内值派生）。⚠ harness 锁定项：steger 强制 Flat、interp_dual 强制 Scan、右目 P(0,3) 置零。⚠ 换标定后必须复位 conic 代偿工作点（rowOffsetPx 归零、circleAxisRatioMax 回 0.03 复扫）。",
+    "display_push": {
+      "_": "261103 显示链路旋钮——改配置重启软件生效（07 推送节流/全量周期＋app PLY 导出/显示抽样帽）；滞后调参优先动这里",
+      "_c_minIntervalMs": "渲染推送最小间隔 ms（调小刷新更顺但下载更频；默认 500）",
+      "minIntervalMs": 500,
+      "_c_fullEvery": "每 N 次推送做一次全量重传（调大减少整朵重传卡顿；默认 10）",
+      "fullEvery": 10,
+      "_c_plyEvery": "每 N 次全量推送导出一次 laser_snapshot.ply（0=关；默认 30）",
+      "plyEvery": 30,
+      "_c_displayMaxPoints": "显示抽样帽——超限按步长抽稀（仓库/日志计数仍全量真值；默认 150 万）",
+      "displayMaxPoints": 1500000
+    },
     "mask_separation": {
       "_": "预处理①·同帧掩膜分离（CUDA，细激光形态：腐蚀级联 3/9/37＋双 top-hat 减法＋边缘膨胀 9/7）",
       "_c_threshold": "二值化阈值（高斯平滑后灰度标度）",

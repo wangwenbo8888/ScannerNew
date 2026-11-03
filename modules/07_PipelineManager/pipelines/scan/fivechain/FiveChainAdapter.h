@@ -197,6 +197,10 @@ private:
     std::chrono::steady_clock::time_point lastRenderPush_{};
     size_t lastPushedLaserPts_ = 0;
     uint64_t pushSeq_ = 0;
+    // 261103 显示链路旋钮 JSON 化（fivechain_operators.json operators.display_push
+    // ——改配置重启生效；缺省 500/10 与原代码常量一致）
+    int renderMinIntervalMs_ = 500;   // 渲染推送最小间隔（ms）
+    int renderFullEvery_ = 10;        // 每 N 次推送做一次全量重传
     std::vector<float> renderKeep_;                          // CloudViewHandle 指针宿主（活到下次推送）
     cv::cuda::Stream dlStream_;                              // 融合云 D2H 下载流
     // 261028 实时标志点云（扫描中边扫边出——conic 有效圆去重累积）

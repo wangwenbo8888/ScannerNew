@@ -62,6 +62,17 @@ FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
     //（CONT4 结论「图路径确定性无恙」仍有效，内部默认即图路径）
     sepL_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
     sepR_ = std::make_unique<calib::LaserMarkingSeparationCUDA>(sepParams);
+    // 261103 显示链路旋钮 JSON 化：operators.display_push（minIntervalMs/
+    // fullEvery）——改配置重启生效；缺文件/缺节/坏值回默认 500/10
+    if (opJson != nullptr && opJson->contains("display_push")) {
+        try {
+            const auto& dp = (*opJson)["display_push"];
+            if (const int v = dp.value("minIntervalMs", 0); v > 0)
+                renderMinIntervalMs_ = v;
+            if (const int v = dp.value("fullEvery", 0); v > 0)
+                renderFullEvery_ = v;
+        } catch (...) { /* 坏值回默认 */ }
+    }
     calib::LaserCloudFuseCUDAParams fp;
     fp.voxelSize = static_cast<float>(cfg_.voxelSizeMm);
     fp.reserveVoxelCount = static_cast<size_t>(cfg_.voxelReserve);
@@ -2223,7 +2234,8 @@ void FiveChainAdapter::collectorLoop() {
 // ---------------------------------------------------------------------------
 void FiveChainAdapter::renderPushIfDue(bool forceFull) {
     const auto now = std::chrono::steady_clock::now();
-    constexpr int64_t kMinMs = 500;   // 261028 测试模式降节流（399 帧 ~3 秒需 ≥6 次推送）
+    // 261103 JSON 化：原 constexpr kMinMs=500 → display_push.minIntervalMs
+    const int64_t kMinMs = renderMinIntervalMs_;
     if (!forceFull) {
         if (lastRenderPush_.time_since_epoch().count() != 0
             && std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2235,7 +2247,8 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
 
     const size_t curPts = fuse_->GetFusedPointCount();
     const bool fullPush = forceFull || lastPushedLaserPts_ == 0
-                          || lastPushedLaserPts_ > curPts || pushSeq_ % 10 == 0;
+                          || lastPushedLaserPts_ > curPts
+                          || pushSeq_ % static_cast<uint64_t>(renderFullEvery_) == 0;
 
     // 融合云下载（设备上下文→dlStream_ 异拷＋同步——LaserFuseAdapter 口径）
     std::vector<float> fusedXyz;
