@@ -56,10 +56,13 @@ struct FiveChainConfig {
     int fCap = 8, trCap = 8;
     int maxInflight = 0;
     int memCapMB = 512;
-    long long voxelReserve = 12000000;
-    double voxelSizeMm = 0.25;
+    // 261103 用户定档：格子 0.25→0.5、预留 12M→50M（与 09 算子 2026-10-29
+    // 用户决定对齐——0.5mm 格子唯一格子数 ~1.4M/全扫，50M 覆盖多次会话冗余）
+    long long voxelReserve = 50000000;
+    double voxelSizeMm = 0.5;
     double voxelLoadFactor = 0.75;
-    long long voxelGrowSlots = 2000000;
+    long long voxelGrowSlots = 20000000;   // 261103 用户定档：扩容增量 2M→20M
+    int voxelSatThreshold = 3;             // 261103 用户定档：格内饱和计数门 5→3
     std::string pinRoles = "1a,1b,marker,ch2";
     bool priorityBoost = true;
     bool splitChain1 = true;

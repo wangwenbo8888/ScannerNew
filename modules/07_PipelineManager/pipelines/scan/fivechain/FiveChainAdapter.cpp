@@ -66,6 +66,7 @@ FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
     fp.voxelSize = static_cast<float>(cfg_.voxelSizeMm);
     fp.reserveVoxelCount = static_cast<size_t>(cfg_.voxelReserve);
     fp.growSlotCount = static_cast<size_t>(cfg_.voxelGrowSlots);   // 沙盒 L533 同款
+    fp.saturationThreshold = cfg_.voxelSatThreshold;   // 261103 用户定档 3（原算子默认 5）
     fp.collectStatistics = true;
     fuse_ = std::make_unique<calib::LaserCloudFuseCuda>(fp);
     JMW_LOG_INFO("07-FiveChain",

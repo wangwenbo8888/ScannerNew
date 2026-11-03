@@ -119,7 +119,7 @@ Scanner::Result ScanPipeline::start() {
             fcCfg.voxelSizeMm = cfg_.voxelSizeMm;
         } else if (cfg_.voxelSizeMm > 0) {
             JMW_LOG_WARN("07-ScanPipeline",
-                "[ScanPipeline] 五链体素档 {}mm 低于下限——用 0.25mm（验证口径）",
+                "[ScanPipeline] 五链体素档 {}mm 低于下限——用 0.5mm（261103 口径）",
                 cfg_.voxelSizeMm);
         }
         // 算子参数源（离线验证同参）：config/fivechain_operators.json
@@ -239,7 +239,7 @@ Scanner::Result ScanPipeline::start() {
     JMW_LOG_INFO("07-ScanPipeline",
         "[ScanPipeline] 五链会话启动: voxel={}mm dropThreshold={} seedMarkers={} "
         "（旧 lane 已退役；v1 限制：无 pause/检查点/编辑账本）",
-        cfg_.voxelSizeMm >= 0.25 ? cfg_.voxelSizeMm : 0.25, dropThreshold_,
+        cfg_.voxelSizeMm >= 0.25 ? cfg_.voxelSizeMm : 0.5, dropThreshold_,
         cfg_.existingMarkers.size());
     return Result::ok();
 }
