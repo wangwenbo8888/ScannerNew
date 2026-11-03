@@ -2815,9 +2815,14 @@ void OSGWidget::laserRebuildChunks(const std::vector<osg::Vec3>& laser)
         ch.coords->dirty();
         ch.corners->dirty();
         ch.colors->dirty();
-        ch.geom->setPrimitiveSet(
-            0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0,
-                                   static_cast<int>(cnt * 4)));
+        // 261103 质量审查建议 1/2：包围盒随重灌刷新＋DrawArrays 原地改 count
+        ch.geom->dirtyBound();
+        if (auto* da = dynamic_cast<osg::DrawArrays*>(ch.geom->getPrimitiveSet(0)))
+            da->setCount(static_cast<int>(cnt * 4));
+        else
+            ch.geom->setPrimitiveSet(
+                0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0,
+                                       static_cast<int>(cnt * 4)));
     }
     // 待物理化删除的融合云下标＝其 4 顶点 alpha=0 隐藏（周期重推不复活——
     // 物理化在就绪态续采/完成前）。全局点下标→块号/块内偏移（满块打包直除）
@@ -2856,9 +2861,15 @@ void OSGWidget::laserAppendRange(LaserChunk& ch, const std::vector<osg::Vec3>& a
     ch.coords->dirty();
     ch.corners->dirty();
     ch.colors->dirty();
-    ch.geom->setPrimitiveSet(
-        0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0,
-                               static_cast<int>(ch.pts * 4)));
+    // 261103 质量审查建议 1/2：包围盒随追加刷新（防扫描移区后新点被视锥剔除
+    // 藏掉）＋DrawArrays 原地改 count（免每追加一次小对象分配）
+    ch.geom->dirtyBound();
+    if (auto* da = dynamic_cast<osg::DrawArrays*>(ch.geom->getPrimitiveSet(0)))
+        da->setCount(static_cast<int>(ch.pts * 4));
+    else
+        ch.geom->setPrimitiveSet(
+            0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0,
+                                   static_cast<int>(ch.pts * 4)));
 }
 
 // 261103 增量追加（分块版）：尾块补 4 顶点/点、写满开新块——只标脏被写块，
