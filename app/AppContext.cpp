@@ -51,6 +51,33 @@ struct HealthAdapter final : Scanner::service::IHealthProvider {
 };
 } // namespace
 
+// 抽检转储 probe 配置读取（config/fc_dump.json probe 段）：装配期初值
+//（initialize）与会话布防（armScanSession）两处共用同源口径；缺文件/缺节/
+// 损坏一律回缺省（关/1000，不拦扫描装配）。直接用 nlohmann 读，不引 07 内部
+// 头（fc_probe.h 带 CUDA 依赖，禁入 exe 编译）
+namespace {
+struct ProbeFileConfig {
+    bool enabled = false;    // probe.enabled（缺省关）
+    long maxFrames = 1000;   // probe.maxFrames（缺省 1000；非正值回退缺省）
+};
+ProbeFileConfig loadProbeConfigFromFile() {
+    ProbeFileConfig cfg;
+    try {
+        std::ifstream fin("config/fc_dump.json");
+        if (!fin.is_open()) return cfg;          // 缺文件——缺省口径
+        nlohmann::json j;
+        fin >> j;
+        const auto& p = j.at("probe");
+        cfg.enabled = p.value("enabled", false);
+        cfg.maxFrames = p.value("maxFrames", 1000L);
+    } catch (const std::exception&) {
+        return ProbeFileConfig{};                // 缺节/损坏——缺省口径兜底
+    }
+    if (cfg.maxFrames <= 0) cfg.maxFrames = 1000;   // 非法上限回退缺省
+    return cfg;
+}
+} // namespace
+
 AppContext::AppContext() {}
 AppContext::~AppContext() { shutdown(); }
 
@@ -276,6 +303,9 @@ void AppContext::initialize() {
                 scanWf_->setFinalBAProgress(finalBAProgress_);
                 finishThread_ = std::thread([this, gen]() {
                     const bool ok = scanWf_->stop().success;
+                    // 261103 审查②：会话终了——probe 会话快照作废（限量停采闩随
+                    // 会话失效；下会话 arm 重新按文件闩入）
+                    probeSessionActive_.store(false, std::memory_order_relaxed);
                     if (scanActGen_.load() != gen) {
                         JMW_LOG_INFO("app-AppContext",
                             "[AppContext] 完成收口跳过（会话代已前进——新动作已接管）");
@@ -614,6 +644,18 @@ void AppContext::initialize() {
     });
 
     JMW_LOG_INFO("app-AppContext", "[AppContext] 全部组件装配完成");
+
+    // 抽检转储开关装配期读初值（261103 审查①）：重启后 UI 按钮态与
+    // config/fc_dump.json 文件态一致——MainWindow 构造读 probeEnabled() 即正确
+    //（此前恒 false：上次开的开关重启后按钮回弹，与文件态脱钩）
+    {
+        const auto pc = loadProbeConfigFromFile();
+        probeEnabled_.store(pc.enabled, std::memory_order_relaxed);
+        probeMaxFrames_.store(pc.maxFrames, std::memory_order_relaxed);
+        JMW_LOG_INFO("app-AppContext",
+            "[AppContext] 抽检转储装配期初值: enabled={} maxFrames={}（config/fc_dump.json）",
+            pc.enabled ? 1 : 0, pc.maxFrames);
+    }
     // 灯态策略：启动/开门面不亮灯；startCapture（开始扫描）亮（N10 按模式四管
     // 掩码组帧）、stopCapture（停扫描）熄（N11 H0）。UI 滑条空闲仅记账，采集中
     // 改值随全参重发。
@@ -778,11 +820,19 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
             // 抽检转储限量停采（exe 侧开关收口）：采满 probe.maxFrames 自动停采
             // 保会话——与设备 M 键停采同一收口（灯灭、会话保活）；07 侧命中帧
             // （probe.frames）的全部中间结果已随帧落盘 diagnostics/fc_probe
-            if (probeEnabled_.load(std::memory_order_relaxed)
-                && ++probeFrameCount_ >= probeMaxFrames_) {
+            // 261103 审查②③：限量停采只认会话快照 probeSessionActive_（arm 时
+            // 按文件闩入——会话中途拨 UI 开关不影响本会话）；计数==上限即一次性
+            // 闩锁（帧回调单线程到达，==只成立一次）——正常态不重复触发，故障态
+            //（stopCapture 后仍来帧）不再每帧风暴刷停采。计数/上限 atomic：消除
+            // arm 写 vs 相机线程回调读的竞争
+            if (probeSessionActive_.load(std::memory_order_relaxed)
+                && probeFrameCount_.load(std::memory_order_relaxed)
+                       < probeMaxFrames_.load(std::memory_order_relaxed)
+                && ++probeFrameCount_ == probeMaxFrames_.load(std::memory_order_relaxed)) {
                 JMW_LOG_WARN("app-AppContext",
                     "[probe] 限量停采: 已采 {} 帧达上限 {}——停采集保会话",
-                    probeFrameCount_, probeMaxFrames_);
+                    probeFrameCount_.load(std::memory_order_relaxed),
+                    probeMaxFrames_.load(std::memory_order_relaxed));
                 dm->stopCapture();   // 与设备 M 键停采同一收口（灯灭、会话保活）
             }
             const auto t = dm->getLastTemperatures();
@@ -822,32 +872,20 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
     // 260831 口径（面片 T1V1/精细 D/深孔 C）
     // 260927 就绪流程：只设模式不启采（原 dm->startCapture 挪至 M 键路径/
     // startScanSession 直启兼容口）——四管掩码 N10/N11H1 推迟到设备 M 键按下
-    // 抽检转储会话初始化（与 07 FiveChainAdapter 同源 config/fc_dump.json）：
-    // 装配时读 probe 段定本会话口径——enabled/maxFrames（缺省关/1000），帧计数
-    // 清零（帧回调按 maxFrames 计数，采满自动停采保会话）。直接用 nlohmann 读，
-    // 不引 07 内部头（fc_probe.h 带 CUDA 依赖，禁入 exe 编译）
+    // 抽检转储会话初始化（与 07 FiveChainAdapter 同源 config/fc_dump.json，读取
+    // 收口 loadProbeConfigFromFile——装配期初值同源）：arm 时读文件**快照**进本
+    // 会话口径——enabled/maxFrames 就位＋probeSessionActive_ 闩入（帧回调限量
+    // 停采只认该快照，261103 审查②）；live 态 probeEnabled_ 同步对齐按钮/下会话
     {
-        try {
-            std::ifstream fin("config/fc_dump.json");
-            if (fin.is_open()) {
-                nlohmann::json j;
-                fin >> j;
-                const auto& p = j.at("probe");
-                probeEnabled_ = p.value("enabled", false);
-                probeMaxFrames_ = p.value("maxFrames", 1000L);
-            } else {
-                probeEnabled_ = false;   // 缺文件——缺省口径（不抽检/上限 1000）
-                probeMaxFrames_ = 1000;
-            }
-        } catch (const std::exception&) {
-            probeEnabled_ = false;       // 缺节/损坏——缺省口径兜底（不拦扫描装配）
-            probeMaxFrames_ = 1000;
-        }
-        if (probeMaxFrames_ <= 0) probeMaxFrames_ = 1000;   // 非法上限回退缺省
-        probeFrameCount_ = 0;
+        const auto pc = loadProbeConfigFromFile();
+        probeEnabled_.store(pc.enabled, std::memory_order_relaxed);
+        probeMaxFrames_.store(pc.maxFrames, std::memory_order_relaxed);
+        probeFrameCount_.store(0, std::memory_order_relaxed);
+        probeSessionActive_.store(pc.enabled, std::memory_order_relaxed);
         JMW_LOG_INFO("app-AppContext",
                      "[AppContext] 抽检转储会话口径: enabled={} maxFrames={}（config/fc_dump.json）",
-                     probeEnabled_.load(std::memory_order_relaxed) ? 1 : 0, probeMaxFrames_);
+                     probeEnabled_.load(std::memory_order_relaxed) ? 1 : 0,
+                     probeMaxFrames_.load(std::memory_order_relaxed));
     }
     dm->setCaptureMode(mode);
     }   // ← 设备段结束（真机前端——中段模拟提取时设备照常采集，提取结果在 07 链内替换）
@@ -1245,9 +1283,11 @@ bool loadPointCloud100MLimited(const std::string& path, size_t maxPts,
 
 // ============================================================================
 // 抽检转储开关（五链中间结果抽检转储，07 probe 挂钩）：
-// 内存态置位＋即时回写 config/fc_dump.json（读改写保住 count/frames 等其他
+// live 态置位＋原子回写 config/fc_dump.json（读改写保住 count/frames 等其他
 // 字段——07 FiveChainAdapter 装配时同源读取，两端口径一致）；文件不存在则从
-// 空 json 起步建 probe 段。整体 try-catch：文件失败仅内存态生效（不拦 UI）
+// 空 json 起步建 probe 段。只改 live 态与文件——进行中会话口径已快照在
+// probeSessionActive_（261103 审查②），下会话装配才生效。整体 try-catch：
+// 文件失败仅内存态生效（不拦 UI）
 // ============================================================================
 void AppContext::setProbeEnabled(bool on) {
     probeEnabled_.store(on, std::memory_order_relaxed);
@@ -1265,12 +1305,26 @@ void AppContext::setProbeEnabled(bool on) {
             }   // 文件不存在：保持空 json，下方建 probe 段
         }
         j["probe"]["enabled"] = on;
-        std::ofstream fout("config/fc_dump.json");
-        if (!fout.is_open())
-            throw std::runtime_error("config/fc_dump.json 打不开（写）");
-        fout << j.dump(2) << '\n';
+        // 261103 审查④：原子写——先写 .tmp 再 rename 覆盖（防中断/崩溃留半截
+        // json，下次装配解析失败回退缺省口径）。Windows 的 rename 不覆盖已存在
+        // 目标：先 remove 目标（errc 忽略——不存在/删除失败均交 rename 裁决），
+        // 失败走下方既有 catch 静默
+        const std::filesystem::path dst = "config/fc_dump.json";
+        const std::filesystem::path tmp = dst.string() + ".tmp";
+        {
+            std::ofstream fout(tmp, std::ios::trunc);
+            if (!fout.is_open())
+                throw std::runtime_error(tmp.string() + " 打不开（写）");
+            fout << j.dump(2) << '\n';
+            fout.flush();
+            if (!fout) throw std::runtime_error(tmp.string() + " 写入失败");
+        }
+        std::error_code ec;
+        std::filesystem::remove(dst, ec);   // errc 忽略（不存在=正常；失败由 rename 报）
+        std::filesystem::rename(tmp, dst, ec);
+        if (ec) throw std::runtime_error("覆盖 config/fc_dump.json 失败: " + ec.message());
         JMW_LOG_INFO("app-AppContext",
-                     "[AppContext] 抽检转储: {}（已回写 config/fc_dump.json）",
+                     "[AppContext] 抽检转储: {}（已原子回写 config/fc_dump.json）",
                      on ? "开" : "关");
     } catch (const std::exception& e) {
         JMW_LOG_WARN("app-AppContext",
