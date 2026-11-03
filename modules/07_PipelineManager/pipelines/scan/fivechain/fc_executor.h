@@ -31,6 +31,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <chrono>   // 261103 FC-EPAIR 探针
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
@@ -298,6 +299,16 @@ private:
     // 分体/全GPU 两路共用；ids 可空（空＝仅 Z 门）【261103 集成重放件】
     void applyLaserQualityGates_(FcJob* j, int slot, const int* ids);
     void fuseLoop();       // CUDA链2（到齐配对＋融合＋F 单点产出）
+    // 261103 FC-EPAIR 成簇归因探针（fuseLoop 配对闸 chC_/chE_ 到达时刻——5s 聚合）
+    void epairAggProbe_(std::chrono::steady_clock::time_point now);
+    std::vector<std::chrono::steady_clock::time_point> epTc_, epTe_;
+    std::vector<char> epHasC_, epHasE_;
+    double epLagBuf_[300] = {};
+    char epLaterE_[300] = {};
+    uint64_t epLagN_ = 0;
+    double epRelBuf_[300] = {};
+    uint64_t epRelN_ = 0;
+    std::chrono::steady_clock::time_point epLastRel_{}, epLastAgg_{};
     void stopAll();
 
     // CUDA链1 分离段（免上传版——灰度环槽已由预上传就位）

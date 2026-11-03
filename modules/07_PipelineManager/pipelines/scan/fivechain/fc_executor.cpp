@@ -5,6 +5,7 @@
 // ②Job 池化零分配 ③配对/重排 map→定容环 ④逐帧指标 fc_metrics/fc_summary CSV。
 #include "fc_executor.h"
 #include "cuda_census.h"
+#include "jmw_logging.h"   // 261103 FC-EPAIR 探针（聚合日志）
 
 #include <algorithm>
 #include <chrono>
@@ -2322,8 +2323,47 @@ void FiveChainExecutor::ch2FullGpu_(FcJob* j) {
 // CUDA链2：C∩E 按帧号到齐（定容环配对）→ hold 零上传弃 E / 成功帧上传＋融合
 // → F（帧序产出）
 // ============================================================================
+// —— 261103 FC-EPAIR 成簇归因探针（fuseLoop 配对闸两侧到达时刻）——
+static double epMsSince(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t).count();
+}
+
+void FiveChainExecutor::epairAggProbe_(std::chrono::steady_clock::time_point now) {
+    if (epLastAgg_.time_since_epoch().count() == 0) { epLastAgg_ = now; return; }
+    const double el = std::chrono::duration<double>(now - epLastAgg_).count();
+    if (el < 5.0) return;
+    const int n = static_cast<int>(std::min<uint64_t>(epLagN_, 300));
+    if (n > 3) {
+        int nE = 0;
+        for (int i = 0; i < n; ++i) if (epLaterE_[i]) ++nE;
+        double l[300];
+        for (int i = 0; i < n; ++i) l[i] = epLagBuf_[i];
+        std::sort(l, l + n);
+        const int nr = static_cast<int>(std::min<uint64_t>(epRelN_, 300));
+        double r[300];
+        for (int i = 0; i < nr; ++i) r[i] = epRelBuf_[i];
+        std::sort(r, r + nr);
+        JMW_LOG_INFO("07-FiveChain",
+            "[FC-EPAIR] {}帧: E侧后到 {}/{}（E后到＝登记路等融合路）| "
+            "迟到滞后 p50={:.1f} p90={:.1f}ms | 放行间隔 p50={:.1f} p90={:.1f}ms",
+            n, nE, n, l[n / 2], l[(n * 9) / 10],
+            nr ? r[nr / 2] : 0.0, nr ? r[(nr * 9) / 10] : 0.0);
+    }
+    epLagN_ = 0;
+    epRelN_ = 0;
+    epLastAgg_ = now;
+}
+
 void FiveChainExecutor::fuseLoop() {
     jmw::census::setStage("fuse");
+    // 261103 FC-EPAIR 探针缓冲初始化（配对闸槽数）
+    if (epTc_.empty()) {
+        epTc_.resize(static_cast<size_t>(pendCap_));
+        epTe_.resize(static_cast<size_t>(pendCap_));
+        epHasC_.assign(static_cast<size_t>(pendCap_), 0);
+        epHasE_.assign(static_cast<size_t>(pendCap_), 0);
+    }
     // 【H1/H2·fuse 绑核＋优先级·2026-10-24】env JMW_FCPIN_FUSE=N：N=物理核号→
     // 绑该核 LP1＋THREAD_PRIORITY_HIGHEST（fcApplyPin 成对，仿 JMW_FCPIN_CH2
     // 模式；JMW_AFFINITY 设置时仍整体旁路）。针对：H1 优先级倒置（ch2(HIGHEST)
@@ -2336,14 +2376,23 @@ void FiveChainExecutor::fuseLoop() {
     }
     for (;;) {
         void* v = nullptr;
+        // —— 261103 成簇归因 E 段配对闸探针（[FC-EPAIR]，5s 聚合）：
+        //    chC_/chE_ 两通道逐帧到达时刻 → 放行时算「哪侧后到＋滞后 ms」——
+        //    后到侧就是 3 帧成簇的制造者（等待＝它的迟到量）
+        const auto tNow = std::chrono::steady_clock::now();
         if (chC_.tryPop(v)) {
             FcJob* jc = static_cast<FcJob*>(v);
-            pendC_[static_cast<size_t>(jc->idx) % static_cast<size_t>(pendCap_)] = jc;
+            const size_t s2 = static_cast<size_t>(jc->idx) % static_cast<size_t>(pendCap_);
+            pendC_[s2] = jc;
+            epTc_[s2] = tNow; epHasC_[s2] = true;
         }
         if (chE_.tryPop(v)) {
             FcJob* je = static_cast<FcJob*>(v);
-            pendE_[static_cast<size_t>(je->idx) % static_cast<size_t>(pendCap_)] = je;
+            const size_t s2 = static_cast<size_t>(je->idx) % static_cast<size_t>(pendCap_);
+            pendE_[s2] = je;
+            epTe_[s2] = tNow; epHasE_[s2] = true;
         }
+        epairAggProbe_(tNow);
         // 【P0-b】滞后回收：上一帧起的 E 池槽，随上一帧 Finish 的流同步一并释放
         while (true) {
             const size_t slot = static_cast<size_t>(nextFuse_)
@@ -2355,6 +2404,24 @@ void FiveChainExecutor::fuseLoop() {
                 break;
             pendC_[slot] = nullptr;
             pendE_[slot] = nullptr;
+            // 261103 FC-EPAIR：本帧放行统计（两侧都有时间戳才算样本）
+            if (epHasC_[slot] && epHasE_[slot]) {
+                const double dC = epMsSince(epTc_[slot]);
+                const double dE = epMsSince(epTe_[slot]);
+                const bool eLater = dC > dE;   // C 等得久＝E 后到
+                epLagBuf_[epLagN_ % 300] = eLater ? dC : dE;
+                epLaterE_[epLagN_ % 300] = eLater;
+                ++epLagN_;
+                if (epLastRel_.time_since_epoch().count() != 0) {
+                    const double gap = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - epLastRel_).count();
+                    if (gap < 1000.0) epRelBuf_[epRelN_ % 300] = gap;
+                    ++epRelN_;
+                }
+                epLastRel_ = std::chrono::steady_clock::now();
+            }
+            epHasC_[slot] = false;
+            epHasE_[slot] = false;
             const std::string& rs = j->prod.regSource;
             // 【查BUG 2026-10-30】JMW_FC_FRAME_DUMPS=<dir>：融合前逐帧落 E 块
             // （相机系 xyz，宿主内存直写）＋R/T＋regSource（五链离面归因；默认关）。
