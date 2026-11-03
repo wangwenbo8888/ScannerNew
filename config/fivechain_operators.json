@@ -293,8 +293,8 @@
       "_": "激光链⑤·三维重建（CUDA，Q 按调用传入=档内 Q）",
       "_c_minDepth": "深度过滤下限（mm）",
       "minDepth": 200,
-      "_c_maxDepth": "深度过滤上限（mm）",
-      "maxDepth": 360,
+      "_c_maxDepth": "深度过滤上限（mm）（261103 定档 550：工作距离 ~448mm，原 360 把全帧挡在窗外致激光 3D 恒 0——Z 实测 437~448mm 贴板）",
+      "maxDepth": 550,
       "_c_deviceId": "GPU 卡号",
       "deviceId": 0,
       "linePlaneGateMm": 15
