@@ -22,6 +22,7 @@
 - 五链 probe 抽检转储：达成｜`fivechain/fc_probe`＋fc_executor 快照制接线（产出段 D2H 宿主快照→E 段纯 CPU 落盘，命名对齐 scan_replay 可离线对拍）＋app 侧限量停采/界面开关；开关与挑帧在 config/fc_dump.json probe 段（enabled/maxFrames/frames/dir 可配）——261103 落地当天完成两案数据闭环
 - 双参数定档 261103：达成｜conic rowOffsetPx=1.0（五点试验通过数 3/16/18/10/0，重建半径恰 3.00mm）；laser_reconstruct maxDepth=550（原 360<工作距离 448 致激光 3D 恒 0，修后 2.4 万点/帧 Z 437~448）——均写入 config/fivechain_operators.json 带定档注释
 - 显示推送链治理 261103：达成｜display_push 四旋钮 JSON 化（minIntervalMs/fullEvery/plyEvery/displayMaxPoints，改配置重启生效）；[FC-RSTAT] 推送诊断遥测（5 秒窗口计数器，定位刷新率问题的权威口径）；30Hz 定档（33ms/900，实测送达 ~21Hz 间隔 48ms 稳定）
+- 成簇根因定案 261103：达成｜五步排除法（定时器粒度/UI 绑核/pushAvg=2ms/相机到达 16.7ms 均匀/E 段探针）锁定 markerLanes=3 重排缓冲结构性 3 帧放行——21Hz 天花板由并行车道数决定（3 车道×48ms/帧簇＝62.5fps≈60fps 吞吐正常但显示端成簇）｜挂账：markerLanes=1 试验或独立推送线程
 - 全量 ctest 110/110（261026）：达成｜tests/ 21 件测试源（sched 7＋posture 3＋calib 3＋scan 3＋postprocess 2＋globaloptim/eventsink/fc_replay 各 1）双绿
 - 拆分匹配 80-85 优于整版 67-73：部分达成｜五链拆分版在库且 399/399 对拍全同；该组匹配率数值现状段无实测记录〔待核〕
 
@@ -37,6 +38,7 @@
 
 ## 4. 日志
 
+- 261103｜成簇根因定案（markerLanes=3 重排缓冲）＋FC-EPAIR 探针＋帧到达指纹探针——五步排除法全实证入档｜人工触发｜规范 §2.3
 - 261103｜显示推送治理：display_push 旋钮 JSON 化＋FC-RSTAT 遥测＋30Hz 定档（详见《开发进度.md》当日）｜人工触发｜规范 §2.3
 - 261103｜probe 抽检转储落地（fc_probe 快照制＋限量停采＋界面开关＋目录可配）＋conic/laser 双参数定档（rowOffsetPx 1.0、maxDepth 550）——标志点/激光双链复活（详见《开发进度.md》当日）｜人工触发｜规范 §2.3
 
