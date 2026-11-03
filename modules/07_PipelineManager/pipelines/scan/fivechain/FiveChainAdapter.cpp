@@ -2255,6 +2255,11 @@ struct FcRenderStats {
     uint64_t d2hBytes = 0;  // 增量推送 D2H 累计字节（float×4）
     uint64_t fullBytes = 0; // 全量推送 D2H 累计字节（另计）
     size_t   lastPts = 0;   // 最近完成推送时融合云总点数
+    // 261103 成簇归因：推送执行耗时（入口→完成）——若 avg ~30-45ms 即坐实
+    //「cudaStreamSynchronize 等 WDDM GPU 排程把 collector 卡出 3 帧一簇」
+    double   pushMsSum = 0.0;
+    int64_t  pushMsMax = 0;
+    uint64_t pushN = 0;
     // —— 聚合窗口快照（窗口增量＝累计−快照；出线即刷新）——
     std::chrono::steady_clock::time_point sessStart{};   // 首调用时刻（FINAL 用）
     std::chrono::steady_clock::time_point lastAgg{};     // 上次聚合线时刻
@@ -2277,10 +2282,14 @@ void fcRstatLog(FcRenderStats& s, std::chrono::steady_clock::time_point now,
             s.dtN > 0 ? s.dtSumMs / static_cast<double>(s.dtN) : 0.0;
         const double kbS = elS > 0
             ? static_cast<double>(s.d2hBytes + s.fullBytes) / 1024.0 / elS : 0.0;
+        const double pushAvg =
+            s.pushN > 0 ? s.pushMsSum / static_cast<double>(s.pushN) : 0.0;
         JMW_LOG_INFO("07-FiveChain",
             "[FC-RSTAT-FINAL] 会话{:.1f}s: calls={} gate={} empty={} del={} | "
-            "dtAvg={:.0f}ms dtMax={}ms | D2H={:.0f}KB/s full={:.2f}MB | fused={}pts",
-            elS, s.nCall, s.nGate, s.nEmpty, s.nDel, avgAll, s.dtMaxMs, kbS,
+            "dtAvg={:.0f}ms dtMax={}ms | pushAvg={:.0f}ms pushMax={}ms | "
+            "D2H={:.0f}KB/s full={:.2f}MB | fused={}pts",
+            elS, s.nCall, s.nGate, s.nEmpty, s.nDel, avgAll, s.dtMaxMs,
+            pushAvg, s.pushMsMax, kbS,
             static_cast<double>(s.fullBytes) / (1024.0 * 1024.0), s.lastPts);
         return;
     }
@@ -2294,10 +2303,12 @@ void fcRstatLog(FcRenderStats& s, std::chrono::steady_clock::time_point now,
         static_cast<double>(s.fullBytes - s.pFull) / (1024.0 * 1024.0);
     JMW_LOG_INFO("07-FiveChain",
         "[FC-RSTAT] 窗口{:.1f}s: calls=+{}(Σ{}) gate=+{}(Σ{}) empty=+{}(Σ{}) "
-        "del=+{}(Σ{}) | dtAvg={:.0f}ms dtMax={}ms | D2H={:.0f}KB/s "
-        "full={:.2f}MB | fused={}pts",
+        "del=+{}(Σ{}) | dtAvg={:.0f}ms dtMax={}ms | pushAvg={:.0f}ms pushMax={}ms | "
+        "D2H={:.0f}KB/s full={:.2f}MB | fused={}pts",
         elS, dCall, s.nCall, dGate, s.nGate, dEmpty, s.nEmpty, dDel, s.nDel,
-        avg, s.wDtMaxMs, kbS, fullMB, s.lastPts);
+        avg, s.wDtMaxMs,
+        s.pushN > 0 ? s.pushMsSum / static_cast<double>(s.pushN) : 0.0,
+        s.pushMsMax, kbS, fullMB, s.lastPts);
     s.pCall = s.nCall; s.pGate = s.nGate; s.pEmpty = s.nEmpty; s.pDel = s.nDel;
     s.pDtSumMs = s.dtSumMs; s.pDtN = s.dtN;
     s.pD2h = s.d2hBytes; s.pFull = s.fullBytes;
@@ -2416,6 +2427,15 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
     sceneFeed_->pushCloudSnapshot(h);
     // 261103 FC-RSTAT：实际完成推送——nDel＋间隔分布（仅非 forceFull 且 prev
     // 非 epoch 计入：间隔＝本次入口 now − 上次过门时刻 prev，即真实推送节拍）
+    // ＋推送执行耗时（入口→此处——含下载/同步/信号发射；若 avg 30-45ms 即坐实
+    //「同步等 WDDM GPU 排程卡 collector」为 3 帧成簇根因）
+    {
+        const int64_t pushMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - now).count();
+        g_fcRstat.pushMsSum += static_cast<double>(pushMs);
+        if (pushMs > g_fcRstat.pushMsMax) g_fcRstat.pushMsMax = pushMs;
+        ++g_fcRstat.pushN;
+    }
     ++g_fcRstat.nDel;
     if (!forceFull && prev.time_since_epoch().count() != 0) {
         const int64_t dtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
