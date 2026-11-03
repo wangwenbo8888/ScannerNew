@@ -19,6 +19,8 @@
 - 07_session 已退役勿复活：达成｜现库会话体＝ScanPipeline 六态状态机；旧对象「以现库为准」不在库〔待核：现状段未点名 07_session〕
 - 五链对拍 399/399 全同：达成｜五链与沙盒实证等价（离线对拍 399/399；test_fc_replay＝对拍件）
 - CCL 门限接线：达成｜FiveChainAdapter.cpp 读 operators.ccl 配置注入 cclMinArea_（原硬编码 800 不读配置；261102 在线调参修复，标志点链全通 det=19 match=21）
+- 五链 probe 抽检转储：达成｜`fivechain/fc_probe`＋fc_executor 快照制接线（产出段 D2H 宿主快照→E 段纯 CPU 落盘，命名对齐 scan_replay 可离线对拍）＋app 侧限量停采/界面开关；开关与挑帧在 config/fc_dump.json probe 段（enabled/maxFrames/frames/dir 可配）——261103 落地当天完成两案数据闭环
+- 双参数定档 261103：达成｜conic rowOffsetPx=1.0（五点试验通过数 3/16/18/10/0，重建半径恰 3.00mm）；laser_reconstruct maxDepth=550（原 360<工作距离 448 致激光 3D 恒 0，修后 2.4 万点/帧 Z 437~448）——均写入 config/fivechain_operators.json 带定档注释
 - 全量 ctest 110/110（261026）：达成｜tests/ 21 件测试源（sched 7＋posture 3＋calib 3＋scan 3＋postprocess 2＋globaloptim/eventsink/fc_replay 各 1）双绿
 - 拆分匹配 80-85 优于整版 67-73：部分达成｜五链拆分版在库且 399/399 对拍全同；该组匹配率数值现状段无实测记录〔待核〕
 
@@ -33,6 +35,8 @@
 - 〔待定〕问题：激光点飞离标志点平面（离线回放 399 帧正确、在线实拍飞出；已排除新旧标定差异/对比度增强/坐标系偏移；嫌疑 CMTT 表(10-13)与 camera_calib.json(10-31) 微差被查表匹配放大，或在线图像特性[增益噪声]对 steger→undistort→interp→match 链的累积影响）｜方法：用在线 dump 帧过离线回放路径跑，定位「图像内容」还是「在线处理路径」问题｜提出 261102｜解决 —
 
 ## 4. 日志
+
+- 261103｜probe 抽检转储落地（fc_probe 快照制＋限量停采＋界面开关＋目录可配）＋conic/laser 双参数定档（rowOffsetPx 1.0、maxDepth 550）——标志点/激光双链复活（详见《开发进度.md》当日）｜人工触发｜规范 §2.3
 
 - 261102｜在线调参：CCL/椭圆/增益修复＋标志点链打通；激光飞点未解（详见会话总结）｜—｜—
 - 261102｜现状改目标达成对照制（对象级细节精简，证据留真名）｜规范 §2.3

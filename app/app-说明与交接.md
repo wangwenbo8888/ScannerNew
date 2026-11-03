@@ -14,6 +14,7 @@
 
 - 组合根＋主程序唯一产物（main.cpp → LeadScannerK2.exe）：达成｜main.cpp（入口）＋AppContext.h/.cpp（组合根：全对象创建/接线/销毁）＋WorkflowContext.h/.cpp（工作流上下文），单 exe 产物
 - 窗口＋工作流装配＋渲染接线：达成｜MainWindow（菜单/工具栏/状态灯）＋ScannerWindow（扫描窗）＋SceneFeedAdapter（07 算完的点云送 03 显示）
+- probe 抽检转储 exe 侧：达成｜AppContext 开关接口（三态统一：装配期读初值/会话快照/停采一次性闩锁＋文件原子写）＋采集帧计数限量停采＋MainWindow「抽检转储」开关（261103；配置 config/fc_dump.json probe 段）
 - 编入 01~05 工作流/渲染源码：达成｜app/CMakeLists.txt:50-62 直接编入 exe
 - 11 个自源文件＋5 个 stubs 占位头：部分达成｜自源文件齐；stubs/ 5 个旧头占位（scan_workflow.h 等）勿引用——清理时机待人工裁定（问题段挂账）
 - 加密狗检测：未达成｜检测项 `license` 恒 true 占位（AppContext.cpp 搜 license 定位）——狗到货后接 USB VID/PID 或厂商 SDK（问题段挂账）
@@ -27,6 +28,8 @@
 - 〔待定〕问题：窗口层走查未做｜方法：随四功能真机闭环验证补走查｜提出 261102｜解决 —
 
 ## 4. 日志
+
+- 261103｜probe 抽检转储 exe 侧落地：开关三态统一＋限量停采＋界面开关（07 侧明细见 07 交接）｜人工触发｜规范 §2.3
 
 - 261102｜现状改目标达成对照制｜规范 §2.3
 - 261102｜转四段新制：目标待人定稿；问题段自下一步+全局挂账迁入（均〔待定〕）｜规范 §2.3
