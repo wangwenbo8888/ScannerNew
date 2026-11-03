@@ -21,12 +21,50 @@
 #include <QVBoxLayout>
 #include <string>
 #include <string_view>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")
+#endif
 
 #include "jmw_pm_contract.h"       // 261031 契约护栏（07 替换守护）
 #include "jmw_pm_contract_hash.h"  // 编译期期望指纹（构建期生成）
 
 int main(int argc, char *argv[])
 {
+    // —— 261103 显示刷新专项（两件套，env JMW_UI_PIN=0 可整体关——A/B 复证用）——
+    // ① 定时器粒度 15.6ms→1ms：33ms 渲染/推送节流在粗粒度时钟上会漂到 ~47ms
+    //   档（RSTAT 实测推送成簇 48ms 的嫌疑根源之一）
+    // ② UI/渲染主线程绑 0 号物理核＋提权：五链 fcPinThread 按「roleIdx+1」设计
+    //   上即跳过 0 号核——本线程（OSG 单线程模型：update/cull/draw 全在此）
+    //   独占之，不再与计算线程抢核漂移
+#ifdef _WIN32
+    timeBeginPeriod(1);
+    if (std::getenv("JMW_UI_PIN") == nullptr
+        || std::string_view(std::getenv("JMW_UI_PIN")) != "0") {
+        std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> topo(64);
+        DWORD cb = static_cast<DWORD>(topo.size() * sizeof(topo[0]));
+        while (GetLogicalProcessorInformation(topo.data(), &cb) == FALSE) {
+            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) { cb = 0; break; }
+            topo.resize(cb / sizeof(topo[0]) + 1);
+            cb = static_cast<DWORD>(topo.size() * sizeof(topo[0]));
+        }
+        for (size_t i = 0; cb && i < cb / sizeof(topo[0]); ++i) {
+            if (topo[i].Relationship != RelationProcessorCore) continue;
+            DWORD_PTR m = topo[i].ProcessorMask;
+            const DWORD_PTR firstLP = m & (~(m - 1));   // 首逻辑处理器
+            if (SetThreadAffinityMask(GetCurrentThread(), firstLP))
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+            break;   // 只取 0 号物理核
+        }
+    }
+#endif
+
     Scanner::service::obsLoggerInit({});
     // 261004 排障开关：JMW_NO_CRASH_HANDLER=1 时跳过内置崩溃转储——堆损坏场景
     // 内置 MiniDumpWriteDump 亦崩（0 字节 dump）且吞掉 WER；跳过后由 Windows
