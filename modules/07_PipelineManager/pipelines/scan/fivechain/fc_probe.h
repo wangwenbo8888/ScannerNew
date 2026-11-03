@@ -50,7 +50,6 @@ struct ProbeSnapshot {
     std::vector<cv::Point2f> stegerL, stegerR;   ///< 激光中心（摊平；截断＝steger totalPointCount）
     std::vector<cv::Point2f> undistL, undistR;   ///< 矫正后激光点（与 steger 点一一对应）
     std::vector<cv::Point2f> interpL, interpR;   ///< 极线插值点（截断＝interp interpCount）
-    std::vector<int> interpLineL, interpLineR;   ///< 插值线号（截断同上）
     std::vector<cv::Point2f> matchL, matchR;     ///< v3 匹配对（chain2 段宿主直拷/GPU D2H，精确 N）
     std::vector<int> matchLine;                  ///< 匹配方线号（逐对，L/R 共用）
     std::vector<cv::Point3f> laser3d;            ///< 激光 3D（chain2 E 块宿主拷出，精确 N）

@@ -933,10 +933,13 @@ void FiveChainExecutor::probeEnqueue1a_(FcJob* j) {
     dlMask(s.binaryR, p.sepR.d_step1_binary, "binaryR");
 }
 
-void FiveChainExecutor::probeEnqueue1b_(FcJob* j) {
+void FiveChainExecutor::probeEnqueue1b_(FcJob* j, cv::cuda::Stream& ls) {
     if (j->probeSnap == nullptr) return;   // 非命中帧零开销（一次判空，无集合查找）
     auto& p = j->prod;
-    cudaStream_t cs = cv::cuda::StreamAccessor::getStream(gS2_);
+    // 流由调用点传入：必须与本帧前段提交（submitLaserFront）同流——chain1Loop
+    // 回退路径（splitChain1=0 kill-switch）前段提交与排水均在 gS_（异流 D2H 与
+    // 生产内核无次序保证＝错帧，且宿主落地不在排水覆盖内）；chain1bLoop 传 gS2_
+    cudaStream_t cs = cv::cuda::StreamAccessor::getStream(ls);
     jmw::probe::ProbeSnapshot& s = *j->probeSnap;
     auto dlPts = [&](std::vector<cv::Point2f>& dst,
                      const std::shared_ptr<cv::cuda::GpuMat>& m, const char* what) {
@@ -953,20 +956,6 @@ void FiveChainExecutor::probeEnqueue1b_(FcJob* j) {
                          j->idx, what);
         }
     };
-    auto dlIds = [&](std::vector<int>& dst,
-                     const std::shared_ptr<cv::cuda::GpuMat>& m, const char* what) {
-        if (!m || m->empty()) return;
-        dst.resize(static_cast<size_t>(m->cols));
-        if (cudaMemcpy2DAsync(dst.data(), sizeof(int) * m->cols, m->ptr(), m->step,
-                              sizeof(int) * m->cols, m->rows,
-                              cudaMemcpyDeviceToHost, cs) != cudaSuccess) {
-            cudaGetLastError();
-            dst.clear();
-            JMW_LOG_WARN("07-FiveChain",
-                         "[fc:probe] idx={} 快照下载 {} 失败——该段弃件（宁缺勿错）",
-                         j->idx, what);
-        }
-    };
     // 视图＝本帧 submitLaserFront 刚填的容量壳（下一覆写者＝本流下一帧提交段
     // ——同线程同流 FIFO 天然防护）；success 守卫防「早退帧下载到上一帧残数据」
     if (p.stegerL.success) dlPts(s.stegerL, p.stegerL.d_centerPoints, "stegerL");
@@ -975,14 +964,8 @@ void FiveChainExecutor::probeEnqueue1b_(FcJob* j) {
         dlPts(s.undistL, p.undistCudaL.d_rectifiedPoints, "undistL");
     if (p.undistCudaR.success)
         dlPts(s.undistR, p.undistCudaR.d_rectifiedPoints, "undistR");
-    if (p.interpL.success) {
-        dlPts(s.interpL, p.interpL.d_interpPoints, "interpL");
-        dlIds(s.interpLineL, p.interpL.d_interp_line_ids, "interpLineL");
-    }
-    if (p.interpR.success) {
-        dlPts(s.interpR, p.interpR.d_interpPoints, "interpR");
-        dlIds(s.interpLineR, p.interpR.d_interp_line_ids, "interpLineR");
-    }
+    if (p.interpL.success) dlPts(s.interpL, p.interpL.d_interpPoints, "interpL");
+    if (p.interpR.success) dlPts(s.interpR, p.interpR.d_interpPoints, "interpR");
 }
 
 // ============================================================================
@@ -1054,10 +1037,11 @@ void FiveChainExecutor::chain1Loop() {
         //（判据用 interp 结果字段：延迟分支提交段不落 stepOk——那是完成段的事）
         if (frontKind == 1 && j->prod.interpL.success && j->prod.interpR.success)
             submitV3FrontDeferred_(j, tubeOdd, gS_);
-        // 【probe v2】1b 段快照 D2H 入队（gS_，同流）——排水（waitForCompletion）
+        // 【probe v2】1b 段快照 D2H 入队（gS_，同流——本回退路径前段提交与排水
+        // 均在 gS_，D2H 必须同流入队防错帧/逃出排水）——排水（waitForCompletion）
         // 之前入队＝宿主落地由既有排水覆盖；frontKind==0 未提交任何内核，视图
         // 是上帧残数据——跳过（宁缺勿错）
-        if (frontKind != 0) probeEnqueue1b_(j);
+        if (frontKind != 0) probeEnqueue1b_(j, gS_);
         // 灰度环槽释放（d_gray 最后读者＝flat/steger；提交序＋执行序双保险）
         cudaEventRecord(evSlot_[static_cast<size_t>(j->idx % graySlots_)],
                         cv::cuda::StreamAccessor::getStream(gS_));
@@ -1529,7 +1513,7 @@ void FiveChainExecutor::chain1bLoop() {
         // 【probe v2】1b 段快照 D2H 入队（gS2_，同流）——入队先于下方排水（evD_/
         // waitForCompletion）＝宿主落地由既有排水覆盖；frontKind==0 未提交任何
         // 内核，prod 视图是上帧残数据——跳过（宁缺勿错）
-        if (frontKind != 0) probeEnqueue1b_(j);
+        if (frontKind != 0) probeEnqueue1b_(j, gS2_);
         // 槽释放（无条件——含 sep 失败/未提交帧；事件语义：d_gray/lmask 最后读者=flat，
         // 未提交帧空流上事件立即触发＝正确放行）
         cudaEventRecord(evSlot_[static_cast<size_t>(j->idx % graySlots_)],

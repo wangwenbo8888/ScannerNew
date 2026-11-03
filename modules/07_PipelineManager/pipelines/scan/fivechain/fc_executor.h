@@ -329,9 +329,11 @@ private:
     // 1a 段（gS_）：分离三对掩膜——须在 evGate_ 记录之前入队（1b 排水经
     // evGate_ 传递保证宿主落地）；非命中帧仅一次判空，零 GPU 零分配
     void probeEnqueue1a_(FcJob* j);
-    // 1b 段（gS2_）：steger/undist/interp 点集（容量宽）——须在排水之前入队
-    //（既有排水点覆盖宿主落地）；非命中帧仅一次判空
-    void probeEnqueue1b_(FcJob* j);
+    // 1b 段：steger/undist/interp 点集（容量宽）——流由调用点传入，须与本帧
+    // 前段提交及排水同流（chain1Loop 回退路径=gS_，chain1bLoop=gS2_——异流 D2H
+    // 与生产内核无次序保证＝可能错帧，且宿主落地逃出排水覆盖）——须在排水之前
+    // 入队（既有排水点覆盖宿主落地）；非命中帧仅一次判空
+    void probeEnqueue1b_(FcJob* j, cv::cuda::Stream& ls);
 
     // —— 指标 ——
     void writeMetricsCsv_();   // 析构期落盘 fc_metrics/fc_summary
