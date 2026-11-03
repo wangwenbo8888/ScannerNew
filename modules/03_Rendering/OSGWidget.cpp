@@ -1976,6 +1976,9 @@ void OSGWidget::applyLassoHighlight(const std::vector<LassoHit>& hits) {
         newColors->dirty();
         geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
         geom->dirtyDisplayList();
+        if (LaserChunk* lch = laserChunkOf(geom))
+            lch->colors = newColors;   // 261103 同步块色数组 ref（编辑链以副本
+                                       // 替换绑定——防追加写回旧数组失联）
         m_highlights.push_back(std::move(entry));
     }
 }
@@ -2011,26 +2014,28 @@ void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
             for (unsigned int vi : kv.second)
                 m_pendingMarkerDel.push_back(vi / divisor);
         }
-        // 激光几何 → 记录融合云下标（P4b 激光侧）：261017 方块点后顶点 4:1
+        // 激光块几何 → 记录融合云下标（P4b 激光侧）：261017 方块点后顶点 4:1
         // （QUADS 角顶点→点下标须 ÷4，否则错位到 4 倍远处别的点——贯穿模式
-        // 「只删到表面一层」观感的 contributory 根因）
+        // 「只删到表面一层」观感的 contributory 根因）。261103 分块后 vi 为
+        // **块内**局部下标——全局点下标＝块基址＋vi/4（块基址＝Σ前块点数）
         std::vector<osg::Vec3> laserPosBatch;   // 261018 删除位置（终版云按位置剔除）
-        if (geom == m_laserGeom.get()) {
-            bool isQuad = false;
-            if (m_laserGeom->getNumPrimitiveSets() > 0) {
-                const auto* ps = m_laserGeom->getPrimitiveSet(0);
-                isQuad = ps && ps->getMode() == osg::PrimitiveSet::QUADS;
-            }
-            const uint32_t divisor = isQuad ? 4 : 1;
-            std::unordered_set<unsigned int> uniq;   // 261018 本批去重（软删计数口径）
-            const auto* lverts =
-                dynamic_cast<const osg::Vec3Array*>(m_laserGeom->getVertexArray());
+        std::vector<uint32_t> laserIdxBatch;    // 261103 删除时全局点下标快照
+        LaserChunk* lch = laserChunkOf(geom);
+        if (lch) {
+            constexpr uint32_t divisor = 4;     // 块几何恒 QUADS（laserNewChunk 建）
+            std::unordered_set<uint32_t> uniq;  // 261018 本批去重（软删计数口径）
+            const auto* lverts = lch->coords.get();
+            const size_t lbase = laserChunkBase(lch);
             for (unsigned int vi : kv.second) {
-                const unsigned int pi = vi / divisor;
+                const uint32_t pi =
+                    static_cast<uint32_t>(lbase) + vi / divisor;
                 m_pendingCloudDel.push_back(pi);
+                laserIdxBatch.push_back(pi);
                 uniq.insert(pi);
-                if (lverts && pi * divisor < lverts->size())
-                    laserPosBatch.push_back((*lverts)[pi * divisor]);
+                if (lverts && static_cast<size_t>(vi / divisor) * divisor
+                                 < lverts->size())
+                    laserPosBatch.push_back(
+                        (*lverts)[static_cast<size_t>(vi / divisor) * divisor]);
             }
             m_laserSoftDeleted += uniq.size();   // 统计栏「删除即变少」
         }
@@ -2043,11 +2048,16 @@ void OSGWidget::applyLassoDelete(const std::vector<LassoHit>& hits) {
             (*newColors)[vi] = osg::Vec4ub(0, 0, 0, 0);   // alpha=0 软删（GL_BLEND）
         }
         pushDeleteUndo(geom, kv.second, orig);
-        if (!laserPosBatch.empty() && !m_deleteHistory.empty() &&
-            m_deleteHistory.back().geom == geom)
+        if (!laserIdxBatch.empty() && !m_deleteHistory.empty() &&
+            m_deleteHistory.back().geom == geom) {
             m_deleteHistory.back().laserPos = std::move(laserPosBatch);
+            m_deleteHistory.back().laserPointIdx = std::move(laserIdxBatch);
+        }
         newColors->dirty();
         geom->setColorArray(newColors.get(), osg::Array::BIND_PER_VERTEX);
+        if (lch)
+            lch->colors = newColors;   // 编辑链以副本替换绑定——同步块内 ref
+                                       // （追加/重灌写回成员数组保持权威）
         geom->dirtyDisplayList();
         osg::StateSet* ss = geom->getOrCreateStateSet();
         ss->setMode(GL_BLEND, osg::StateAttribute::ON);
@@ -2071,11 +2081,12 @@ void OSGWidget::deletePointsInPolyline() {
     m_selectedPolylines.clear();
 }
 // 261018 激光删除位置集：撤销账本驱动（undo 弹栈后自动失效）——终版云
-// （GBA 重放按下标找不回删除点）按空间位置剔除的唯一凭据
+// （GBA 重放按下标找不回删除点）按空间位置剔除的唯一凭据。
+// 261103 分块：按块归属判定（原单几何指针比对已退役）
 std::vector<osg::Vec3> OSGWidget::laserDeletedPositions() const {
     std::vector<osg::Vec3> out;
     for (const auto& e : m_deleteHistory)
-        if (e.geom == m_laserGeom.get())
+        if (laserChunkOf(e.geom))
             out.insert(out.end(), e.laserPos.begin(), e.laserPos.end());
     return out;
 }
@@ -2102,19 +2113,24 @@ size_t OSGWidget::visibleMarkerCount() const
 
 size_t OSGWidget::visibleLaserCount() const
 {
-    // 软删计数（05 P4b 激光侧）：alpha>0 顶点数（逐顶点色 1:1＝点数）
-    if (!m_laserGeom.valid()) return 0;
-    const auto* colors =
-        dynamic_cast<const osg::Vec4ubArray*>(m_laserGeom->getColorArray());
-    if (!colors) {
-        // 无逐顶点色（旧态）＝顶点计数兜底
-        const auto* verts =
-            dynamic_cast<const osg::Vec3Array*>(m_laserGeom->getVertexArray());
-        return verts ? verts->size() : 0;
-    }
+    // 软删计数（05 P4b 激光侧）：alpha>0 顶点数（口径与原单几何版一致）。
+    // 261103 分块：逐块求和；读 geom 当前绑定色数组（高亮/删除以副本替换
+    // 绑定时该数组才是权威）
     size_t visible = 0;
-    for (const auto& c : *colors)
-        if (c.a() > 0) ++visible;
+    for (const auto& ch : m_laserChunks) {
+        if (!ch.geom) continue;
+        const auto* colors =
+            dynamic_cast<const osg::Vec4ubArray*>(ch.geom->getColorArray());
+        if (!colors) {
+            // 无逐顶点色（旧态）＝顶点计数兜底
+            const auto* verts =
+                dynamic_cast<const osg::Vec3Array*>(ch.geom->getVertexArray());
+            visible += verts ? verts->size() : 0;
+            continue;
+        }
+        for (const auto& c : *colors)
+            if (c.a() > 0) ++visible;
+    }
     return visible;
 }
 
@@ -2192,17 +2208,12 @@ void OSGWidget::undoDelete()
         if (entry.geom == m_markerGeom.get()) {
             const uint32_t div = markerDivisor();
             for (unsigned int vi : entry.indices) undoMarkerIdx.push_back(vi / div);
-        } else if (entry.geom == m_laserGeom.get()) {
-            // 261017 方块点后顶点 4:1——原 vi 未 ÷4（4 倍空间下标），purge 差集
-            // 永远对不上＝撤销后的点在物化时仍被真删（存量 bug 顺手修）
-            uint32_t div = 1;
-            if (m_laserGeom->getNumPrimitiveSets() > 0) {
-                const auto* ps = m_laserGeom->getPrimitiveSet(0);
-                if (ps && ps->getMode() == osg::PrimitiveSet::QUADS) div = 4;
-            }
-            std::unordered_set<unsigned int> uniq;   // 261018 软删计数回扣（去重）
-            for (unsigned int vi : entry.indices) {
-                const unsigned int pi = vi / div;
+        } else if (laserChunkOf(entry.geom)) {
+            // 261103 分块：indices 为块内局部下标且块布局随全量重建变化——
+            // 账本 purge/软删回扣改用删除时快照的全局点下标（laserPointIdx），
+            // 不受重建影响；上方颜色恢复循环仍按块内局部下标原地写（geom 即块）
+            std::unordered_set<uint32_t> uniq;   // 261018 软删计数回扣（去重）
+            for (uint32_t pi : entry.laserPointIdx) {
                 undoCloudIdx.push_back(pi);
                 uniq.insert(pi);
             }
@@ -2713,53 +2724,177 @@ void OSGWidget::setLaserPointWorldSize(float worldMm)
         worldMm, worldMm > 0.0f ? 12.0 * std::sqrt(static_cast<double>(worldMm)) * 1900.0 / 800.0 : 4.0);
 }
 
-// 261018 增量追加：尾部补 4 顶点/点——老段坐标/角/色零重建（消费线程增量
-// 推送的用户口径落地：只渲染增加的点）。OSG 数组 dirty 仍整幅 VBO 重传（03
-// 层限制，后续可分块几何细化），但 UI 线程的百万级重建循环全免
+// ============================================================================
+// 261103 激光分块几何辅助：块创建/归属/基址/重灌/块尾补点
+// ============================================================================
+OSGWidget::LaserChunk OSGWidget::laserNewChunk()
+{
+    LaserChunk ch;
+    ch.geom = new osg::Geometry;
+    ch.geom->setUseVertexBufferObjects(true);
+    ch.geom->setUseDisplayList(false);
+    ch.geom->setDataVariance(osg::Object::DYNAMIC);
+    ch.coords = new osg::Vec3Array;
+    ch.corners = new osg::Vec2Array;
+    ch.colors = new osg::Vec4ubArray;
+    // 容量一次到位：后续 resize 只到已填数×4（OSG 按数组**当前长度**上传
+    // VBO——块半满只传半块；容量内增长零再分配）
+    ch.coords->reserve(kLaserChunkPts * 4);
+    ch.corners->reserve(kLaserChunkPts * 4);
+    ch.colors->reserve(kLaserChunkPts * 4);
+    ch.geom->setVertexArray(ch.coords.get());
+    // aCorner 绑定 8（与 applySquarePointState 的 addBindAttribLocation 同值）
+    // ＋BIND_PER_VERTEX——缺角属性绑定＝4 顶点重合零面积（激光不显示旧根因）
+    ch.geom->setVertexAttribArray(8, ch.corners.get());
+    ch.geom->setVertexAttribBinding(8, osg::Geometry::BIND_PER_VERTEX);
+    ch.geom->setColorArray(ch.colors.get(), osg::Array::BIND_PER_VERTEX);
+    ch.geom->addPrimitiveSet(new osg::DrawArrays(osg::DrawArrays::QUADS, 0, 0));
+    m_laserGeode->addDrawable(ch.geom.get());
+    return ch;
+}
+
+const OSGWidget::LaserChunk* OSGWidget::laserChunkOf(const osg::Geometry* g) const
+{
+    if (!g) return nullptr;
+    for (const auto& ch : m_laserChunks)
+        if (ch.geom.get() == g) return &ch;
+    return nullptr;   // 块数 ≤ 数百——线性查可忽略
+}
+
+OSGWidget::LaserChunk* OSGWidget::laserChunkOf(osg::Geometry* g)
+{
+    return const_cast<LaserChunk*>(
+        static_cast<const OSGWidget*>(this)->laserChunkOf(g));
+}
+
+size_t OSGWidget::laserChunkBase(const LaserChunk* target) const
+{
+    size_t base = 0;
+    for (const auto& ch : m_laserChunks) {
+        if (&ch == target) break;
+        base += ch.pts;
+    }
+    return base;
+}
+
+// 全量按块重灌（loadLaserPoints 主体）：块对象**复用不销毁**（撤销账本持块
+// 几何裸指针，销毁＝悬垂）；点数缩小时多余块清零保留（count=0 不画），再
+// 增长时原对象续用。重灌按满块顺序打包——除尾块外恒满，全局点序与融合云一致
+void OSGWidget::laserRebuildChunks(const std::vector<osg::Vec3>& laser)
+{
+    const size_t n = laser.size();
+    const size_t nChunks = (n + kLaserChunkPts - 1) / kLaserChunkPts;
+    while (m_laserChunks.size() < nChunks)
+        m_laserChunks.push_back(laserNewChunk());
+
+    static const osg::Vec2 kQuadCorner[4] = {
+        osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
+        osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
+    const osg::Vec4ub kLaserColor(134, 206, 250, 255);
+    for (size_t ci = 0; ci < m_laserChunks.size(); ++ci) {
+        LaserChunk& ch = m_laserChunks[ci];
+        const size_t base = ci * kLaserChunkPts;
+        const size_t cnt = base < n ? std::min(kLaserChunkPts, n - base) : 0;
+        ch.pts = cnt;
+        ch.coords->resize(cnt * 4);
+        ch.corners->resize(cnt * 4);
+        ch.colors->assign(cnt * 4, kLaserColor);   // 默认＝导入点云色（LeadScan 浅蓝）
+        for (size_t i = 0; i < cnt; ++i) {
+            const auto& p = laser[base + i];
+            for (int c = 0; c < 4; ++c) {
+                (*ch.coords)[i * 4 + c] = p;
+                (*ch.corners)[i * 4 + c] = kQuadCorner[c];
+            }
+        }
+        // 重灌后块内三数组即权威（编辑链曾以副本替换绑定——统一重拴成员数组）
+        ch.geom->setVertexArray(ch.coords.get());
+        ch.geom->setVertexAttribArray(8, ch.corners.get());
+        ch.geom->setVertexAttribBinding(8, osg::Geometry::BIND_PER_VERTEX);
+        ch.geom->setColorArray(ch.colors.get(), osg::Array::BIND_PER_VERTEX);
+        // 260915：同指针 setVertexArray 早退不重传 VBO——原地改必须显式 dirty
+        ch.coords->dirty();
+        ch.corners->dirty();
+        ch.colors->dirty();
+        ch.geom->setPrimitiveSet(
+            0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0,
+                                   static_cast<int>(cnt * 4)));
+    }
+    // 待物理化删除的融合云下标＝其 4 顶点 alpha=0 隐藏（周期重推不复活——
+    // 物理化在就绪态续采/完成前）。全局点下标→块号/块内偏移（满块打包直除）
+    for (uint32_t vi : m_pendingCloudDel) {
+        if (vi >= n) continue;
+        const size_t ci = vi / kLaserChunkPts;
+        if (ci >= m_laserChunks.size()) continue;
+        const size_t li = (vi % kLaserChunkPts) * 4;
+        auto& cols = *m_laserChunks[ci].colors;
+        for (int c = 0; c < 4; ++c)
+            cols[li + c] = osg::Vec4ub(0, 0, 0, 0);
+    }
+}
+
+// 块尾补点（追加路径主体）：resize 到已填数×4 后写值并 dirty——只标脏本块，
+// OSG 仅重传本块 VBO（分块根治整幅重传的关键路径）
+void OSGWidget::laserAppendRange(LaserChunk& ch, const std::vector<osg::Vec3>& add,
+                                 size_t from, size_t cnt)
+{
+    static const osg::Vec2 kQ[4] = {osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
+                                    osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
+    const osg::Vec4ub kLaserColor(134, 206, 250, 255);
+    const size_t v0 = ch.pts * 4;
+    ch.coords->resize(v0 + cnt * 4);
+    ch.corners->resize(v0 + cnt * 4);
+    ch.colors->resize(v0 + cnt * 4, kLaserColor);
+    for (size_t i = 0; i < cnt; ++i) {
+        const auto& p = add[from + i];
+        for (int c = 0; c < 4; ++c) {
+            (*ch.coords)[v0 + i * 4 + c] = p;
+            (*ch.corners)[v0 + i * 4 + c] = kQ[c];
+            (*ch.colors)[v0 + i * 4 + c] = kLaserColor;
+        }
+    }
+    ch.pts += cnt;
+    ch.coords->dirty();
+    ch.corners->dirty();
+    ch.colors->dirty();
+    ch.geom->setPrimitiveSet(
+        0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0,
+                               static_cast<int>(ch.pts * 4)));
+}
+
+// 261103 增量追加（分块版）：尾块补 4 顶点/点、写满开新块——只标脏被写块，
+// 重传量从整幅（200 万点≈192MB/次）降到单块（≈6.3MB）。老段坐标/角/色
+// 零重建（消费线程增量推送「只渲染增加的点」口径不变；UI 线程百万级重建
+// 循环与整幅 VBO 重传全免）。显示总点数由 MainWindow 帽控
 void OSGWidget::appendLaserPoints(const std::vector<osg::Vec3>& add) {
     if (add.empty()) return;
-    if (!m_laserRoot || m_laserRoot->getNumParents() == 0 || !m_laserCoords ||
-        !m_laserGeom) {
+    if (!m_laserRoot || m_laserRoot->getNumParents() == 0 || m_laserChunks.empty()) {
         loadLaserPoints(add);   // 未建几何＝首推，走全量路径
         return;
     }
     m_laserRoot->setNodeMask(m_laserVisible ? ~0u : 0u);
-    const size_t basePts = m_laserCoords->size() / 4;
     const size_t n = add.size();
-    m_laserCoords->resize((basePts + n) * 4);
-    m_laserCorners->resize((basePts + n) * 4);
-    m_laserColors->resize((basePts + n) * 4);
-    static const osg::Vec2 kQ[4] = {osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
-                                    osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
-    const osg::Vec4ub kLaserColor(134, 206, 250, 255);
-    for (size_t i = 0; i < n; ++i) {
-        const auto& p = add[i];
-        for (int c = 0; c < 4; ++c) {
-            (*m_laserCoords)[(basePts + i) * 4 + c] = p;
-            (*m_laserCorners)[(basePts + i) * 4 + c] = kQ[c];
-            (*m_laserColors)[(basePts + i) * 4 + c] = kLaserColor;
+    size_t done = 0;
+    while (done < n) {
+        LaserChunk& ch = m_laserChunks.back();
+        if (ch.pts >= kLaserChunkPts) {
+            m_laserChunks.push_back(laserNewChunk());   // 尾块写满＝开新块
+            continue;
         }
+        const size_t take = std::min(kLaserChunkPts - ch.pts, n - done);
+        laserAppendRange(ch, add, done, take);
+        done += take;
     }
-    m_laserCoords->dirty();
-    m_laserCorners->dirty();
-    m_laserColors->dirty();
-    m_laserGeom->setPrimitiveSet(
-        0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0,
-                               static_cast<int>((basePts + n) * 4)));
 }
 
 void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
 {
     if (laser.empty()) return;
     if (!m_laserRoot || m_laserRoot->getNumParents() == 0) {
-        // 重建判定同标志点（clearScene 摘除后指针不置空的坑）
+        // 重建判定同标志点（clearScene 摘除后指针不置空的坑）。clearScene 已
+        // 清撤销账本——旧块几何随块表清空析构，无悬垂风险
         m_laserRoot = new osg::Group;
         m_laserGeode = new osg::Geode;
-        m_laserGeom = new osg::Geometry;
-        m_laserGeom->setUseVertexBufferObjects(true);
-        m_laserGeom->setUseDisplayList(false);
-        m_laserGeom->setDataVariance(osg::Object::DYNAMIC);
-        m_laserGeode->addDrawable(m_laserGeom);
+        m_laserChunks.clear();
         m_laserRoot->addChild(m_laserGeode);
         m_root->addChild(m_laserRoot);
 
@@ -2767,7 +2902,8 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
         // 本机驱动+8x MSAA 下实测恒呈圆点（三轮实测）——弃点路线，改**真四边
         // 形**：每点扩 4 顶点（aCorner 四角），共享方块材质（applySquarePoint
         // State——仓库快照/导入云同源）。上版缺 setVertexAttribBinding(8)＝角属
-        // 性未启用→4 顶点重合零面积＝扫描中激光不显示的根因
+        // 性未启用→4 顶点重合零面积＝扫描中激光不显示的根因。
+        // 261103 分块：块几何逐块挂 m_laserGeode（材质/混合状态在 root 级共享）
         applySquarePointState(m_laserRoot->getOrCreateStateSet(), m_laserRoot.get());
         m_laserRoot->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
         // 混合开：软删 alpha=0 隐藏（05 P4b 激光删除链——旧版 BIND_OVERALL
@@ -2776,58 +2912,18 @@ void OSGWidget::loadLaserPoints(const std::vector<osg::Vec3>& laser)
         osg::ref_ptr<osg::BlendFunc> lbf = new osg::BlendFunc;
         lbf->setFunction(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         m_laserRoot->getOrCreateStateSet()->setAttribute(lbf);
-        m_laserCoords = new osg::Vec3Array;
-        m_laserColors = new osg::Vec4ubArray;   // 成员复用（见头文件注）
-        m_laserCorners = new osg::Vec2Array;    // 261017 方块点：四角属性（4 顶点/点）
     }
     m_laserRoot->setNodeMask(m_laserVisible ? ~0u : 0u);      // 重建后承袭开关
-    // 261017 方块点：每点扩 4 顶点（QUADS）——坐标重复 4 份＋角属性常量模式
-    const size_t n = laser.size();
-    m_laserCoords->resize(n * 4);
-    for (size_t i = 0; i < n; ++i) {
-        const auto& p = laser[i];
-        (*m_laserCoords)[4 * i + 0] = p;
-        (*m_laserCoords)[4 * i + 1] = p;
-        (*m_laserCoords)[4 * i + 2] = p;
-        (*m_laserCoords)[4 * i + 3] = p;
-    }
-    static const osg::Vec2 kQuadCorner[4] = {
-        osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
-        osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
-    m_laserCorners->resize(n * 4);
-    for (size_t i = 0; i < n; ++i)
-        for (int c = 0; c < 4; ++c) (*m_laserCorners)[4 * i + c] = kQuadCorner[c];
-    m_laserCorners->dirty();
-    m_laserCoords->dirty();   // 260915：同指针 setVertexArray 早退不重传 VBO——原地改必须显式 dirty
+    // 261103 分块重灌：坐标重复 4 份/点＋角属性＋逐顶点色（默认 LeadScan 浅
+    // 蓝；待物理化删除点 alpha=0）——重灌细节见 laserRebuildChunks
+    laserRebuildChunks(laser);
     static std::atomic<uint64_t> s_laserLoadCnt{0};
     if (const auto k = s_laserLoadCnt.fetch_add(1); k % 30 == 0) {
         JMW_LOG_INFO("03-OSGWidget",
-            "[OSGWidget] 激光点渲染（方块 quad）: {} 点（第 {} 次）nodeMask={} parents={}",
-            n, k + 1, m_laserRoot->getNodeMask(), m_laserRoot->getNumParents());
+            "[OSGWidget] 激光点渲染（分块 quad）: {} 点 / {} 块（第 {} 次）nodeMask={} parents={}",
+            laser.size(), m_laserChunks.size(), k + 1,
+            m_laserRoot->getNodeMask(), m_laserRoot->getNumParents());
     }
-    m_laserGeom->setVertexArray(m_laserCoords);
-    m_laserGeom->setVertexAttribArray(8 /* aCorner（prog->addBindAttribLocation 同值）*/,
-                                     m_laserCorners.get());
-    // 上版缺此调用＝角属性未按逐顶点启用→4 顶点重合零面积（激光不显示根因）
-    m_laserGeom->setVertexAttribBinding(8, osg::Geometry::BIND_PER_VERTEX);
-    // 逐顶点色（成员复用——260919 卡顿修复：每次 push new 数组=MB 级分配＋
-    // VBO 全量重传抖动）：默认=导入点云色（LeadScan 浅蓝）；待物理化删除的
-    // 点＝其 4 顶点 alpha=0 隐藏（周期重推不复活——物理化在就绪态续采/完成前）
-    if (!m_laserColors) m_laserColors = new osg::Vec4ubArray;
-    const osg::Vec4ub kLaserColor(134, 206, 250, 255);
-    m_laserColors->assign(n * 4, kLaserColor);
-    for (uint32_t vi : m_pendingCloudDel)
-        if (vi < n)
-            for (int c = 0; c < 4; ++c)
-                (*m_laserColors)[4 * vi + c] = osg::Vec4ub(0, 0, 0, 0);
-    m_laserColors->dirty();
-    m_laserGeom->setColorArray(m_laserColors.get(), osg::Array::BIND_PER_VERTEX);
-    if (m_laserGeom->getNumPrimitiveSets() == 0)
-        m_laserGeom->addPrimitiveSet(
-            new osg::DrawArrays(osg::DrawArrays::QUADS, 0, static_cast<int>(n * 4)));
-    else
-        m_laserGeom->setPrimitiveSet(
-            0, new osg::DrawArrays(osg::DrawArrays::QUADS, 0, static_cast<int>(n * 4)));
     // 261029 扫描激光路径同标志点口径：取景走 maybeAutoFrame（左相机视角＋
     // 半径带/1s 节流/避让拖拽）——MainWindow 的强制 autoFitCamera（LeadScan
     // 斜视角）会在每次全量推后踩掉左相机视角（扫描中视角不对根因）

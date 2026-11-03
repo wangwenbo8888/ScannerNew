@@ -388,6 +388,10 @@ private:
                                  // 「恢复后标志点未恢复」=一条已弹一条还压栈）
         std::vector<osg::Vec3> laserPos;   // 261018 激光删除点的空间位置（几何
                                            // 下标跨 GBA 重放失效——按位置剔除）
+        std::vector<uint32_t> laserPointIdx;   // 261103 删除时全局点下标快照
+                                           //（分块后 indices 为块内局部下标且
+                                           // 块布局随全量重建变化——账本 purge/
+                                           // 软删回扣须用删除时的全局口径）
     };
     std::vector<DeleteEntry> m_deleteHistory;
     uint64_t m_deleteActionSeq = 0;   // 删除动作序号（applyLassoDelete 每次 ++）
@@ -436,15 +440,34 @@ private:
     osg::ref_ptr<osg::Group> m_markerBbGroup;       // 标志点 billboard 容器（同心圆贴图朝屏）
     osg::ref_ptr<osg::Texture2D> m_markerTexture;   // 同心圆纹理（内白外黑）
     osg::ref_ptr<osg::Geode> m_pcbGeode;            // PointCloudBuffer 直读点云 geode（原子替换用）
-    osg::ref_ptr<osg::Group> m_laserRoot;           // 激光点容器（points 几何）
-    osg::ref_ptr<osg::Geode> m_laserGeode;
-    osg::ref_ptr<osg::Geometry> m_laserGeom;
-    osg::ref_ptr<osg::Vec3Array> m_laserCoords;
-    osg::ref_ptr<osg::Vec4ubArray> m_laserColors;   // 逐顶点色（成员复用——每次
-                                                    // push new 数组=MB 级分配抖动）
-    osg::ref_ptr<osg::Vec2Array> m_laserCorners;    // 261017 方块点：四角属性
-                                                    //   （每点 4 顶点 QUADS——GL_POINTS
-                                                    //   光栅在本机恒圆点，弃点路线）
+    osg::ref_ptr<osg::Group> m_laserRoot;           // 激光点容器（分块几何）
+    osg::ref_ptr<osg::Geode> m_laserGeode;          // 块几何宿主（一 drawable 一块）
+    // 261103 激光点云分块几何（性能根治）：旧版一整块几何三数组，追加新点
+    // dirty() 让 OSG 整幅重传全部顶点（200 万点≈192MB/次）＝显示刷新的结构
+    // 性瓶颈。现按 kLaserChunkPts 点/块切分：每块独立 Geometry＋三数组，扫描
+    // 追加只标脏「当前块」（重传≈6.3MB/块）；全量重建按块重灌。对外 API、
+    // 渲染效果（每点 4 顶点 QUADS 方块＋同色 Vec4ub）、软删/撤销语义不变
+    struct LaserChunk {
+        osg::ref_ptr<osg::Geometry> geom;       // 块几何（VBO+DYNAMIC）
+        osg::ref_ptr<osg::Vec3Array> coords;    // 坐标（每点 4 顶点）
+        osg::ref_ptr<osg::Vec2Array> corners;   // 方块四角属性（aCorner）
+        osg::ref_ptr<osg::Vec4ubArray> colors;  // 逐顶点色（软删 alpha=0）
+        size_t pts = 0;                         // 块内已填点数（≤kLaserChunkPts）
+    };
+    static constexpr size_t kLaserChunkPts = 65536;  // 块容量（点）：≈6.3MB/块 VBO
+    std::vector<LaserChunk> m_laserChunks;      // 块表（顺序＝全局点序；除尾块外
+                                                // 恒满——块基址＝Σ前块点数。全量
+                                                // 重建缩点时多余块清零保留**不销
+                                                // 毁**：撤销账本持块几何裸指针）
+
+    // —— 261103 激光分块内部辅助（追加/重建/编辑链/计数共用；块表空安全）——
+    LaserChunk laserNewChunk();                          // 新块（挂 m_laserGeode）
+    LaserChunk* laserChunkOf(osg::Geometry* g);          // 几何→块（非激光块 nullptr）
+    const LaserChunk* laserChunkOf(const osg::Geometry* g) const;
+    size_t laserChunkBase(const LaserChunk* ch) const;   // 块基址（全局点下标＝Σ前块点数）
+    void laserRebuildChunks(const std::vector<osg::Vec3>& laser);  // 全量按块重灌
+    void laserAppendRange(LaserChunk& ch,                // 块尾补点（只标脏本块）
+                          const std::vector<osg::Vec3>& add, size_t from, size_t cnt);
     float m_laserPointWorldMm = 0.0f;               // 261017 方块点：体素边长 mm
                                                     //   （存原值，0=固定 4px 口径；
                                                     //   屏幕边长=着色器 √档值×12 平方
