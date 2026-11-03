@@ -1,0 +1,4 @@
+# 测试数据不入库——仅保 README 与本文件（261103 约定）
+*
+!README.md
+!.gitignore

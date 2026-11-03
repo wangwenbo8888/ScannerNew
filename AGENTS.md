@@ -9,6 +9,7 @@
 - `modules/` 11 业务模块（01 标定 ~ 11 部署；09＝算子库 OperatorLib）
 - `app/` 应用入口与装配（LeadScannerK2.exe；AppContext 组合根）
 - `cmake/` `config/` `scripts/` 构建辅助 / 随软件运行时配置 / 交付脚本
+- `test_data/` 测试数据集中区（每主题一子文件夹，内容不入库）
 - `docs/` 全部文档（plans / 流水线 / 开发需要的信息 / 规范与模板 / 用户文档＋存量终态五区——见地图 §2）
 - `factory_calib/` 厂家标定独立子工程（AI 只读禁区，见其 AGENTS.md）
 - `build*/` 构建产物，不入库
