@@ -1975,9 +1975,9 @@ Scanner::Result FiveChainAdapter::startRealtime(
             frameProbe_.enabled() ? &frameProbe_ : nullptr;
         if (probePtr != nullptr)
             JMW_LOG_WARN("07-FiveChain",
-                "[FiveChainAdapter] fc_probe 抽检开启: {} 帧命中 → diagnostics/fc_probe"
+                "[FiveChainAdapter] fc_probe 抽检开启: {} 帧命中 → {}"
                 "（快照制——建议帧号避开前 3 帧图捕获暖机窗）",
-                frameProbe_.frameCount());
+                frameProbe_.frameCount(), frameProbe_.dir());
         executor_ = std::make_unique<scr::fc::FiveChainExecutor>(*harness_, 0, 0x7fffffff,
                                                                 probePtr);
 

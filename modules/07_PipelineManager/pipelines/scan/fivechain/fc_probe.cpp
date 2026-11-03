@@ -146,6 +146,9 @@ ProbeConfig ProbeConfig::load() {
         const auto& pr = j.at("probe");
         c.enabled = pr.value("enabled", false);
         c.maxFrames = pr.value("maxFrames", c.maxFrames);
+        // 输出目录可配（261103）：空串/缺省＝默认 diagnostics/fc_probe
+        if (const auto d = pr.value("dir", std::string{}); !d.empty())
+            c.dir = d;
         if (pr.contains("frames") && pr.at("frames").is_array())
             for (const auto& e : pr.at("frames")) {
                 // 单个坏值只跳过本值，不弃整配置（审查#9）；帧号合法域 [1, 1e7]
@@ -180,7 +183,7 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p,
         char cycBuf[32];
         std::snprintf(cycBuf, sizeof(cycBuf), "cycle_%04ld", frameNo);
         const std::filesystem::path dir =
-            std::filesystem::path("diagnostics") / "fc_probe" / cycBuf;
+            std::filesystem::path(cfg_.dir) / cycBuf;
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
 
@@ -740,7 +743,7 @@ void FrameProbe::appendRt(long idx, const scr::CycleProductsCompat& p) {
     if (!cfg_.enabled) return;
     try {
         const std::filesystem::path root =
-            std::filesystem::path("diagnostics") / "fc_probe";
+            std::filesystem::path(cfg_.dir);
         if (!dirEnsured_) {   // 目录只建一次（审查#3——原每帧建目录）
             std::error_code ec;
             std::filesystem::create_directories(root, ec);

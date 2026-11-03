@@ -35,6 +35,8 @@ struct ProbeConfig {
     bool enabled = false;
     long maxFrames = 1000;          // app 侧限量停采阈值（probe 侧仅透传/记录）
     std::set<long> frames;          // 挑帧帧号集合（1 起，流水线处理序号）
+    std::string dir = "diagnostics/fc_probe";   // 输出根目录（261103 可配——相对 exe
+                                    // CWD；测试主题换目录只改 fc_dump.json 不动代码）
     static ProbeConfig load();      // 读 config/fc_dump.json 的 probe 段
 };
 
@@ -63,6 +65,7 @@ public:
     void configure(const ProbeConfig& c) { cfg_ = c; }
     bool enabled() const { return cfg_.enabled; }
     size_t frameCount() const { return cfg_.frames.size(); }
+    const std::string& dir() const { return cfg_.dir; }   // 输出根目录（装配日志用）
     /// idx 0 起，帧号=idx+1；命中 probe.frames 则 true（产出线程命中判定——
     /// 非命中帧仅此一次 set 查找，零 GPU 操作零分配）
     bool hit(long idx) const {
