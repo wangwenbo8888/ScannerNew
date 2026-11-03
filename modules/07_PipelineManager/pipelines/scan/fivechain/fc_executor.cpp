@@ -1355,6 +1355,12 @@ bool FiveChainExecutor::trySubmit1aBig_(FcJob* j) {
     if (sepBigExec_[static_cast<size_t>(rs)] && sepBigSigValid_[static_cast<size_t>(rs)]) {
         if (cudaGraphLaunch(sepBigExec_[static_cast<size_t>(rs)], cs) == cudaSuccess) {
             fillProducts();
+            // 【261103 缺件根因】sepDone 必须先置位再入队：probeEnqueue1a_ 的
+            // 「!sepDone 早退」守卫（防 sep 失败帧无掩膜可拷）会把大图路径整链
+            // 帧静默挡掉——此前置位在 chain1aLoop 的 bigDone 分支（返回后才执行）
+            // ＝暖机后稳态帧掩膜快照全缺的真因。图发射成功即 sep 产出已提交，
+            // 此处置位语义成立（调用侧 store 幂等保留）
+            j->sepDone = true;
             // 【probe v2】1a 段快照 D2H 入队（gS_，图发射之后＝流序读到本帧图产物；
             // evGate_ 记录之前＝1b 排水经事件传递保证宿主落地）
             probeEnqueue1a_(j);
@@ -1431,6 +1437,9 @@ bool FiveChainExecutor::trySubmit1aBig_(FcJob* j) {
     std::cout << "[fc:1abig] SepBigGraph captured slot=" << rs << " nodes=" << nn << std::endl;
     if (cudaGraphLaunch(ge, cs) == cudaSuccess) {
         fillProducts();
+        // 【261103 缺件根因】sepDone 先置位再入队（同稳态位——防 !sepDone 早退
+        // 守卫静默弃件；首捕帧即命中帧时同样缺件）
+        j->sepDone = true;
         // 【probe v2】1a 段快照 D2H 入队（同稳态位——图发射后/evGate_ 记录前）
         probeEnqueue1a_(j);
         recordGateAndDone();
