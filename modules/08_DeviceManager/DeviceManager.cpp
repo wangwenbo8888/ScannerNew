@@ -53,7 +53,8 @@ std::vector<ParamSpec> makeParamSpecs(double expMinMs) {  // 参数字段定义�
 // 掩码映射（261002 临时测试机协议——扫描仪损坏临时环境，管语义改：T=精细线、
 // V=左斜线、C=右斜线、D=无对应线〔测试机未接，占位〕；原 260831/260910 口径
 // 「面片 T1V1／精细 D／深孔 C」作废，回正式机须回退）：标志点 A（MarkerOnly）
-// T0V0C0D0＋L=0；面片 B（MarkerPlusLaser）V1C1（左斜+右斜两管轮流）；精细 C
+// T0V0C0D0＋L=0；面片 B（MarkerPlusLaser）V1C0（261102 起仅左斜，右斜管临时关——
+// 人工指令，见 effectiveN10 内注）；精细 C
 // （FineScan）T 管；深孔 D（DeepHoleScan）D 管（无对应线，仅协议占位）。
 // 调用点均在逻辑线程
 constexpr int kMarkerOnlyBg = 10;   // A 模式补光基线（260927 真机回调：B40 过曝——标志点
@@ -76,8 +77,10 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
                        ? 0
                        : static_cast<int>(params.get("laserLevel").value);
     p.laserT = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;          // T=精细线（261002 临时）
-    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // V=左斜线（面片交叉对）
-    p.laserC = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // C=右斜线（面片交叉对）
+    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // V=左斜线
+    // 261102 人工指令：面片扫描只发左斜（V1C0，C=右斜管关）——原 V1C1 交叉口径
+    // 注释见上（回正式机恢复交叉时，把下一行改回 (mode==MarkerPlusLaser)?1:0）
+    p.laserC = 0;   // C=右斜线（临时关闭，仅左斜）
     p.laserD = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;      // D=无对应线（占位）
     return p;
 }
@@ -135,6 +138,8 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
     // 261004 曝光档值表化（camera.json brightnessLadder.exposureMs 20 元数组）：
     // 梯表整体换＋账本钳制域取表内最小值（非法表回退内置均匀 0.5~5——函数自防）
     ladder_.setSteps(builtinBrightnessLadder20(brightnessExposureMs));
+    // 261102 定标对齐：默认档 10（曝光 2ms、激光≈53、补光≈7——匹配标定采集条件）
+    ladder_.setIndex(10);
     double tblMin = 0.5;
     if (brightnessExposureMs.size() == 20)
         tblMin = *std::min_element(brightnessExposureMs.begin(),
@@ -853,7 +858,7 @@ void DeviceManager::setDeviceLed(int s1to4) {
 
 // —— 灯光直控（用户按钮直调；不启停采集——N10 灯字段即时生效，实测口径同
 //    自检闪灯：固件收到 N10 即按新参数调灯，无需 H1）——
-// 基线=面片灯型（V1C1＋账本 B/L，261002 临时测试机管语义）；bgOn/laserOn：false 压 0。标点扫描 A
+// 基线=面片灯型（V1C0＋账本 B/L，261002 临时测试机管语义、261102 起仅左斜）；bgOn/laserOn：false 压 0。标点扫描 A
 // 模式＝(true,false) 只开补光
 void DeviceManager::setLights(bool bgOn, bool laserOn) {
     post([this, bgOn, laserOn] {
@@ -875,9 +880,9 @@ void DeviceManager::lightsBgOnly() {
 }
 
 void DeviceManager::lightsBgAndCrossLaser() {
-    setLights(/*bgOn=*/true, /*laserOn=*/true);    // V1C1（面片交叉激光，交替归固件帧序）
+    setLights(/*bgOn=*/true, /*laserOn=*/true);    // V1C0（面片仅左斜激光，261102 临时）
     JMW_LOG_INFO("08-DeviceManager",
-        "[DeviceManager] 打光场景: 补光＋左右斜激光（V1C1，交替归固件帧序）");
+        "[DeviceManager] 打光场景: 补光＋左斜激光（V1C0，仅左斜·261102 临时）");
 }
 
 void DeviceManager::lightsAllOff() {

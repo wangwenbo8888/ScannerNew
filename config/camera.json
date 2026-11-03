@@ -6,10 +6,10 @@
     "triggerSource": "Line2",
     "pairStrictFrameId": true,
     "previewFps": 10,
-    "contrastLeft": 90,
-    "contrastRight": 80,
-    "width": 2048,
-    "height": 1536
+    "contrastLeft": 0,
+    "contrastRight": 0,
+    "width": 1688,
+    "height": 1400
   },
   "depthOfField": {
     "enabled": true,
@@ -19,6 +19,28 @@
     "farMax": 700.0
   },
   "brightnessLadder": {
-    "exposureMs": [0.5, 0.7368, 0.9737, 1.2105, 1.4474, 1.6842, 1.9211, 2.1579, 2.3947, 2.6316, 2.8684, 3.1053, 3.3421, 3.5789, 3.8158, 4.0526, 4.2895, 4.5263, 4.7632, 5]
+    "_comment": "261102 定标对齐：档10=2ms（匹配标定采集）；档1-10 幂曲线 0.5→2.0；档11-20 线性 2.2→5.0",
+    "exposureMs": [
+      0.5,
+      0.56,
+      0.66,
+      0.79,
+      0.94,
+      1.12,
+      1.32,
+      1.53,
+      1.76,
+      2.0,
+      2.2,
+      2.4,
+      2.6,
+      2.8,
+      3.0,
+      3.3,
+      3.6,
+      4.0,
+      4.5,
+      5.0
+    ]
   }
 }

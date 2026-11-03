@@ -111,11 +111,11 @@ inline std::vector<BrightnessStep> builtinBrightnessLadder20(
     std::vector<BrightnessStep> steps;
     steps.reserve(20);
     for (int i = 0; i < 20; ++i) {
-        const double t = static_cast<double>(i) / 19.0;   // 0.0 ~ 1.0 均分（激光/补光）
+        const double t = static_cast<double>(i) / 19.0;   // 0.0 ~ 1.0 均分
         steps.push_back(BrightnessStep{
             exp[static_cast<size_t>(i)],     // 曝光＝档值表逐档（camera.json 注入）
-            t * 100.0,           // 激光 0→100 线性均分
-            t * 100.0});         // 补光 0→100 线性均分
+            t * 60.0,            // 激光 0→60（261102：60 够亮不刺眼）
+            t * 40.0});         // 补光 0→40（标志点需足够补光）
     }
     return steps;
 }

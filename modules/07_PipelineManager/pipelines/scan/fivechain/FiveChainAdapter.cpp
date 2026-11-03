@@ -468,10 +468,24 @@ void FcHarnessCompat::runMarkerChainRuns(scr::CycleProductsCompat& p, bool recor
     if (!ops) return;
     try {
         // CCL 门限＝harness 成员（沙盒 config ccl 节默认 800/30000/0——对拍同参）
+        // 261103 勘误：22:12 会话实证本 RLE 路径在线可用（det=9 conic=2149）——
+        // 曾试绕 RLE 直载掩膜，因分离缓冲跨帧复用引入脏读，已回滚
         p.cclL = scr::runCclCpuFromRuns(runsL, nL, cols, rows,
                                         cclMinArea_, cclMaxArea_, cclTopX_);
         p.cclR = scr::runCclCpuFromRuns(runsR, nR, cols, rows,
                                         cclMinArea_, cclMaxArea_, cclTopX_);
+        // 261102 在线排障打点（每 30 帧）：RLE 行程数 / CCL 组件数 / 门槛——
+        // n=0→GPU RLE 编码空；n>0 而 comps=0→组件面积全低于 minArea
+        {
+            static std::atomic<long> sRleDiag_{0};
+            const long fn = sRleDiag_.fetch_add(1, std::memory_order_relaxed);
+            if (fn % 30 == 0) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[fc:rlediag] n={}|{} comps={}|{} minArea={} maxArea={} topX={}",
+                    nL, nR, p.cclL.components.size(), p.cclR.components.size(),
+                    cclMinArea_, cclMaxArea_, cclTopX_);
+            }
+        }
         if (!p.cclL.success || !p.cclR.success) {
             fail("ccl", p, "runCclCpuFromRuns 失败");
             diagCclFail_.fetch_add(1, std::memory_order_relaxed);
@@ -1792,6 +1806,23 @@ Scanner::Result FiveChainAdapter::startRealtime(
         harness_->cfg.fivechain = cfg_;                    // 双名兼容
         if (opJson_ != nullptr)
             harness_->cfg_.operators = *opJson_;           // 算子参数源全链应用（v3/flow/fuse/标志点链）
+        // 261102 补接线：operators.ccl → RLE 路径 CCL 门限（FcHarnessCompat
+        // 原硬编码 800 且从不读配置——在线标志点组件 ~400-600px 被全滤成 0
+        // 的根因）；缺省/无节点保持 800 沙盒对拍口径
+        if (opJson_ != nullptr && opJson_->contains("ccl")) {
+            try {
+                const auto& cc = (*opJson_)["ccl"];
+                harness_->cclMinArea_ = cc.value("minArea", harness_->cclMinArea_);
+                harness_->cclMaxArea_ = cc.value("maxArea", harness_->cclMaxArea_);
+                harness_->cclTopX_    = cc.value("topXCount", harness_->cclTopX_);
+                JMW_LOG_WARN("07-FiveChain",
+                    "[FiveChainAdapter] ccl 门限接线: minArea={} maxArea={} topX={}",
+                    harness_->cclMinArea_, harness_->cclMaxArea_, harness_->cclTopX_);
+            } catch (const std::exception& e) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[FiveChainAdapter] ccl 参数解析失败（沿用默认 800）: {}", e.what());
+            }
+        }
         if (getenv("JMW_FC_FUSE_ON_HOLD") != nullptr)
             harness_->cfg_.runtime.fuseOnHold = true;   // 诊断：hold 帧强制融合（无标志点验激光链）
         harness_->cfg_.runtime.nominalTemperature =

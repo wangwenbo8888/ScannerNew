@@ -550,20 +550,27 @@ Result CameraControl::setResolution(int width, int height) {
             width = (width / (int)wInc) * (int)wInc;
             height = (height / (int)hInc) * (int)hInc;
 
-            // 大恒要求: 先设 OffsetX/Y 再设 Width/Height
+            // 261103 根治 ROI 偏移时序（16:21 成功/16:24 失败实证）：
+            // 大恒相机 close→reopen 后回到全画幅 2048×1536，此时 OffsetX max=0
+            // （无偏移空间），旧序「先设 Offset→再缩 Width」被钳位到 (0,0)＝
+            // 左上角取景＝与标定居中几何不匹配＝看不到标志点。
+            // 正确序：①Offset 归零 ②缩小 Width/Height（腾出偏移空间）
+            // ③设居中 Offset——GenICam 标准序列
+            fc->GetIntFeature("OffsetX")->SetValue(0);
+            fc->GetIntFeature("OffsetY")->SetValue(0);
+            fc->GetIntFeature("Width")->SetValue(width);
+            fc->GetIntFeature("Height")->SetValue(height);
+
             int64_t offXInc = fc->GetIntFeature("OffsetX")->GetInc();
             int64_t offYInc = fc->GetIntFeature("OffsetY")->GetInc();
             int64_t offX = ((wMax - width) / 2 / offXInc) * offXInc;
             int64_t offY = ((hMax - height) / 2 / offYInc) * offYInc;
-            // 261027 修复：部分相机 OffsetX/OffsetY max=0（不支持 ROI 偏移）——
-            // 居中偏移被拒导致整个 ROI 设置失败回退全画幅。此机型只能从
-            // 传感器左上角 (0,0) 取 ROI。标定数据即此几何（1688×1400 @ (0,0)）
             {
                 const int64_t offXMax = fc->GetIntFeature("OffsetX")->GetMax();
                 const int64_t offYMax = fc->GetIntFeature("OffsetY")->GetMax();
                 if (offX > offXMax) {
                     JMW_LOG_WARN("08-CameraControl",
-                        "[CameraControl] side={} OffsetX={} 超上限 {}——钳到 {}（该相机不支持 ROI 偏移，左上角取景）",
+                        "[CameraControl] side={} OffsetX={} 超上限 {}——钳到 {}（不支持居中，左上角取景）",
                         i, offX, offXMax, offXMax);
                     offX = std::max<int64_t>(0, offXMax);
                 }
@@ -577,8 +584,55 @@ Result CameraControl::setResolution(int width, int height) {
 
             fc->GetIntFeature("OffsetX")->SetValue(offX);
             fc->GetIntFeature("OffsetY")->SetValue(offY);
-            fc->GetIntFeature("Width")->SetValue(width);
-            fc->GetIntFeature("Height")->SetValue(height);
+
+            // 261103 根治在线扫描不一致：显式关 auto（ExposureAuto/GainAuto）——
+            // 16:21 首开成功后每次重开 auto 适配不同 → 亮度/增益漂移 → 分离
+            // 参数失效（阈值 200 对不同亮度的图像表现完全不同）。锁定手动
+            // 模式保证每次重开相机图像特性一致（曝光由 N12/亮度梯控制）
+            try {
+                fc->GetEnumFeature("ExposureAuto")->SetValue("Off");
+                fc->GetEnumFeature("GainAuto")->SetValue("Off");
+                // 261102 补手动增益（原从不设置＝上电默认增益，板子近乎全黑
+                // P50=8 vs 离线 85——椭圆方向角噪声大 → conic NoRealRoot 19/21）。
+                // 增益特性名按机型自适应：Gain(float dB)→GainRaw(int)→GainAbs(float)；
+                // env JMW_CAM_GAIN 可调（缺省 10）；设失败仅告警不阻断
+                static const double kGainVal = [] {
+                    const char* e = getenv("JMW_CAM_GAIN");
+                    return e ? atof(e) : 10.0;  // 261102 在线扫描需增益看板
+                }();
+                bool gainSet = false;
+                std::string gainHow;
+                try {
+                    fc->GetFloatFeature("Gain")->SetValue(kGainVal);
+                    gainSet = true; gainHow = "Gain(float)=" + std::to_string(kGainVal);
+                } catch (CGalaxyException&) {
+                    try {
+                        fc->GetIntFeature("GainRaw")
+                            ->SetValue(static_cast<int64_t>(kGainVal));
+                        gainSet = true;
+                        gainHow = "GainRaw(int)=" + std::to_string((int64_t)kGainVal);
+                    } catch (CGalaxyException&) {
+                        try {
+                            fc->GetFloatFeature("GainAbs")->SetValue(kGainVal);
+                            gainSet = true;
+                            gainHow = "GainAbs(float)=" + std::to_string(kGainVal);
+                        } catch (CGalaxyException& e3) {
+                            JMW_LOG_WARN("08-CameraControl",
+                                "[CameraControl] side={} 增益设置失败（Gain/GainRaw/"
+                                "GainAbs 均不可用）: {}", i, e3.what());
+                        }
+                    }
+                }
+                if (gainSet) {
+                    JMW_LOG_INFO("08-CameraControl",
+                        "[CameraControl] side={} 增益已设 {}（手动）", i, gainHow);
+                }
+                JMW_LOG_INFO("08-CameraControl",
+                    "[CameraControl] side={} ExposureAuto/GainAuto 已关（手动模式）", i);
+            } catch (CGalaxyException& e) {
+                JMW_LOG_WARN("08-CameraControl",
+                    "[CameraControl] side={} auto 关闭失败（可能不支持）: {}", i, e.what());
+            }
 
             // 读回验证
             int64_t actW = fc->GetIntFeature("Width")->GetValue();

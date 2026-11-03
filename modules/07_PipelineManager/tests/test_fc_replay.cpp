@@ -37,6 +37,7 @@
 #include "pipelines/scan/fivechain/FiveChainAdapter.h"
 #include "pipelines/scan/fivechain/harness.h"
 #include "pipelines/scan/fivechain/fc_executor.h"
+#include "pipelines/scan/fivechain/ccl_cpu.h"
 #include "pipelines/scan/FrameObsAccumulator.h"
 #include "pipelines/globaloptim/GlobalOptimObject.h"   // GBA 全链验证用例
 #include "pipelines/calibcompute/CalibComputeTypes.h"  // CancelToken
@@ -2944,7 +2945,7 @@ TEST(FcReplay, StereoCalib1688) {
     const char* outPath = getenv("JMW_STEREO_OUT");
     if (leftDir == nullptr || rightDir == nullptr)
         GTEST_SKIP() << "JMW_STEREO_L=<左目录> / JMW_STEREO_R=<右目录> 未设";
-    if (outPath == nullptr) outPath = "camera_calib_1688.json";
+    if (outPath == nullptr) outPath = "config/camera_calib_1688.json";
 
     // 棋盘格参数
     const cv::Size boardSize(11, 8);
@@ -4063,5 +4064,199 @@ TEST(FcReplay, AnalyzeCheckpointReg) {
             fprintf(stderr, "[MK-T] id 出生分布: 后半会话新发号 %zu/%zu（>0 且位置近老 id "
                 "＝关联断裂·同点鬼影——「后面乱」的直接形态）\n", bornLate, bornAt.size());
         }
-        SUCCEED();
+    SUCCEED();
+}
+
+// ============================================================================
+// DumpSeparationOnline — 加载在线采集 dump 帧 → 跑分离 → 保存全部中间掩膜
+// ＋激光线/标志点提取结果（261103 在线不产点·终极可视化诊断）
+// 输入: diagnostics/fc_frames/L_000000.png + R_000000.png（在线扫描 dump）
+// 输出: diagnostics/sep_debug/ 下 10+ 张 PNG
+// ============================================================================
+TEST(FcReplay, DumpSeparationOnline) {
+    namespace fs = std::filesystem;
+    std::string sepDir = "diagnostics/sep_debug";
+    fs::create_directories(sepDir);
+
+    // —— 同时跑离线标定帧和在线采集帧，逐步对比 ——
+    cv::Mat onlineImg, offlineImg;
+
+    // 加载在线帧
+    const std::string lPath = "diagnostics/fc_frames/L_000000.png";
+    if (fs::exists(lPath)) {
+        onlineImg = cv::imread(lPath, cv::IMREAD_GRAYSCALE);
+        fprintf(stderr, "[CMP] 在线帧: %dx%d\n", onlineImg.cols, onlineImg.rows);
+    }
+
+    // 加载离线标定帧（left.bin 第 0 帧）
+    const std::string rawDir =
+        "../../../modules/09_OperatorLib/TEST/speed_optimize/date_in/laser-mark1688-1006/ALL_raw";
+    if (fs::exists(rawDir + "/left.bin")) {
+        std::ifstream f(rawDir + "/left.bin", std::ios::binary);
+        if (f) {
+            // 读 meta 获取尺寸
+            std::ifstream mf(rawDir + "/meta.json");
+            nlohmann::json meta; mf >> meta; mf.close();
+            int w = meta["width"], h = meta["height"];
+            std::vector<uint8_t> buf(w * h);
+            f.read(reinterpret_cast<char*>(buf.data()), buf.size());
+            f.close();
+            offlineImg = cv::Mat(h, w, CV_8UC1, buf.data()).clone();
+            fprintf(stderr, "[CMP] 离线帧: %dx%d\n", offlineImg.cols, offlineImg.rows);
+        }
+    }
+    ASSERT_FALSE(offlineImg.empty()) << "离线帧加载失败";
+    ASSERT_FALSE(onlineImg.empty()) << "在线帧加载失败";
+
+    // —— 对比原图灰度分布 ——
+    auto stats = [](const cv::Mat& m, const char* name) {
+        std::vector<int> vals;
+        for (int i = 0; i < m.total(); i += 50) vals.push_back(m.at<uint8_t>(i));
+        std::sort(vals.begin(), vals.end());
+        int n = vals.size();
+        int gt200 = 0;
+        for (int v : vals) if (v > 200) ++gt200;
+        fprintf(stderr, "[CMP] %s: P10=%d P50=%d P90=%d Max=%d >200=%.1f%%\n",
+                name, vals[n/10], vals[n/2], vals[n*9/10], vals[n-1],
+                100.0 * gt200 / n);
+        return vals[n/2];
+    };
+    stats(offlineImg, "离线");
+    stats(onlineImg, "在线");
+
+    // —— 对同一图像跑相同的分离 → 逐步统计 ——
+    auto runSep = [&](const cv::Mat& img, const char* prefix) {
+        cv::cuda::GpuMat d_img;
+        d_img.upload(img);
+        calib::LaserMarkingSeparationParams params;
+        params.threshold = 200;
+        params.dumpAllSteps = true;
+        calib::LaserMarkingSeparationCUDA sep(params);
+        cv::cuda::Stream stream;
+        auto result = sep.Execute(d_img, stream);
+        stream.waitForCompletion();
+
+        auto analyze = [&](const char* name,
+                           const std::shared_ptr<cv::cuda::GpuMat>& mask) {
+            if (!mask || mask->empty()) {
+                fprintf(stderr, "[CMP] %s_%s: 空\n", prefix, name);
+                return;
+            }
+            cv::Mat host;
+            mask->download(host);
+            int nz = cv::countNonZero(host);
+            std::vector<std::vector<cv::Point>> contours;
+            cv::findContours(host, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            int ge800 = 0, ge200 = 0;
+            for (auto& c : contours) {
+                double a = cv::contourArea(c);
+                if (a >= 800) ++ge800;
+                if (a >= 200) ++ge200;
+            }
+            // 保存可视化
+            std::string fn = sepDir + "/" + prefix + "_" + name + ".png";
+            cv::imwrite(fn, host);
+            fprintf(stderr, "[CMP] %s_%s: 白像素=%d 轮廓=%zu ≥200px=%d ≥800px=%d\n",
+                    prefix, name, nz, contours.size(), ge200, ge800);
+        };
+        analyze("binary", result.d_step1_binary);
+        analyze("structures", result.d_structuresMask);
+        analyze("laser_raw", result.d_laserRaw);
+        analyze("survivor", result.d_survivorMask);
+        analyze("marking_raw", result.d_markingRaw);
+        analyze("laser_mask", result.d_laserMask);
+        analyze("marking_mask", result.d_markingPointMask);
+    };
+    runSep(offlineImg, "OFFLINE");
+    runSep(onlineImg, "ONLINE");
+
+    // —— 追加：对在线帧跑完整标志点链（split → zernike → ellipse）——
+    {
+        fprintf(stderr, "\n===== 在线帧完整标志点链测试 =====\n");
+        cv::cuda::GpuMat d_img;
+        d_img.upload(onlineImg);
+        calib::LaserMarkingSeparationParams sepP;
+        sepP.threshold = 200;
+        calib::LaserMarkingSeparationCUDA sep(sepP);
+        cv::cuda::Stream stream;
+        auto sepR = sep.Execute(d_img, stream);
+        stream.waitForCompletion();
+
+        if (!sepR.success || !sepR.d_markingPointMask) {
+            fprintf(stderr, "[CHAIN] 分离失败\n");
+            SUCCEED();
+            return;
+        }
+
+        // 下载掩膜
+        cv::Mat maskHost;
+        sepR.d_markingPointMask->download(maskHost);
+
+        // CCL 找连通域（用 minArea=200）
+        auto cclR = scr::runCclCpu(maskHost, 200, 30000, 0);
+        fprintf(stderr, "[CHAIN] CCL: comps=%d\n", cclR.componentCount);
+
+        // 生成 ROI
+        std::vector<cv::Rect> rois;
+        for (const auto& c : cclR.components) {
+            rois.emplace_back(c.boundingBoxX, c.boundingBoxY,
+                           c.boundingBoxWidth, c.boundingBoxHeight);
+        }
+        fprintf(stderr, "[CHAIN] ROIs: %zu 个\n", rois.size());
+
+        // image_split
+        calib::ImageSplitCPUParams sp;
+        sp.enableBoundaryCheck = true;
+        calib::ImageSplitCPU splitOp(sp);
+        auto splitR = splitOp.Execute(onlineImg, rois);
+        fprintf(stderr, "[CHAIN] split: success=%d images=%zu\n",
+                (int)splitR.success, splitR.splitImages.size());
+
+        // zernike + ellipse（每个 patch）
+        calib::ZernikeEdgeCPUParams zp;
+        zp.templateSize = 5;
+        zp.edgeStrengthThreshold = 20.0;
+        calib::ZernikeEdgeCPU zernOp(zp);
+        calib::EllipseFitCPUParams ep;
+        ep.ransacIterations = 100;
+        ep.ransacThreshold = 0.5;
+        ep.minEllipseAxis = 2.0;
+        ep.minLongAxis = 20.0;
+        ep.maxLongAxis = 30.0;
+        ep.minRoundness = 0.7;
+        ep.minInliers = 5;
+        ep.minInlierRatio = 0.5;
+        calib::EllipseFitCPU ellipseOp(ep);
+
+        int ok = 0, fail = 0;
+        for (size_t i = 0; i < splitR.splitImages.size() && i < 30; ++i) {
+            auto edge = zernOp.Execute(splitR.splitImages[i]);
+            if (!edge.success || edge.edgePoints.empty()) {
+                if (i < 5)
+                    fprintf(stderr, "[CHAIN] patch[%zu] %dx%d zernike: %zu edges\n",
+                            i, splitR.splitImages[i].cols, splitR.splitImages[i].rows,
+                            edge.edgePoints.size());
+                ++fail;
+                continue;
+            }
+            auto ell = ellipseOp.Execute(edge.edgePoints);
+            if (ell.success) {
+                ++ok;
+                fprintf(stderr, "[CHAIN] patch[%zu] %dx%d → edges=%zu → "
+                        "ELLIPSE OK\n",
+                        i, splitR.splitImages[i].cols, splitR.splitImages[i].rows,
+                        edge.edgePoints.size());
+            } else {
+                ++fail;
+                if (i < 10)
+                    fprintf(stderr, "[CHAIN] patch[%zu] %dx%d → edges=%zu → "
+                            "FAIL: %s\n",
+                            i, splitR.splitImages[i].cols, splitR.splitImages[i].rows,
+                            edge.edgePoints.size(), ell.message.c_str());
+            }
+        }
+        fprintf(stderr, "[CHAIN] 结果: %d 成功 / %d 失败\n", ok, fail);
+    }
+    fprintf(stderr, "[CMP] 可视化已保存到 %s\n", sepDir.c_str());
+    SUCCEED();
 }

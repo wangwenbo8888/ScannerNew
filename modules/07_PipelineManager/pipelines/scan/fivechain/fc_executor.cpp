@@ -1,4 +1,4 @@
-// fc_executor.cpp — 【五链 P2】五链流水线执行器实现
+﻿// fc_executor.cpp — 【五链 P2】五链流水线执行器实现
 // 设计：五链并行流水线重构-设计方案-2026-10-21.md §二/§十 P2。头文件见 fc_executor.h。
 // 2026-10-21 调优会话：①二分 1a/1b 默认开（A/B/A/B 实测 131.8-137.2 vs 单线程
 // 113.5-118.7 FPS；历史 42.8 病理未复现，诱因模式已改 cv 阻塞＋lmask 多槽环）
@@ -893,6 +893,14 @@ void FiveChainExecutor::chain1Loop() {
         j->sepDone = sepOk;
         const bool hasMarkMask = sepOk && j->prod.sepL.d_markingPointMask
                                  && j->prod.sepR.d_markingPointMask;
+        // 261103 逐帧诊断（前 5 帧）：分离产出体检——分离成败＋掩膜非空
+        if (j->idx < 5) {
+            JMW_LOG_WARN("07-FiveChain",
+                "[fc:sepdiag] idx={} sepOk={} hasMask={} laserMask={} markMask={}",
+                j->idx, (int)sepOk, (int)hasMarkMask,
+                j->prod.sepL.d_laserMask ? "非空" : "空",
+                j->prod.sepL.d_markingPointMask ? "非空" : "空");
+        }
         const int rs = j->idx % rleSlots_;
         if (hasMarkMask) {
             // RLE 环槽发射（标记掩膜 sep 内部缓冲——同流 FIFO 防下帧覆写）

@@ -1,4 +1,4 @@
-// harness.h — fc_executor 兼容层（07 PipelineManager 五链集成 261025）
+﻿// harness.h — fc_executor 兼容层（07 PipelineManager 五链集成 261025）
 //
 // 沙盒 fc_executor.h include "harness.h"——本文件提供等价的类型/算子/接口
 // 声明，使 fc_executor.cpp 无需修改即可在 07 编译。实现由 FiveChainAdapter

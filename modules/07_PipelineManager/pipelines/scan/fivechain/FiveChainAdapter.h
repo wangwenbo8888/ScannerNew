@@ -78,8 +78,10 @@ struct FiveChainConfig {
     // 模式键只 arm，设备 M 键启停控制回放起停；空=恒开（离线直跑/无设备））
     std::function<bool()> testFrameGate;
     // 261025 算法几何口径：全部标定表（K/D/P1/P2/Q/激光平面表/CMTT）为 1688×1400
-    // 几何（laser-mark1688 标定链产物）；采集 2048×1536（camera.json——居中 ROI）。
-    // 五链入口居中裁剪到算法几何。env JMW_FC_W/JMW_FC_H 可覆盖（=0 关闭裁剪直通）
+    // 几何（laser-mark1688 标定链产物）。261103 用户裁决：采集＝相机侧原生
+    // 1688×1400（camera.json ROI——训练数据同口径直采），不再采集后裁剪。
+    // 此字段保留（默认 1688×1400＝与采集一致→直通零裁剪）；env JMW_FC_W/H
+    // 可覆盖（=0 关闭裁剪直通——遗留诊断用）
     int algoWidth = 1688;
     int algoHeight = 1400;
 };
