@@ -329,11 +329,18 @@ private:
     // 1a 段（gS_）：分离三对掩膜——须在 evGate_ 记录之前入队（1b 排水经
     // evGate_ 传递保证宿主落地）；非命中帧仅一次判空，零 GPU 零分配
     void probeEnqueue1a_(FcJob* j);
-    // 1b 段：steger/undist/interp 点集（容量宽）——流由调用点传入，须与本帧
+    // 1b 段：steger/undist 点集（容量宽）——流由调用点传入，须与本帧
     // 前段提交及排水同流（chain1Loop 回退路径=gS_，chain1bLoop=gS2_——异流 D2H
     // 与生产内核无次序保证＝可能错帧，且宿主落地逃出排水覆盖）——须在排水之前
-    // 入队（既有排水点覆盖宿主落地）；非命中帧仅一次判空
+    // 入队（既有排水点覆盖宿主落地）；非命中帧仅一次判空。interp 不在此列：
+    // 延迟臂提交期 d_interpPoints 是空壳（精确 N 视图要到 FinishInterp 才建）
+    //——改由 probeDownloadInterp_ 在排水后同步下载
     void probeEnqueue1b_(FcJob* j, cv::cuda::Stream& ls);
+    // 【I-1】interp 专用同步下载：在两个排水路径（chain1Loop 回退 / chain1bLoop
+    // 分体）的 finishLaserFront 之后调用——FinishInterp 刚建好精确 N 视图，
+    // 且到本线程下一帧提交是串行窗（算子缓冲必为本帧内容）；按 interpCount
+    // 精确拷 interpL/interpR 两段，失败 WARN＋弃段（宁缺勿错）
+    void probeDownloadInterp_(FcJob* j);
 
     // —— 指标 ——
     void writeMetricsCsv_();   // 析构期落盘 fc_metrics/fc_summary

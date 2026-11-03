@@ -69,6 +69,13 @@ public:
         return cfg_.enabled && !cfg_.frames.empty()
                && cfg_.frames.find(idx + 1) != cfg_.frames.end();
     }
+    /// 【S-2】会话复位：每次扫描会话开始（startRealtime 装配处）调用——
+    /// rtStarted_/dirEnsured_ 归零，使下一会话首帧重新 trunc rt.csv（防上一
+    /// 会话残留导致第二次扫描 rt.csv 不截断＝旧数据混入）与目录状态错乱
+    void beginSession() {
+        rtStarted_ = false;
+        dirEnsured_ = false;
+    }
     /// 命中帧全套落盘：优先消费快照宿主数据，prod 宿主字段照旧直读；
     /// 快照缺段＝该产物跳过＋一次 WARN（宁缺勿错——绝不回退读过期 GPU 视图）
     void maybeDump(long idx, const scr::CycleProductsCompat& p,

@@ -886,6 +886,9 @@ bool FiveChainExecutor::submitV3FrontDeferred_(FcJob* j, bool tubeOdd,
 // 覆盖，零新增同步。运行期零 CUDA 分配：只 cudaMemcpy2DAsync 到宿主
 // Mat/vector（命中帧仅此一次宿主分配），无 cudaMalloc/建流/GpuMat 扩容——
 // 捕获窗（ThreadLocal 大图/sep 内部 Global 图）零不安全 API。
+// 【S-3】宿主缓冲必须保持 pageable——D2H pageable 同步契约是安全依据之一
+//（cudaMemcpy2DAsync 对 pageable 宿主端实际同步落地，无在飞宿主写）；若未来
+// 改 pinned 须改为同步拷贝或补执行错误检查。
 // ============================================================================
 void FiveChainExecutor::probeSnapEnsure_(FcJob* j) {
     // 非命中帧：一次 set 查找即返回（零 GPU 操作零分配；probe 关＝一次判空）。
@@ -958,14 +961,62 @@ void FiveChainExecutor::probeEnqueue1b_(FcJob* j, cv::cuda::Stream& ls) {
     };
     // 视图＝本帧 submitLaserFront 刚填的容量壳（下一覆写者＝本流下一帧提交段
     // ——同线程同流 FIFO 天然防护）；success 守卫防「早退帧下载到上一帧残数据」
+    // 【I-1】interp 不在此列：延迟臂（含默认 1B 大图臂）提交期 d_interpPoints
+    // 是空壳、精确 N 视图要到排水后 finishLaserFront（FinishInterp）才建——
+    // 提交相位永远拷不到（原两行 dlPts 恒空转已删），改 probeDownloadInterp_
     if (p.stegerL.success) dlPts(s.stegerL, p.stegerL.d_centerPoints, "stegerL");
     if (p.stegerR.success) dlPts(s.stegerR, p.stegerR.d_centerPoints, "stegerR");
     if (p.undistCudaL.success)
         dlPts(s.undistL, p.undistCudaL.d_rectifiedPoints, "undistL");
     if (p.undistCudaR.success)
         dlPts(s.undistR, p.undistCudaR.d_rectifiedPoints, "undistR");
-    if (p.interpL.success) dlPts(s.interpL, p.interpL.d_interpPoints, "interpL");
-    if (p.interpR.success) dlPts(s.interpR, p.interpR.d_interpPoints, "interpR");
+}
+
+// ============================================================================
+// 【I-1】命中帧 interp 专用同步下载——finishLaserFront 之后调用（两个排水
+// 路径各一处：chain1bLoop 分体臂 / chain1Loop 回退臂）。
+//
+// 为什么不能在提交相位（probeEnqueue1b_）下载：interp 延迟臂（含默认 1B
+// 大图臂）提交期只给空壳——ExecuteDeferred/MakeBigShell 置 success=true、
+// interpCount=-1、d_interpPoints 空 GpuMat（epipolar_interp_dual_cuda_impl.cu
+// :812-814 / epipolar_interp_dual_cuda.cpp:150-156）；精确 N 视图要到排水后
+// FinishInterp（h_.finishLaserFront 内 → finishScanResult 建 d_scan_cpts_ 的
+// ROI 视图）才存在——提交相位下载恒空＝L3-interp 产物永不产出。
+//
+// 此处安全性：finishLaserFront 之后、本线程下一帧 submitLaserFront 之前是
+// 同线程串行窗——算子持久缓冲内容必为本帧（下一覆写者＝本线程下一帧提交段，
+// 无并发写者）；同步 cudaMemcpy2D（pageable 宿主缓冲＝同步契约，见 probeSnap
+// v2 头注【S-3】）返回即落地。精确计数 interpCount 由 FinishInterp 填真值，
+// 按精确 N 拷（容量宽下载的前提已消失）；失败 WARN＋弃段（宁缺勿错）。
+// legacy 臂（kind=2）interp 视图提交期即精确——同样被本调用覆盖（视图有效期
+// 至下一次 Execute，同线程窗内）。左右独立（一侧失败/缺视图不牵连另一侧）。
+// ============================================================================
+void FiveChainExecutor::probeDownloadInterp_(FcJob* j) {
+    if (j->probeSnap == nullptr) return;   // 非命中帧零开销（一次判空）
+    auto& p = j->prod;
+    jmw::probe::ProbeSnapshot& s = *j->probeSnap;
+    auto dlInterp = [&j](std::vector<cv::Point2f>& dst,
+                         const calib::EpipolarInterpResult& r, const char* what) {
+        // 视图守卫：FinishInterp 未跑（success 假）/未提交（空 ptr）/0 点帧
+        //（empty 视图或 count=0）一律跳过——E 段 dump 侧按缺段 WARN
+        if (!r.success || r.interpCount <= 0 || !r.d_interpPoints
+            || r.d_interpPoints->empty())
+            return;
+        const int n = std::min(r.interpCount, r.d_interpPoints->cols);
+        dst.resize(static_cast<size_t>(n));
+        if (cudaMemcpy2D(dst.data(), sizeof(cv::Point2f) * n,
+                         r.d_interpPoints->ptr(), r.d_interpPoints->step,
+                         sizeof(cv::Point2f) * n, 1,
+                         cudaMemcpyDeviceToHost) != cudaSuccess) {
+            cudaGetLastError();   // 清残留（防毒害后续消费者——dlMask 同款）
+            dst.clear();
+            JMW_LOG_WARN("07-FiveChain",
+                         "[fc:probe] idx={} 快照下载 {} 失败——该段弃件（宁缺勿错）",
+                         j->idx, what);
+        }
+    };
+    dlInterp(s.interpL, p.interpL, "interpL");
+    dlInterp(s.interpR, p.interpR, "interpR");
 }
 
 // ============================================================================
@@ -1055,6 +1106,9 @@ void FiveChainExecutor::chain1Loop() {
             gS_.waitForCompletion();   // 唯一排水点（同流单线程——含 RLE D2H）
             j->prod.gpuDrained = true;
             h_.finishLaserFront(h_.laserOps_, j->prod, j->record, frontKind);
+            // 【I-1】interp 快照同步下载：FinishInterp 刚建好精确 N 视图——此处
+            // 到本线程下一帧提交是串行窗，算子缓冲必为本帧内容
+            probeDownloadInterp_(j);
             if (h_.stepOk(j->prod, "steger_fast")
                 && h_.stepOk(j->prod, "undistort_cuda")
                 && h_.stepOk(j->prod, "epipolar_interp_dual"))
@@ -1605,6 +1659,9 @@ void FiveChainExecutor::chain1bLoop() {
                 && j->prod.interpL.success && j->prod.interpR.success)
                 submitV3FrontCapacity_(j, tubeOdd, gS2_);
             h_.finishLaserFront(h_.laserOps_, j->prod, j->record, frontKind);
+            // 【I-1】interp 快照同步下载：FinishInterp 刚建好精确 N 视图——此处
+            // 到本线程下一帧提交是串行窗，算子缓冲必为本帧内容
+            probeDownloadInterp_(j);
             // v3 前段（吃精确 ROI；内部自带 sync#1/#2——S4 未做之代价）
             if (h_.stepOk(j->prod, "steger_fast")
                 && h_.stepOk(j->prod, "undistort_cuda")
@@ -2325,6 +2382,14 @@ void FiveChainExecutor::fuseLoop() {
                 if (j->probeSnap) {
                     probe_->maybeDump(j->idx, j->prod, *j->probeSnap);
                     j->probeSnap.reset();
+                } else if (probe_->hit(j->idx)) {
+                    // 【S-1】命中帧却无快照＝读帧失败墓碑帧（readFail 在
+                    // probeSnapEnsure_ 之前直通，快照从未建成）——不告警则该帧
+                    // cycle 目录静默缺失，用户无从对因；显式提示（hit() 已 public）
+                    JMW_LOG_WARN("07-FiveChain",
+                                 "[fc:probe] idx={} 命中帧无快照（读帧失败墓碑帧）"
+                                 "——该帧 cycle 目录将缺失",
+                                 j->idx);
                 }
             }
             // 【P5】holdSkip 演练：全部帧按 hold 处理（零上传弃 E 路径验证）

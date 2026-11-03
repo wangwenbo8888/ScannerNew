@@ -319,6 +319,13 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p,
                     warnMiss(what);
                     return;
                 }
+                // 【S-5】半对：单侧缺——另一侧有效仍出图（mergeLR 黑屏侧补齐），
+                // 但左右不对称本身是分离/下载异常证据，显式告警防误读为算法问题
+                if (l.empty() != r.empty())
+                    JMW_LOG_WARN("07-FiveChain",
+                                 "[fc_probe] cycle {} {} 半对缺失（L={},R={}）",
+                                 frameNo, what,
+                                 l.empty() ? "缺" : "有", r.empty() ? "缺" : "有");
                 cv::Mat img = mergeLR(l, r);
                 if (!img.empty()) savePngW((dir / name).string(), img);
             };

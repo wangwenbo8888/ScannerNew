@@ -1967,6 +1967,10 @@ Scanner::Result FiveChainAdapter::startRealtime(
         // 同文件）：产出线程快照制接线——执行器构造期注入（线程构造尾启动，
         // 事后置指针有竞态）；默认关＝传 nullptr，全钩子短路零开销
         frameProbe_.configure(jmw::probe::ProbeConfig::load());
+        // 【S-2】跨会话标志复位：adapter 复用（第二次 startRealtime）时
+        // rtStarted_/dirEnsured_ 残留会使 rt.csv 不截断（旧会话数据混入）、
+        // 目录状态错乱——每会话装配期归零
+        frameProbe_.beginSession();
         jmw::probe::FrameProbe* probePtr =
             frameProbe_.enabled() ? &frameProbe_ : nullptr;
         if (probePtr != nullptr)
