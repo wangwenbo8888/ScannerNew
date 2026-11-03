@@ -1963,7 +1963,19 @@ Scanner::Result FiveChainAdapter::startRealtime(
             sepR_->Warmup(fh, fw);
             harness_->preallocGrayLanes(cfg_.graySlots, fh, fw);
         }
-        executor_ = std::make_unique<scr::fc::FiveChainExecutor>(*harness_, 0, 0x7fffffff);
+        // 【probe v2】抽检装配（config/fc_dump.json probe 段——与帧转储 count
+        // 同文件）：产出线程快照制接线——执行器构造期注入（线程构造尾启动，
+        // 事后置指针有竞态）；默认关＝传 nullptr，全钩子短路零开销
+        frameProbe_.configure(jmw::probe::ProbeConfig::load());
+        jmw::probe::FrameProbe* probePtr =
+            frameProbe_.enabled() ? &frameProbe_ : nullptr;
+        if (probePtr != nullptr)
+            JMW_LOG_WARN("07-FiveChain",
+                "[FiveChainAdapter] fc_probe 抽检开启: {} 帧命中 → diagnostics/fc_probe"
+                "（快照制——建议帧号避开前 3 帧图捕获暖机窗）",
+                frameProbe_.frameCount());
+        executor_ = std::make_unique<scr::fc::FiveChainExecutor>(*harness_, 0, 0x7fffffff,
+                                                                probePtr);
 
         // 261028 修复：fuseOnHold 在执行器构造后强制设置（loadTestData 在执行器
         // 前设置但 fuseLoop 读到 false——引用/时序问题；此处直接改 harness 成员，

@@ -202,13 +202,15 @@ void FiveChainExecutor::releaseJob(FcJob* j) {
     jobCv_.notify_all();
 }
 
-FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles)
+FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
+                                     jmw::probe::FrameProbe* probe)
     : h_(h), firstIdx_(firstIdx), totalCycles_(totalCycles),
       maxInflight_(h.cfg_.fivechain.maxInflight > 0 ? h.cfg_.fivechain.maxInflight : 56),
       graySlots_(std::max(2, h.cfg_.fivechain.graySlots)),
       rleCap_(h.cfg_.fivechain.kRleCapOverride > 0
                   ? std::max(8, h.cfg_.fivechain.kRleCapOverride)
                   : std::max(1024, h.cfg_.fivechain.rleCap)),
+      probe_(probe),
       chRead_(8), chGpu_(graySlots_), ch1ab_(4),
       chB_(std::max(2, h.cfg_.fivechain.bCap)),
       chC_(std::max(2, h.cfg_.fivechain.cCap)), chD_(std::max(2, h.cfg_.fivechain.dQueueCap)),
@@ -868,6 +870,122 @@ bool FiveChainExecutor::submitV3FrontDeferred_(FcJob* j, bool tubeOdd,
 }
 
 // ============================================================================
+// 【probe v2】命中帧宿主快照——产出线程 D2H 入队（快照制）
+//
+// v1 方案（融合线程 E 段直读 GPU 视图）被质量审查否决：
+//  - 错帧：undistort/interp/steger/分离掩膜等 GPU 产物是算子持久缓冲的 ROI
+//    视图，契约「帧内消费、有效期至下一次 Execute」（undistort_points_cuda_
+//    impl.cu:289-292 / epipolar_interp_dual_cuda_impl.cu:1144-1146 /
+//    steger_fast_impl.cu:1901-1904 / laser_markingpoint_mask_separation_cuda_
+//    impl.cu:1006-1009）——maxInflight=56 下融合线程滞后，E 段读到的是后续
+//    帧数据＝错误证据。
+//  - 捕获窗禁令：1b 大图 Global 模式捕获窗内任何线程 cudaMalloc/
+//    cudaStreamCreate 非法（harness.h 灰环预分配段自写禁令）。
+// v2：产出线程在「该帧数据尚未被后续帧覆写」的时机把 D2H 入队进生产流本身
+//（同流 FIFO 保证：先产→后拷→再被下一帧覆写），宿主落地由**既有**排水链条
+// 覆盖，零新增同步。运行期零 CUDA 分配：只 cudaMemcpy2DAsync 到宿主
+// Mat/vector（命中帧仅此一次宿主分配），无 cudaMalloc/建流/GpuMat 扩容——
+// 捕获窗（ThreadLocal 大图/sep 内部 Global 图）零不安全 API。
+// ============================================================================
+void FiveChainExecutor::probeSnapEnsure_(FcJob* j) {
+    // 非命中帧：一次 set 查找即返回（零 GPU 操作零分配；probe 关＝一次判空）。
+    // 帧首调用（墓碑检查后）——sep 失败帧也要有槽：宿主段（标志点链/CCL/位姿）
+    // 照旧落盘，GPU 段缺段 WARN
+    if (probe_ == nullptr || j->probeSnap != nullptr) return;
+    if (!probe_->hit(j->idx)) return;
+    try {
+        j->probeSnap = std::make_unique<jmw::probe::ProbeSnapshot>();
+    } catch (const std::exception& e) {
+        j->probeSnap.reset();
+        JMW_LOG_WARN("07-FiveChain", "[fc:probe] idx={} 快照分配失败: {}",
+                     j->idx, e.what());
+    }
+}
+
+void FiveChainExecutor::probeEnqueue1a_(FcJob* j) {
+    if (j->probeSnap == nullptr) return;   // 非命中帧零开销（一次判空，无集合查找）
+    if (!j->sepDone) return;   // sep 失败帧：无掩膜可拷（宿主段照旧，E 段缺段 WARN）
+    auto& p = j->prod;
+    cudaStream_t cs = cv::cuda::StreamAccessor::getStream(gS_);
+    jmw::probe::ProbeSnapshot& s = *j->probeSnap;
+    auto dlMask = [&](cv::Mat& dst, const std::shared_ptr<cv::cuda::GpuMat>& m,
+                      const char* what) {
+        if (!m || m->empty()) return;
+        dst.create(m->rows, m->cols, m->type());
+        if (cudaMemcpy2DAsync(dst.ptr(), dst.step, m->ptr(), m->step,
+                              m->cols * m->elemSize(), m->rows,
+                              cudaMemcpyDeviceToHost, cs) != cudaSuccess) {
+            cudaGetLastError();   // 清残留（recordBusySpan_ 同款——防毒害后续消费者）
+            dst.release();
+            JMW_LOG_WARN("07-FiveChain",
+                         "[fc:probe] idx={} 快照下载 {} 失败——该段弃件（宁缺勿错）",
+                         j->idx, what);
+        }
+    };
+    // 三对掩膜：d_laserMask＝lmask 环槽视图（split 路已 D2D 入槽——本调用点
+    // 在入队流序之后）；marking/binary＝sep 内部缓冲视图（下一覆写者＝本流
+    // 下一帧 sep——同流 FIFO 天然防护）
+    dlMask(s.laserMaskL, p.sepL.d_laserMask, "laserMaskL");
+    dlMask(s.laserMaskR, p.sepR.d_laserMask, "laserMaskR");
+    dlMask(s.markingMaskL, p.sepL.d_markingPointMask, "markingMaskL");
+    dlMask(s.markingMaskR, p.sepR.d_markingPointMask, "markingMaskR");
+    dlMask(s.binaryL, p.sepL.d_step1_binary, "binaryL");
+    dlMask(s.binaryR, p.sepR.d_step1_binary, "binaryR");
+}
+
+void FiveChainExecutor::probeEnqueue1b_(FcJob* j) {
+    if (j->probeSnap == nullptr) return;   // 非命中帧零开销（一次判空，无集合查找）
+    auto& p = j->prod;
+    cudaStream_t cs = cv::cuda::StreamAccessor::getStream(gS2_);
+    jmw::probe::ProbeSnapshot& s = *j->probeSnap;
+    auto dlPts = [&](std::vector<cv::Point2f>& dst,
+                     const std::shared_ptr<cv::cuda::GpuMat>& m, const char* what) {
+        if (!m || m->empty()) return;
+        dst.resize(static_cast<size_t>(m->cols));   // 容量宽下载（延迟算子精确计数
+                                                    // 排水后才知）——dump 按计数截断
+        if (cudaMemcpy2DAsync(dst.data(), sizeof(cv::Point2f) * m->cols, m->ptr(),
+                              m->step, sizeof(cv::Point2f) * m->cols, m->rows,
+                              cudaMemcpyDeviceToHost, cs) != cudaSuccess) {
+            cudaGetLastError();
+            dst.clear();
+            JMW_LOG_WARN("07-FiveChain",
+                         "[fc:probe] idx={} 快照下载 {} 失败——该段弃件（宁缺勿错）",
+                         j->idx, what);
+        }
+    };
+    auto dlIds = [&](std::vector<int>& dst,
+                     const std::shared_ptr<cv::cuda::GpuMat>& m, const char* what) {
+        if (!m || m->empty()) return;
+        dst.resize(static_cast<size_t>(m->cols));
+        if (cudaMemcpy2DAsync(dst.data(), sizeof(int) * m->cols, m->ptr(), m->step,
+                              sizeof(int) * m->cols, m->rows,
+                              cudaMemcpyDeviceToHost, cs) != cudaSuccess) {
+            cudaGetLastError();
+            dst.clear();
+            JMW_LOG_WARN("07-FiveChain",
+                         "[fc:probe] idx={} 快照下载 {} 失败——该段弃件（宁缺勿错）",
+                         j->idx, what);
+        }
+    };
+    // 视图＝本帧 submitLaserFront 刚填的容量壳（下一覆写者＝本流下一帧提交段
+    // ——同线程同流 FIFO 天然防护）；success 守卫防「早退帧下载到上一帧残数据」
+    if (p.stegerL.success) dlPts(s.stegerL, p.stegerL.d_centerPoints, "stegerL");
+    if (p.stegerR.success) dlPts(s.stegerR, p.stegerR.d_centerPoints, "stegerR");
+    if (p.undistCudaL.success)
+        dlPts(s.undistL, p.undistCudaL.d_rectifiedPoints, "undistL");
+    if (p.undistCudaR.success)
+        dlPts(s.undistR, p.undistCudaR.d_rectifiedPoints, "undistR");
+    if (p.interpL.success) {
+        dlPts(s.interpL, p.interpL.d_interpPoints, "interpL");
+        dlIds(s.interpLineL, p.interpL.d_interp_line_ids, "interpLineL");
+    }
+    if (p.interpR.success) {
+        dlPts(s.interpR, p.interpR.d_interpPoints, "interpR");
+        dlIds(s.interpLineR, p.interpR.d_interp_line_ids, "interpLineR");
+    }
+}
+
+// ============================================================================
 // CUDA链1 单线程（splitChain1=0 回退路径）：分离→RLE 环槽发射→steger→undist→
 // interp→v3前段→槽释放→RLE 拷出→推 A/D
 // ============================================================================
@@ -884,6 +1002,8 @@ void FiveChainExecutor::chain1Loop() {
             chD_.push(j);
             continue;
         }
+        // 【probe v2】命中判定＋快照槽分配（帧首唯一 set 查找点）
+        probeSnapEnsure_(j);
         const bool tubeOdd = h_.src_->cycles[static_cast<size_t>(j->idx)].tubeOdd;
         if (busyProbe_ && metricsOn_ && recs_)
             cudaEventRecord(evBusy1aA_[static_cast<size_t>(j->idx) % static_cast<size_t>(busyRing_ + 1)],
@@ -912,6 +1032,10 @@ void FiveChainExecutor::chain1Loop() {
                                    rleCntRing_ + 2 * static_cast<size_t>(rs),
                                    rleRunsRing_ + 6 * static_cast<size_t>(rleCap_) * static_cast<size_t>(rs),
                                    gS_);
+            // 【probe v2】1a 段快照 D2H 入队（gS_）——紧邻 evGate_ 记录之前：
+            // 早退帧兜底 cudaEventSynchronize(evGate_) 与正常帧唯一排水点双覆盖；
+            // 无标记掩膜帧（理论不可达）不入队＝缺段 WARN（宁缺勿错）
+            probeEnqueue1a_(j);
             // 【N-2】evRleRing_ 并入 evGate_（本臂单线程单流，与 1a/1b 线程组互斥
             // ——evGate_ 无他人记录；记录位点与旧 per-slot 事件逐字同位，消费者
             //（早退兜底/尾拷）全在本线程后序，无跨代覆写）
@@ -930,6 +1054,10 @@ void FiveChainExecutor::chain1Loop() {
         //（判据用 interp 结果字段：延迟分支提交段不落 stepOk——那是完成段的事）
         if (frontKind == 1 && j->prod.interpL.success && j->prod.interpR.success)
             submitV3FrontDeferred_(j, tubeOdd, gS_);
+        // 【probe v2】1b 段快照 D2H 入队（gS_，同流）——排水（waitForCompletion）
+        // 之前入队＝宿主落地由既有排水覆盖；frontKind==0 未提交任何内核，视图
+        // 是上帧残数据——跳过（宁缺勿错）
+        if (frontKind != 0) probeEnqueue1b_(j);
         // 灰度环槽释放（d_gray 最后读者＝flat/steger；提交序＋执行序双保险）
         cudaEventRecord(evSlot_[static_cast<size_t>(j->idx % graySlots_)],
                         cv::cuda::StreamAccessor::getStream(gS_));
@@ -1189,6 +1317,9 @@ bool FiveChainExecutor::trySubmit1aBig_(FcJob* j) {
     if (sepBigExec_[static_cast<size_t>(rs)] && sepBigSigValid_[static_cast<size_t>(rs)]) {
         if (cudaGraphLaunch(sepBigExec_[static_cast<size_t>(rs)], cs) == cudaSuccess) {
             fillProducts();
+            // 【probe v2】1a 段快照 D2H 入队（gS_，图发射之后＝流序读到本帧图产物；
+            // evGate_ 记录之前＝1b 排水经事件传递保证宿主落地）
+            probeEnqueue1a_(j);
             recordGateAndDone();
             h_.setStepOk(p, "mask_separation", true);
             return true;
@@ -1262,6 +1393,8 @@ bool FiveChainExecutor::trySubmit1aBig_(FcJob* j) {
     std::cout << "[fc:1abig] SepBigGraph captured slot=" << rs << " nodes=" << nn << std::endl;
     if (cudaGraphLaunch(ge, cs) == cudaSuccess) {
         fillProducts();
+        // 【probe v2】1a 段快照 D2H 入队（同稳态位——图发射后/evGate_ 记录前）
+        probeEnqueue1a_(j);
         recordGateAndDone();
         h_.setStepOk(p, "mask_separation", true);
         return true;
@@ -1289,6 +1422,8 @@ void FiveChainExecutor::chain1aLoop() {
             ch1ab_.push(j);
             continue;
         }
+        // 【probe v2】命中判定＋快照槽分配（帧首唯一 set 查找点）
+        probeSnapEnsure_(j);
         // 【N-6】1a 三合一大图（暖机 2 帧 legacy——摊平 sep 内部缓冲/暂存后首捕）
         bool bigDone = false;
         if (sepBigArm_ && !sepBigDisabled_ && sepBigWarm_ >= 2)
@@ -1325,6 +1460,10 @@ void FiveChainExecutor::chain1aLoop() {
             j->prod.sepR.d_laserMask =
                 std::shared_ptr<cv::cuda::GpuMat>(&lmaskRingR_[static_cast<size_t>(ls)],
                                                  [](cv::cuda::GpuMat*) {});
+            // 【probe v2】1a 段快照 D2H 入队（gS_，D2D 之后流序读到环槽本帧内容；
+            // fcEmitRleSlot_ 的 evGate_ 记录之前＝1b 排水经事件传递保证宿主落地；
+            // marking/binary 视图下一覆写者＝下一帧 sep——同流 FIFO 防护）
+            probeEnqueue1a_(j);
             // RLE 内核发射（标记掩膜 sep 内部缓冲——同流 FIFO 防下帧覆写；
             // 目标＝本帧环形槽——1b 拷出计数闸门防越代覆写）
             // 【批C】图/逐发统一发射口：图臂含 evGate 图内 record＋gateFed_ 尾
@@ -1387,6 +1526,10 @@ void FiveChainExecutor::chain1bLoop() {
         //（判据用 interp 结果字段：延迟分支提交段不落 stepOk——那是完成段的事）
         if (frontKind == 1 && j->prod.interpL.success && j->prod.interpR.success)
             submitV3FrontDeferred_(j, tubeOdd, gS2_);
+        // 【probe v2】1b 段快照 D2H 入队（gS2_，同流）——入队先于下方排水（evD_/
+        // waitForCompletion）＝宿主落地由既有排水覆盖；frontKind==0 未提交任何
+        // 内核，prod 视图是上帧残数据——跳过（宁缺勿错）
+        if (frontKind != 0) probeEnqueue1b_(j);
         // 槽释放（无条件——含 sep 失败/未提交帧；事件语义：d_gray/lmask 最后读者=flat，
         // 未提交帧空流上事件立即触发＝正确放行）
         cudaEventRecord(evSlot_[static_cast<size_t>(j->idx % graySlots_)],
@@ -1772,6 +1915,22 @@ void FiveChainExecutor::chain2Loop() {
             }
             h_.setStepOk(j->prod, "laser_match_scan_v3", cr.success);
             h_.timeEnd("laser_match_scan_v3", j->prod, j->record, false);
+            // 【probe v2】命中帧匹配对快照（chain2 段＝纯宿主拷贝——在线
+            // prod.matchV3 从不赋值（cr 是局部量），E 段唯一来源即此处快照；
+            // 视差门已就地紧缩，matchedCount＝最终口径）
+            if (j->probeSnap && cr.success && cr.matchedCount > 0
+                && cr.matched_left.total() > 0 && cr.matched_right.total() > 0) {
+                jmw::probe::ProbeSnapshot& sPr = *j->probeSnap;
+                const size_t n = static_cast<size_t>(cr.matchedCount);
+                const cv::Point2f* pl = cr.matched_left.ptr<cv::Point2f>();
+                const cv::Point2f* pr = cr.matched_right.ptr<cv::Point2f>();
+                sPr.matchL.assign(pl, pl + n);
+                sPr.matchR.assign(pr, pr + n);
+                if (!cr.matched_line_ids.empty()) {
+                    const int* pi = cr.matched_line_ids.ptr<int>();
+                    sPr.matchLine.assign(pi, pi + n);   // 逐对线号（L/R 共用）
+                }
+            }
             if (fcbd)   // 【插桩】后段分段串＋front 规模逐帧分布（seg/cards）
                 fprintf(stderr, "[fc:bd] idx=%d seg=%d cards=%d bd=%s\n",
                         j->idx, j->front.segCount, j->front.totalCards,
@@ -1807,6 +1966,16 @@ void FiveChainExecutor::chain2Loop() {
                     eTruncPts_.fetch_add(cr.matchedCount - eCapPts_);
                 applyLaserQualityGates_(j, s, idsScratch.data());
                 j->prod.laserPoints3D = j->eCount;
+                // 【probe v2】命中帧激光 3D 快照（E 块锁页宿主直拷——门后口径；
+                // 在线 prod.recon 从不赋值，E 段唯一来源即此处快照）
+                if (j->probeSnap && j->eCount > 0) {
+                    const float* eb = eBlocks_[static_cast<size_t>(s)];
+                    jmw::probe::ProbeSnapshot& sPr = *j->probeSnap;
+                    sPr.laser3d.resize(static_cast<size_t>(j->eCount));
+                    for (int q = 0; q < j->eCount; ++q)
+                        sPr.laser3d[static_cast<size_t>(q)] =
+                            cv::Point3f(eb[3 * q], eb[3 * q + 1], eb[3 * q + 2]);
+                }
             }
             h_.setStepOk(j->prod, "laser_reconstruct", true);
             h_.timeEnd("laser_reconstruct", j->prod, j->record, false);
@@ -1998,6 +2167,37 @@ void FiveChainExecutor::ch2FullGpu_(FcJob* j) {
         h_.fail("laser_match_scan_v3", j->prod,
                 "前段失败墓碑: " + j->front.message);
     }
+    // 【probe v2】命中帧匹配对快照（全GPU臂）：整体版 Execute 计数回传已内部
+    // 同步——此处同步 cudaMemcpy 与本函数既有 E 块/视差 D2H 同风险面；下一
+    // 覆写者＝下一帧 Execute（同线程），数据仍为本帧
+    if (j->probeSnap && mr.success && mr.matchedCount > 0) {
+        jmw::probe::ProbeSnapshot& sPr = *j->probeSnap;
+        const size_t n = static_cast<size_t>(mr.matchedCount);
+        bool dlOk = true;
+        auto dlSync = [&j, &dlOk](void* dst, const void* src, size_t bytes,
+                                  const char* what) {
+            if (cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
+                cudaGetLastError();   // 清残留（防毒害后续消费者）
+                dlOk = false;
+                JMW_LOG_WARN("07-FiveChain",
+                             "[fc:probe] idx={} 快照下载 {} 失败——该段弃件（宁缺勿错）",
+                             j->idx, what);
+            }
+        };
+        if (mr.d_matched_left && mr.d_matched_right) {
+            sPr.matchL.resize(n);
+            sPr.matchR.resize(n);
+            dlSync(sPr.matchL.data(), mr.d_matched_left->ptr(),
+                   sizeof(cv::Point2f) * n, "matchL");
+            dlSync(sPr.matchR.data(), mr.d_matched_right->ptr(),
+                   sizeof(cv::Point2f) * n, "matchR");
+            if (dlOk && mr.d_matched_line_ids) {
+                sPr.matchLine.resize(n);
+                dlSync(sPr.matchLine.data(), mr.d_matched_line_ids->ptr(),
+                       sizeof(int) * n, "matchLine");
+            }
+        }
+    }
     j->prod.laserPoints3D = 0;
     if (mr.success && mr.matchedCount > 0) {
         h_.timeBegin();
@@ -2032,6 +2232,15 @@ void FiveChainExecutor::ch2FullGpu_(FcJob* j) {
                 }
                 applyLaserQualityGates_(j, s2, fgIds);
                 j->prod.laserPoints3D = j->eCount;
+                // 【probe v2】命中帧激光 3D 快照（E 块已 D2H——纯宿主拷贝，门后口径）
+                if (j->probeSnap && j->eCount > 0) {
+                    const float* eb = eBlocks_[static_cast<size_t>(s2)];
+                    jmw::probe::ProbeSnapshot& sPr = *j->probeSnap;
+                    sPr.laser3d.resize(static_cast<size_t>(j->eCount));
+                    for (int q = 0; q < j->eCount; ++q)
+                        sPr.laser3d[static_cast<size_t>(q)] =
+                            cv::Point3f(eb[3 * q], eb[3 * q + 1], eb[3 * q + 2]);
+                }
             }
         } else if (!rr.success) {
             h_.fail("laser_reconstruct", j->prod,
@@ -2122,6 +2331,16 @@ void FiveChainExecutor::fuseLoop() {
                     for (int q = 0; q < j->eCount; ++q)
                         ply << eb[3 * q] << ' ' << eb[3 * q + 1] << ' '
                             << eb[3 * q + 2] << '\n';
+                }
+            }
+            // 【probe v2】E 段钩子（快照制）：probe 开时逐帧 rt 行；命中帧消费
+            // 产出线程快照落盘全套（纯宿主读写零 CUDA——GPU 视图过期问题由
+            // 快照根治）；落盘后即释放快照（诊断件内存界＝命中帧快照全集峰值）
+            if (probe_ != nullptr) {
+                probe_->appendRt(j->idx, j->prod);
+                if (j->probeSnap) {
+                    probe_->maybeDump(j->idx, j->prod, *j->probeSnap);
+                    j->probeSnap.reset();
                 }
             }
             // 【P5】holdSkip 演练：全部帧按 hold 处理（零上传弃 E 路径验证）

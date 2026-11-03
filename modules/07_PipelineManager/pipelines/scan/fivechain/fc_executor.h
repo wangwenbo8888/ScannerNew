@@ -38,6 +38,8 @@
 #include "harness.h"
 #include "scr_config.h"
 
+#include "fc_probe.h"   // 【probe v2】jmw::probe::ProbeSnapshot/FrameProbe（快照制）
+
 #include "laser_match_scan_v3_split.h"
 #include "laser_reconstruct_cpu.h"
 
@@ -189,6 +191,9 @@ struct FcJob {
     int eCount = 0;
     // 【指标】B 通道入队时间戳（链3 唤醒 P99 分子——生产者侧记录）
     long long bPushNs = 0;
+    // 【probe v2】命中帧宿主快照（产出线程分线程段 D2H 填充；E 段 maybeDump
+    // 消费后 reset——仅命中帧分配，56 池槽不常驻几十 MB）
+    std::unique_ptr<jmw::probe::ProbeSnapshot> probeSnap;
 
     /// 池归还时复位（容量保留：rleL/rleR/front 内 vector 只 clear 不释放——
     /// 下帧 Execute 的 assign/resize 直接复用容量，零分配）
@@ -216,6 +221,7 @@ struct FcJob {
         eSlot = -1;
         eCount = 0;
         bPushNs = 0;
+        probeSnap.reset();   // 【probe v2】快照随槽归还释放
         prod = CycleProducts{};
     }
 };
@@ -251,7 +257,10 @@ struct FcFrameRec {
 // ============================================================================
 class FiveChainExecutor {
 public:
-    FiveChainExecutor(Harness& h, int firstIdx, int totalCycles);
+    /// probe：抽检落盘器（FiveChainAdapter 注入持有；nullptr=关——产出/E 段
+    /// 钩子全部短路，零开销）。构造期传入——线程在构造尾启动，事后置指针有竞态
+    FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
+                      jmw::probe::FrameProbe* probe = nullptr);
     ~FiveChainExecutor();
 
     /// 主线程收割第 curIdx 帧产物（F 通道按帧序产出——阻塞等待）
@@ -314,6 +323,16 @@ private:
     void waitCounterGe_(const std::atomic<int>& ctr, int target);
     void notifyGate_();
 
+    // —— 【probe v2】命中帧宿主快照（产出线程 D2H 入队；见 cpp 头注）——
+    // 帧首命中判定＋快照槽分配（唯一 set 查找点——sep 失败帧也要有槽落宿主段）
+    void probeSnapEnsure_(FcJob* j);
+    // 1a 段（gS_）：分离三对掩膜——须在 evGate_ 记录之前入队（1b 排水经
+    // evGate_ 传递保证宿主落地）；非命中帧仅一次判空，零 GPU 零分配
+    void probeEnqueue1a_(FcJob* j);
+    // 1b 段（gS2_）：steger/undist/interp 点集（容量宽）——须在排水之前入队
+    //（既有排水点覆盖宿主落地）；非命中帧仅一次判空
+    void probeEnqueue1b_(FcJob* j);
+
     // —— 指标 ——
     void writeMetricsCsv_();   // 析构期落盘 fc_metrics/fc_summary
 
@@ -323,6 +342,7 @@ private:
     int maxInflight_;
     int graySlots_;
     int rleCap_;
+    jmw::probe::FrameProbe* probe_ = nullptr;   // 【probe v2】抽检落盘器（null=关）
 
     // —— Job 池 ——
     std::vector<std::unique_ptr<FcJob>> jobs_;   // 池存储（构造期全量建）

@@ -6,6 +6,9 @@
 // 两处 PNG 名按设计文档 §4 口径：L2-undistort.png（沙箱原名 L2-undistort_cuda.png）、
 // L4-match.png（沙箱原名 L4-match_v3.png）——CSV 名与沙箱完全一致。
 //
+// 【v2·快照制】maybeDump 全程零 CUDA：GPU 产物改由产出线程写入 ProbeSnapshot
+//（fc_executor 1a/1b/chain2 段——该帧数据未被后续帧覆写的时机），此处只读快照
+// 宿主数据＋prod 宿主字段；快照缺段＝该产物跳过＋一次 WARN（宁缺勿错）。
 // 全部落盘经 scr::artifacts 工具箱；整体 try-catch，失败 JMW_LOG_WARN 不打断
 // 主链（诊断件语义）。默认关＝maybeDump/appendRt 首行短路＝零开销。
 #include "pipelines/scan/fivechain/fc_probe.h"
@@ -20,10 +23,10 @@
 #include <sstream>
 #include <vector>
 
-#include <opencv2/core/cuda.hpp>
 #include <opencv2/imgproc.hpp>
 #include <nlohmann/json.hpp>
 
+#include "pipelines/scan/fivechain/harness.h"   // CycleProductsCompat/算子结果真身
 #include "pipelines/scan/fivechain/artifacts.h"
 #include "jmw_logging.h"
 
@@ -33,42 +36,6 @@ namespace jmw::probe {
 // 可视化绘图助手（自沙箱 harness.cpp L92-235 逐段搬用——dump 专用）
 // ============================================================================
 namespace {
-
-/// GpuMat 点集(CV_32FC2)安全下载（ROI 视图先物化）
-std::vector<cv::Point2f> downloadP2(const std::shared_ptr<cv::cuda::GpuMat>& m,
-                                    cv::cuda::Stream& s) {
-    std::vector<cv::Point2f> out;
-    if (!m) return out;
-    try {
-        cv::cuda::GpuMat c;
-        m->copyTo(c, s);
-        cv::Mat h;
-        c.download(h, s);
-        s.waitForCompletion();
-        if (!h.empty() && h.type() == CV_32FC2)
-            out.assign(h.begin<cv::Point2f>(), h.end<cv::Point2f>());
-    } catch (...) {
-    }
-    return out;
-}
-
-/// GpuMat 整型数组(CV_32SC1)安全下载（线号/段 ID 等）
-std::vector<int> downloadIds(const std::shared_ptr<cv::cuda::GpuMat>& m,
-                             cv::cuda::Stream& s) {
-    std::vector<int> out;
-    if (!m) return out;
-    try {
-        cv::cuda::GpuMat c;
-        m->copyTo(c, s);
-        cv::Mat h;
-        c.download(h, s);
-        s.waitForCompletion();
-        if (!h.empty() && h.type() == CV_32SC1)
-            out.assign(h.begin<int>(), h.end<int>());
-    } catch (...) {
-    }
-    return out;
-}
 
 /// 左右图并合为一张（中间 4px 白隔条；右图按左图尺寸对齐缩放）
 cv::Mat mergeLR(const cv::Mat& lIn, const cv::Mat& rIn) {
@@ -149,17 +116,13 @@ cv::Mat makeCollage(const std::vector<cv::Mat>& tiles, int cell, int maxTiles) {
     return canvas;
 }
 
-/// steger 点集：GPU 视图优先（沙箱同源），为空时回退摊平 host map
-/// （StegerResult.centerPoints——07 侧 steger_fast 默认收集 host 点）
-std::vector<cv::Point2f> stegerPoints(const calib::StegerResult& s,
-                                      cv::cuda::Stream& cs) {
-    if (s.d_centerPoints) {
-        auto v = downloadP2(s.d_centerPoints, cs);
-        if (!v.empty()) return v;
-    }
-    std::vector<cv::Point2f> out;
-    for (const auto& kv : s.centerPoints)
-        out.insert(out.end(), kv.second.begin(), kv.second.end());
+/// 【v2】快照截断：容量宽下载按精确计数 n 取前缀（n<=0 或快照空 → 空）
+template <typename T>
+std::vector<T> snapTrim(const std::vector<T>& v, long n) {
+    std::vector<T> out;
+    if (v.empty() || n <= 0) return out;
+    const size_t k = std::min(v.size(), static_cast<size_t>(n));
+    out.assign(v.begin(), v.begin() + static_cast<long>(k));
     return out;
 }
 
@@ -204,10 +167,11 @@ ProbeConfig ProbeConfig::load() {
 }
 
 // ============================================================================
-// FrameProbe::maybeDump — 挑帧全套落盘（沙箱 dumpCycle full 段逐项移植）
+// FrameProbe::maybeDump — 挑帧全套落盘（快照制 v2：纯宿主读写，零 CUDA）
 // ============================================================================
 
-void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
+void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p,
+                           const ProbeSnapshot& snap) {
     if (!cfg_.enabled || cfg_.frames.empty()) return;
     const long frameNo = idx + 1;                     // 帧号 1 起（与 probe.frames 口径一致）
     if (cfg_.frames.find(frameNo) == cfg_.frames.end()) return;
@@ -219,9 +183,6 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
             std::filesystem::path("diagnostics") / "fc_probe" / cycBuf;
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-
-        // dump 专用流（ROI 视图先物化后下载——沙箱同法）
-        cv::cuda::Stream cs;
 
         // 落盘回执（审查#1）：全部 save* 检查返回值，失败 WARN（含产物文件名）
         // 并计入 failCount——末尾"已落盘"INFO 仅全数成功时打
@@ -235,14 +196,6 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         };
         auto saveJsonW = [&](const std::string& path, const nlohmann::json& j) {
             if (!scr::saveJson(path, j)) {
-                ++failCount;
-                JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
-                             frameNo, fileNameOf(path));
-            }
-        };
-        auto saveGpuP2W = [&](const std::string& path, const cv::cuda::GpuMat& m,
-                              cv::cuda::Stream& s) {
-            if (!scr::saveGpuMatP2(path, m, s)) {
                 ++failCount;
                 JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} 写 {} 失败",
                              frameNo, fileNameOf(path));
@@ -294,6 +247,13 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
                 JMW_LOG_WARN("07-FiveChain", "[fc_probe] cycle {} {} 落盘未知异常",
                              frameNo, name);
             }
+        };
+        // 【v2】快照缺段：该产物跳过＋一次 WARN（宁缺勿错——GPU 视图已过期，
+        // 绝不回退直读；缺段原因＝产出线程下载失败/该帧该步未成功）
+        auto warnMiss = [frameNo](const char* what) {
+            JMW_LOG_WARN("07-FiveChain",
+                         "[fc_probe] cycle {} 快照缺 {}——该产物跳过（宁缺勿错）",
+                         frameNo, what);
         };
 
         // ------------------------------------------------------------
@@ -348,54 +308,48 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         });
 
         // ------------------------------------------------------------
-        // 1- 掩膜分离（纯掩膜二值图，白=掩膜；L|R 并合）。GpuMat 先物化再下载
-        //     （沙箱 maskLR 同法）。0-binary 用 sep.d_step1_binary（生产常驻字段：
-        //     ① 高斯+阈值二值图，未分割——分离前端证据图）
+        // 1- 掩膜分离（纯掩膜二值图，白=掩膜；L|R 并合）。【v2】快照宿主 Mat
+        //     直拼（1a 段产出线程下载）。0-binary 用分离前端二值图（生产常驻
+        //     证据图：高斯+阈值二值化，未分割）。
         // ------------------------------------------------------------
         step("masks", [&] {
-            auto maskLR = [&](const char* name,
-                              const std::shared_ptr<cv::cuda::GpuMat>& mL,
-                              const std::shared_ptr<cv::cuda::GpuMat>& mR) {
-                if (!mL && !mR) return;
-                cv::Mat hl, hr;
-                try {
-                    if (mL) {
-                        cv::cuda::GpuMat c; mL->copyTo(c, cs); c.download(hl, cs);
-                    }
-                    if (mR) {
-                        cv::cuda::GpuMat c; mR->copyTo(c, cs); c.download(hr, cs);
-                    }
-                    cs.waitForCompletion();
-                } catch (...) {
+            auto maskPair = [&](const char* name, const cv::Mat& l, const cv::Mat& r,
+                                const char* what) {
+                if (l.empty() && r.empty()) {
+                    warnMiss(what);
+                    return;
                 }
-                cv::Mat img = mergeLR(hl, hr);
+                cv::Mat img = mergeLR(l, r);
                 if (!img.empty()) savePngW((dir / name).string(), img);
             };
-            maskLR("L0-laser_mask.png", p.sepL.d_laserMask, p.sepR.d_laserMask);
-            maskLR("M0-marking_mask.png", p.sepL.d_markingPointMask, p.sepR.d_markingPointMask);
-            maskLR("0-binary.png", p.sepL.d_step1_binary, p.sepR.d_step1_binary);
+            maskPair("L0-laser_mask.png", snap.laserMaskL, snap.laserMaskR, "laserMask");
+            maskPair("M0-marking_mask.png", snap.markingMaskL, snap.markingMaskR, "markingMask");
+            maskPair("0-binary.png", snap.binaryL, snap.binaryR, "binary");
         });
 
         // ------------------------------------------------------------
-        // 2- steger：激光中心点（绿）叠原帧，L|R 并合。
-        //     CSV 沙箱走 d_centerPoints（GPU）；07 侧 GPU 视图为空时回退摊平
-        //     host centerPoints map（同点集同序）
+        // 2- steger：激光中心点（绿）叠原帧，L|R 并合。【v2】快照容量宽点集按
+        //     totalPointCount 截断；快照空时回退摊平 host centerPoints map
+        //     （SetCollectHostPoints=true 的收集模式——在线默认空，仅离线口径）
         // ------------------------------------------------------------
         step("L1-steger", [&] {
-            // CSV（沙箱口径仅左）：左目有源即写——GPU 视图优先，空则摊平 host map
-            if (p.stegerL.d_centerPoints) {
-                saveGpuP2W((dir / "L1-steger_L.csv").string(),
-                           *p.stegerL.d_centerPoints, cs);
-            } else if (!p.stegerL.centerPoints.empty()) {
-                std::vector<cv::Point2f> flat;
-                for (const auto& kv : p.stegerL.centerPoints)
-                    flat.insert(flat.end(), kv.second.begin(), kv.second.end());
-                saveCsvP2fW((dir / "L1-steger_L.csv").string(), flat);
+            auto take = [&](const std::vector<cv::Point2f>& snapPts,
+                            const calib::StegerResult& s) {
+                std::vector<cv::Point2f> out = snapTrim(snapPts, s.totalPointCount);
+                if (!out.empty()) return out;
+                for (const auto& kv : s.centerPoints)   // 回退：宿主 map（收集模式）
+                    out.insert(out.end(), kv.second.begin(), kv.second.end());
+                return out;
+            };
+            const auto stgL = take(snap.stegerL, p.stegerL);
+            const auto stgR = take(snap.stegerR, p.stegerR);
+            if (stgL.empty() && stgR.empty()) {
+                warnMiss("steger");
+                return;
             }
-            // PNG：左右独立判断（审查#6——左失败/空而右有效时仍出右）
-            auto stgL = stegerPoints(p.stegerL, cs);
-            auto stgR = stegerPoints(p.stegerR, cs);
-            if (stgL.empty() && stgR.empty()) return;
+            // CSV（沙箱口径仅左）：左目有源即写
+            if (!stgL.empty())
+                saveCsvP2fW((dir / "L1-steger_L.csv").string(), stgL);
             cv::Mat cl = toBgr(p.frameGrayL), cr = toBgr(p.frameGrayR);
             drawPts(cl, stgL, cv::Scalar(0, 255, 0), 1);
             drawPts(cr, stgR, cv::Scalar(0, 255, 0), 1);
@@ -405,18 +359,21 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
 
         // ------------------------------------------------------------
         // 3- undistort_cuda：矫正后激光点（绿）画暗画布（矫正系坐标，无法叠
-        //     原帧），L|R 并合（沙箱原名 L2-undistort_cuda.png）
+        //     原帧），L|R 并合（沙箱原名 L2-undistort_cuda.png）。【v2】快照
+        //     容量宽点集按 steger totalPointCount 截断（矫正点与中心点一一对应）
         // ------------------------------------------------------------
         step("L2-undistort", [&] {
-            // 左右独立判断（审查#6——沙箱仅看左 success，07 侧单目失败不少见：
-            // 失败侧不取点，另一侧有效仍出图）
+            // 左右独立判断（审查#6——失败侧不取点，另一侧有效仍出图）
             auto rl = p.undistCudaL.success
-                          ? downloadP2(p.undistCudaL.d_rectifiedPoints, cs)
+                          ? snapTrim(snap.undistL, p.stegerL.totalPointCount)
                           : std::vector<cv::Point2f>();
             auto rr = p.undistCudaR.success
-                          ? downloadP2(p.undistCudaR.d_rectifiedPoints, cs)
+                          ? snapTrim(snap.undistR, p.stegerR.totalPointCount)
                           : std::vector<cv::Point2f>();
-            if (rl.empty() && rr.empty()) return;
+            if (rl.empty() && rr.empty()) {
+                warnMiss("undistort");
+                return;
+            }
             cv::Mat cl(p.frameGrayL.rows, p.frameGrayL.cols, CV_8UC3,
                        cv::Scalar(20, 20, 20));
             cv::Mat cr = cl.clone();
@@ -426,17 +383,20 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         });
 
         // ------------------------------------------------------------
-        // 4- 极线插值：插值点（黄）叠原帧，L|R 并合
+        // 4- 极线插值：插值点（黄）叠原帧，L|R 并合。【v2】快照容量宽点集按
+        //     interpCount 截断（精确计数在 1b 排水后 FinishInterp 才知）
         // ------------------------------------------------------------
         step("L3-interp", [&] {
-            if (!p.interpL.d_interpPoints) return;
-            saveGpuP2W((dir / "L3-interp_L.csv").string(),
-                              *p.interpL.d_interpPoints, cs);
-            if (p.interpR.d_interpPoints)
-                saveGpuP2W((dir / "L3-interp_R.csv").string(),
-                                  *p.interpR.d_interpPoints, cs);
-            auto il = downloadP2(p.interpL.d_interpPoints, cs);
-            auto ir = downloadP2(p.interpR.d_interpPoints, cs);
+            const auto il = snapTrim(snap.interpL, p.interpL.interpCount);
+            const auto ir = snapTrim(snap.interpR, p.interpR.interpCount);
+            if (il.empty() && ir.empty()) {
+                warnMiss("interp");
+                return;
+            }
+            if (!il.empty())
+                saveCsvP2fW((dir / "L3-interp_L.csv").string(), il);
+            if (!ir.empty())
+                saveCsvP2fW((dir / "L3-interp_R.csv").string(), ir);
             cv::Mat cl = toBgr(p.frameGrayL), cr = toBgr(p.frameGrayR);
             drawPts(cl, il, cv::Scalar(0, 255, 255), 1);
             drawPts(cr, ir, cv::Scalar(0, 255, 255), 1);
@@ -447,20 +407,21 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         // ------------------------------------------------------------
         // 5- v3 匹配：白=未匹配（左右各自插值点），彩色=匹配对（按激光线号
         //     同色，左点旁标注线号、编号与线同色；同线号左右同色），L|R 并合
-        //     （沙箱原名 L4-match_v3.png）
+        //     （沙箱原名 L4-match_v3.png）。【v2】匹配对来自 chain2 段快照
+        //     （在线 prod.matchV3 从不赋值——E 段唯一来源即快照）
         // ------------------------------------------------------------
         step("L4-match", [&] {
-            if (!p.matchV3.d_matched_left) return;
-            saveGpuP2W((dir / "L4-match_L.csv").string(),
-                              *p.matchV3.d_matched_left, cs);
-            if (p.matchV3.d_matched_right)
-                saveGpuP2W((dir / "L4-match_R.csv").string(),
-                                  *p.matchV3.d_matched_right, cs);
-            auto ml = downloadP2(p.matchV3.d_matched_left, cs);
-            auto mr = downloadP2(p.matchV3.d_matched_right, cs);
-            auto ids = downloadIds(p.matchV3.d_matched_line_ids, cs);
-            auto il = downloadP2(p.interpL.d_interpPoints, cs);
-            auto ir = downloadP2(p.interpR.d_interpPoints, cs);
+            if (snap.matchL.empty() && snap.matchR.empty()) {
+                warnMiss("match_v3");
+                return;
+            }
+            const auto& ml = snap.matchL;
+            const auto& mr = snap.matchR;
+            const auto& ids = snap.matchLine;
+            saveCsvP2fW((dir / "L4-match_L.csv").string(), ml);
+            saveCsvP2fW((dir / "L4-match_R.csv").string(), mr);
+            const auto il = snapTrim(snap.interpL, p.interpL.interpCount);
+            const auto ir = snapTrim(snap.interpR, p.interpR.interpCount);
             cv::Mat cl(p.frameGrayL.rows, p.frameGrayL.cols, CV_8UC3,
                        cv::Scalar(20, 20, 20));
             cv::Mat cr = cl.clone();
@@ -495,60 +456,44 @@ void FrameProbe::maybeDump(long idx, const scr::CycleProductsCompat& p) {
         });
 
         // ------------------------------------------------------------
-        // 6- 激光 3D 点云（PLY，3D 查看器）：recon.d_points3d（CV_32FC3）
+        // 6- 激光 3D 点云（PLY，3D 查看器）。【v2】chain2 段 E 块宿主拷出快照
+        //     （在线 prod.recon 从不赋值——E 段唯一来源即快照）
         // ------------------------------------------------------------
         step("L5-laser3d", [&] {
-            if (!p.recon.d_points3d) return;
-            cv::cuda::GpuMat contiguous;
-            p.recon.d_points3d->copyTo(contiguous, cs);
-            cv::Mat h;
-            contiguous.download(h, cs);
-            cs.waitForCompletion();
-            std::vector<cv::Point3f> pts;
-            if (!h.empty() && h.type() == CV_32FC3)
-                pts.assign(h.begin<cv::Point3f>(), h.end<cv::Point3f>());
-            savePlyFW((dir / "L5-laser3d.ply").string(), pts);
+            if (snap.laser3d.empty()) {
+                warnMiss("laser3d");
+                return;
+            }
+            savePlyFW((dir / "L5-laser3d.ply").string(), snap.laser3d);
         });
 
         // ------------------------------------------------------------
-        // 7- ccl：组件伪彩标签＋白框＋编号，L|R 并合
+        // 7- ccl：组件伪彩＋白框＋编号，L|R 并合。【v2·M1 修正】在线 CCL＝CPU
+        //     版（runCclCpuFromRuns——RLE 行程驱动）不产 d_labeledMask 像素级
+        //     标签——改宿主 components 列表画 bbox 框＋编号伪彩（编号色=
+        //     paletteColor(label)，与沙箱标签伪彩同语义），底图=灰帧
         // ------------------------------------------------------------
         step("M1-ccl", [&] {
-            auto cclCanvas = [&](const calib::RegionAnalysisResult& r) {
+            auto cclCanvas = [&](const calib::RegionAnalysisResult& r,
+                                 const cv::Mat& gray) {
                 cv::Mat canvas;
-                if (!r.d_labeledMask) return canvas;
-                try {
-                    cv::cuda::GpuMat c;
-                    r.d_labeledMask->copyTo(c, cs);
-                    cv::Mat lab;
-                    c.download(lab, cs);
-                    cs.waitForCompletion();
-                    if (lab.empty() || lab.type() != CV_32SC1) return canvas;
-                    double mx = 0;
-                    cv::minMaxIdx(lab, nullptr, &mx);
-                    if (mx <= 0) {
-                        canvas = cv::Mat::zeros(lab.size(), CV_8UC3);
-                        return canvas;
-                    }
-                    cv::Mat norm;
-                    lab.convertTo(norm, CV_8UC1, 255.0 / mx);
-                    cv::applyColorMap(norm, canvas, cv::COLORMAP_HSV);
-                    canvas.setTo(0, lab == 0);
-                    for (const auto& comp : r.components) {
-                        cv::rectangle(canvas,
-                                      cv::Rect(comp.boundingBoxX, comp.boundingBoxY,
-                                               comp.boundingBoxWidth, comp.boundingBoxHeight),
-                                      cv::Scalar(255, 255, 255), 2);
-                        cv::putText(canvas, std::to_string(comp.label),
-                                    cv::Point(comp.boundingBoxX, comp.boundingBoxY - 4), 0,
-                                    0.5, cv::Scalar(255, 255, 255));
-                    }
-                } catch (...) {
-                    canvas.release();
+                if (r.components.empty() || gray.empty()) return canvas;
+                canvas = toBgr(gray);
+                for (const auto& comp : r.components) {
+                    const cv::Scalar c = paletteColor(comp.label);
+                    cv::rectangle(canvas,
+                                  cv::Rect(comp.boundingBoxX, comp.boundingBoxY,
+                                           comp.boundingBoxWidth, comp.boundingBoxHeight),
+                                  c, 2);
+                    cv::putText(canvas, std::to_string(comp.label),
+                                cv::Point(comp.boundingBoxX,
+                                          std::max(12, comp.boundingBoxY - 4)),
+                                0, 0.6, c, 2);
                 }
                 return canvas;
             };
-            cv::Mat img = mergeLR(cclCanvas(p.cclL), cclCanvas(p.cclR));
+            cv::Mat img = mergeLR(cclCanvas(p.cclL, p.frameGrayL),
+                                  cclCanvas(p.cclR, p.frameGrayR));
             if (!img.empty()) savePngW((dir / "M1-ccl.png").string(), img);
         });
 

@@ -21,6 +21,7 @@
 #include "pipelines/scan/ScanTypes.h"
 #include "pipelines/scan/FrameObsAccumulator.h"
 #include "core/common/calib_result_types.h"   // calib::LaserPlaneMapTempTable（struct 真身——防 class 误前置致名修饰分裂）
+#include "pipelines/scan/fivechain/fc_probe.h"   // 【probe v2】FrameProbe（快照式抽检落盘）
 #include <nlohmann/json.hpp>
 
 namespace Scanner::data {
@@ -181,6 +182,10 @@ private:
     std::unique_ptr<RtBridge> bridge_;
     class FcHarnessCompat* harness_ = nullptr;              // 五链 harness（自有）
     std::unique_ptr<scr::fc::FiveChainExecutor> executor_;  // 五链执行器（INT_MAX 无界）
+    // 【probe v2】抽检落盘器（config/fc_dump.json probe 段；默认关＝执行器收
+    // nullptr 全钩子短路）。adapter 持有——执行器只借指针（构造期注入，线程
+    // 构造尾即启动，事后置指针有竞态）
+    jmw::probe::FrameProbe frameProbe_;
     std::thread collector_;
     std::atomic<bool> rtActive_{false};
     const nlohmann::json* opJson_ = nullptr;                // 算子参数源（宿主保活——startRealtime 全链应用）
