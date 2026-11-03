@@ -2653,6 +2653,48 @@ QWidget *MainWindow::createToolBar()
     });
     layout->addWidget(simToggle);
 
+    // —— 「抽检转储」开关（五链中间结果抽检转储，07 probe 挂钩）：置位后下个
+    //    扫描会话采满上限自动停采保会话，挑定帧（config/fc_dump.json frames 列表）
+    //    的全部中间计算结果落盘 diagnostics/fc_probe——视觉/布局照抄「模拟数据」
+    //    开关（调试件同款可勾选样式）
+    QPushButton *probeToggle = new QPushButton();
+    probeToggle->setObjectName("toolButton");
+    probeToggle->setFixedSize(64, 56);
+    probeToggle->setCheckable(true);
+    probeToggle->setChecked(m_appCtx ? m_appCtx->probeEnabled() : false);
+    probeToggle->setToolTip(QStringLiteral("抽检转储：下个扫描会话起采满上限自动停采，"
+                                         "并把挑定帧的全部中间计算结果存到 diagnostics/fc_probe"
+                                         "（改配置 config/fc_dump.json）"));
+    QVBoxLayout *probeLay = new QVBoxLayout(probeToggle);
+    probeLay->setContentsMargins(0, 4, 0, 4);
+    probeLay->setSpacing(2);
+    probeLay->setAlignment(Qt::AlignCenter);
+    QLabel *probeIcon = new QLabel();
+    probeIcon->setPixmap(renderSvg(
+        QStringLiteral(":/icons/resources/icons/icon/third/filemanager-black-14.svg"), 20));
+    probeIcon->setFixedSize(20, 20);
+    probeLay->addWidget(probeIcon, 0, Qt::AlignHCenter);
+    QLabel *probeText = new QLabel(QStringLiteral("抽检转储"));
+    probeText->setObjectName("toolButtonText");
+    probeText->setAlignment(Qt::AlignCenter);
+    probeText->setMinimumWidth(probeToggle->width());
+    probeLay->addWidget(probeText);
+    probeToggle->setStyleSheet(
+        "QPushButton { background-color: transparent; border: none; }"
+        "QPushButton:hover { background-color: rgba(0,0,0,0.05); }"
+        "QPushButton:checked { background-color: rgba(230,145,18,0.18);"
+        " border: 1px solid #E69112; border-radius: 4px; }");
+    connect(probeToggle, &QPushButton::toggled, this, [this](bool on) {
+        if (!m_appCtx) return;
+        m_appCtx->setProbeEnabled(on);
+        JMW_LOG_INFO("app-MainWindow", "[抽检转储] 开关: {}（下个扫描会话生效）",
+                     on ? "开" : "关");
+        statusBar()->showMessage(on
+            ? QStringLiteral("抽检转储：开（下个扫描会话生效）")
+            : QStringLiteral("抽检转储：关（下个扫描会话生效）"), 3000);
+    });
+    layout->addWidget(probeToggle);
+
     layout->addStretch();
     return bar;
 }
