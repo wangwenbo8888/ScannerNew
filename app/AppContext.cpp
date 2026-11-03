@@ -800,6 +800,31 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
     }
     // 帧流双投递注册（单槽语义：后注册生效）——就绪即挂：M 键开扫后帧直达预览/会话
     dm->startFrameStream([this, dm](const Scanner::hal::StereoFrame& frame) {
+        // 261103 成簇归因终局口：相机回调到达间隔指纹（每 300 帧一条）——
+        // 平滑＝16.7ms 均匀；若 3 帧一批×48ms 则 p50≈0/p95≈45ms 双峰自证。
+        // 静态窗口：gap>1s（会话间歇）自动重置
+        {
+            static std::chrono::steady_clock::time_point sLastArr{};
+            static double sGaps[300] = {};
+            static int sGapN = 0;
+            const auto tArr = std::chrono::steady_clock::now();
+            if (sLastArr.time_since_epoch().count() != 0) {
+                const double gapMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                    tArr - sLastArr).count();
+                if (gapMs < 1000.0) {   // >1s 视为间歇，不入样本
+                    sGaps[sGapN % 300] = gapMs;
+                    if (++sGapN % 300 == 0) {
+                        double s[300]; std::copy(sGaps, sGaps + 300, s);
+                        std::sort(s, s + 300);
+                        JMW_LOG_INFO("app-AppContext",
+                            "[帧到达指纹] 300 对: gap p10={:.1f} p50={:.1f} p90={:.1f} "
+                            "max={:.1f}ms（平滑 60fps 应≈16.7 均匀；3帧一批＝p10≈0/p90≈45）",
+                            s[30], s[150], s[270], s[299]);
+                    }
+                }
+            }
+            sLastArr = tArr;
+        }
         // ① 预览链：06 FrameBuffer（ScannerWindow 10fps 消费）
         if (frameBuffer_) {
             Scanner::data::FrameData fd;
