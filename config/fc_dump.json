@@ -1,0 +1,8 @@
+{
+  "count": 3,
+  "probe": {
+    "enabled": false,
+    "maxFrames": 1000,
+    "frames": [1, 2, 500, 999, 1000]
+  }
+}
