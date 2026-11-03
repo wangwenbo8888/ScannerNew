@@ -73,6 +73,11 @@ FiveChainAdapter::FiveChainAdapter(const FiveChainConfig& cfg,
                 renderFullEvery_ = v;
         } catch (...) { /* 坏值回默认 */ }
     }
+    // 261103 FC-RSTAT 配置盲区补口：打印「生效值」（JSON 覆盖或默认 500/10
+    // ——display_push 是否真加载一眼可见，当天吃过静默回默认的亏）
+    JMW_LOG_INFO("07-FiveChain",
+        "[FiveChainAdapter] display_push: minIntervalMs={} fullEvery={}",
+        renderMinIntervalMs_, renderFullEvery_);
     calib::LaserCloudFuseCUDAParams fp;
     fp.voxelSize = static_cast<float>(cfg_.voxelSizeMm);
     fp.reserveVoxelCount = static_cast<size_t>(cfg_.voxelReserve);
@@ -2232,17 +2237,107 @@ void FiveChainAdapter::collectorLoop() {
 // ---------------------------------------------------------------------------
 // 渲染推送（collector 调用；终局 stopRealtime forceFull=true）
 // ---------------------------------------------------------------------------
+namespace {
+// 261103 FC-RSTAT 推送诊断计数器（审查 B 口径）：display_push 节流 30Hz
+// （minIntervalMs=33）但日志实测仅 ~8.9Hz（p50 间隔 114ms）——逐类计数
+// 定位「调用率不足 / 时间门异常 / 空推送 / 真推送」。单线程访问（collector
+// 线程调用；stopRealtime 在 join 后终局调用），普通整型即可；匿名命名空间
+// ＝.cpp-only，契约指纹不变可热换。
+struct FcRenderStats {
+    // —— 会话累计 ——
+    uint64_t nCall = 0;     // renderPushIfDue 总调用（含门拦截/空推送）
+    uint64_t nGate = 0;     // 时间门拦截（prev 有效且 now-prev<minIntervalMs）
+    uint64_t nEmpty = 0;    // 过门后空推送 early-return（云空且无标志点）
+    uint64_t nDel = 0;      // 实际完成推送（pushCloudSnapshot 调用后）
+    double   dtSumMs = 0.0; // 实际推送间隔累计（非 forceFull 且 prev 非 epoch）
+    uint64_t dtN = 0;       // 间隔样本数
+    int64_t  dtMaxMs = 0;   // 会话最大间隔
+    uint64_t d2hBytes = 0;  // 增量推送 D2H 累计字节（float×4）
+    uint64_t fullBytes = 0; // 全量推送 D2H 累计字节（另计）
+    size_t   lastPts = 0;   // 最近完成推送时融合云总点数
+    // —— 聚合窗口快照（窗口增量＝累计−快照；出线即刷新）——
+    std::chrono::steady_clock::time_point sessStart{};   // 首调用时刻（FINAL 用）
+    std::chrono::steady_clock::time_point lastAgg{};     // 上次聚合线时刻
+    uint64_t pCall = 0, pGate = 0, pEmpty = 0, pDel = 0;
+    double   pDtSumMs = 0.0;
+    uint64_t pDtN = 0, pD2h = 0, pFull = 0;
+    int64_t  wDtMaxMs = 0;  // 窗口内最大间隔（出线即重置）
+};
+FcRenderStats g_fcRstat;
+
+// FC-RSTAT 聚合线：final=false＝5s 窗口（增量+累计并列，dtAvg/dtMax/D2H
+// 均窗口口径——D2H 速率含增量+全量全部下载字节，full＝窗口内全量字节数）；
+// final=true＝会话终局累计口径
+void fcRstatLog(FcRenderStats& s, std::chrono::steady_clock::time_point now,
+                bool final) {
+    const double elS = std::chrono::duration_cast<std::chrono::duration<double>>(
+        now - (final ? s.sessStart : s.lastAgg)).count();
+    if (final) {
+        const double avgAll =
+            s.dtN > 0 ? s.dtSumMs / static_cast<double>(s.dtN) : 0.0;
+        const double kbS = elS > 0
+            ? static_cast<double>(s.d2hBytes + s.fullBytes) / 1024.0 / elS : 0.0;
+        JMW_LOG_INFO("07-FiveChain",
+            "[FC-RSTAT-FINAL] 会话{:.1f}s: calls={} gate={} empty={} del={} | "
+            "dtAvg={:.0f}ms dtMax={}ms | D2H={:.0f}KB/s full={:.2f}MB | fused={}pts",
+            elS, s.nCall, s.nGate, s.nEmpty, s.nDel, avgAll, s.dtMaxMs, kbS,
+            static_cast<double>(s.fullBytes) / (1024.0 * 1024.0), s.lastPts);
+        return;
+    }
+    const uint64_t dCall = s.nCall - s.pCall, dGate = s.nGate - s.pGate;
+    const uint64_t dEmpty = s.nEmpty - s.pEmpty, dDel = s.nDel - s.pDel;
+    const uint64_t dDtN = s.dtN - s.pDtN;
+    const double avg = dDtN > 0 ? (s.dtSumMs - s.pDtSumMs) / dDtN : 0.0;
+    const uint64_t dB = (s.d2hBytes - s.pD2h) + (s.fullBytes - s.pFull);
+    const double kbS = elS > 0 ? static_cast<double>(dB) / 1024.0 / elS : 0.0;
+    const double fullMB =
+        static_cast<double>(s.fullBytes - s.pFull) / (1024.0 * 1024.0);
+    JMW_LOG_INFO("07-FiveChain",
+        "[FC-RSTAT] 窗口{:.1f}s: calls=+{}(Σ{}) gate=+{}(Σ{}) empty=+{}(Σ{}) "
+        "del=+{}(Σ{}) | dtAvg={:.0f}ms dtMax={}ms | D2H={:.0f}KB/s "
+        "full={:.2f}MB | fused={}pts",
+        elS, dCall, s.nCall, dGate, s.nGate, dEmpty, s.nEmpty, dDel, s.nDel,
+        avg, s.wDtMaxMs, kbS, fullMB, s.lastPts);
+    s.pCall = s.nCall; s.pGate = s.nGate; s.pEmpty = s.nEmpty; s.pDel = s.nDel;
+    s.pDtSumMs = s.dtSumMs; s.pDtN = s.dtN;
+    s.pD2h = s.d2hBytes; s.pFull = s.fullBytes;
+    s.wDtMaxMs = 0;
+    s.lastAgg = now;
+}
+
+// 5s 聚合触发（门拦截前查——即使推送被节流到低频，调用仍持续出线暴露
+// renderPushIfDue 的真实调用率）
+void fcRstatMaybeAgg(FcRenderStats& s, std::chrono::steady_clock::time_point now) {
+    if (s.sessStart.time_since_epoch().count() == 0) {   // 首调用：只立时钟
+        s.sessStart = now;
+        s.lastAgg = now;
+        return;
+    }
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - s.lastAgg).count() < 5000)
+        return;
+    fcRstatLog(s, now, /*final=*/false);
+}
+}   // namespace
+
 void FiveChainAdapter::renderPushIfDue(bool forceFull) {
     const auto now = std::chrono::steady_clock::now();
+    // 261103 FC-RSTAT：入口总调用计数＋5s 聚合线（在时间门之前——被拦截
+    // 的调用也要计入窗口，否则低频推送时聚合线停摆）
+    ++g_fcRstat.nCall;
+    fcRstatMaybeAgg(g_fcRstat, now);
     // 261103 JSON 化：原 constexpr kMinMs=500 → display_push.minIntervalMs
     const int64_t kMinMs = renderMinIntervalMs_;
     if (!forceFull) {
         if (lastRenderPush_.time_since_epoch().count() != 0
             && std::chrono::duration_cast<std::chrono::milliseconds>(
-                   now - lastRenderPush_).count() < kMinMs)
+                   now - lastRenderPush_).count() < kMinMs) {
+            ++g_fcRstat.nGate;   // 时间门拦截（8.9Hz 定位口：正常应占大头）
             return;
+        }
     }
-    if (!sceneFeed_ && !warehouse_) return;
+    if (!sceneFeed_ && !warehouse_) return;   // 未计数类（calls−gate−empty−del 差值即此类）
+    const auto prev = lastRenderPush_;   // FC-RSTAT：覆盖前取——实际推送间隔口径
     lastRenderPush_ = now;
 
     const size_t curPts = fuse_->GetFusedPointCount();
@@ -2277,14 +2372,17 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
         lastPushedLaserPts_ = 0;   // 空云全量：归零（下载失败下次全量重推）
     }
     ++pushSeq_;
-    // 261028 激光显示诊断（stderr 直打——定位融合云是否为空）
-    fprintf(stderr, "[FC-RENDER] fused=%zu pts laserUI=%zu markers=%zu full=%d\n",
-            curPts, fusedXyz.size() / 3,
-            markerFuseOp_ ? markerFuseOp_->GetFusedPoints().size() : 0,
-            static_cast<int>(fullPush));
+    // 261103 FC-RSTAT：D2H 字节按实际下载到的 float 数计（下载失败已清空→0）
+    // ——在下方 renderKeep_ move 掏空前累计；原 261028 [FC-RENDER] stderr 直打
+    // 删除（GUI 无处可看——信息并入 FC-RSTAT 聚合线）
+    if (fullPush) g_fcRstat.fullBytes += fusedXyz.size() * sizeof(float);
+    else          g_fcRstat.d2hBytes += fusedXyz.size() * sizeof(float);
     // 261028 修复：标志点不依赖激光——即使激光云为空（标点模式）也推送
     const bool hasMarkers = markerFuseOp_ && !markerFuseOp_->GetFusedPoints().empty();
-    if (fusedXyz.empty() && !hasMarkers && !forceFull) return;
+    if (fusedXyz.empty() && !hasMarkers && !forceFull) {
+        ++g_fcRstat.nEmpty;   // 空推送 early-return（云空且无标志点）
+        return;
+    }
 
     // 仓库＝全量真值账（全量替换/尾部追加）
     if (warehouse_) {
@@ -2316,6 +2414,18 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
     h.laserAppend = !fullPush;
     h.laserTotal = curPts;
     sceneFeed_->pushCloudSnapshot(h);
+    // 261103 FC-RSTAT：实际完成推送——nDel＋间隔分布（仅非 forceFull 且 prev
+    // 非 epoch 计入：间隔＝本次入口 now − 上次过门时刻 prev，即真实推送节拍）
+    ++g_fcRstat.nDel;
+    if (!forceFull && prev.time_since_epoch().count() != 0) {
+        const int64_t dtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - prev).count();
+        g_fcRstat.dtSumMs += static_cast<double>(dtMs);
+        ++g_fcRstat.dtN;
+        if (dtMs > g_fcRstat.dtMaxMs) g_fcRstat.dtMaxMs = dtMs;
+        if (dtMs > g_fcRstat.wDtMaxMs) g_fcRstat.wDtMaxMs = dtMs;
+    }
+    g_fcRstat.lastPts = curPts;
     JMW_LOG_INFO("07-FiveChain",
         "[FiveChainAdapter] 推送渲染: 融合云={} 点（{}：UI {} 点）",
         curPts, fullPush ? "全量" : "增量", h.laserCount);
@@ -2390,6 +2500,9 @@ void FiveChainAdapter::stopRealtime() {
     executor_.reset();                            // 此后析构安全（stopAll 幂等）
     if (markerFuseOp_) markerFuseOp_->Clear();
     renderPushIfDue(true);                        // 终局全量（仓库+UI 收口）
+    // 261103 FC-RSTAT 终局：会话累计对账（collector 已 join——单线程无并发；
+    // calls−gate−empty−del 差值＝无 feed/仓库的早退类）
+    fcRstatLog(g_fcRstat, std::chrono::steady_clock::now(), /*final=*/true);
     delete harness_; harness_ = nullptr;
     bridge_.reset();
 }
