@@ -22,6 +22,8 @@ if(BUILD_CUDA)
          pipelines/scan/fivechain/ccl_cpu.cpp
          pipelines/scan/fivechain/steger_dedup_merge.cpp
          pipelines/scan/fivechain/triangle_index.cpp)  # 五链执行器族
+    # 261103 probe 抽检转储：沙箱 artifacts 存盘工具箱搬用（仅 std＋OpenCV＋nlohmann）
+    list(APPEND JMW_PM_PIPELINE_SRCS pipelines/scan/fivechain/artifacts.cpp)
 endif()
 if(BUILD_GLOBAL_OPTIM)                                                  # D 全局优化（GBA 依赖 Ceres）
     list(APPEND JMW_PM_PIPELINE_SRCS pipelines/globaloptim/GlobalOptimObject.cpp)
