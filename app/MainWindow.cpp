@@ -2347,6 +2347,9 @@ QWidget *MainWindow::createToolBar()
                 m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
                 // 260927 就绪流程（用户口径）：UI 模式键只备会话（模式/帧流/工作流），
                 // 不启采——正式开扫由设备 M 键触发（captureToggle→N10 四管掩码）
+                // 261104 重置联动解冻：重置后显示链保持冻结（防迟到旧数据回魂），
+                // 新会话 arm 时解冻——新数据从此刻起正常流入
+                if (auto* sfReset = m_appCtx->sceneFeed()) sfReset->notifyFreeze(false);
                 if (m_appCtx->deviceManager())
                     m_appCtx->deviceManager()->setCalibCaptureArmed(false);   // 扫描会话撤标定布防
                 const auto r = m_appCtx->armScanSession(mode);
@@ -2688,11 +2691,10 @@ QWidget *MainWindow::createToolBar()
                 m_laserDispPts = 0;
                 m_importedCloudCount = 0;        // 导入云计数同归零（260927 上树口径）
                 statusBar()->showMessage(QStringLiteral("项目已重置"), 5000);
-                JMW_LOG_WARN("app-MainWindow", "[重置项目] 全量重置完成（仓库/场景/账本/工程树已清）");
-                // 261104 解冻——此时会话已彻底结束、终局推送已入冻结丢弃——安全
-                if (m_appCtx) {
-                    if (auto* sf2 = m_appCtx->sceneFeed()) sf2->notifyFreeze(false);
-                }
+                JMW_LOG_WARN("app-MainWindow", "[重置项目] 全量重置完成（仓库/场景/账本/工程树已清——显示链保持冻结至下次开扫）");
+                // 261104 三修：不在此解冻！终局 forceFull 推送在状态转 S2 之后
+                // 仍可能到达（stopRealtime 内 renderPushIfDue(forceFull=true)）——
+                // 保持冻结＝所有迟到的旧数据推送被丢弃。解冻归下次 armScanSession
                 });
                 pollTimer->start(200);
                 return;   // 轮询路径：清场在 poll 回调内完成
