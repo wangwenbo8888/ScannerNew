@@ -2620,6 +2620,62 @@ QWidget *MainWindow::createToolBar()
             });
         }
 
+        // 重置项目（i==8）：全量重置——确认弹窗防误触（按键⑤侧是设备子态二次
+        // 确认，软件键用 UI 弹窗同闸）。会话停止走 discard 链（内部即
+        // stopScanSession 同款停采/finish，另加「不落库」——防 GBA 终局批在
+        // 仓库 clear 后回写旧点；S2 无会话走残留清同口径），对齐按键⑤重置
+        // 语义（261004 矩阵规则 8）
+        if (i == 8) {
+            connect(btn, &QPushButton::clicked, this, [this]() {
+                const auto ans = QMessageBox::question(this, QStringLiteral("重置项目"),
+                    QStringLiteral("将清空全部点云/标志点/编辑记录，确认重置？"),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                if (ans != QMessageBox::Yes) return;
+                if (!m_appCtx) return;
+                // ① 扫描会话＋点云仓库：两分支内部均含 pointCloudBuffer()->clear()
+                //    （会话云＋标志点）＋sceneFeed 缓存清＋磁盘产物清
+                if (m_appCtx->isScanSessionActive())
+                    m_appCtx->discardScanSession();      // 活会话：停采＋finish 不落库＋全清
+                else
+                    m_appCtx->clearResidualWorkingSet(); // S2：残留工作集同口径清
+                // ② 3D 场景＋编辑账本：clearScene 清几何/高亮/撤销/套索账本；
+                //    显示级删除账本（pendingCloud/Marker）不在 clearScene 范围，单独清
+                if (m_3dView) {
+                    m_3dView->clearScene();
+                    m_3dView->clearPendingCloudDeletes();
+                    m_3dView->clearPendingMarkerDeletes();
+                    // 恢复初始视图：中心 overlay 可见＋灰底＋Trackball 相机回 home
+                    // （同 onScanClicked 清场口径）
+                    m_3dView->setCenterOverlayVisible(true);
+                    m_3dView->viewer()->getCamera()->setClearColor(
+                        osg::Vec4(0.412f, 0.412f, 0.412f, 1.0f));
+                    auto* manip = new osgGA::TrackballManipulator();
+                    m_3dView->setCameraManipulator(manip);
+                    manip->home(0);
+                    m_3dView->update();
+                }
+                // ③ 工程树：标记点会话节点删（骨架根保留）；点云 001 文本归零
+                //    （计数随后由 cloudTimer 按 06 仓库真值续写）；网格随场景清同归零
+                if (m_markerRootItem) {
+                    while (m_markerRootItem->childCount() > 0)
+                        m_markerRootItem->removeChild(m_markerRootItem->child(0));
+                }
+                m_markerCurrentItem = nullptr;
+                if (m_cloudItem001)
+                    m_cloudItem001->setText(0, QStringLiteral("点云数据 001"));
+                if (m_meshItem001)
+                    m_meshItem001->setText(0, QStringLiteral("三角面 001"));
+                // ④ 扫描键态＋显示基线复位
+                if (m_activeScanToolIdx >= 0) setScanButtonVisual(m_activeScanToolIdx, false);
+                m_activeScanToolIdx = -1;
+                m_laserSessionLatched = false;   // 激光仓库基线待新会话重锁（260912c）
+                m_laserDispPts = 0;
+                m_importedCloudCount = 0;        // 导入云计数同归零（260927 上树口径）
+                statusBar()->showMessage(QStringLiteral("项目已重置"), 5000);
+                JMW_LOG_WARN("app-MainWindow", "[重置项目] 全量重置完成（仓库/场景/账本/工程树已清）");
+            });
+        }
+
         if (i == 0) {
             layout->addSpacing(16);
             QFrame *separator = new QFrame();
