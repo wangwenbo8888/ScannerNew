@@ -2634,16 +2634,26 @@ QWidget *MainWindow::createToolBar()
                 if (!m_appCtx) return;
                 // ① 扫描会话＋点云仓库：两分支内部均含 pointCloudBuffer()->clear()
                 //    （会话云＋标志点）＋sceneFeed 缓存清＋磁盘产物清
-                // 261104 修：discard 后五链线程仍在排空缓冲帧→推送旧数据→清完又
-                // 冒点。改为「先冻显示链→discard→延迟 800ms 后再清 UI」——等五链
-                // 线程排空+最终推送完成，UI 清场在最后一波数据之后执行
+                // 261104 二修：800ms 固定延迟不够（五链 56 帧在飞排空>1s＋终局
+                // forceFull 推送在解冻后到达→数据回魂）。改为「冻结显示链→
+                // discard→轮询等会话彻底结束→清 UI→解冻」——不猜时间，等事实
                 if (auto* sf = m_appCtx->sceneFeed()) sf->notifyFreeze(true);
                 if (m_appCtx->isScanSessionActive())
                     m_appCtx->discardScanSession();      // 活会话：停采＋finish 不落库＋全清
                 else
                     m_appCtx->clearResidualWorkingSet(); // S2：残留工作集同口径清
-                // 延迟清 UI（后台 stop 线程排空窗口）
-                QTimer::singleShot(800, this, [this]() {
+                statusBar()->showMessage(QStringLiteral("正在重置——等待数据链排空..."), 3000);
+                // 轮询：每 200ms 检查会话是否彻底结束（含后台 stop 线程+终局推送）
+                // 上限 5s（防死等——到时强制清＋解冻）
+                auto* pollTimer = new QTimer(this);
+                pollTimer->setSingleShot(false);
+                int* attempts = new int(0);
+                connect(pollTimer, &QTimer::timeout, this, [this, pollTimer, attempts]() {
+                    const bool sessionDone = !m_appCtx || !m_appCtx->isScanSessionActive();
+                    if (!sessionDone && ++(*attempts) < 25) return;   // 未结束且未超 25×200ms=5s
+                    pollTimer->stop();
+                    pollTimer->deleteLater();
+                    delete attempts;
                 // ② 3D 场景＋编辑账本：clearScene 清几何/高亮/撤销/套索账本；
                 //    显示级删除账本（pendingCloud/Marker）不在 clearScene 范围，单独清
                 if (m_3dView) {
@@ -2679,12 +2689,13 @@ QWidget *MainWindow::createToolBar()
                 m_importedCloudCount = 0;        // 导入云计数同归零（260927 上树口径）
                 statusBar()->showMessage(QStringLiteral("项目已重置"), 5000);
                 JMW_LOG_WARN("app-MainWindow", "[重置项目] 全量重置完成（仓库/场景/账本/工程树已清）");
-                // 261104 解冻（数据链已排空、UI 已清——恢复新会话推送）
+                // 261104 解冻——此时会话已彻底结束、终局推送已入冻结丢弃——安全
                 if (m_appCtx) {
                     if (auto* sf2 = m_appCtx->sceneFeed()) sf2->notifyFreeze(false);
                 }
                 });
-                return;   // 延迟路径：后续清场在 lambda 内完成
+                pollTimer->start(200);
+                return;   // 轮询路径：清场在 poll 回调内完成
             });
         }
 
