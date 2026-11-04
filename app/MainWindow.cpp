@@ -343,6 +343,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
             // 激光点云（host 块直推——FuseConsumer 下载的当帧激光块）
             connect(feed, &SceneFeedAdapter::laserCloudUpdated, this,
                     [this](const std::vector<cv::Point3f>& pts) {
+                if (m_resetting) return;
                 JMW_LOG_INFO("app-MainWindow",
                     "[3D激光渲染] laserCloudUpdated 推送 {} 点——261004 排障插桩", pts.size());
                 // 显示/导出减负（260919：全域扫描后融合云至数百万点——全量 VBO
@@ -419,7 +420,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
             // 纠正推每 10 次自来一次，届时回到 ≤150 万均匀抽样）
             connect(feed, &SceneFeedAdapter::laserCloudAppended, this,
                     [this](const std::vector<cv::Point3f>& pts) {
-                        if (pts.empty() || !m_3dView) return;
+                        if (m_resetting || pts.empty() || !m_3dView) return;
                         if (auto* dmV = m_appCtx ? m_appCtx->deviceManager() : nullptr)
                             m_3dView->setLaserPointWorldSize(
                                 static_cast<float>(dmV->voxelLadderValue()));
@@ -2350,6 +2351,7 @@ QWidget *MainWindow::createToolBar()
                 // 261104 重置联动解冻：重置后显示链保持冻结（防迟到旧数据回魂），
                 // 新会话 arm 时解冻——新数据从此刻起正常流入
                 if (auto* sfReset = m_appCtx->sceneFeed()) sfReset->notifyFreeze(false);
+                m_resetting = false;   // 261104 重置闸门开——UI 恢复接收推送
                 if (m_appCtx->deviceManager())
                     m_appCtx->deviceManager()->setCalibCaptureArmed(false);   // 扫描会话撤标定布防
                 const auto r = m_appCtx->armScanSession(mode);
@@ -2637,10 +2639,10 @@ QWidget *MainWindow::createToolBar()
                 if (!m_appCtx) return;
                 // ① 扫描会话＋点云仓库：两分支内部均含 pointCloudBuffer()->clear()
                 //    （会话云＋标志点）＋sceneFeed 缓存清＋磁盘产物清
-                // 261104 二修：800ms 固定延迟不够（五链 56 帧在飞排空>1s＋终局
-                // forceFull 推送在解冻后到达→数据回魂）。改为「冻结显示链→
-                // discard→轮询等会话彻底结束→清 UI→解冻」——不猜时间，等事实
-                if (auto* sf = m_appCtx->sceneFeed()) sf->notifyFreeze(true);
+                // 261104 四修：UI 侧闸门（m_resetting）——冻结被某处解除导致终局
+                // 推送回魂。改为「闸门设在 UI 接收侧」——不管数据链怎么推、冻结
+                // 是否被解除，UI 端直接拒收。彻底根治。
+                m_resetting = true;   // ← 关闸：laserCloudUpdated/Appended 全拒收
                 if (m_appCtx->isScanSessionActive())
                     m_appCtx->discardScanSession();      // 活会话：停采＋finish 不落库＋全清
                 else

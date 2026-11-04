@@ -208,6 +208,7 @@ protected:
     class QTimer *m_bannerTimer = nullptr;   // 瞬态 1.8s 计时（到时恢复常驻/隐藏）
     QString m_bannerPersist;            // 菜单期常驻文案（空=无常驻）
     uint64_t m_importedCloudCount = 0; // 导入点云计数（260927 上树/信息卡——不入扫描仓库）
+    bool m_resetting = false;           // 261104 重置项目闸门——true 期间 UI 拒收一切点云推送
 
     // —— UI 状态图标（P1-2）：订阅 10 状态机 StateChanged（EventBus 主通道），
     //    主线程刷 7 态指示。EventBus 同步分发持总线锁——锁内只拷贝 param2 再
