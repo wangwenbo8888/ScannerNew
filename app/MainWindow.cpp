@@ -343,7 +343,6 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
             // 激光点云（host 块直推——FuseConsumer 下载的当帧激光块）
             connect(feed, &SceneFeedAdapter::laserCloudUpdated, this,
                     [this](const std::vector<cv::Point3f>& pts) {
-                if (m_resetting) return;
                 JMW_LOG_INFO("app-MainWindow",
                     "[3D激光渲染] laserCloudUpdated 推送 {} 点——261004 排障插桩", pts.size());
                 // 显示/导出减负（260919：全域扫描后融合云至数百万点——全量 VBO
@@ -420,7 +419,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
             // 纠正推每 10 次自来一次，届时回到 ≤150 万均匀抽样）
             connect(feed, &SceneFeedAdapter::laserCloudAppended, this,
                     [this](const std::vector<cv::Point3f>& pts) {
-                        if (m_resetting || pts.empty() || !m_3dView) return;
+                        if (pts.empty() || !m_3dView) return;
                         if (auto* dmV = m_appCtx ? m_appCtx->deviceManager() : nullptr)
                             m_3dView->setLaserPointWorldSize(
                                 static_cast<float>(dmV->voxelLadderValue()));
@@ -2348,10 +2347,6 @@ QWidget *MainWindow::createToolBar()
                 m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
                 // 260927 就绪流程（用户口径）：UI 模式键只备会话（模式/帧流/工作流），
                 // 不启采——正式开扫由设备 M 键触发（captureToggle→N10 四管掩码）
-                // 261104 重置联动解冻：重置后显示链保持冻结（防迟到旧数据回魂），
-                // 新会话 arm 时解冻——新数据从此刻起正常流入
-                if (auto* sfReset = m_appCtx->sceneFeed()) sfReset->notifyFreeze(false);
-                m_resetting = false;   // 261104 重置闸门开——UI 恢复接收推送
                 if (m_appCtx->deviceManager())
                     m_appCtx->deviceManager()->setCalibCaptureArmed(false);   // 扫描会话撤标定布防
                 const auto r = m_appCtx->armScanSession(mode);
@@ -2639,26 +2634,10 @@ QWidget *MainWindow::createToolBar()
                 if (!m_appCtx) return;
                 // ① 扫描会话＋点云仓库：两分支内部均含 pointCloudBuffer()->clear()
                 //    （会话云＋标志点）＋sceneFeed 缓存清＋磁盘产物清
-                // 261104 四修：UI 侧闸门（m_resetting）——冻结被某处解除导致终局
-                // 推送回魂。改为「闸门设在 UI 接收侧」——不管数据链怎么推、冻结
-                // 是否被解除，UI 端直接拒收。彻底根治。
-                m_resetting = true;   // ← 关闸：laserCloudUpdated/Appended 全拒收
                 if (m_appCtx->isScanSessionActive())
                     m_appCtx->discardScanSession();      // 活会话：停采＋finish 不落库＋全清
                 else
                     m_appCtx->clearResidualWorkingSet(); // S2：残留工作集同口径清
-                statusBar()->showMessage(QStringLiteral("正在重置——等待数据链排空..."), 3000);
-                // 轮询：每 200ms 检查会话是否彻底结束（含后台 stop 线程+终局推送）
-                // 上限 5s（防死等——到时强制清＋解冻）
-                auto* pollTimer = new QTimer(this);
-                pollTimer->setSingleShot(false);
-                int* attempts = new int(0);
-                connect(pollTimer, &QTimer::timeout, this, [this, pollTimer, attempts]() {
-                    const bool sessionDone = !m_appCtx || !m_appCtx->isScanSessionActive();
-                    if (!sessionDone && ++(*attempts) < 25) return;   // 未结束且未超 25×200ms=5s
-                    pollTimer->stop();
-                    pollTimer->deleteLater();
-                    delete attempts;
                 // ② 3D 场景＋编辑账本：clearScene 清几何/高亮/撤销/套索账本；
                 //    显示级删除账本（pendingCloud/Marker）不在 clearScene 范围，单独清
                 if (m_3dView) {
@@ -2693,13 +2672,7 @@ QWidget *MainWindow::createToolBar()
                 m_laserDispPts = 0;
                 m_importedCloudCount = 0;        // 导入云计数同归零（260927 上树口径）
                 statusBar()->showMessage(QStringLiteral("项目已重置"), 5000);
-                JMW_LOG_WARN("app-MainWindow", "[重置项目] 全量重置完成（仓库/场景/账本/工程树已清——显示链保持冻结至下次开扫）");
-                // 261104 三修：不在此解冻！终局 forceFull 推送在状态转 S2 之后
-                // 仍可能到达（stopRealtime 内 renderPushIfDue(forceFull=true)）——
-                // 保持冻结＝所有迟到的旧数据推送被丢弃。解冻归下次 armScanSession
-                });
-                pollTimer->start(200);
-                return;   // 轮询路径：清场在 poll 回调内完成
+                JMW_LOG_WARN("app-MainWindow", "[重置项目] 全量重置完成（仓库/场景/账本/工程树已清）");
             });
         }
 
