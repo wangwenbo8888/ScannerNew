@@ -17,3 +17,6 @@ build-so/
 build-so-ops/
 
 backup_config_*/
+
+# factory_calib 独立嵌入仓（自带 .git，261105 起脱离主仓跟踪——rm --cached 了断）
+factory_calib/
