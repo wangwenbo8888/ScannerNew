@@ -14,11 +14,13 @@
 
 namespace Scanner::hal {
 
-struct CaptureParams {              // N10 七参（协议 260831 §下行表；H 1-200 / B 0-100 / T V C D 0|1 / L 0-100）
+struct CaptureParams {              // N10 八参（协议 260831 §下行表＋261105 增补 E；H 1-200 / B 0-100 / T V C D E 0|1 / L 0-100）
     int freqHz = 120;   // 260927 用户口径回调 120（60→120→30→120；H120 带宽饱和风险留痕 2b3155d）
     int bgLight = 10;
-    int laserT = 1, laserV = 1, laserC = 0, laserD = 0;   // 四激光管开关（261002 临时测试机
-                                     // 语义：T=精细 V=左斜 C=右斜 D=无对应线；ScanMode 映射见 DeviceManager::effectiveN10；默认值从不直发——发送点均逐字段覆写）
+    int laserT = 1, laserV = 1, laserC = 0, laserD = 0;   // 激光管开关 T/V/C/D（261105
+                                     // 固件语义：T=左斜 V=右斜 C=深孔 D=精细；ScanMode 映射见 DeviceManager::effectiveN10；默认值从不直发——发送点均逐字段覆写）
+    int laserE = 0;     // 第 8 参 E＝备用中竖25线激光管开关（261105 固件增补，帧序 D 后 L 前；
+                        // 现无扫描模式启用恒 0——将来启用须真机验证灯型/轮序）
     int laserLevel = 40;
 };
 
@@ -36,7 +38,7 @@ public:
     virtual bool isOpen() const = 0;
 
     using DoneCb = Scanner::device::serial::CommandChannel::DoneCb;
-    virtual void setCaptureParams(const CaptureParams&, DoneCb) = 0;        // $N10H..B..T..V..L..
+    virtual void setCaptureParams(const CaptureParams&, DoneCb) = 0;        // N10 H..B..T..V..C..D..E..L..
     virtual void startScan(DoneCb) = 0;   virtual void stopScan(DoneCb) = 0;         // N11 H1/H0
     virtual void enterSelfCheck(DoneCb) = 0; virtual void exitSelfCheck(DoneCb) = 0; // N12 Z1/Z0
     virtual void enterStandby(DoneCb) = 0; virtual void exitStandby(DoneCb) = 0;     // N13 E1/E0

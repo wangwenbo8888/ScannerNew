@@ -49,13 +49,13 @@ std::vector<ParamSpec> makeParamSpecs(double expMinMs) {  // 参数字段定义�
     };
 }
 
-// N10 生效参数（cpp 本地——不进头防 IMCU.h 类型泄漏）：账本值 ＋ ScanMode 四管
-// 掩码映射（261002 临时测试机协议——扫描仪损坏临时环境，管语义改：T=精细线、
-// V=左斜线、C=右斜线、D=无对应线〔测试机未接，占位〕；原 260831/260910 口径
-// 「面片 T1V1／精细 D／深孔 C」作废，回正式机须回退）：标志点 A（MarkerOnly）
-// T0V0C0D0＋L=0；面片 B（MarkerPlusLaser）V1C0（261102 起仅左斜，右斜管临时关——
-// 人工指令，见 effectiveN10 内注）；精细 C
-// （FineScan）T 管；深孔 D（DeepHoleScan）D 管（无对应线，仅协议占位）。
+// N10 生效参数（cpp 本地——不进头防 IMCU.h 类型泄漏）：账本值 ＋ ScanMode 五管
+// 掩码映射（261105 固件管语义定版，factory_calib GUI 真机验证通过：T=左斜、
+// V=右斜、C=深孔、D=精细、E=备用中竖25线恒关；261002 临时机口径「T=精细/
+// V=左斜/C=右斜/D=占位」作废）：标志点 A（MarkerOnly）T0V0C0D0E0＋L=0；
+// 面片 B（MarkerPlusLaser）T1 仅左斜（261102 单斜口径延续，换 261105 语义后
+// 左斜=T 管——恢复交叉改回 T1V1）；精细 C（FineScan）D 管；深孔 D
+// （DeepHoleScan）C 管。
 // 调用点均在逻辑线程
 constexpr int kMarkerOnlyBg = 10;   // A 模式补光基线（260927 真机回调：B40 过曝——标志点
                                     // 检测只剩 1 点/光流配准 0<3 全败；B10=面片模式同场景
@@ -76,12 +76,12 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
     p.laserLevel = (mode == Scanner::ScanMode::MarkerOnly)
                        ? 0
                        : static_cast<int>(params.get("laserLevel").value);
-    p.laserT = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;          // T=精细线（261002 临时）
-    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // V=左斜线
-    // 261102 人工指令：面片扫描只发左斜（V1C0，C=右斜管关）——原 V1C1 交叉口径
-    // 注释见上（回正式机恢复交叉时，把下一行改回 (mode==MarkerPlusLaser)?1:0）
-    p.laserC = 0;   // C=右斜线（临时关闭，仅左斜）
-    p.laserD = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;      // D=无对应线（占位）
+    p.laserT = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // T=左斜线（261105 语义）
+    p.laserV = 0;   // V=右斜线——面片沿 261102 仅左斜口径（单管 T1；恢复交叉改
+                    // (mode==MarkerPlusLaser)?1:0 出 T1V1）
+    p.laserC = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;      // C=深孔线（261105 语义）
+    p.laserD = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;          // D=精细线（261105 语义）
+    p.laserE = 0;   // E=备用中竖25线（261105 第 8 参）——无扫描模式入口，恒关（逐字段覆写铁律）
     return p;
 }
 
@@ -109,10 +109,11 @@ hal::CaptureParams calibPhaseParams(const ParamStore& params, int phase) {
     p.freqHz = std::min(static_cast<int>(params.get("freqHz").value), kCalibCycleMaxHz);
     p.bgLight = static_cast<int>(params.get("bgLight").value);
     p.laserLevel = (phase == 0) ? 0 : static_cast<int>(params.get("laserLevel").value);
-    p.laserT = (phase == 3) ? 1 : 0;   // 精细
-    p.laserV = (phase == 1) ? 1 : 0;   // 左斜
-    p.laserC = (phase == 2) ? 1 : 0;   // 右斜
-    p.laserD = (phase == 4) ? 1 : 0;   // 深孔
+    p.laserT = (phase == 1) ? 1 : 0;   // 左斜（261105 语义：T=左斜）
+    p.laserV = (phase == 2) ? 1 : 0;   // 右斜（V=右斜）
+    p.laserC = (phase == 4) ? 1 : 0;   // 深孔（C=深孔）
+    p.laserD = (phase == 3) ? 1 : 0;   // 精细（D=精细）
+    p.laserE = 0;                      // 备用中竖25线不参与标定灯序（261105 增补，恒关）
     return p;
 }
 
@@ -960,8 +961,8 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
         // 不发——manual 口走 stage0 1s 活证观察，温度无源由固件方定位，不盲补
         //（260926 曾在此无条件发 N12 T5，260927 证伪撤销）
 
-        // 自检亮灯（用户定版流程）：N10 H50 B50 T0 V1 C1 D0 L50（七参·261002
-        // 临时测试机口径：V/C=左右斜线交叉点灯，探测帧同参）。
+        // 自检亮灯（用户定版流程）：N10 H50 B50 T1 V1 C0 D0 E0 L50（八参·261105
+        // 管语义：T/V=左右斜线交叉点灯，探测帧同参）。
         // 只发一个：auto 搜口已发同参 N10（兼探测+点灯，probeN10Sent 凭据）——此处
         // 省略；manual 口（无探测帧）且回显未达才补发兜底。亮灯总窗 ~3s（stage0
         // 1s 上行活证过关＋stage1 停留 2s，2026-09-27 用户口径「灯亮三秒」；
@@ -969,9 +970,9 @@ void DeviceManager::startupSelfCheck(std::function<void(const std::string&, bool
         // → N11 H0 收口（停扫描，固件关灯）
         hal::CaptureParams on{};
         on.freqHz = 50; on.bgLight = 50;
-        on.laserT = 0; on.laserV = 1; on.laserC = 1; on.laserD = 0;
+        on.laserT = 1; on.laserV = 1; on.laserC = 0; on.laserD = 0; on.laserE = 0;
         on.laserLevel = 50;
-        selfCheck_.expectEcho = "N10 H50 B50 T0 V1 C1 D0 L50";
+        selfCheck_.expectEcho = "N10 H50 B50 T1 V1 C0 D0 E0 L50";
         if (mcu_->lastEchoPayload() != selfCheck_.expectEcho && !mcu_->probeN10Sent()) {
             mcu_->setCaptureParams(on, nullptr);   // 兜底补发（仅 manual 口）
         }
@@ -1209,7 +1210,7 @@ void DeviceManager::buildKeyActions() {
             lightsOff.freqHz = 1;
             lightsOff.bgLight = 0;
             lightsOff.laserLevel = 0;
-            lightsOff.laserT = lightsOff.laserV = lightsOff.laserC = lightsOff.laserD = 0;
+            lightsOff.laserT = lightsOff.laserV = lightsOff.laserC = lightsOff.laserD = lightsOff.laserE = 0;
             mcu_->setCaptureParams(lightsOff, nullptr);          // ② 灭灯 N10
             mcu_->stopScan(nullptr);                             // ③ N11 H0 停触发
             mcu_->flushWrites(2000);                             // ④ 确保落线

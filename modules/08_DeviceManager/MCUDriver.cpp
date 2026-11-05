@@ -255,7 +255,7 @@ std::string MCUDriver::probeAutoPort(int baud) {
         // 日志）——N12 兜底停发；命中凭据放宽＝任意上行字节（临时机回显
         // "CMD: ..."文本行，经 onParseFail 刷 lastRx_ 心跳口径——lastRx_>0 即活证；
         // 回正式机恢复原「G0x/数值行」严格凭据＋N12 条件兜底）
-        channel_.sendFireAndForget("N10 H50 B50 T0 V1 C1 D0 L50");
+        channel_.sendFireAndForget("N10 H50 B50 T1 V1 C0 D0 E0 L50");
         probeN10Sent_.store(true, std::memory_order_release);   // 自检兜底省略凭据（该口已发同参帧）
         bool hit = false;
         for (int waited = 0; waited < 3000; waited += 10) {
@@ -557,6 +557,7 @@ void MCUDriver::setCaptureParams(const hal::CaptureParams& p, DoneCb cb) {
                   " V" + std::to_string(p.laserV) +
                   " C" + std::to_string(p.laserC) +
                   " D" + std::to_string(p.laserD) +
+                  " E" + std::to_string(p.laserE) +
                   " L" + std::to_string(p.laserLevel), std::move(cb));
 }
 void MCUDriver::startScan(DoneCb cb)        { channel_.send("N11 H1", std::move(cb)); }
