@@ -1181,9 +1181,9 @@ void AppContext::shutdown() {
 // 真狗到货由 DongleGuard 挑战应答接替，守卫两处与上报口径不变）
 // ============================================================================
 void AppContext::submitLicenseCode(const std::string& code) {
-    // 占位码 JMW-K2-2026 的 SHA-256——正式码人工定后替换（换码命令 design.md §2.5）
+    // 占位码 88888888 的 SHA-256——正式码人工定后替换（换码命令 design.md §2.5）
     static constexpr char kLicenseSha256[] =
-        "7b5d2187bd9146f5e62cc7b0913a1327e0dda31b9f7a3b964aa22223a7c5e980";
+        "615ed7fb1504b0c724a296d7a69e6c7b2f9ea2c57c1d8206c5afdf392ebdfd25";
     const bool ok = Scanner::device::LicenseGate(kLicenseSha256).verify(code);
     if (ok) JMW_LOG_INFO("app", "[授权] 验证码校验通过");
     else    JMW_LOG_WARN("app", "[授权] 验证码校验失败——核心功能锁定（软门禁）");
@@ -1206,6 +1206,10 @@ void AppContext::notifySelfCheckItem(const std::string& item, bool ok) {
         else if (item == "laser")      selfCheck_.laser      = ok;
         else return;
         ++selfCheck_.reportedCount;
+        // 到齐即完成——任意到达顺序成立（261107 修复：license 改由启动弹窗主线程
+        // 上报后可能晚于设备末项，仅靠 startupSelfCheck 回调设 done 会漏——
+        // 实证：camera 后 license 到，系统已 Standby 而初始化弹窗傻等 20s 兜底）
+        if (selfCheck_.reportedCount >= 6) selfCheck_.done = true;
     }
     JMW_LOG_INFO("app", "自检项 {}: {}", item, ok ? "通过" : "失败");
     if (!ok) {

@@ -22,9 +22,9 @@ using namespace Scanner::device;
 
 namespace {
 
-// 占位码 JMW-K2-2026 的 SHA-256（正式码人工定后替换——design.md §十二-1）
-constexpr char kHashJmwK2[] =
-    "7b5d2187bd9146f5e62cc7b0913a1327e0dda31b9f7a3b964aa22223a7c5e980";
+// 占位码 88888888 的 SHA-256（正式码人工定后替换——design.md §十二-1）
+constexpr char kHash8x8[] =
+    "615ed7fb1504b0c724a296d7a69e6c7b2f9ea2c57c1d8206c5afdf392ebdfd25";
 // 测试专用码 "Abc-123" 的 SHA-256（大小写敏感断言用）
 constexpr char kHashAbc123[] =
     "6c3422a0ed44d5da8c88ffefcc4a7caa24e951bd921257f4c9f594c3fd8e666a";
@@ -35,17 +35,17 @@ constexpr char kHashX[] =
 } // namespace
 
 TEST(LicenseGate, AcceptsExactCode) {
-    LicenseGate g(kHashJmwK2);
-    EXPECT_TRUE(g.verify("JMW-K2-2026"));
+    LicenseGate g(kHash8x8);
+    EXPECT_TRUE(g.verify("88888888"));
 }
 
 TEST(LicenseGate, TrimsSurroundingWhitespace) {   // 首尾空白（含 CR/LF）不挡正确码
-    LicenseGate g(kHashJmwK2);
-    EXPECT_TRUE(g.verify("  JMW-K2-2026 \r\n"));
+    LicenseGate g(kHash8x8);
+    EXPECT_TRUE(g.verify("  88888888 \r\n"));
 }
 
 TEST(LicenseGate, RejectsWrongCode) {
-    LicenseGate g(kHashJmwK2);
+    LicenseGate g(kHash8x8);
     EXPECT_FALSE(g.verify("wrong-code"));
 }
 
@@ -62,6 +62,6 @@ TEST(LicenseGate, RejectsEmptyAndWhitespaceOnly) {
 }
 
 TEST(LicenseGate, AcceptsUppercaseHexExpected) {  // 期望哈希注入为大写也能用（归一化）
-    LicenseGate g("7B5D2187BD9146F5E62CC7B0913A1327E0DDA31B9F7A3B964AA22223A7C5E980");
-    EXPECT_TRUE(g.verify("JMW-K2-2026"));
+    LicenseGate g("615ED7FB1504B0C724A296D7A69E6C7B2F9EA2C57C1D8206C5AFDF392EBDFD25");
+    EXPECT_TRUE(g.verify("88888888"));
 }
