@@ -4105,8 +4105,13 @@ TEST(FcReplay, DumpSeparationOnline) {
             fprintf(stderr, "[CMP] 离线帧: %dx%d\n", offlineImg.cols, offlineImg.rows);
         }
     }
-    ASSERT_FALSE(offlineImg.empty()) << "离线帧加载失败";
-    ASSERT_FALSE(onlineImg.empty()) << "在线帧加载失败";
+    // 在线/离线帧均为现场数据（在线=真机扫描 dump、离线=沙盒数据集——皆不入库）：
+    // 缺任一侧对比即无意义——SKIP 对齐本文件惯例（CropOffsetSolve :912 同款；
+    // 在线帧真机 JMW_FC_DUMPFRAMES 转储 diagnostics/fc_frames 后重跑）
+    if (offlineImg.empty() || onlineImg.empty())
+        GTEST_SKIP() << "帧数据缺失（在线=" << (onlineImg.empty() ? "缺" : "在")
+                     << " 离线=" << (offlineImg.empty() ? "缺" : "在")
+                     << "）——diagnostics/fc_frames 或 ALL_raw 数据集不在本机";
 
     // —— 对比原图灰度分布 ——
     auto stats = [](const cv::Mat& m, const char* name) {
