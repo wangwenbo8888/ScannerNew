@@ -46,6 +46,7 @@ target_sources(DeviceManager PRIVATE ParamStore.cpp)
 target_sources(DeviceManager PRIVATE WarmupSequence.cpp)
 target_sources(DeviceManager PRIVATE DeviceManager.cpp)
 target_sources(DeviceManager PRIVATE SelfCheckCollector.cpp)
+target_sources(DeviceManager PRIVATE LicenseGate.cpp)   # 许可证（过渡：验证码；终态 DongleGuard）
 
 if(BUILD_TESTS)
     file(GLOB DEV_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
