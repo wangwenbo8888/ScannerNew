@@ -17,17 +17,19 @@
 - probe 抽检转储 exe 侧：达成｜AppContext 开关接口（三态统一：装配期读初值/会话快照/停采一次性闩锁＋文件原子写）＋采集帧计数限量停采＋MainWindow「抽检转储」开关（261103；配置 config/fc_dump.json probe 段）
 - 编入 01~05 工作流/渲染源码：达成｜app/CMakeLists.txt:50-62 直接编入 exe
 - 11 个自源文件＋5 个 stubs 占位头：部分达成｜自源文件齐；stubs/ 5 个旧头占位（scan_workflow.h 等）勿引用——清理时机待人工裁定（问题段挂账）
-- 加密狗检测：未达成｜检测项 `license` 恒 true 占位（AppContext.cpp 搜 license 定位）——狗到货后接 USB VID/PID 或厂商 SDK（问题段挂账）
+- 加密狗检测：过渡达成｜验证码弹窗＋软门禁落地（main.cpp 启动弹窗 → AppContext::submitLicenseCode → 08 LicenseGate SHA-256 校验 → license 自检项；armScanSession/armCalibCapture＋MainWindow 三处导出守卫）——真狗到货换 DongleGuard 实检（方案：docs/plans/2026-11-04-加密验证系统-design.md §二/§七）
 - 目录单测：未达成｜无 tests/；窗口层走查未做（问题段挂账）
 
 ## 3. 问题与方法
 
-- 〔待定〕问题：加密狗检测为占位——license 恒 true｜方法：狗到货后接 USB VID/PID 或厂商 SDK｜提出 261102｜解决 —
+- 〔待定〕问题：授权过渡占位码 JMW-K2-2026 待人工定正式值；真狗到货接 DongleGuard 换终态｜方法：换码命令 design.md §2.5；终态按方案 §三~§十一 实施｜提出 261102｜解决 —
 - 〔待定〕问题：BUILD_UI=OFF 清理或转正（原全局挂账迁入）｜方法：待人工裁定｜提出 261102｜解决 —
 - 〔待定〕问题：stubs/ 5 件旧头清理时机未定｜方法：人工裁定清理时机｜提出 261102｜解决 —
 - 〔待定〕问题：窗口层走查未做｜方法：随四功能真机闭环验证补走查｜提出 261102｜解决 —
 
 ## 4. 日志
+
+- 261107｜授权验证过渡方案落地：验证码弹窗＋软门禁守卫＋08 LicenseGate（TDD 六用例全绿）；license 默认 false=未验先锁；占位码待人工定值｜人工触发｜规范 §2.3
 
 - 261104｜重置项目按钮功能四轮迭代后撤回（问题挂账——根因五链异步终局推送时序）｜人工触发｜规范 §2.3
 
