@@ -33,6 +33,7 @@
 #include "modules/08_DeviceManager/CameraFactory.h"   // 相机工厂契约（实现细节收在 08）
 #include "modules/08_DeviceManager/HardwareMonitor.h"
 #include "modules/08_DeviceManager/SelfCheckCollector.h"
+#include "modules/08_DeviceManager/LicenseGate.h"   // 授权码校验（过渡件，design.md §二）
 #include "WorkflowContext.h"
 #include "ScanWorkflow.h"
 #include "CalibrationWorkflow.h"
@@ -683,7 +684,8 @@ void AppContext::startDevicesAsync() {
         JMW_LOG_INFO("app-AppContext", "[AppContext] DeviceManager open: {}", devR.success ? "ok" : devR.message);
 
         notifySelfCheckItem("serialPort", devR.success);
-        notifySelfCheckItem("license", true);   // 占位（狗到货接实检）
+        //（license 项不再在此恒真占位——过渡=验证码：main.cpp 启动弹窗收码 →
+        //  submitLicenseCode() 校验上报；真狗到货换 DongleGuard 实检，design.md §二）
 
         if (!devR.success) {
             // open 失败立即收口（260927 真机实证：探针 N10 已点灯——失败后不收口
@@ -767,6 +769,8 @@ Scanner::Result AppContext::armCalibCapture() {
     auto* dm = deviceManager_.get();
     if (!dm || !dm->isDeviceReady())
         return Scanner::Result::fail("设备未就绪——请等待自检完成（相机/串口）");
+    if (!licensePassed())
+        return Scanner::Result::fail("软件未授权——请重启软件输入验证码后重试");
     dm->startFrameStream([this](const Scanner::hal::StereoFrame& frame) {
         // ① 预览链：06 FrameBuffer（帧带 lightPhase 相位标记，消费方按灯型分派）
         if (frameBuffer_) {
@@ -797,6 +801,10 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
     if (!dm || !dm->isDeviceReady()) {
         JMW_LOG_WARN("app-AppContext", "[AppContext] 扫描点火被拦: 设备未就绪（门面空/相机或 MCU 未开）");
         return Scanner::Result::fail("设备未就绪——请等待自检完成（相机/串口）");
+    }
+    if (!licensePassed()) {   // 授权守卫（过渡：验证码——design.md §2.1 双保险）
+        JMW_LOG_WARN("app-AppContext", "[AppContext] 扫描点火被拦: 软件未授权");
+        return Scanner::Result::fail("软件未授权——请重启软件输入验证码后重试");
     }
     // 帧流双投递注册（单槽语义：后注册生效）——就绪即挂：M 键开扫后帧直达预览/会话
     dm->startFrameStream([this, dm](const Scanner::hal::StereoFrame& frame) {
@@ -1166,6 +1174,25 @@ void AppContext::shutdown() {
     if (faultHandler_) faultHandler_->stop();
     if (deviceManager_) deviceManager_->close();   // 相机+MCU 收口（门面倒序关）
     JMW_LOG_INFO("app-AppContext", "[AppContext] 全部组件已关闭");
+}
+
+// ============================================================================
+// 授权（过渡：固定验证码顶位 license 自检项——design.md §二；
+// 真狗到货由 DongleGuard 挑战应答接替，守卫两处与上报口径不变）
+// ============================================================================
+void AppContext::submitLicenseCode(const std::string& code) {
+    // 占位码 JMW-K2-2026 的 SHA-256——正式码人工定后替换（换码命令 design.md §2.5）
+    static constexpr char kLicenseSha256[] =
+        "7b5d2187bd9146f5e62cc7b0913a1327e0dda31b9f7a3b964aa22223a7c5e980";
+    const bool ok = Scanner::device::LicenseGate(kLicenseSha256).verify(code);
+    if (ok) JMW_LOG_INFO("app", "[授权] 验证码校验通过");
+    else    JMW_LOG_WARN("app", "[授权] 验证码校验失败——核心功能锁定（软门禁）");
+    notifySelfCheckItem("license", ok);
+}
+
+bool AppContext::licensePassed() const {
+    std::lock_guard<std::mutex> lock(selfCheckMtx_);
+    return selfCheck_.license;
 }
 
 void AppContext::notifySelfCheckItem(const std::string& item, bool ok) {

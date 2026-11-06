@@ -49,6 +49,9 @@ public:
     // UI 状态栏拉取：自检结果摘要（"✓通讯 ✗补光 …" 风格由 UI 定；此处给原始项表）
     std::vector<std::pair<std::string, bool>> selfCheckSnapshot() const;
     bool selfCheckDone() const;                                    // 序列是否跑完（全部项已上报）
+    // —— 授权（过渡：验证码顶位 license 自检项——design.md §二；真狗到货换实检）——
+    bool licensePassed() const;                       // 自检 license 项快照（守卫用）
+    void submitLicenseCode(const std::string& code);  // 启动/重试入口：校验＋上报自检项
     // 设备启动后台化（main 在 window.show() 后调）：设备 open（相机枚举+自动搜口
     // ~5s）+ 启动自检序列移后台线程——主窗口秒开不再白屏等设备
     void startDevicesAsync();
@@ -217,8 +220,10 @@ private:
         bool mcuLink{false};       // 下位机链路（回环验证口径=serialPort 同源；单列供 UI 展示）
         bool bgLight{false};       // 补光灯（N10 闪灯回环验证）
         bool laser{false};         // 激光器（同上——N10 一帧双灯同验）
-        // 加密狗/授权：暂占位 true（TODO: 狗到货后接 USB 枚举/厂商 SDK 实检）
-        bool license{true};
+        // 加密狗/授权：过渡=固定验证码（main.cpp 启动弹窗 → submitLicenseCode
+        // 校验上报；真狗到货换 DongleGuard 实检——design.md §二/§七）。
+        // 默认 false＝未验先锁（软门禁）
+        bool license{false};
         int  reportedCount{0};     // 已上报项数（=6 时序列完成：camera/serialPort/mcuLink/bgLight/laser/license）
         bool done{false};
     };

@@ -12,7 +12,10 @@
 #include <QFile>
 #include <QFont>
 #include <QLabel>
+#include <QHBoxLayout>
+#include <QLineEdit>
 #include <QProgressBar>
+#include <QPushButton>
 #include <QScreen>
 #include <QSurfaceFormat>
 #include <QTextCursor>
@@ -212,6 +215,53 @@ int main(int argc, char *argv[])
 
     // 设备链路（相机枚举+自动搜口）后台起
     appCtx.startDevicesAsync();
+
+    // —— 授权验证弹窗（过渡：真狗到货前固定验证码顶位 license 自检项——
+    //    docs/plans/2026-11-04-加密验证系统-design.md §二）。设备后台同步起，
+    //    输码与设备打开并行不空等；取消/空码=校验失败=软门禁（滞留 S1 锁核心功能）。
+    //    狗到货后本段整体移除（换开机自动验狗），卡片风与 initDlg 同源。
+    {
+        QDialog licDlg(&window);
+        licDlg.setWindowTitle(QStringLiteral("授权验证"));
+        licDlg.setModal(true);
+        licDlg.setWindowFlags(licDlg.windowFlags() | Qt::WindowStaysOnTopHint);
+        licDlg.setWindowFlag(Qt::FramelessWindowHint, true);
+        licDlg.setAttribute(Qt::WA_TranslucentBackground);
+        licDlg.setFixedSize(360, 200);
+        licDlg.setStyleSheet(
+            "QDialog { background-color: white; border: 1px solid #e0e0e0;"
+            " border-radius: 8px; }");
+        auto* licLay = new QVBoxLayout(&licDlg);
+        licLay->setContentsMargins(20, 16, 20, 16);
+        auto* licTitle = new QLabel(QStringLiteral("授权验证"), &licDlg);
+        licTitle->setAlignment(Qt::AlignCenter);
+        licTitle->setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #8B1A2B; padding: 0 0 8px 0;");
+        licLay->addWidget(licTitle);
+        auto* licMsg = new QLabel(
+            QStringLiteral("请输入授权验证码（未授权将锁定扫描 / 标定 / 导出）"), &licDlg);
+        licMsg->setAlignment(Qt::AlignCenter);
+        licMsg->setStyleSheet("color:#444; font-size:13px;");
+        licLay->addWidget(licMsg);
+        auto* licEdit = new QLineEdit(&licDlg);
+        licEdit->setPlaceholderText(QStringLiteral("授权验证码"));
+        licEdit->setFixedWidth(320);
+        licLay->addWidget(licEdit, 0, Qt::AlignHCenter);
+        auto* licOk = new QPushButton(QStringLiteral("确 认"));
+        auto* licCancel = new QPushButton(QStringLiteral("取 消"));
+        licOk->setFixedWidth(96);
+        licCancel->setFixedWidth(96);
+        auto* licBtnLay = new QHBoxLayout();
+        licBtnLay->setSpacing(16);
+        licBtnLay->addWidget(licOk);
+        licBtnLay->addWidget(licCancel);
+        licLay->addLayout(licBtnLay);
+        QObject::connect(licOk, &QPushButton::clicked, &licDlg, &QDialog::accept);
+        QObject::connect(licCancel, &QPushButton::clicked, &licDlg, &QDialog::reject);
+        QObject::connect(licEdit, &QLineEdit::returnPressed, &licDlg, &QDialog::accept);
+        licDlg.exec();   // 模态：确认 / 取消 / 回车任一出口都收口
+        appCtx.submitLicenseCode(licEdit->text().trimmed().toStdString());
+    }
 
     QTimer initTimer;
     int initTicks = 0;

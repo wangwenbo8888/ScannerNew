@@ -2523,6 +2523,11 @@ QWidget *MainWindow::createToolBar()
                 menu.addSeparator();
 
                 menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9"), [this]() {
+                    if (!m_appCtx || !m_appCtx->licensePassed()) {   // 授权守卫（design.md §2.1）
+                        statusBar()->showMessage(
+                            QStringLiteral("软件未授权——请重启软件输入验证码后再导出"), 5000);
+                        return;
+                    }
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa0\x87\xe5\xbf\x97\xe7\x82\xb9"), "markers.json", "Marker Files (*.json *.txt)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
@@ -2533,6 +2538,11 @@ QWidget *MainWindow::createToolBar()
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xa4\xb1\xe8\xb4\xa5"));
                 });
                 menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\x82\xb9\xe4\xba\x91"), [this]() {
+                    if (!m_appCtx || !m_appCtx->licensePassed()) {   // 授权守卫（design.md §2.1）
+                        statusBar()->showMessage(
+                            QStringLiteral("软件未授权——请重启软件输入验证码后再导出"), 5000);
+                        return;
+                    }
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe7\x82\xb9\xe4\xba\x91"), "pointcloud.ply", "Point Cloud (*.ply *.pcd *.xyz)");
                     if (path.isEmpty()) return;
                     std::string spath = path.toStdString();
@@ -2551,6 +2561,11 @@ QWidget *MainWindow::createToolBar()
                             QStringLiteral("导出点云失败（仓库 %1 点）").arg(nPts), 5000);
                 });
                 menu.addAction(QStringLiteral("\xe5\x90\x8e\xe5\xa4\x84\xe7\x90\x86\xe5\xaf\xbc\xe5\x87\xba STL"), [this]() {
+                    if (!m_appCtx || !m_appCtx->licensePassed()) {   // 授权守卫（design.md §2.1）
+                        statusBar()->showMessage(
+                            QStringLiteral("软件未授权——请重启软件输入验证码后再导出"), 5000);
+                        return;
+                    }
                     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\xe5\x90\x8e\xe5\xa4\x84\xe7\x90\x86\xe5\xaf\xbc\xe5\x87\xba\xe7\xbd\x91\xe6\xa0\xbc"), "mesh.stl", "Mesh (*.stl *.obj)");
                     if (path.isEmpty()) return;
                     // P1-1（260912 诚实化的兑现）：04/07-E 后处理真正点火——S2→S6
