@@ -598,7 +598,7 @@ Result CameraControl::setResolution(int width, int height) {
                 // env JMW_CAM_GAIN 可调（缺省 10）；设失败仅告警不阻断
                 static const double kGainVal = [] {
                     const char* e = getenv("JMW_CAM_GAIN");
-                    return e ? atof(e) : 10.0;  // 261102 在线扫描需增益看板
+                    return e ? atof(e) : 10.0;  // 261107 试 5dB 下午暗→回 10dB（档位调低补偿强光）
                 }();
                 bool gainSet = false;
                 std::string gainHow;

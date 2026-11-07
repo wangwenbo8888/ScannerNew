@@ -140,7 +140,9 @@ public:
                   CameraFactory camFactory = nullptr,
                   SerialWriteOverride serialWriteOverride = nullptr,
                   ParamIo paramIo = {},
-                  std::vector<double> brightnessExposureMs = {});   // 261004 曝光档值表
+                  std::vector<double> brightnessExposureMs = {},
+                   std::vector<double> brightnessLaserLevel = {},
+                   std::vector<double> brightnessBgLight = {});   // 261004 曝光档值表
                                                                     // （20 元——camera.json
                                                                     // brightnessLadder.exposureMs
                                                                     // 注入；空=内置均匀 0.5~5）

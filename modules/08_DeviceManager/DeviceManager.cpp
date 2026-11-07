@@ -38,14 +38,12 @@ constexpr int64_t code(DevFault f) { return static_cast<int64_t>(f); }
 std::vector<ParamSpec> makeParamSpecs(double expMinMs) {  // 参数字段定义归 08（红线）
     if (!(expMinMs > 0.0)) expMinMs = 0.5;                // 非法回退（与梯表同源）
     return {
-        {"exposure", 3.0, expMinMs, 100.0},        // 曝光 ms（≈档10 中位均分值——boot 后由梯覆写；261004
+        {"exposure", 3.0, expMinMs, 100.0},        // 曝光 ms（≈档30 中位均分值——boot 后由梯覆写；261004
                                                   // 下限随曝光档值表最小值同步——账本钳制域与
                                                   // 梯表同源防档 1 被钳位）
-        {"freqHz", 60.0, 1.0, 200.0},         // N10 H 拍照频率＝固定值（261002 按键域定稿：无任何调节入口，
-                                              // 仅 N10 组帧读取。261004 短暂试 80 后回退——真机实测采集跑
-                                              // 不满 60（触发/传输链路饱和），维持 60 定版）
-        {"bgLight", 47.0, 0.0, 100.0},        // N10 B 补光（≈档10 中位均分值——boot 后由梯覆写）
-        {"laserLevel", 47.0, 0.0, 100.0},     // N10 L 激光强度（≈档10 中位均分值——boot 后由梯覆写）
+        {"freqHz", 60.0, 1.0, 200.0},         // N10 H 拍照频率（261107 160Hz 带宽饱和杀全链——60 定版）
+        {"bgLight", 30.0, 0.0, 100.0},        // N10 B 补光（默认档3≈30——boot 后由梯覆写；261107 用户改档30→6）
+        {"laserLevel", 47.0, 0.0, 100.0},     // N10 L 激光强度（≈档30 中位均分值——boot 后由梯覆写）
     };
 }
 
@@ -71,7 +69,7 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
     // 261003 标点模式补光改随梯值（原硬编码 kMarkerOnlyBg=10 换档无效——补光/
     // 激光全被覆盖只剩曝光 1-5ms 变化，用户实测「换挡效果不明显」根因）。
     // 梯＝三参唯一真相源（§3.3.2），标点模式只锁激光管关＋频率钳，B/E 随档走；
-    // 档10≈旧基线 B=40（B10 基线随档值表产线对账后定版）
+    // 档30≈旧基线 B=40（B10 基线随档值表产线对账后定版）
     p.bgLight = static_cast<int>(params.get("bgLight").value);
     p.laserLevel = (mode == Scanner::ScanMode::MarkerOnly)
                        ? 0
@@ -126,7 +124,7 @@ hal::CaptureParams calibPhaseParams(const ParamStore& params, int phase) {
 DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* bus,
                              CameraFactory camFactory, SerialWriteOverride serialWrite,
                              ParamIo paramIo,
-                             std::vector<double> brightnessExposureMs)
+                             std::vector<double> brightnessExposureMs, std::vector<double> brightnessLaserLevel, std::vector<double> brightnessBgLight)
     : cfg_(std::move(cfg)),
       paramIo_(std::move(paramIo)),
       bus_(bus),
@@ -138,9 +136,10 @@ DeviceManager::DeviceManager(DeviceConfig cfg, GateQuery gate, infra::EventBus* 
       warmup_(std::make_unique<WarmupSequence>(cfg_.warmup)) {
     // 261004 曝光档值表化（camera.json brightnessLadder.exposureMs 20 元数组）：
     // 梯表整体换＋账本钳制域取表内最小值（非法表回退内置均匀 0.5~5——函数自防）
-    ladder_.setSteps(builtinBrightnessLadder20(brightnessExposureMs));
-    // 261102 定标对齐：默认档 10（曝光 2ms、激光≈53、补光≈7——匹配标定采集条件）
-    ladder_.setIndex(10);
+    ladder_.setSteps(builtinBrightnessLadder20(brightnessExposureMs, brightnessLaserLevel, brightnessBgLight));
+    // 261107 用户改默认档 10→6（下午环境光下 10 过曝；原 10 匹配标定采集条件）
+    ladder_.setIndex(3);
+    ladderIndexSnap_.store(3, std::memory_order_relaxed);   // 构造期即同步（UI 构建时能读到正确档号）
     double tblMin = 0.5;
     if (brightnessExposureMs.size() == 20)
         tblMin = *std::min_element(brightnessExposureMs.begin(),

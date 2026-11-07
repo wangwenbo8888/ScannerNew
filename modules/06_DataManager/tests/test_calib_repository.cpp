@@ -387,6 +387,61 @@ TEST(CalibRepository, FactorySchemaLaserMergeMakesReady) {
     fs::remove_all(dir2);
 }
 
+// 261107 换机断供修复：6.3-cmtt 代工厂激光档顶层无 tempTable/planeMapTempTable，
+// 档温移入 laserExtrinsicTempTable.virtualToLeft.table（虚拟相机外参逐档）。
+// 合并应物化「仅温度」档表：门禁放行；旧链 buildLaserTableFromRepo 跳过无
+// mapData 档→nullptr→降级 A（既有约定，语义不变）；五链用 CMTT 不经此路。
+TEST(CalibRepository, FactorySchemaV2LaserExtrinsicTiersMergeMakesReady) {
+    nlohmann::json fc = {
+        {"schema", "factory_calib.camera_calib.v1"},
+        {"imageSize", nlohmann::json::array({2048, 1536})},
+        {"intrinsic",
+         {{"left", {{"camera_matrix", mat3(1839)}, {"dist_coeffs", nlohmann::json::array({nlohmann::json::array({0, 0, 0, 0, 0})})}}},
+          {"right", {{"camera_matrix", mat3(1841)}, {"dist_coeffs", nlohmann::json::array({nlohmann::json::array({0, 0, 0, 0, 0})})}}}}},
+        {"extrinsic", {{"R", mat3(1)},
+                       {"T", nlohmann::json::array({nlohmann::json::array({-40}),
+                                                    nlohmann::json::array({0}),
+                                                    nlohmann::json::array({0})})}}},
+        {"rectify", {{"R1", mat3(1)}, {"R2", mat3(1)},
+                     {"P1", mat34(1)}, {"P2", mat34(1)}, {"Q", mat44(1)}}},
+        {"stereoRectifyTempTable",
+         {{"tableSize", 1},
+          {"table", nlohmann::json::array({
+              {{"temperature", 22.5}, {"R1", mat3(1)}, {"R2", mat3(1)},
+               {"P1", mat34(1)}, {"P2", mat34(1)}, {"Q", mat44(1)}}})}}}};
+    const std::string dir3 = tmpPath("t11_fc_v2_dir");
+    fs::create_directories(dir3);
+    const std::string camPath = dir3 + "/camera_calib.json";
+    const std::string laserPath = dir3 + "/laser_calib.json";
+    {
+        std::ofstream ofs(camPath, std::ios::binary | std::ios::trunc);
+        ofs << fc.dump();
+        // 6.3-cmtt 代激光档：无 tempTable/planeMapTempTable 键，档温在
+        // laserExtrinsicTempTable.virtualToLeft.table（条目=外参+温度，无 mapData）
+        nlohmann::json laser = nlohmann::json::object();
+        nlohmann::json e1 = nlohmann::json::object(), e2 = nlohmann::json::object();
+        e1["temperature"] = 22.5;
+        e2["temperature"] = 23.0;
+        laser["laserExtrinsicTempTable"]["virtualToLeft"]["table"] =
+            nlohmann::json::array({e1, e2});
+        laser["laserExtrinsicTempTable"]["virtualToLeft"]["tableSize"] = 2;
+        laser["curveMapTempTable"]["success"] = true;
+        std::ofstream lfs(laserPath, std::ios::binary | std::ios::trunc);
+        lfs << laser.dump();
+    }
+    CalibrationRepository repo;
+    ASSERT_TRUE(repo.load(camPath).success);
+    ReadyReport rep;
+    EXPECT_TRUE(repo.readyForScan(rep).success);
+    EXPECT_TRUE(rep.ready);                     // 六项全过（激光档表由 v2 源物化）
+    EXPECT_TRUE(rep.missing.empty());
+    PlaneMapTempTableRef pm = repo.planeMapTiers();
+    ASSERT_EQ(pm.tiers.size(), 2u);
+    EXPECT_DOUBLE_EQ(pm.tiers[0].tempC, 22.5);
+    EXPECT_DOUBLE_EQ(pm.tiers[1].tempC, 23.0);
+    fs::remove_all(dir3);
+}
+
 TEST(CalibRepository, ClearMakesNotReady) {
     CalibrationRepository repo;
     ASSERT_TRUE(loadSample(repo, "t08_clear.json"));

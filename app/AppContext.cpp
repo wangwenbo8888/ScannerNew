@@ -30,6 +30,8 @@
 #include "jmw_logging.h"
 #include "base/EventBus.h"
 #include "modules/08_DeviceManager/DeviceManager.h"
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>   // 261107 帧转储 cv::imwrite
 #include "modules/08_DeviceManager/CameraFactory.h"   // 相机工厂契约（实现细节收在 08）
 #include "modules/08_DeviceManager/HardwareMonitor.h"
 #include "modules/08_DeviceManager/SelfCheckCollector.h"
@@ -372,6 +374,10 @@ void AppContext::initialize() {
         // 261004 曝光档值表（ms——camera.json brightnessLadder.exposureMs 20 元
         // 数组逐档注入〔逐档自由方便产线定表〕；空=内置均匀 0.5~5）
         std::vector<double> brightExposureMs;
+        // 261007 激光/补光档值表（camera.json brightnessLadder.laserLevel/bgLight
+        // 20 元数组逐档注入；空=内置公式兜底）
+        std::vector<double> brightLaserLevel;
+        std::vector<double> brightBgLight;
         // 261006 采集矩阵（camera.json "width"/"height"；0=不设用传感器缺省——
         // 传感器上限钳制/Inc 对齐/居中 ROI 由 08 CameraControl 兜）
         int acqWidth = 0;
@@ -423,6 +429,17 @@ void AppContext::initialize() {
                         } catch (const std::exception&) {
                             camCfg.brightExposureMs.clear();   // 元素非数值——回退
                         }
+                    }
+                    // 261007 激光/补光档值表化（20 元数组；缺省＝内置公式兜底）
+                    if (bl.contains("laserLevel") && bl["laserLevel"].is_array()) {
+                        try { camCfg.brightLaserLevel =
+                            bl["laserLevel"].get<std::vector<double>>();
+                        } catch (const std::exception&) { camCfg.brightLaserLevel.clear(); }
+                    }
+                    if (bl.contains("bgLight") && bl["bgLight"].is_array()) {
+                        try { camCfg.brightBgLight =
+                            bl["bgLight"].get<std::vector<double>>();
+                        } catch (const std::exception&) { camCfg.brightBgLight.clear(); }
                     }
                     if (camCfg.brightExposureMs.size() != 20) {
                         JMW_LOG_WARN("app-AppContext",
@@ -536,7 +553,9 @@ void AppContext::initialize() {
                 camCfg.timestampPairing);
         },
         nullptr, std::move(paramIo),
-        std::move(camCfg.brightExposureMs));   // 261004 曝光档值表（camera.json 20 元数组）
+        std::move(camCfg.brightExposureMs),   // 261004 曝光档值表（camera.json 20 元数组）
+        std::move(camCfg.brightLaserLevel),   // 261007 激光档值表
+        std::move(camCfg.brightBgLight));     // 261007 补光档值表
     // P-1 全局态门禁注入（261002 按键域 §3.2.3）：四类键（启停/切模式/调节/菜单）
     // 白名单＝S2 待机/S4 扫标点/S5 标点+激光——S1/S3/S6/S7 全拦（逃生类不问）。
     // 装配期注入（open 前——与 setProtocolVersion 同约定）；08 不认识 10 态
@@ -782,6 +801,15 @@ Scanner::Result AppContext::armCalibCapture() {
             fd.lightPhase = frame.lightPhase;
             frameBuffer_->pushFrame(fd);
         }
+        // 261007 预览过滤验证：亮帧统计（暗帧仍入算法链）
+        {
+            static int sBrightCnt = 0, sDarkCnt = 0;
+            const double m = cv::mean(frame.leftGray)[0];
+            if (m < 15.0) ++sDarkCnt; else ++sBrightCnt;
+            if ((sBrightCnt + sDarkCnt) % 60 == 1)
+                JMW_LOG_INFO("app-AppContext",
+                    "[帧过滤诊断] 亮={} 暗={} 最新mean={:.1f}", sBrightCnt, sDarkCnt, m);
+        }
         // ② 调试分路：相机预览监视弹窗（订阅方切线程+节流自理）
         {
             std::lock_guard<std::mutex> lock(debugTapMtx_);
@@ -842,6 +870,24 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
             fd.rightGray = frame.rightGray;
             fd.lightPhase = frame.lightPhase;   // 261002 标定灯序相位随帧透传
             frameBuffer_->pushFrame(fd);
+        }
+        // 261107 预览闪烁诊断：统计亮/暗帧分布（扫描路径专用）
+        {
+            static int sBrightCnt = 0, sDarkCnt = 0;
+            const double m = cv::mean(frame.leftGray)[0];
+            if (m < 15.0) ++sDarkCnt; else ++sBrightCnt;
+            if ((sBrightCnt + sDarkCnt) % 60 == 1)
+                JMW_LOG_INFO("app-AppContext",
+                    "[帧过滤诊断] 亮={} 暗={} mean={:.1f}", sBrightCnt, sDarkCnt, m);
+            // 保存前200张左图（人工检查亮暗交替）
+            static int sDumpCnt = 0;
+            if (sDumpCnt < 200 && !frame.leftGray.empty()) {
+                const std::string dumpDir = "diagnostics/frame_dump_200";
+                std::filesystem::create_directories(dumpDir);
+                cv::imwrite(dumpDir + "/" + std::to_string(sDumpCnt) + ".png", frame.leftGray);
+                if (++sDumpCnt == 200)
+                    JMW_LOG_INFO("app-AppContext", "[帧转储] 前200张左图已保存 → {}", dumpDir);
+            }
         }
         // ② 扫描链：02 会话环（enrich 出口查表→SlotRing；非扫描期该口自弃）
         // 261004 门控修正：设备未开采集（M 键未按＝N11H0 无激光/补光投影）不喂

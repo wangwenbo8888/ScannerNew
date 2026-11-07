@@ -2334,14 +2334,14 @@ QWidget *MainWindow::createToolBar()
                 }
                 if (mode == Scanner::ScanMode::MarkerOnly) {
                     // 261017 恢复推荐预设套用（261004 曾撤——当日口径「沿用当前档」；
-                    // 261017 排障确认补光卡低档（档6=B31）后用户裁定恢复，仅新启会话套用）
+                    // 261017 排障确认补光卡低档（档3=B31）后用户裁定恢复，仅新启会话套用）
                     applyMarkerPreset();
                     statusBar()->showMessage(
-                        QStringLiteral("标点扫描就绪（已套推荐亮度档 10/20）"), 3000);
+                        QStringLiteral("标点扫描就绪（已套推荐亮度档 3/20）"), 3000);
                 } else if (mode == Scanner::ScanMode::MarkerPlusLaser) {
                     applyMeshPreset();
                     statusBar()->showMessage(
-                        QStringLiteral("面片扫描就绪（已套推荐亮度档 10/20）"), 3000);
+                        QStringLiteral("面片扫描就绪（已套推荐亮度档 3/20）"), 3000);
                 }
                 // 精细/深孔：P-5 收敛后无独立预设（保持当前亮度档——待真机标定预设）
                 m_laserSessionLatched = false; // 新会话：激光仓库基线待重锁（260912c）
@@ -2894,7 +2894,7 @@ QWidget *MainWindow::createParamSection()
         QSlider *slider = new QSlider(Qt::Horizontal);
         slider->setObjectName("paramSlider");
         slider->setRange(1, 20);
-        slider->setValue(10);                     // 档10=面片推荐（档值表插值精确点）
+        slider->setValue(10);                     // 档30=面片推荐（档值表插值精确点）
         slider->setStyleSheet(
             "QSlider::groove:horizontal { height: 4px; background: #E1E1E1; border-radius: 2px; }"
             "QSlider::handle:horizontal { background: #900021; width: 12px; height: 12px; margin: -5px 0px; border-radius: 6px; border: none; }"
@@ -3024,18 +3024,18 @@ void MainWindow::updateToolbarEditGate() {
 void MainWindow::applyMeshPreset() {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
-    dm->setBrightnessLadderIndex(10);          // 档10=中位（均分：≈2.9ms/47/47）
+    dm->setBrightnessLadderIndex(3);           // 261107 用户改 10→6（下午环境光过曝）
     statusBar()->showMessage(
-        QStringLiteral("面片扫描推荐参数已套用（亮度档 10/20）"), 3000);
+        QStringLiteral("面片扫描推荐参数已套用（亮度档 3/20）"), 3000);
 }
 
-// 标点扫描推荐预设（P-5 收敛 261002）：档10 中位＝均分梯 B≈47（L 在标点模式
-// 实发恒 0 由 effectiveN10 强制，账本值占位）；仅新启会话套用（261017 恢复接回）
+// 标点扫描推荐预设（P-5 收敛 261002）：档3＝下午环境光适配
+// （L 在标点模式实发恒 0 由 effectiveN10 强制，账本值占位）；仅新启会话套用
 void MainWindow::applyMarkerPreset() {
     auto* dm = m_appCtx ? m_appCtx->deviceManager() : nullptr;
     if (!dm) return;
-    dm->setBrightnessLadderIndex(10);          // 档10 中位（标点检测从此档起步调）
-    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（亮度档 10/20）"), 3000);
+    dm->setBrightnessLadderIndex(3);           // 261107 用户改 10→6
+    statusBar()->showMessage(QStringLiteral("标点扫描推荐参数已套用（亮度档 3/20）"), 3000);
 }
 
 QWidget *MainWindow::createInfoSection()

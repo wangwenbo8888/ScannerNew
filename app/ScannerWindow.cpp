@@ -1,4 +1,4 @@
-﻿#include "ScannerWindow.h"
+#include "ScannerWindow.h"
 #include "AppContext.h"
 #include "IWorkflow.h"
 #include "ScanWorkflow.h"
@@ -106,7 +106,7 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
         m_ladderSlider->setRange(1, 20);
         m_ladderSlider->setValue(
             m_appCtx && m_appCtx->deviceManager()
-                ? m_appCtx->deviceManager()->presetLadderIndex() : 10);
+                ? m_appCtx->deviceManager()->presetLadderIndex() : 3);
         m_ladderLbl = new QLabel(row);
         lay->addWidget(nameLbl);
         lay->addWidget(m_ladderSlider, 1);
@@ -167,13 +167,22 @@ ScannerWindow::ScannerWindow(AppContext* appCtx, QWidget *parent)
             latest = std::move(f);
         }
         if (!latest || latest->leftGray.empty()) return;
+        // 261107 预览只显示亮帧（标记帧 LED 开）：B 模式下标记帧(亮)/激光帧(暗)
+        // 交替——按图像均值过滤暗帧（lightPhase 在非标定态恒 -1 不可用）
+        {
+            const cv::Scalar m = cv::mean(latest->leftGray);
+            if (m[0] < 15.0) return;   // 暗帧（激光帧 LED 灭）不进预览
+            static int sPreviewCnt = 0;
+            if (++sPreviewCnt % 30 == 1)   // 每30帧打一条（防爆日志）
+                JMW_LOG_INFO("app", "[预览过滤] 亮帧 mean={:.1f} count={}", m[0], sPreviewCnt);
+        }
 
         cv::Mat leftReduced, rightReduced;
         cv::resize(latest->leftGray, leftReduced, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
         cv::resize(latest->rightGray, rightReduced, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
         emit updateImages(matToQImage(leftReduced), matToQImage(rightReduced));
     });
-    m_consumerTimer->start(100);  // 显示固定 10fps，不影响采集帧率
+    m_consumerTimer->start(100);  // 10fps（261107 试验 30/60fps 无改善——亮暗差不是帧率问题）
 
     // 图像更新信号
     connect(this, &ScannerWindow::updateImages, this, [this](QImage left, QImage right) {

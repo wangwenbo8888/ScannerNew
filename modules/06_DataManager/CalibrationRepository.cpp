@@ -144,7 +144,11 @@ nlohmann::json adaptFactoryCalib(const nlohmann::json& src) {
 
 // 工厂激光档并入主工程档（planeMap.tempTable ← laser_calib.json 顶层 tempTable 子树；
 // 工厂 schema 现状无该子树时置空数组——readyForScan 报缺"激光档表"如实反映）
-// 键名兼容两代工厂输出：主档顶层 tempTable；left_skew 变体 planeMapTempTable
+// 键名兼容三代工厂输出：主档顶层 tempTable；left_skew 变体 planeMapTempTable；
+// 6.3-cmtt 代（261107）laserExtrinsicTempTable.virtualToLeft.table（虚拟相机外参
+// 逐档）——该代物化「仅温度」档（无 mapData）：门禁按"档表在位"放行，旧链
+// buildLaserTableFromRepo 跳过无 mapData 档→nullptr→降级 A（既有约定），
+// 五链查表走 CMTT sidecar 不经此路。
 void mergeFactoryLaser(nlohmann::json& doc, const nlohmann::json& laser) {
     nlohmann::json pm = nlohmann::json::object();
     pm["tempTable"] = nlohmann::json::object();
@@ -154,6 +158,26 @@ void mergeFactoryLaser(nlohmann::json& doc, const nlohmann::json& laser) {
             laser[key]["table"].is_array() && !laser[key]["table"].empty()) {
             table = laser[key]["table"];
             break;
+        }
+    }
+    if (table.empty() && laser.contains("laserExtrinsicTempTable")) {
+        const auto& let = laser["laserExtrinsicTempTable"];
+        for (const char* side : {"virtualToLeft", "virtualToRight"}) {
+            if (!let.contains(side) || !let[side].contains("table") ||
+                !let[side]["table"].is_array()) {
+                continue;
+            }
+            nlohmann::json tiers = nlohmann::json::array();
+            for (const auto& e : let[side]["table"]) {
+                if (!e.contains("temperature")) continue;
+                nlohmann::json t = nlohmann::json::object();
+                t["temperature"] = e["temperature"];
+                tiers.push_back(std::move(t));
+            }
+            if (!tiers.empty()) {
+                table = std::move(tiers);
+                break;
+            }
         }
     }
     pm["tempTable"]["table"] = std::move(table);

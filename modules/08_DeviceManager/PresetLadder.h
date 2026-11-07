@@ -93,29 +93,34 @@ inline std::vector<double> uniformExposureTable(double minMs, double maxMs) {
 }
 
 // 20 档产线基线（261003 口径：激光/补光均分 0~100；261004 曝光档值表化——
-// camera.json brightnessLadder.exposureMs 20 元数组逐档注入，缺省均匀 0.5~5）：
-//   曝光 = exposureMs[i]（第 i+1 档；逐档自由，非强制等差——方便产线按需定表）
-//   补光 0~100 → 步长 100/19 ≈ 5.263
-//   激光 0~100 → 步长 100/19 ≈ 5.263
+// camera.json brightnessLadder.exposureMs 20 元数组逐档注入，缺省均匀 0.5~5；
+// 261107 激光/补光也表化——camera.json brightnessLadder.laserLevel/bgLight
+// 20 元数组逐档注入，缺省内置公式兜底）：
 // 非法表（元素数≠20 / 任一 ≤0）回退内置默认。真机定表后亦可 setSteps 整体替换
 inline std::vector<BrightnessStep> builtinBrightnessLadder20(
-    const std::vector<double>& exposureMs) {
-    auto valid = [](const std::vector<double>& t) {
+    const std::vector<double>& exposureMs,
+    const std::vector<double>& laserLevel = {},
+    const std::vector<double>& bgLight = {}) {
+    auto valid20 = [](const std::vector<double>& t) {
         if (t.size() != 20) return false;
         for (double v : t)
-            if (!(v > 0.0)) return false;
+            if (v < 0.0) return false;   // 允许 0（档1 激光/补光可为 0）
         return true;
     };
-    std::vector<double> exp = valid(exposureMs) ? exposureMs
-                                                : uniformExposureTable(0.5, 5.0);
+    std::vector<double> exp = valid20(exposureMs) && !exposureMs.empty() &&
+        std::any_of(exposureMs.begin(), exposureMs.end(), [](double v){ return v > 0; })
+        ? exposureMs : uniformExposureTable(0.5, 5.0);
     std::vector<BrightnessStep> steps;
     steps.reserve(20);
     for (int i = 0; i < 20; ++i) {
         const double t = static_cast<double>(i) / 19.0;   // 0.0 ~ 1.0 均分
-        steps.push_back(BrightnessStep{
-            exp[static_cast<size_t>(i)],     // 曝光＝档值表逐档（camera.json 注入）
-            t * 60.0,            // 激光 0→60（261102：60 够亮不刺眼）
-            t * 40.0});         // 补光 0→40（标志点需足够补光）
+        const double laser = (valid20(laserLevel))
+            ? laserLevel[static_cast<size_t>(i)]
+            : std::min(t * 120.0, 100.0);   // 缺省：261107 ×2 封顶 100
+        const double bg = (valid20(bgLight))
+            ? bgLight[static_cast<size_t>(i)]
+            : t * 40.0;                      // 缺省：0→40
+        steps.push_back(BrightnessStep{exp[static_cast<size_t>(i)], laser, bg});
     }
     return steps;
 }
