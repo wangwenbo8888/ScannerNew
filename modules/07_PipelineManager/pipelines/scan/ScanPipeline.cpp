@@ -198,13 +198,29 @@ Scanner::Result ScanPipeline::start() {
             const std::string cmttCPath = "config/curve_map_temp_table_C.bin";
             std::string lerrC;
             auto tC = calib::LoadTempTableFromCmtt(cmttCPath, 22.5, lerrC);
-            if (tC) fcAdapter_->setTubeTable(2, tC);
+            if (tC) {
+                fcAdapter_->setTubeTable(2, tC);
+                JMW_LOG_INFO("07-ScanPipeline",
+                    "[ScanPipeline] 五链 CMTT C管(深孔)装载: {}（referenceTemp={:.1f}℃）",
+                    cmttCPath, tC->referenceTemperature);
+            } else {
+                JMW_LOG_WARN("07-ScanPipeline",
+                    "[ScanPipeline] C管 CMTT 装载失败（{}: {}）——回退T管表", cmttCPath, lerrC);
+            }
         }
         {
             const std::string cmttDPath = "config/curve_map_temp_table_D.bin";
             std::string lerrD;
             auto tD = calib::LoadTempTableFromCmtt(cmttDPath, 22.5, lerrD);
-            if (tD) fcAdapter_->setTubeTable(3, tD);
+            if (tD) {
+                fcAdapter_->setTubeTable(3, tD);
+                JMW_LOG_INFO("07-ScanPipeline",
+                    "[ScanPipeline] 五链 CMTT D管(精细)装载: {}（referenceTemp={:.1f}℃）",
+                    cmttDPath, tD->referenceTemperature);
+            } else {
+                JMW_LOG_WARN("07-ScanPipeline",
+                    "[ScanPipeline] D管 CMTT 装载失败（{}: {}）——回退T管表", cmttDPath, lerrD);
+            }
         }
         fcAdapter_->attachCalib(K1_, D1_, K2_, D2_, imageWidth_, imageHeight_,
                                 fcTable ? fcTable : laserTable_,

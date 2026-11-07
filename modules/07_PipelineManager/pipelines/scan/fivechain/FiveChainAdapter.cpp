@@ -334,6 +334,14 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
         bool bigDone = false;
         if (bigOn && L.flatL_ && L.flatR_)
             bigDone = trySubmitBigGraph_(L, p, gL, gR, ls);
+        // 261107 双组 steger：D 精细（tubeIdx=3）宽带组——组变才切
+        if (L.stegerL_ && L.stegerR_) {
+            const bool stgFine = (tubeIdx == 3);
+            if (frontParamGroupStg_.exchange(stgFine ? 2 : 0) != (stgFine ? 2 : 0)) {
+                L.stegerL_->SetParams(stgFine ? stgFine_ : stgBase_);
+                L.stegerR_->SetParams(stgFine ? stgFine_ : stgBase_);
+            }
+        }
         if (bigDone) {
             // 大图整段完成（flat+undist+interp）；壳已填——undistort/interp
             // 常规段整段跳过（沙盒同款）
@@ -1329,6 +1337,9 @@ struct FiveChainAdapter::RtBridge {
     uint64_t counter = 0;                       // grabLatest 读游标（本桥单读者）
     std::atomic<uint64_t> skippedTotal{0};      // 过载丢帧累计（诊断）
     std::atomic<uint64_t> servedFrames{0};      // 实际服务帧数
+    // 261007 per-tube 路由诊断（readerLoop 单线程写；stopRealtime 汇总读）
+    std::atomic<long> tubeFrames_[4]{0, 0, 0, 0};
+    std::atomic<int> lastTube_{-1};
 
     // 逐 fc-idx 元数据＋帧宿主（shared_ptr 保活 frameGray 浅拷贝——Overwrite 环
     // 槽位复用后老帧数据仍存活至在飞结束）
@@ -1449,6 +1460,19 @@ struct FiveChainAdapter::RtBridge {
                 Slot& s = ring[static_cast<size_t>(idx) % kRing];
                 s.keep = cur;
                 s.tubeIdx = deriveTubeIdx(*cur);
+                // 261007 per-tube 路由诊断：帧计数＋管切换实时日志
+                {
+                    const int ti = (s.tubeIdx >= 0 && s.tubeIdx < 4) ? s.tubeIdx : 0;
+                    tubeFrames_[static_cast<size_t>(ti)]
+                        .fetch_add(1, std::memory_order_relaxed);
+                    if (ti != lastTube_.exchange(ti, std::memory_order_relaxed)) {
+                        JMW_LOG_INFO("07-FiveChain",
+                            "[RtBridge] 激光管切换→tube{}（{}帧累计 t0/t1/t2/t3={}/{}/{}/{}）",
+                            ti, servedFrames.load(),
+                            tubeFrames_[0].load(), tubeFrames_[1].load(),
+                            tubeFrames_[2].load(), tubeFrames_[3].load());
+                    }
+                }
                 s.snap = cur->snapshot;
                 s.temperature = cur->temperature;
                 s.seq.store(idx, std::memory_order_release);
@@ -1914,6 +1938,33 @@ Scanner::Result FiveChainAdapter::startRealtime(
                 harness_->cfg_.opParams("steger_fast"));
             L.stegerL_ = std::make_unique<calib::StegerExtractorFast>(stg);
             L.stegerR_ = std::make_unique<calib::StegerExtractorFast>(stg);
+            // 261107 双组前段参数：宽带组（D 精细）从 *_fine 节读（缺省
+            // 继承基础组）；fc_executor 723/submitLaserFront 组变切换
+            harness_->stgBase_ = stg;
+            harness_->stgFine_ = stg;
+            try {
+                if (opJson_ && opJson_->contains("steger_fast_fine"))
+                    harness_->stgFine_ = calib::StegerParams::fromJson(
+                        (*opJson_)["steger_fast_fine"]);
+            } catch (const std::exception& e) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[FiveChainAdapter] steger_fast_fine 解析失败（继承基础）: {}",
+                    e.what());
+            }
+            try {
+                harness_->sepBase_ = calib::LaserMarkingSeparationParams::fromJson(
+                    opJson_ ? (*opJson_)["mask_separation"]
+                            : nlohmann::json::object());
+                harness_->sepFine_ = harness_->sepBase_;
+                if (opJson_ && opJson_->contains("mask_separation_fine"))
+                    harness_->sepFine_ =
+                        calib::LaserMarkingSeparationParams::fromJson(
+                            (*opJson_)["mask_separation_fine"]);
+            } catch (const std::exception& e) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[FiveChainAdapter] mask 双组解析失败（用默认）: {}", e.what());
+            }
+            harness_->frontParamGroup_.store(-1, std::memory_order_relaxed);
             const auto fp = calib::FlatCenterParams::fromJson(
                 harness_->cfg_.opParams("flat_center"));
             L.flatL_ = std::make_unique<calib::FlatCenterExtractor>(fp);
@@ -2492,6 +2543,12 @@ void FiveChainAdapter::stopRealtime() {
             executor_ ? executor_->zGateDrops() : 0,
             executor_ ? executor_->zLinePruned() : 0,
             executor_ ? executor_->linePlaneGateMm() : 0);
+        JMW_LOG_WARN("07-FiveChain",
+            "[FiveChainAdapter] 管路由帧数: T(左斜)={} V(右斜)={} C(深孔)={} D(精细)={}",
+            bridge_ ? bridge_->tubeFrames_[0].load() : 0,
+            bridge_ ? bridge_->tubeFrames_[1].load() : 0,
+            bridge_ ? bridge_->tubeFrames_[2].load() : 0,
+            bridge_ ? bridge_->tubeFrames_[3].load() : 0);
         // 261103 候选池验尸（丢点定位）：会话结束仍未转正的候选逐个对账——
         // 距最近地图点 >10mm＝真点丢失（复现不足/断档期独见）；<5mm＝既有
         // 点的鬼影（重复簇，丢了无妨）；count=1＝只被见过一次（第二次从未

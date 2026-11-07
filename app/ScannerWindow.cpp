@@ -362,7 +362,10 @@ void ScannerWindow::onStartScanner()
                                                        dm->captureMode());
         }
     });
-    dm->startCapture(Scanner::ScanMode::MarkerPlusLaser);   // 面片默认（仅左斜 T1 激光，N10 八参组·261105 管语义）
+    // 261107 模式沿用：菜单/按键切过的会话模式直接开扫（原硬编码面片
+    // 会把用户已切模式重置——「点了面片扫描按钮状态又恢复了」根因）；
+    // 未切过时 captureMode() 初始值即面片，默认行为不变
+    dm->startCapture(dm->captureMode());
 
     // P5-T15 ①：经统一命令通道点火扫描（门禁 S2→S4/S5；payload=ScanMode 四值
     // 喂状态机 S4/S5 判别——0=标点→S4，1-3=含激光形态→S5（⑨b 暂并入）；handler
@@ -371,7 +374,7 @@ void ScannerWindow::onStartScanner()
     // 告警（§8-1 生产者缺口）。拒绝＝流程不走的打印点：UI 提示＋JMW_LOG 双出口
     //（gate 内亦有一道）
     if (m_appCtx && m_appCtx->scanWorkflow()) {
-        const auto mode = Scanner::ScanMode::MarkerPlusLaser;
+        const auto mode = dm->captureMode();   // 261007 沿用会话模式（与 startCapture 同源）
         m_appCtx->scanWorkflow()->setScanMode(mode);
         auto gr = m_appCtx->commandGate()->submit("start_scan",
                                                   static_cast<int64_t>(mode));

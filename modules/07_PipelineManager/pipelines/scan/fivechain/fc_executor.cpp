@@ -342,6 +342,18 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
         h_.cfg_.opParams("laser_match_scan_v3"));
     splitGpu_ = std::make_unique<calib::LaserMatchScanSplitGpuV3>(v3p);
     splitCpu_ = std::make_unique<calib::LaserMatchScanSplitCpuV3>(v3p);
+    // 261007 参数跟帧走：T/V 共用（组 0——面片逐帧交替下每帧 SetParams 会
+    // 重置算子 warmup 引发崩溃）；窗 [34,86] 同盖 T 实测 61~87 与 V 39~62
+    for (int t = 0; t < 4; ++t) h_.v3TubeParams_[t] = v3p;
+    h_.v3TubeParams_[0].cascade_spacing_px = 52.0f;   // T 左斜（组 0 与 V 共用）
+    h_.v3TubeParams_[0].cascade_spacing_tol = 0.68f;
+    h_.v3TubeParams_[1] = h_.v3TubeParams_[0];        // V 右斜（同组同值）
+    // C(2) 单线——cascade lidDiff==1 不触发，保持基础包
+    h_.v3TubeParams_[3].cascade_spacing_px = 88.0f;   // D 精细 窗[62,114]（实测 68~108）
+    h_.v3TubeParams_[3].cascade_spacing_tol = 0.30f;
+    h_.v3TubeParams_[3].match_threshold = 12.0f;      // 261107 表 rms 6.4 下收紧
+    //    （32px 窗放重叠窗错卡存活跨线错配；12 只留准预测）
+    h_.v3ParamGroup_.store(-1, std::memory_order_relaxed);
     reconP_ = calib::LaserReconstructParams::fromJson(
         h_.cfg_.opParams("laser_reconstruct"));
     // 261030 飞线门阈值（laser_reconstruct 节点 linePlaneGateMm——07 侧治理
@@ -706,6 +718,14 @@ void FiveChainExecutor::fcSeparation(FcJob* j) {
     try {
         h_.timeBegin();
         const int slot = j->idx % graySlots_;
+        // 261107 双组 mask：D 精细（tubeIdx=3）用宽带组（低阈值救 30~100px
+        // 竖带），其余细线组（高阈防噪声）——组变才 SetParams
+        const int sepTube = h_.src_->cycles[static_cast<size_t>(j->idx)].tubeIdx;
+        const bool sepFine = (sepTube == 3);
+        if (h_.frontParamGroup_.exchange(sepFine ? 2 : 0) != (sepFine ? 2 : 0)) {
+            h_.sepLaserL_->SetParams(sepFine ? h_.sepFine_ : h_.sepBase_);
+            h_.sepLaserR_->SetParams(sepFine ? h_.sepFine_ : h_.sepBase_);
+        }
         cudaStreamWaitEvent(cv::cuda::StreamAccessor::getStream(gS_),
                             evUpl_[static_cast<size_t>(slot)], 0);
         p.sepL = h_.sepLaserL_->Execute(h_.d_grayLanesL_[static_cast<size_t>(slot)], gS_);
@@ -782,6 +802,9 @@ void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
                                    ls, j->front);
         } else {
             splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
+            if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
+                    != Harness::v3ParamGroupOf(tubeIdx))
+                splitGpu_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
             splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
             // ══【B4】前段提交图化（【批D·c2】默认开——JMW_V3FRONTGRAPH=0 显式关；
             //    JMW_NOGRAPH=1 总闸优先；发射相位＝排水后窗口，本函数即排水后
@@ -841,6 +864,9 @@ bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, int tubeIdx,
     cv::cuda::GpuMat idsR = L.interpR_->GetCapacityIdsView();
     if (ptsL.empty() || ptsR.empty() || idsL.empty() || idsR.empty()) return false;
     splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
+    if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
+            != Harness::v3ParamGroupOf(tubeIdx))
+        splitGpu_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
     splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
     splitGpu_->ExecuteDeferred(ptsL, idsL, L.interpL_->GetOutputCountPtr(),
                                ptsR, idsR, L.interpR_->GetOutputCountPtr(),
@@ -2206,6 +2232,9 @@ void FiveChainExecutor::ch2FullGpu_(FcJob* j) {
                             evIRing_[static_cast<size_t>(s)], 0);
         h_.timeBegin();
         matchFull_->SetTempTable(h_.tableFor(tubeIdx));
+        if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
+                != Harness::v3ParamGroupOf(tubeIdx))
+            matchFull_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
         matchFull_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
         mr = matchFull_->Execute(vPL, vIL, vPR, vIR, cS_);
         j->prod.laserMatched = mr.matchedCount;

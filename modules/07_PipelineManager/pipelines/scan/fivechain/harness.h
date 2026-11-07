@@ -364,6 +364,32 @@ public:
         }
     }
 
+    // 261007 参数跟帧走：per-tube v3 匹配参数（新机四管线间距实测与
+    // cascade_spacing_px=36.9 旧机标定值全不匹配——T 61~87 / V 39~62 /
+    // D 68~108px；D 管 CMTT 对极残差 6.4px 需独立 match_threshold）。
+    // fc_executor 构造期从基础包派生填 4 份，逐帧与 tableFor 同步切换。
+    // ⚠ T/V 共用同值（组 0）：面片模式 T/V 逐帧交替，若 0/1 参数不同则
+    // 每帧 SetParams→算子 warmup 每帧归零→buffer 重分配竞态崩溃（261107
+    // 0xC0000005 实证）。组切换（模式级）才 SetParams。
+    calib::LaserMatchScanParamsV3 v3TubeParams_[4];
+    const calib::LaserMatchScanParamsV3& v3ParamsFor(int tubeIdx) const {
+        return (tubeIdx >= 0 && tubeIdx < 4) ? v3TubeParams_[tubeIdx]
+                                             : v3TubeParams_[0];
+    }
+    /// 参数组（0=T/V 斜线共用 / 1=C 基础 / 2=D 精细）——组变才换参
+    static int v3ParamGroupOf(int tubeIdx) {
+        return (tubeIdx == 3) ? 2 : (tubeIdx == 2) ? 1 : 0;
+    }
+    std::atomic<int> v3ParamGroup_{-1};
+
+    // 261107 双组前段参数：细线组（T/V/C——json 基准）vs 宽带组（D 精细
+    // ——json *_fine 节覆盖）。竖带 30~100px 与细线 4~7px 的 mask/steger
+    // 参数无法全局兼容（45+120 噪声淹没细线 / 150+8 杀宽带），组变才切。
+    calib::LaserMarkingSeparationParams sepBase_, sepFine_;
+    calib::StegerParams stgBase_, stgFine_;
+    std::atomic<int> frontParamGroup_{-1};
+    std::atomic<int> frontParamGroupStg_{-1};   // steger 组缓存（与 mask 独立）
+
     // 融合流指针（fc_executor 写入——fuse 共用）
     cv::cuda::Stream* fcFuseStreamPtr_ = nullptr;
 
