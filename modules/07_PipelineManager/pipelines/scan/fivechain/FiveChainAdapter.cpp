@@ -331,24 +331,32 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
             const char* e = getenv("JMW_1BBIGGRAPH");
             return !(e != nullptr && e[0] == '0');
         }();
-        bool bigDone = false;
-        if (bigOn && L.flatL_ && L.flatR_)
-            bigDone = trySubmitBigGraph_(L, p, gL, gR, ls);
-        // 261107 双组 steger：D 精细（tubeIdx=3）宽带组——组变才切
+        // 261107 双组 steger/flat：D 精细（tubeIdx=3）宽带组——组变才切。
+        // ⚠ 必须在 big graph 提交之前（图捕获固化算子参数；SetParams 触发
+        // epoch 失效自动重建图——先切参再提交，本帧即用新参数）
         if (L.stegerL_ && L.stegerR_) {
             const bool stgFine = (tubeIdx == 3);
             if (frontParamGroupStg_.exchange(stgFine ? 2 : 0) != (stgFine ? 2 : 0)) {
-                L.stegerL_->SetParams(stgFine ? stgFine_ : stgBase_);
-                L.stegerR_->SetParams(stgFine ? stgFine_ : stgBase_);
+                if (L.stegerL_) L.stegerL_->SetParams(stgFine ? stgFine_ : stgBase_);
+                if (L.stegerR_) L.stegerR_->SetParams(stgFine ? stgFine_ : stgBase_);
+                if (L.flatL_) L.flatL_->SetParams(stgFine ? flatFine_ : flatBase_);
+                if (L.flatR_) L.flatR_->SetParams(stgFine ? flatFine_ : flatBase_);
             }
         }
+        // 261107 D 精细（tubeIdx=3）禁 flat 走 steger：标定链（fc 4-4
+        // steger sigma1.5/maxWidth6）抽的带内窄特征点——实扫必须同口径，
+        // flat 平顶中心与表基准系统性错位（匹配死因）
+        const bool fineTube = (tubeIdx == 3);
+        bool bigDone = false;
+        if (bigOn && L.flatL_ && L.flatR_ && !fineTube)
+            bigDone = trySubmitBigGraph_(L, p, gL, gR, ls);
         if (bigDone) {
             // 大图整段完成（flat+undist+interp）；壳已填——undistort/interp
             // 常规段整段跳过（沙盒同款）
             return 1;   // deferred 口径：仍走排水（FinishInterp 幂等——图路径
                         // 只落精确 N/延迟段排水语义同构）
         }
-        if (L.flatL_ && L.flatR_) {
+        if (L.flatL_ && L.flatR_ && !fineTube) {
             // flat 路径（沙盒 extractor=flat）：延迟提交——双眼连续入队
             // 不同步（stats 28B D2H 在飞，完成段排水）。分眼实例（计数器私有）
             p.stegerL = L.flatL_->ExecuteDeferred(gL, *p.sepL.d_laserMask, ls);
@@ -1969,6 +1977,18 @@ Scanner::Result FiveChainAdapter::startRealtime(
                 harness_->cfg_.opParams("flat_center"));
             L.flatL_ = std::make_unique<calib::FlatCenterExtractor>(fp);
             L.flatR_ = std::make_unique<calib::FlatCenterExtractor>(fp);
+            // 261107 flat 双组：D 精细宽带（30~100px 斑点带）放宽平台平坦度
+            harness_->flatBase_ = fp;
+            harness_->flatFine_ = fp;
+            try {
+                if (opJson_ && opJson_->contains("flat_center_fine"))
+                    harness_->flatFine_ = calib::FlatCenterParams::fromJson(
+                        (*opJson_)["flat_center_fine"]);
+            } catch (const std::exception& e) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[FiveChainAdapter] flat_center_fine 解析失败（继承基础）: {}",
+                    e.what());
+            }
         try {
             calib::UndistortPointsParams ul, ur;
             if (hasStereoNominal_) {

@@ -387,8 +387,9 @@ public:
     // 参数无法全局兼容（45+120 噪声淹没细线 / 150+8 杀宽带），组变才切。
     calib::LaserMarkingSeparationParams sepBase_, sepFine_;
     calib::StegerParams stgBase_, stgFine_;
+    calib::FlatCenterParams flatBase_, flatFine_;
     std::atomic<int> frontParamGroup_{-1};
-    std::atomic<int> frontParamGroupStg_{-1};   // steger 组缓存（与 mask 独立）
+    std::atomic<int> frontParamGroupStg_{-1};   // steger/flat 组缓存（与 mask 独立）
 
     // 融合流指针（fc_executor 写入——fuse 共用）
     cv::cuda::Stream* fcFuseStreamPtr_ = nullptr;
