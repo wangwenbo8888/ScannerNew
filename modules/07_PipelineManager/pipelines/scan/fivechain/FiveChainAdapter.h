@@ -129,7 +129,9 @@ public:
     /// 标定注入（ScanPipeline configure 期调用；温表=生产 laserTable 单表）
     void attachCalib(const cv::Mat& K1, const cv::Mat& D1, const cv::Mat& K2,
                      const cv::Mat& D2, int imageWidth, int imageHeight,
-                     std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable);
+                     std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable,
+                     // 261007 交叉扫描第二表（V 管右斜；空=回退单表）
+                     std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable2 = nullptr);
 
     /// 261027 名义温档立体标定注入（config/camera_calib.json——与产表/离线
     /// 验证同源；启用后 harness 用构造期标定，逐帧快照注入关闭）
@@ -176,6 +178,7 @@ private:
     cv::Mat rtK1_, rtD1_, rtK2_, rtD2_;
     int rtW_ = 0, rtH_ = 0;
     std::shared_ptr<const calib::LaserPlaneMapTempTable> rtLaserTable_;
+    std::shared_ptr<const calib::LaserPlaneMapTempTable> rtLaserTable2_;   // 261007 交叉扫描 V 管
     bool hasStereoNominal_ = false;               // 名义温档标定已注入
     cv::Mat snR1_, snR2_, snP1_, snP2_, snQ_, snK1c_, snK2c_, snD1_, snD2_;
     cv::Mat snRext_, snTcomp_;

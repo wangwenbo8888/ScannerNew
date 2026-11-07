@@ -173,8 +173,29 @@ Scanner::Result ScanPipeline::start() {
                     cmttPath, lerr);
             }
         }
+        // 261007 交叉扫描：第二张 CMTT（V 管右斜）——env JMW_FC_CMTT_V 或
+        // config/curve_map_temp_table_V.bin；缺表回退单表（tableEven=tableOdd）
+        std::shared_ptr<const calib::LaserPlaneMapTempTable> fcTable2;
+        {
+            const std::string cmttVPath = getenv("JMW_FC_CMTT_V") != nullptr
+                ? std::string(getenv("JMW_FC_CMTT_V"))
+                : "config/curve_map_temp_table_V.bin";
+            std::string lerr2;
+            auto t2 = calib::LoadTempTableFromCmtt(cmttVPath, 22.5, lerr2);
+            if (t2) {
+                fcTable2 = t2;
+                JMW_LOG_INFO("07-ScanPipeline",
+                    "[ScanPipeline] 五链 CMTT V管(右斜)装载: {}（referenceTemp={:.1f}℃）",
+                    cmttVPath, t2->referenceTemperature);
+            } else {
+                JMW_LOG_INFO("07-ScanPipeline",
+                    "[ScanPipeline] V管 CMTT 缺失（{}: {}）——单表模式（tableEven=tableOdd）",
+                    cmttVPath, lerr2);
+            }
+        }
         fcAdapter_->attachCalib(K1_, D1_, K2_, D2_, imageWidth_, imageHeight_,
-                                fcTable ? fcTable : laserTable_);
+                                fcTable ? fcTable : laserTable_,
+                                fcTable2);
         // 名义温档立体标定（config/camera_calib.json——产表同源；env
         // JMW_FC_CAMJSON 可指定路径；缺文件回退逐帧快照注入并 WARN）
         {

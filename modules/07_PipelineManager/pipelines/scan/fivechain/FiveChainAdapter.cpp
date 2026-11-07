@@ -1475,11 +1475,13 @@ struct FiveChainAdapter::RtBridge {
 void FiveChainAdapter::attachCalib(const cv::Mat& K1, const cv::Mat& D1,
                                    const cv::Mat& K2, const cv::Mat& D2,
                                    int imageWidth, int imageHeight,
-                                   std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable) {
+                                   std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable,
+                                   std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable2) {
     rtK1_ = K1.clone(); rtD1_ = D1.clone();
     rtK2_ = K2.clone(); rtD2_ = D2.clone();
     rtW_ = imageWidth; rtH_ = imageHeight;
     rtLaserTable_ = std::move(laserTable);
+    rtLaserTable2_ = std::move(laserTable2);   // 261007 交叉扫描 V 管（空=单表回退）
 }
 
 // ---------------------------------------------------------------------------
@@ -1850,8 +1852,9 @@ Scanner::Result FiveChainAdapter::startRealtime(
         // 几何（非采集几何；采集 2048×1536 已在桥居中裁剪）
         harness_->imageWidth_ = bridge_->algoW_ > 0 ? bridge_->algoW_ : rtW_;
         harness_->imageHeight_ = bridge_->algoH_ > 0 ? bridge_->algoH_ : rtH_;
-        harness_->tableOdd_ = rtLaserTable_;               // 产线单表：奇偶共表
-        harness_->tableEven_ = rtLaserTable_;
+        harness_->tableOdd_ = rtLaserTable_;               // T 管（左斜）表
+        // 261007 交叉扫描：tableEven_ 独立装 V 管（右斜）表——缺第二表时回退单表
+        harness_->tableEven_ = rtLaserTable2_ ? rtLaserTable2_ : rtLaserTable_;
         harness_->sepLaserL_ = sepL_.get();
         harness_->sepLaserR_ = sepR_.get();
         harness_->voxelFuseOp_ = fuse_.get();
