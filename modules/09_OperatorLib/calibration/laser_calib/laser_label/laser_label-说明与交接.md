@@ -12,14 +12,17 @@
 
 ## 2. 现状
 
-- 连通域掩膜按交点序重编号激光线（1 起序）：达成｜主类 `LaserLabelerCUDA` 扫中心列（cols/2+centerColOffset）取各连通域最小 Y、稳定排序后重编号全图（CUDA＋Thrust）；在用 07 calibcompute/LaserChain.cpp（标定链）
-- 关键参数与输入约束：达成｜maxLabels=256（上限 4096 超限整帧失败）、centerColOffset=0；仅吃 CV_32SC1 已标记掩膜（上游 region_analyze），质量门禁触发只置 frameRejected、success 仍 true
+- 连通域掩膜按交点序重编号激光线（1 起序）：达成｜主类 `LaserLabelerCUDA`：竖切＝扫中心列（cols/2+centerColOffset）取各连通域最小 Y、横切＝按 rowRefMode 取交点 minX，稳定排序后重编号全图（CUDA＋Thrust）；在用 07 calibcompute/LaserChain.cpp（标定链）＋factory_calib 模块2 镜像
+- 关键参数与输入约束：达成｜maxLabels=256（上限 4096 超限整帧失败）、centerColOffset=0、scanDirection（0 竖切/1 横切）；仅吃 CV_32SC1 已标记掩膜（上游 region_analyze），质量门禁触发只置 frameRejected、success 仍 true
+- 横切自适应行参考（261107 增）：达成｜`rowRefMode`（0=旧固定中心行可回滚/1=每连通域自身 y 中点行·默认）——斜扇面（边缘线从画面上/下沿出画、不跨中心行）下全画面线可编号；平行线族与旧规则排序一致；门2 展布与粘连拆分同口径在自参考行测量（TDD 51/51，真数据左斜 22 pose 验证全链至 CMTT）
 
 ## 3. 问题与方法
 
 - 〔待定〕问题：无挂账（如有人工裁定项随时补）｜提出 261102｜解决 —
 
 ## 4. 日志
+
+- 261107｜rowRefMode 自适应行编号（0 旧中心行/1 每线中点行默认）＋门禁/拆分自参考行同口径；实现含 cudaMemcpy2DAsync 修正（GpuMat step 对齐）；fc↔09 三文件逐字节镜像；主仓 51 例绿＋全量 107/107（真数据验证详见 factory_calib/AGENTS.md 2026-11-07 节）｜人工触发｜规范 §2.3
 
 - 261102｜现状改目标达成对照制｜规范 §2.3
 - 261102｜转四段新制：目标待人定稿；问题段自下一步迁入（均〔待定〕）｜规范 §2.3
