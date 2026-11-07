@@ -1,4 +1,4 @@
-﻿// FiveChainAdapter.cpp — 适配层实现（自持算子宿主＋07 桥）＋FcHarnessCompat 方法实现
+// FiveChainAdapter.cpp — 适配层实现（自持算子宿主＋07 桥）＋FcHarnessCompat 方法实现
 #include "FiveChainAdapter.h"
 #include "harness.h"
 
@@ -293,9 +293,9 @@ bool FcHarnessCompat::trySubmitBigGraph_(LaserOps& L, scr::CycleProductsCompat& 
 }
 
 int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
-                                        bool record, bool tubeOdd, int laneIdx,
+                                        bool record, int tubeIdx, int laneIdx,
                                         cv::cuda::Stream& ls) {
-    (void)tubeOdd; (void)record;
+    (void)tubeIdx; (void)record;
     ensureGrayLanes(laneIdx + 1);
     auto& gL = d_grayLanesL_[static_cast<size_t>(laneIdx)];
     auto& gR = d_grayLanesR_[static_cast<size_t>(laneIdx)];
@@ -1299,13 +1299,17 @@ bool FcHarnessCompat::mergeNormalCompatible(const cv::Vec3d& a,
 // ============================================================================
 namespace {
 
-/// tubeOdd（＝生产口径 leftSkewFrame）：面片 T/V 交替（tvKnown 时间戳奇偶法，
-/// 未知回退帧号奇偶）；精细/深孔单管恒 true（ScanChains L503-511 同源）
-bool deriveTubeOdd(const Scanner::data::EnhancedFrame& f) {
-    if (f.scanMode == Scanner::ScanMode::FineScan
-        || f.scanMode == Scanner::ScanMode::DeepHoleScan)
-        return true;
-    return f.tvKnown ? f.tvLeftSkew : ((f.frameId % 2) == 0);
+/// tubeIdx（0=T左斜 1=V右斜 2=C深孔 3=D精细）：
+/// 面片交叉 T/V/C/D 交替按帧号取模（启用管数从 N10 推断，暂用帧号取模）；
+/// 精细/深孔单管恒 0（ScanChains 同源口径）
+int deriveTubeIdx(const Scanner::data::EnhancedFrame& f) {
+    if (f.scanMode == Scanner::ScanMode::FineScan)
+        return 3;   // D 管
+    if (f.scanMode == Scanner::ScanMode::DeepHoleScan)
+        return 2;   // C 管
+    // 面片交叉：tvKnown 显式标记 或 帧号取模
+    if (f.tvKnown) return f.tvLeftSkew ? 0 : 1;
+    return static_cast<int>(f.frameId % 4);   // 0=T 1=V 2=C 3=D（四管 N 路取模）
 }
 
 } // namespace
@@ -1330,7 +1334,7 @@ struct FiveChainAdapter::RtBridge {
     // 槽位复用后老帧数据仍存活至在飞结束）
     struct Slot {
         std::atomic<int> seq{-1};               // fc idx（release 写/acquire 读）
-        bool tubeOdd = true;
+        int tubeIdx = true;
         Scanner::data::CalibSnapshot snap;      // Matx 定长——平凡可拷
         double temperature = 0.0;
         std::shared_ptr<const Scanner::data::EnhancedFrame> keep;   // 帧宿主
@@ -1420,7 +1424,7 @@ struct FiveChainAdapter::RtBridge {
             ci.laserIdx = static_cast<int>(i);   // 桥语义：laserIdx 槽位复用透传 fc idx
             const Slot& s = ring[i % kRing];
             if (s.seq.load(std::memory_order_acquire) == static_cast<int>(i))
-                ci.tubeOdd = s.tubeOdd;          // chain1/1b 读取时已填（通道序保证）
+                ci.tubeIdx = s.tubeIdx;          // chain1/1b 读取时已填（通道序保证）
             return ci;
         };
         src.readFrame = [this](int idx, bool left, cv::Mat& out, std::string& err) -> bool {
@@ -1444,7 +1448,7 @@ struct FiveChainAdapter::RtBridge {
                 // 元数据＋帧宿主落槽（release 序——cycleAt/chain 消费方 acquire）
                 Slot& s = ring[static_cast<size_t>(idx) % kRing];
                 s.keep = cur;
-                s.tubeOdd = deriveTubeOdd(*cur);
+                s.tubeIdx = deriveTubeIdx(*cur);
                 s.snap = cur->snapshot;
                 s.temperature = cur->temperature;
                 s.seq.store(idx, std::memory_order_release);
@@ -1482,6 +1486,16 @@ void FiveChainAdapter::attachCalib(const cv::Mat& K1, const cv::Mat& D1,
     rtW_ = imageWidth; rtH_ = imageHeight;
     rtLaserTable_ = std::move(laserTable);
     rtLaserTable2_ = std::move(laserTable2);   // 261007 交叉扫描 V 管（空=单表回退）
+}
+
+void FiveChainAdapter::setTubeTable(int tubeIdx,
+                                     std::shared_ptr<const calib::LaserPlaneMapTempTable> table) {
+    // 存到成员，startRealtime 时转入 harness 对应表位
+    switch (tubeIdx) {
+        case 2: rtLaserTableC_ = std::move(table); break;
+        case 3: rtLaserTableD_ = std::move(table); break;
+        default: break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1634,7 +1648,7 @@ Scanner::Result FiveChainAdapter::loadTestData(const std::string& dir) {
     bridge_->src.cycleAt = [this, n](size_t i) {
         scr::FrameCycleInfo ci;
         ci.laserIdx = static_cast<int>(i % static_cast<size_t>(n));
-        ci.tubeOdd = (i % 2) == 1;
+        ci.tubeIdx = (i % 2) == 1;
         return ci;
     };
     // 快照注入关闭（测试数据用名义标定）
@@ -1855,6 +1869,8 @@ Scanner::Result FiveChainAdapter::startRealtime(
         harness_->tableOdd_ = rtLaserTable_;               // T 管（左斜）表
         // 261007 交叉扫描：tableEven_ 独立装 V 管（右斜）表——缺第二表时回退单表
         harness_->tableEven_ = rtLaserTable2_ ? rtLaserTable2_ : rtLaserTable_;
+        harness_->tableC_ = rtLaserTableC_ ? rtLaserTableC_ : rtLaserTable_;   // C 深孔（缺→回退）
+        harness_->tableD_ = rtLaserTableD_ ? rtLaserTableD_ : rtLaserTable_;   // D 精细（缺→回退）
         harness_->sepLaserL_ = sepL_.get();
         harness_->sepLaserR_ = sepR_.get();
         harness_->voxelFuseOp_ = fuse_.get();

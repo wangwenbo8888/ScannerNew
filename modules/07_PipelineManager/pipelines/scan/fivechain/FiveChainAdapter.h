@@ -133,6 +133,9 @@ public:
                      // 261007 交叉扫描第二表（V 管右斜；空=回退单表）
                      std::shared_ptr<const calib::LaserPlaneMapTempTable> laserTable2 = nullptr);
 
+    /// 261007 交叉扫描：按管索引注入 CMTT 表（tubeIdx: 2=C深孔 3=D精细）
+    void setTubeTable(int tubeIdx, std::shared_ptr<const calib::LaserPlaneMapTempTable> table);
+
     /// 261027 名义温档立体标定注入（config/camera_calib.json——与产表/离线
     /// 验证同源；启用后 harness 用构造期标定，逐帧快照注入关闭）
     void attachStereoNominal(const cv::Mat& R1, const cv::Mat& R2,
@@ -179,6 +182,8 @@ private:
     int rtW_ = 0, rtH_ = 0;
     std::shared_ptr<const calib::LaserPlaneMapTempTable> rtLaserTable_;
     std::shared_ptr<const calib::LaserPlaneMapTempTable> rtLaserTable2_;   // 261007 交叉扫描 V 管
+    std::shared_ptr<const calib::LaserPlaneMapTempTable> rtLaserTableC_;   // 261007 C 管深孔
+    std::shared_ptr<const calib::LaserPlaneMapTempTable> rtLaserTableD_;   // 261007 D 管精细
     bool hasStereoNominal_ = false;               // 名义温档标定已注入
     cv::Mat snR1_, snR2_, snP1_, snP2_, snQ_, snK1c_, snK2c_, snD1_, snD2_;
     cv::Mat snRext_, snTcomp_;

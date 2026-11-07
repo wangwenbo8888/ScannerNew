@@ -696,7 +696,7 @@ ContRun runContinuous(ReplayRig& rig, Scanner::pipeline::FcHarnessCompat* h,
         scr::FrameCycleInfo ci;
         const int id = rig.frameIds[i % static_cast<size_t>(n)];
         ci.laserIdx = id;
-        ci.tubeOdd = (id % 2 == 1);
+        ci.tubeIdx = (id % 2 == 1);
         return ci;
     };
 
@@ -950,7 +950,7 @@ TEST(FcReplay, CropOffsetSolve) {
     rig.src.cycleAt = [&](size_t i) {
         scr::FrameCycleInfo ci;
         ci.laserIdx = static_cast<int>(i);        // 槽位透传 fc idx（帧号=idx%nFrames）
-        ci.tubeOdd = (i % 2) == 1;
+        ci.tubeIdx = (i % 2) == 1;
         return ci;
     };
     rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
@@ -1149,7 +1149,7 @@ TEST(FcReplay, FineCropSolve) {
     rig.src.cycleAt = [&](size_t i) {
         scr::FrameCycleInfo ci;
         ci.laserIdx = static_cast<int>(i);
-        ci.tubeOdd = (i % 2) == 1;
+        ci.tubeIdx = (i % 2) == 1;
         return ci;
     };
     rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
@@ -1273,7 +1273,7 @@ TEST(FcReplay, ConicRejectDiagnosis) {
     rig.src.cycleAt = [&](size_t i) {
         scr::FrameCycleInfo ci;
         ci.laserIdx = static_cast<int>(i);
-        ci.tubeOdd = (i % 2) == 1;
+        ci.tubeIdx = (i % 2) == 1;
         return ci;
     };
     rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
@@ -1543,7 +1543,7 @@ TEST(FcReplay, PerEyeCropSolve) {
     rig.src.cycleAt = [&](size_t i) {
         scr::FrameCycleInfo ci;
         ci.laserIdx = static_cast<int>(i);
-        ci.tubeOdd = (i % 2) == 1;
+        ci.tubeIdx = (i % 2) == 1;
         return ci;
     };
     rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
@@ -1655,7 +1655,7 @@ TEST(FcReplay, ConicCropSolve) {
     rig.src.cycleAt = [&](size_t i) {
         scr::FrameCycleInfo ci;
         ci.laserIdx = static_cast<int>(i);
-        ci.tubeOdd = (i % 2) == 1;
+        ci.tubeIdx = (i % 2) == 1;
         return ci;
     };
     rig.src.readFrame = [&](int idx, bool left, cv::Mat& out, std::string& e) -> bool {
@@ -1830,7 +1830,7 @@ TEST(FcReplay, WhiteboardPlaneDiagnosis) {
         fprintf(stderr, "[PLANE-CHK] obs=%zu 激光帧=%zu degraded=%d\n",
                 snap.obs.size(), snap.laserFrames.size(),
                 static_cast<int>(acc.degradedLaser()));
-        // 261030 首 40 帧点数序列（交替模式＝tubeOdd 奇偶病；随机＝另有因）
+        // 261030 首 40 帧点数序列（交替模式＝tubeIdx 奇偶病；随机＝另有因）
         {
             std::ostringstream seq;
             int shown = 0;

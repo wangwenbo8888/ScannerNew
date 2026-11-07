@@ -74,11 +74,10 @@ hal::CaptureParams effectiveN10(const ParamStore& params, Scanner::ScanMode mode
     p.laserLevel = (mode == Scanner::ScanMode::MarkerOnly)
                        ? 0
                        : static_cast<int>(params.get("laserLevel").value);
-    p.laserT = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // T=左斜线（261105 语义）
-    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // V=右斜线——261107 用户
-                    // 指令恢复交叉扫描 T1V1（MCU 逐帧轮流 T→V→T→V；五链按帧标记分流双 CMTT）
-    p.laserC = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;      // C=深孔线（261105 语义）
-    p.laserD = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;          // D=精细线（261105 语义）
+    p.laserT = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // T=左斜线
+    p.laserV = (mode == Scanner::ScanMode::MarkerPlusLaser) ? 1 : 0;   // V=右斜线（交叉）
+    p.laserC = (mode == Scanner::ScanMode::DeepHoleScan) ? 1 : 0;      // C=深孔线（独立模式）
+    p.laserD = (mode == Scanner::ScanMode::FineScan) ? 1 : 0;          // D=精细线（独立模式）
     p.laserE = 0;   // E=备用中竖25线（261105 第 8 参）——无扫描模式入口，恒关（逐字段覆写铁律）
     return p;
 }

@@ -193,6 +193,19 @@ Scanner::Result ScanPipeline::start() {
                     cmttVPath, lerr2);
             }
         }
+        // 261007 交叉扫描：C 管（深孔）＋ D 管（精细）CMTT
+        {
+            const std::string cmttCPath = "config/curve_map_temp_table_C.bin";
+            std::string lerrC;
+            auto tC = calib::LoadTempTableFromCmtt(cmttCPath, 22.5, lerrC);
+            if (tC) fcAdapter_->setTubeTable(2, tC);
+        }
+        {
+            const std::string cmttDPath = "config/curve_map_temp_table_D.bin";
+            std::string lerrD;
+            auto tD = calib::LoadTempTableFromCmtt(cmttDPath, 22.5, lerrD);
+            if (tD) fcAdapter_->setTubeTable(3, tD);
+        }
         fcAdapter_->attachCalib(K1_, D1_, K2_, D2_, imageWidth_, imageHeight_,
                                 fcTable ? fcTable : laserTable_,
                                 fcTable2);

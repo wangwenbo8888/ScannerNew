@@ -1,4 +1,4 @@
-﻿// harness.h — fc_executor 兼容层（07 PipelineManager 五链集成 261025）
+// harness.h — fc_executor 兼容层（07 PipelineManager 五链集成 261025）
 //
 // 沙盒 fc_executor.h include "harness.h"——本文件提供等价的类型/算子/接口
 // 声明，使 fc_executor.cpp 无需修改即可在 07 编译。实现由 FiveChainAdapter
@@ -80,10 +80,10 @@ struct ScrConfigCompat {
     }
 };
 
-/// 帧源周期信息（fc_executor readerLoop 消费——tubeOdd＝激光管奇偶标记）
+/// 帧源周期信息（fc_executor readerLoop 消费——tubeIdx＝激光管奇偶标记）
 struct FrameCycleInfo {
     int laserIdx = 0;
-    bool tubeOdd = true;
+    int tubeIdx = 0;   // 261007: 0=T 1=V 2=C 3=D
 };
 
 struct FrameSourceCompat {
@@ -347,7 +347,22 @@ public:
 
     // 激光链前段/v3
     std::unique_ptr<calib::LaserMatchScanSplitGpuV3> splitGpu_;
-    std::shared_ptr<const calib::LaserPlaneMapTempTable> tableOdd_, tableEven_;
+    // 261007 交叉扫描：四表位（T左斜/V右斜/C深孔/D精细）
+    std::shared_ptr<const calib::LaserPlaneMapTempTable> tableOdd_;   // tube 0 (T)
+    std::shared_ptr<const calib::LaserPlaneMapTempTable> tableEven_;  // tube 1 (V)
+    std::shared_ptr<const calib::LaserPlaneMapTempTable> tableC_;     // tube 2 (C 深孔)
+    std::shared_ptr<const calib::LaserPlaneMapTempTable> tableD_;     // tube 3 (D 精细)
+
+    /// 按管索引取表（tubeIdx: 0=T 1=V 2=C 3=D；越界回退 tableOdd_）
+    const std::shared_ptr<const calib::LaserPlaneMapTempTable>& tableFor(int tubeIdx) const {
+        switch (tubeIdx) {
+            case 0: return tableOdd_;
+            case 1: return tableEven_;
+            case 2: return tableC_;
+            case 3: return tableD_;
+            default: return tableOdd_;
+        }
+    }
 
     // 融合流指针（fc_executor 写入——fuse 共用）
     cv::cuda::Stream* fcFuseStreamPtr_ = nullptr;
@@ -386,7 +401,7 @@ public:
 
     // 沙盒激光链前段提交/收尾（v3 前段延迟执行；签名＝沙盒 6 参数全）
     int submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p, bool record,
-                          bool tubeOdd, int laneIdx, cv::cuda::Stream& ls);
+                          int tubeIdx, int laneIdx, cv::cuda::Stream& ls);
     void finishLaserFront(LaserOps& L, scr::CycleProductsCompat& p, bool record,
                           int frontKind);
 

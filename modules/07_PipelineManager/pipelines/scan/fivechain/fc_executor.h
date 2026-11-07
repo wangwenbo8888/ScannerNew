@@ -316,11 +316,11 @@ private:
 
     // 【前段提前提交】v3 提交段随 1b 提交相位（排水前）——容量视图＋设备计数
     // 尾闸；false＝未提交（执行器回退排水后整段旧路径）。env：JMW_V3DEFER=0 关
-    bool submitV3FrontDeferred_(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls);
+    bool submitV3FrontDeferred_(FcJob* j, int tubeIdx, cv::cuda::Stream& ls);
     // 【批1·E3】容量提交核心（相位无关）：V3DEFER＝排水前 / V3POSTDEF＝排水后
     // 立刻（消灭排水后到首笔提交的 GPU 空窗）——两臂共用同一提交体
-    bool submitV3FrontCapacity_(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls);
-    void fcV3Front(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls);
+    bool submitV3FrontCapacity_(FcJob* j, int tubeIdx, cv::cuda::Stream& ls);
+    void fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls);
 
     int acquireEBlock();
     void releaseEBlock(int s);

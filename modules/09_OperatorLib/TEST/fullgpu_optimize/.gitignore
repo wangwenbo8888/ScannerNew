@@ -1,0 +1,13 @@
+out/
+build*/
+
+# 大体积数据资产（真机录制不可再生，走交接包/备份盘，不进版本库）
+date_in/
+golden/
+compare/
+归档/实测数据/
+out_fuse_test.ply
+vis_out/
+out_allfull/
+备份*.zip
+tools/*.exe

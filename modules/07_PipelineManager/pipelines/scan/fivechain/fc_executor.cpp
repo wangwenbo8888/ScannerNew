@@ -1,4 +1,4 @@
-﻿// fc_executor.cpp — 【五链 P2】五链流水线执行器实现
+// fc_executor.cpp — 【五链 P2】五链流水线执行器实现
 // 设计：五链并行流水线重构-设计方案-2026-10-21.md §二/§十 P2。头文件见 fc_executor.h。
 // 2026-10-21 调优会话：①二分 1a/1b 默认开（A/B/A/B 实测 131.8-137.2 vs 单线程
 // 113.5-118.7 FPS；历史 42.8 病理未复现，诱因模式已改 cv 阻塞＋lmask 多槽环）
@@ -721,7 +721,7 @@ void FiveChainExecutor::fcSeparation(FcJob* j) {
     }
 }
 
-void FiveChainExecutor::fcV3Front(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls) {
+void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
     auto& p = j->prod;
     auto& L = h_.laserOps_;
     if (!h_.stepOk(p, "epipolar_interp_dual")) return;
@@ -781,7 +781,7 @@ void FiveChainExecutor::fcV3Front(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls) 
             splitGpu_->FinishFront(p.interpL.interpCount, p.interpR.interpCount,
                                    ls, j->front);
         } else {
-            splitGpu_->SetTempTable(tubeOdd ? h_.tableOdd_ : h_.tableEven_);
+            splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
             splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
             // ══【B4】前段提交图化（【批D·c2】默认开——JMW_V3FRONTGRAPH=0 显式关；
             //    JMW_NOGRAPH=1 总闸优先；发射相位＝排水后窗口，本函数即排水后
@@ -830,7 +830,7 @@ void FiveChainExecutor::fcV3Front(FcJob* j, bool tubeOdd, cv::cuda::Stream& ls) 
 // 【批1·E3】容量提交核心（相位无关）——V3DEFER（排水前）与 V3POSTDEF（排水后
 // 立刻）共用：容量视图＋设备输出计数尾闸，成功置 j->v3Deferred（fcV3Front 走
 // FinishFront 收尾）。失败返回 false＝调用方回退旧路径（幂等重做）。
-bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, bool tubeOdd,
+bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, int tubeIdx,
                                                cv::cuda::Stream& ls) {
     auto& L = h_.laserOps_;
     if (fullGpu_) return false;   // 全GPU臂：不产 front——回退路径即环槽搬运
@@ -840,7 +840,7 @@ bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, bool tubeOdd,
     cv::cuda::GpuMat ptsR = L.interpR_->GetCapacityPointsView();
     cv::cuda::GpuMat idsR = L.interpR_->GetCapacityIdsView();
     if (ptsL.empty() || ptsR.empty() || idsL.empty() || idsR.empty()) return false;
-    splitGpu_->SetTempTable(tubeOdd ? h_.tableOdd_ : h_.tableEven_);
+    splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
     splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
     splitGpu_->ExecuteDeferred(ptsL, idsL, L.interpL_->GetOutputCountPtr(),
                                ptsR, idsR, L.interpR_->GetOutputCountPtr(),
@@ -852,7 +852,7 @@ bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, bool tubeOdd,
 
 // 【前段提前提交】v3 提交段（排水前）：容量视图＋设备输出计数尾闸。失败/关闭/
 // legacy 臂一律返回 false——执行器走排水后整段旧路径（行为与旧版逐字一致）
-bool FiveChainExecutor::submitV3FrontDeferred_(FcJob* j, bool tubeOdd,
+bool FiveChainExecutor::submitV3FrontDeferred_(FcJob* j, int tubeIdx,
                                                cv::cuda::Stream& ls) {
     // ⚠️【2026-10-23 实测证伪·默认关】JMW_V3DEFER=1 才启用（实验臂）。两对 ABBA
     // 实测开启稳定慢 8-12 FPS（126.7/139.9 vs 139.0/148.3）：排水等待在 1b 关键
@@ -867,7 +867,7 @@ bool FiveChainExecutor::submitV3FrontDeferred_(FcJob* j, bool tubeOdd,
     static const bool legacyArm_ = getenv("JMW_K2A_LEGACY") != nullptr
                                    || getenv("JMW_K2_LEGACY") != nullptr;
     if (!on_ || legacyArm_ || fullGpu_) return false;
-    return submitV3FrontCapacity_(j, tubeOdd, ls);
+    return submitV3FrontCapacity_(j, tubeIdx, ls);
 }
 
 // ============================================================================
@@ -1039,7 +1039,7 @@ void FiveChainExecutor::chain1Loop() {
         }
         // 【probe v2】命中判定＋快照槽分配（帧首唯一 set 查找点）
         probeSnapEnsure_(j);
-        const bool tubeOdd = h_.src_->cycles[static_cast<size_t>(j->idx)].tubeOdd;
+        const int tubeIdx = h_.src_->cycles[static_cast<size_t>(j->idx)].tubeIdx;
         if (busyProbe_ && metricsOn_ && recs_)
             cudaEventRecord(evBusy1aA_[static_cast<size_t>(j->idx) % static_cast<size_t>(busyRing_ + 1)],
                             cv::cuda::StreamAccessor::getStream(gS_));
@@ -1084,11 +1084,11 @@ void FiveChainExecutor::chain1Loop() {
         int frontKind = 0;
         if (j->sepDone)
             frontKind = h_.submitLaserFront(h_.laserOps_, j->prod, j->record,
-                                            tubeOdd, j->idx % graySlots_, gS_);
+                                            tubeIdx, j->idx % graySlots_, gS_);
         // 【前段提前提交】v3 提交段随提交相位（排水前）——容量视图＋计数尾闸
         //（判据用 interp 结果字段：延迟分支提交段不落 stepOk——那是完成段的事）
         if (frontKind == 1 && j->prod.interpL.success && j->prod.interpR.success)
-            submitV3FrontDeferred_(j, tubeOdd, gS_);
+            submitV3FrontDeferred_(j, tubeIdx, gS_);
         // 【probe v2】1b 段快照 D2H 入队（gS_，同流——本回退路径前段提交与排水
         // 均在 gS_，D2H 必须同流入队防错帧/逃出排水）——排水（waitForCompletion）
         // 之前入队＝宿主落地由既有排水覆盖；frontKind==0 未提交任何内核，视图
@@ -1113,7 +1113,7 @@ void FiveChainExecutor::chain1Loop() {
             if (h_.stepOk(j->prod, "steger_fast")
                 && h_.stepOk(j->prod, "undistort_cuda")
                 && h_.stepOk(j->prod, "epipolar_interp_dual"))
-                fcV3Front(j, tubeOdd, gS_);
+                fcV3Front(j, tubeIdx, gS_);
         }
 
         // RLE runs 拷出【E3】：正常路径 gpuDrained（flat 排水含 evGate 传递→RLE D2H
@@ -1556,7 +1556,7 @@ void FiveChainExecutor::chain1bLoop() {
             chD_.push(j);
             continue;
         }
-        const bool tubeOdd = h_.src_->cycles[static_cast<size_t>(j->idx)].tubeOdd;
+        const int tubeIdx = h_.src_->cycles[static_cast<size_t>(j->idx)].tubeIdx;
         if (j->sepDone) {
             // 提交序闸门（防 wait 捕获旧记录——cv 阻塞）→ 流级等 1a 的 D2D/RLE 完成
             waitCounterGe_(gateFed_, j->idx);
@@ -1569,11 +1569,11 @@ void FiveChainExecutor::chain1bLoop() {
         int frontKind = 0;
         if (j->sepDone)
             frontKind = h_.submitLaserFront(h_.laserOps_, j->prod, j->record,
-                                            tubeOdd, j->idx % graySlots_, gS2_);
+                                            tubeIdx, j->idx % graySlots_, gS2_);
         // 【前段提前提交】v3 提交段随提交相位（排水前）——容量视图＋计数尾闸
         //（判据用 interp 结果字段：延迟分支提交段不落 stepOk——那是完成段的事）
         if (frontKind == 1 && j->prod.interpL.success && j->prod.interpR.success)
-            submitV3FrontDeferred_(j, tubeOdd, gS2_);
+            submitV3FrontDeferred_(j, tubeIdx, gS2_);
         // 【probe v2】1b 段快照 D2H 入队（gS2_，同流）——入队先于下方排水（evD_/
         // waitForCompletion）＝宿主落地由既有排水覆盖；frontKind==0 未提交任何
         // 内核，prod 视图是上帧残数据——跳过（宁缺勿错）
@@ -1667,7 +1667,7 @@ void FiveChainExecutor::chain1bLoop() {
                                                || getenv("JMW_K2_LEGACY") != nullptr;
             if (postdefOn_ && !postdefLegacy_ && frontKind == 1 && !j->v3Deferred
                 && j->prod.interpL.success && j->prod.interpR.success)
-                submitV3FrontCapacity_(j, tubeOdd, gS2_);
+                submitV3FrontCapacity_(j, tubeIdx, gS2_);
             h_.finishLaserFront(h_.laserOps_, j->prod, j->record, frontKind);
             // 【I-1】interp 快照同步下载：FinishInterp 刚建好精确 N 视图——此处
             // 到本线程下一帧提交是串行窗，算子缓冲必为本帧内容
@@ -1676,7 +1676,7 @@ void FiveChainExecutor::chain1bLoop() {
             if (h_.stepOk(j->prod, "steger_fast")
                 && h_.stepOk(j->prod, "undistort_cuda")
                 && h_.stepOk(j->prod, "epipolar_interp_dual"))
-                fcV3Front(j, tubeOdd, gS2_);
+                fcV3Front(j, tubeIdx, gS2_);
         }
 
         if (busyProbe_ && metricsOn_ && recs_) {
@@ -2199,13 +2199,13 @@ void FiveChainExecutor::ch2FullGpu_(FcJob* j) {
                              cv::Rect(0, 0, nr, 1));
         cv::cuda::GpuMat vIR(iRingIdsR_[static_cast<size_t>(s)],
                              cv::Rect(0, 0, nr, 1));
-        const bool tubeOdd =
-            h_.src_->cycles[static_cast<size_t>(j->idx)].tubeOdd;
+        const int tubeIdx =
+            h_.src_->cycles[static_cast<size_t>(j->idx)].tubeIdx;
         // 等 1b 的 D2D 拷贝完成（跨流事件）——之后 cS_ 流才可读环槽
         cudaStreamWaitEvent(cv::cuda::StreamAccessor::getStream(cS_),
                             evIRing_[static_cast<size_t>(s)], 0);
         h_.timeBegin();
-        matchFull_->SetTempTable(tubeOdd ? h_.tableOdd_ : h_.tableEven_);
+        matchFull_->SetTempTable(h_.tableFor(tubeIdx));
         matchFull_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
         mr = matchFull_->Execute(vPL, vIL, vPR, vIR, cS_);
         j->prod.laserMatched = mr.matchedCount;
