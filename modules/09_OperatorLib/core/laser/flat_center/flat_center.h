@@ -61,6 +61,14 @@ struct FlatCenterParams {
     bool smooth3 = true;          // 3 点滑动平均（统计遍/找沿遍/括号重心同款口径；
                                   // 段端读段外原始灰度、图像边界钳位）
     int maxLabels = 256;          // 契约兼容保留；K2 hist 沿用 steger 硬编码 4096 bins
+    // 261107 竖带模式（scanAxis=1）：1 线程/行、段沿 x、段内去背景亮度加权
+    // 质心＝带中心——为竖直激光带（如精细 D 管 30~100px 斑驳宽带）设计；
+    // 行模式只有质心语义（平顶/半高链不适用宽带形态）。0=列扫描（水平线，
+    // 原路径逐位不动）。
+    int scanAxis = 0;
+    // 261107 行模式段合并（gap≤本值的同 label 断口桥接为一段再取质心——
+    // 带内暗纹切碎行段致碎段质心偏移带中心＝小段错位实证）；0=off
+    int segMergeGap = 8;
     int deviceId = 0;
 
     void validate() const {
@@ -82,6 +90,10 @@ struct FlatCenterParams {
             throw std::invalid_argument("FlatCenterParams::maxLineWidth must be >= 0 (0=off)");
         if (maxLabels < 1 || maxLabels > 4096)
             throw std::invalid_argument("FlatCenterParams::maxLabels must be [1, 4096]");
+        if (scanAxis != 0 && scanAxis != 1)
+            throw std::invalid_argument("FlatCenterParams::scanAxis must be 0 (col) or 1 (row)");
+        if (segMergeGap < 0 || segMergeGap > 63)
+            throw std::invalid_argument("FlatCenterParams::segMergeGap must be [0, 63]");
         if (deviceId < 0)
             throw std::invalid_argument("FlatCenterParams::deviceId must be >= 0");
     }
@@ -98,6 +110,8 @@ struct FlatCenterParams {
             {"maxLineWidth", maxLineWidth},
             {"smooth3", smooth3},
             {"maxLabels", maxLabels},
+            {"scanAxis", scanAxis},
+            {"segMergeGap", segMergeGap},
             {"deviceId", deviceId}
         };
     }
@@ -114,6 +128,8 @@ struct FlatCenterParams {
         if (j.contains("maxLineWidth")) p.maxLineWidth = j.at("maxLineWidth").get<float>();
         if (j.contains("smooth3")) p.smooth3 = j.at("smooth3").get<bool>();
         if (j.contains("maxLabels")) p.maxLabels = j.at("maxLabels").get<int>();
+        if (j.contains("scanAxis")) p.scanAxis = j.at("scanAxis").get<int>();
+        if (j.contains("segMergeGap")) p.segMergeGap = j.at("segMergeGap").get<int>();
         if (j.contains("deviceId")) p.deviceId = j.at("deviceId").get<int>();
         p.validate();
         return p;

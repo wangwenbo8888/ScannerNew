@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file flat_center_impl.cu
  * @brief 平顶激光中心提取算子（flat_center）CUDA 实现 — Task 2 桩版
  *
@@ -152,6 +152,92 @@ struct FlatK1Ctx {
     int* d_stats; int max_points;
 };
 
+// ============================================================================
+// 261107 行模式（scanAxis=1）——竖直激光带质心提取
+// 1 线程/行；段沿 x（连续同 label 掩膜段）；段内去背景亮度加权质心＝带中心。
+// 门：minRun / bright(vmax) / contrast / 段宽 max_line_width（FWHM 口径简化
+// 为段宽，0=off）。输出点 (cx, y)——x 向亚像素质心、y 为整数行（行栅格化
+// 由下游 interp 承担）。列模式（原路径）不经过本函数——逐位契约不动。
+// ============================================================================
+template <bool MASK8>
+__device__ __forceinline__ void flatCenterK1BodyRow(const FlatK1Ctx& c, int merge_gap)
+{
+    const int y = blockIdx.x * blockDim.x + threadIdx.x;
+    if (y >= c.rows) return;
+    const int bands = gridDim.y;
+    const int bw = (c.cols + bands - 1) / bands;
+    const int left = blockIdx.y * bw;
+    if (left >= c.cols) return;
+    const int right = min(c.cols, left + bw);
+    int* d_count = c.d_stats;
+    int* d_drop  = c.d_stats + 1;   // [0]minRun [1]contrast [2]bright [3]edge [4]gate [5]width
+    auto maskAt = [&](int xx) -> int {
+        if (MASK8)
+            return reinterpret_cast<const unsigned char*>(
+                reinterpret_cast<const char*>(c.d_mask) + (size_t)y * c.mask_step)[xx] > 0 ? 1 : 0;
+        return reinterpret_cast<const int*>(
+            reinterpret_cast<const char*>(c.d_mask) + (size_t)y * c.mask_step)[xx];
+    };
+    auto RD = [&](int xx) -> float {
+        return reinterpret_cast<const unsigned char*>(
+            reinterpret_cast<const char*>(c.d_gray) + (size_t)y * c.gray_step)[xx];
+    };
+    int x = left;
+    while (x < right) {
+        const int label = maskAt(x);
+        if (label <= 0) { ++x; continue; }
+        if (x == left && left > 0 && maskAt(left - 1) == label) {
+            while (x < c.cols && maskAt(x) == label) ++x;
+            continue;
+        }
+        const int x0 = x;
+        // 261107 段合并：gap≤merge_gap 的纯背景断口桥接（带内暗纹在 mask 上
+        // 为 0——桥接后段完整、质心=带中心）；异 label（邻近带）禁止桥接
+        int lastLabelX = x;
+        while (true) {
+            while (x < c.cols && maskAt(x) == label) { lastLabelX = x; ++x; }
+            if (merge_gap <= 0 || x >= c.cols) break;
+            int g = 0;
+            while (g < merge_gap && x + g < c.cols && maskAt(x + g) == 0) ++g;
+            if (g < merge_gap && x + g < c.cols && maskAt(x + g) == label) {
+                x += g;   // 背景断口 ≤gap 且末端回同 label——桥接继续
+                continue;
+            }
+            break;
+        }
+        const int x1 = lastLabelX + 1, len = x1 - x0;
+        if (len < c.min_run) { atomicAdd(&d_drop[0], 1); continue; }
+        // 统计：vmax/vmin（质心去背景基准）
+        float vmax = -1.f, vmin = 1e9f;
+        for (int k = x0; k < x1; ++k) {
+            const float v = RD(k);
+            if (v > vmax) vmax = v;
+            if (v < vmin) vmin = v;
+        }
+        if (vmax < c.low_thresh) { atomicAdd(&d_drop[2], 1); continue; }
+        if (vmax - vmin < c.min_contrast) { atomicAdd(&d_drop[1], 1); continue; }
+        if (c.max_line_width > 0.f && static_cast<float>(len) > c.max_line_width) {
+            atomicAdd(&d_drop[5], 1); continue;
+        }
+        // 去背景亮度加权质心（vmin≈段端衬底＝天然背景扣除）
+        float sw = 0.f, sx = 0.f;
+        for (int k = x0; k < x1; ++k) {
+            const float w = RD(k) - vmin;
+            if (w > 0.f) { sw += w; sx += k * w; }
+        }
+        if (sw < 1e-6f) { atomicAdd(&d_drop[1], 1); continue; }
+        const float cx = sx / sw;
+        if (!(cx == cx) || cx < -1.f || cx > c.cols) {
+            atomicAdd(&d_drop[4], 1); continue;
+        }
+        const int idx = atomicAdd(d_count, 1);
+        if (idx < c.max_points) {
+            c.d_coords[idx] = make_float2(cx, static_cast<float>(y));
+            c.d_ids[idx] = label;
+        }
+    }
+}
+
 template <bool MASK8>
 __device__ __forceinline__ void flatCenterK1Body(const FlatK1Ctx& c)
 {
@@ -276,6 +362,21 @@ __device__ __forceinline__ void flatCenterK1Body(const FlatK1Ctx& c)
 }
 
 template <bool MASK8>
+__global__ void FlatCenterK1Row(
+    const unsigned char* __restrict__ d_gray, const void* __restrict__ d_mask,
+    size_t gray_step, size_t mask_step, int rows, int cols,
+    int min_run, float low_thresh, float min_contrast, float max_line_width,
+    int merge_gap,
+    float2* __restrict__ d_coords, int* __restrict__ d_ids,
+    int* __restrict__ d_stats, int max_points)
+{
+    FlatK1Ctx c{d_gray, d_mask, gray_step, mask_step, rows, cols,
+                low_thresh, 0.f, 0.f, 0, min_contrast, 0.f, max_line_width,
+                min_run, false, nullptr, d_coords, d_ids, d_stats, max_points};
+    flatCenterK1BodyRow<MASK8>(c, merge_gap);
+}
+
+template <bool MASK8>
 __global__ void FlatCenterK1(
     const unsigned char* __restrict__ d_gray, const void* __restrict__ d_mask,
     size_t gray_step, size_t mask_step, int rows, int cols,
@@ -335,6 +436,7 @@ StegerResult FlatCenterExtractor::Impl::extractFlatSubmit(
     // 【flat 优化·宏打包】usePre 且未禁用时 [PreSmooth+K1] 免改参数图一次发射
     //（全参数跨帧稳定；首次捕获前排空本流——WDDM 规则）
     const bool usePre = params_.smooth3
+                        && params_.scanAxis != 1   // 261107 行模式：RD 直读原灰度（竖带质心不需要预平滑——列模式契约不动）
                         && !(getenv("JMW_FLATPRE") && getenv("JMW_FLATPRE")[0] == '0');
     // 【flat 优化·宏打包】【批D·c2 默认开】flat 图翻转放行——历史「多收尾 lane
     // 必崩 0xC0000005 ×3/3」在现架构（P2-4 link 入图/B5 事件合一/C RLE 图后）
@@ -480,6 +582,17 @@ StegerResult FlatCenterExtractor::Impl::extractFlatSubmit(
         int nbands = 96;   // 【BANDS 定界】同 nbandsG（nsys 实测 96 最优）
         if (const char* e = getenv("JMW_FLATBANDS"))
             nbands = std::max(1, std::min(128, atoi(e)));
+        if (params_.scanAxis == 1) {
+            // 261107 行模式（scanAxis=1）：竖带质心——1 线程/行、段沿 x
+            const dim3 block2(256);
+            const dim3 grid2(static_cast<unsigned>((rows + 255) / 256), 16);
+            FlatCenterK1Row<true><<<grid2, block2, 0, cs>>>(
+                d_grayImage.ptr<unsigned char>(), d_binaryMask.ptr<unsigned char>(),
+                d_grayImage.step, d_binaryMask.step, rows, cols,
+                params_.minRunLength, params_.lowThreshold, params_.minContrast,
+                params_.maxLineWidth, params_.segMergeGap, d_coords_, d_ids_, d_stats_,
+                FlatCenterExtractor::kOutCap);
+        } else {
         const dim3 block(256),
             grid((cols + 255) / 256, static_cast<unsigned>(nbands));
         FlatCenterK1<true><<<grid, block, 0, cs>>>(
@@ -490,6 +603,7 @@ StegerResult FlatCenterExtractor::Impl::extractFlatSubmit(
             params_.maxLineWidth, params_.minRunLength, params_.smooth3,
             static_cast<const float*>(nullptr),
             d_coords_, d_ids_, d_stats_, FlatCenterExtractor::kOutCap);   // 【E5】
+        }
         const cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             result.success = false;
@@ -658,6 +772,27 @@ StegerResult FlatCenterExtractor::Impl::Execute(
     cudaMemsetAsync(d_stats_, 0, 7 * sizeof(int), cs);
     if (bench_ && events_ready_) cudaEventRecord(ev_start_, cs);
 
+    if (params_.scanAxis == 1) {
+        // 261107 行模式（scanAxis=1）：竖带质心——1 线程/行、段沿 x、
+        // 段内去背景亮度加权质心（平顶/半高链不适用宽带）；收尾（stats
+        // D2H/分组/出壳）复用下方 32S 原路
+        const dim3 block2(256);
+        const dim3 grid2(static_cast<unsigned>((rows + 255) / 256), 16);
+        FlatCenterK1Row<false><<<grid2, block2, 0, cs>>>(
+            d_grayImage.ptr<unsigned char>(), d_labeledMask.ptr(),
+            d_grayImage.step, d_labeledMask.step, rows, cols,
+            params_.minRunLength, params_.lowThreshold, params_.minContrast,
+            params_.maxLineWidth, params_.segMergeGap, d_coords_, d_ids_, d_stats_,
+            FlatCenterExtractor::kOutCap);
+        const cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            result.success = false;
+            result.message = std::string("[10-FlatCenterExtractor] row-kernel launch failed: ")
+                             + cudaGetErrorString(err);
+            CALIB_LOG_ERROR("{}", result.message);
+            return result;
+        }
+    } else {
     {
         const dim3 block(256), grid((cols + 255) / 256, 8);   // 列带×8（设计 §4 备选）
         FlatCenterK1<false><<<grid, block, 0, cs>>>(
@@ -676,6 +811,7 @@ StegerResult FlatCenterExtractor::Impl::Execute(
             CALIB_LOG_ERROR("{}", result.message);
             return result;
         }
+    }
     }
     if (bench_ && events_ready_) cudaEventRecord(ev_scan_, cs);
 
