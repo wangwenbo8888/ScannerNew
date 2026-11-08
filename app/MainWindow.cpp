@@ -294,7 +294,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         // 改每信号直更）：当前扫描会话节点「标记点 00N (M)」＝
                         // 重建标志点个数（融合云瞬时点数）；历史会话节点保留
                         // 各自最终值；点云数据由落库后 cloudTimer 更新
-                        if (m_markerCurrentItem)
+                        if (m_markerCurrentItem && !pts.empty())
                             m_markerCurrentItem->setText(
                                 0, QStringLiteral("标记点 %1 (%2)")
                                           .arg(m_markerScanSeq, 3, 10, QChar('0'))
