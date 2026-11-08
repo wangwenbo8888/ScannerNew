@@ -76,6 +76,18 @@ OSGWidget::~OSGWidget()
         m_streamFile.close();
 }
 
+// 261108 需求：点大小随用户体素分辨率（密度档）——voxel×6px（0.5mm→3px
+// 出厂基准）。app 组合根会话启动时注入；m_cloudRoot 惰性创建先存值。
+void OSGWidget::setCloudVoxelMm(double mm)
+{
+    m_cloudVoxelMm = mm;
+    if (m_cloudRoot && mm > 0.0) {
+        osg::ref_ptr<osg::Point> ps = new osg::Point;
+        ps->setSize(static_cast<float>(mm * 6.0));
+        m_cloudRoot->getOrCreateStateSet()->setAttribute(ps);
+    }
+}
+
 void OSGWidget::setSceneData(osg::Node *node)
 {
     m_root->removeChildren(0, m_root->getNumChildren());
@@ -2341,9 +2353,12 @@ void OSGWidget::loadPointCloudWithNormals(const std::vector<osg::Vec3>& points,
         m_cloudRoot->addChild(m_cloudGeode);
         m_root->addChild(m_cloudRoot);
 
-        // 点大小
+        // 点大小：用户体素档优先（voxel×6px——261108 需求：显示分辨率跟随
+        // 用户密度设置）；未注入时出厂 3.0px
         osg::ref_ptr<osg::Point> pointSize = new osg::Point;
-        pointSize->setSize(3.0f);
+        pointSize->setSize(m_cloudVoxelMm > 0.0
+                               ? static_cast<float>(m_cloudVoxelMm * 6.0)
+                               : 3.0f);
         m_cloudRoot->getOrCreateStateSet()->setAttribute(pointSize);
 
         m_cloudCoords = new osg::Vec3Array;

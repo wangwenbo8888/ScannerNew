@@ -37,6 +37,11 @@ public:
     osgViewer::Viewer* viewer() { return m_viewer.get(); }
     osg::Group* root() { return m_root.get(); }
 
+    /// 261108 点大小随体素分辨率（用户密度档）：点大小=voxel×6px（0.5mm→3px
+    /// 出厂基准、0.25→1.5px、1.0→6px）。app 组合根在会话启动时注入（03 不
+    /// 反向依赖 02/08——禁令口径）。mm<=0 忽略。
+    void setCloudVoxelMm(double mm);
+
     void loadPointCloud(const std::vector<osg::Vec3>& points);
     void loadPointCloud(const std::vector<osg::Vec3>& points,
                         const std::vector<osg::Vec4ub>& colors);
@@ -402,6 +407,7 @@ private:
 
     // LeadScan 移植：动态点云几何
     osg::ref_ptr<osg::Group> m_cloudRoot;       // 点云根节点
+    double m_cloudVoxelMm = 0.0;                // 261108 用户体素档（0=未注入→出厂 3px）
     osg::ref_ptr<osg::Group> m_markerRoot;      // 标志点根节点
     osg::ref_ptr<osg::Geode> m_cloudGeode;      // 点云叶节点
     osg::ref_ptr<osg::Geode> m_markerGeode;     // 标志点叶节点

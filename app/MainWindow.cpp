@@ -2362,6 +2362,12 @@ QWidget *MainWindow::createToolBar()
                 } else {
                     setScanButtonVisual(myIdx, true);          // 只有本键变红
                     m_activeScanToolIdx = myIdx;
+                    // 261108 显示点大小随用户体素档（会话启动注入——密度
+                    // 档是会话级参数，运行中改档下会话生效）
+                    if (m_3dView && m_appCtx && m_appCtx->deviceManager()) {
+                        const double vm = m_appCtx->deviceManager()->voxelLadderValue();
+                        if (vm > 0.0) m_3dView->setCloudVoxelMm(vm);
+                    }
                     m_sessionSimExtract = m_appCtx->simExtract();   // 会话开关基线（续采变体检测）
                     // 工程树：首个扫描会话建「标记点 001」，后续会话（标点/面片/
                     // 精细/深孔）复用同一节点不新建（有对应类型即可——用户口径 2026-09-05）；
