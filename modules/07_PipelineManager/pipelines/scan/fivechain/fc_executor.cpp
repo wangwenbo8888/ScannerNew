@@ -342,14 +342,6 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
         h_.cfg_.opParams("laser_match_scan_v3"));
     splitGpu_ = std::make_unique<calib::LaserMatchScanSplitGpuV3>(v3p);
     splitCpu_ = std::make_unique<calib::LaserMatchScanSplitCpuV3>(v3p);
-    // 261108 四管常驻实例：T/V/C/D 各一个（构造期各装各表，运行期零换表）
-    for (int t = 0; t < 4; ++t) {
-        splitTubes_[static_cast<size_t>(t)] =
-            std::make_unique<calib::LaserMatchScanSplitGpuV3>(v3p);
-        splitTubes_[static_cast<size_t>(t)]->SetTempTable(h_.tableFor(t));
-        splitTubes_[static_cast<size_t>(t)]->
-            SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
-    }
     // 261007 参数跟帧走：T/V 共用（组 0——面片逐帧交替下每帧 SetParams 会
     // 重置算子 warmup 引发崩溃）；窗 [34,86] 同盖 T 实测 61~87 与 V 39~62
     for (int t = 0; t < 4; ++t) h_.v3TubeParams_[t] = v3p;
@@ -811,13 +803,11 @@ void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
             splitGpu_->FinishFront(p.interpL.interpCount, p.interpR.interpCount,
                                    ls, j->front);
         } else {
-            // 261108 四管常驻实例：T/V/C/D 各一个，运行期零换表（O(N) 根除）
-            calib::LaserMatchScanSplitGpuV3* sg = splitGpu_.get();
-            if (tubeIdx >= 0 && tubeIdx < 4 && splitTubes_[static_cast<size_t>(tubeIdx)])
-                sg = splitTubes_[static_cast<size_t>(tubeIdx)].get();
-            else
-                splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
-            sg->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+            splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
+            if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
+                    != Harness::v3ParamGroupOf(tubeIdx))
+                splitGpu_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
+            splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
             // ══【B4】前段提交图化（【批D·c2】默认开——JMW_V3FRONTGRAPH=0 显式关；
             //    JMW_NOGRAPH=1 总闸优先；发射相位＝排水后窗口，本函数即排水后
             //    调用点——非已证伪的 defer 相位；单 env，禁带 V3DEFER）══
@@ -836,12 +826,12 @@ void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
                     cv::cuda::GpuMat gPtsR = Lg.interpR_->GetCapacityPointsView();
                     cv::cuda::GpuMat gIdsR = Lg.interpR_->GetCapacityIdsView();
                     if (!gPtsL.empty() && !gIdsL.empty() && !gPtsR.empty() && !gIdsR.empty()) {
-                        sg->ExecuteFrontGraph(
+                        splitGpu_->ExecuteFrontGraph(
                             gPtsL, gIdsL, Lg.interpL_->GetOutputCountPtr(),
                             gPtsR, gIdsR, Lg.interpR_->GetOutputCountPtr(),
                             ls, j->front);
                         if (j->front.success && j->front.leftCount == -1) {
-                            sg->FinishFront(p.interpL.interpCount,
+                            splitGpu_->FinishFront(p.interpL.interpCount,
                                                    p.interpR.interpCount, ls, j->front);
                             graphDone = true;
                         }
@@ -849,7 +839,7 @@ void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
                 }
             }
             if (!graphDone)
-                sg->Execute(*p.interpL.d_interpPoints, *p.interpL.d_interp_line_ids,
+                splitGpu_->Execute(*p.interpL.d_interpPoints, *p.interpL.d_interp_line_ids,
                                    *p.interpR.d_interpPoints, *p.interpR.d_interp_line_ids,
                                    ls, j->front);
         }
@@ -875,14 +865,12 @@ bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, int tubeIdx,
     cv::cuda::GpuMat ptsR = L.interpR_->GetCapacityPointsView();
     cv::cuda::GpuMat idsR = L.interpR_->GetCapacityIdsView();
     if (ptsL.empty() || ptsR.empty() || idsL.empty() || idsR.empty()) return false;
-    // 261108 四实例选路（deferred 路径——与 graph 路径同构，零换表）
-    calib::LaserMatchScanSplitGpuV3* sgD = splitGpu_.get();
-    if (tubeIdx >= 0 && tubeIdx < 4 && splitTubes_[static_cast<size_t>(tubeIdx)])
-        sgD = splitTubes_[static_cast<size_t>(tubeIdx)].get();
-    else
-        splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
-    sgD->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
-    sgD->ExecuteDeferred(ptsL, idsL, L.interpL_->GetOutputCountPtr(),
+    splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
+    if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
+            != Harness::v3ParamGroupOf(tubeIdx))
+        splitGpu_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
+    splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+    splitGpu_->ExecuteDeferred(ptsL, idsL, L.interpL_->GetOutputCountPtr(),
                                ptsR, idsR, L.interpR_->GetOutputCountPtr(),
                                ls, j->front);
     if (!j->front.success) return false;   // 提交失败——回退旧路径（幂等重做）

@@ -517,114 +517,124 @@ void LaserMatchScanCudaV3::Impl::SetCurrentTemperature(double temperature) {
 void LaserMatchScanCudaV3::Impl::uploadMapTable(
     const TempTableEntry& entry, cv::cuda::Stream& stream)
 {
-    activeMapCount_ = entry.entryCount;
-    activeNumLines_ = entry.numLines;
-
-    cv::Mat h_map(activeMapCount_, 1, CV_32FC4,
-                  const_cast<float*>(entry.mapData.data()));
-    d_map_table_.upload(h_map, stream);
-
-    std::vector<int> h_line_start(activeNumLines_, 0);
-    std::vector<int> h_line_count(activeNumLines_, 0);
-
-    for (int i = 0; i < activeMapCount_; ++i) {
-        int lid = static_cast<int>(entry.mapData[i * 4 + 3]);
-        if (lid >= 0 && lid < activeNumLines_) {
-            if (h_line_count[lid] == 0) {
-                h_line_start[lid] = i;
+    // 261108 byrow 预计算缓存：首次计算（~80ms），后续直接用（~0ms）
+    //  T/V 交替时每帧 uploadMapTable 从 ~100ms 降到 ~10ms（纯 GPU memcpy）
+    if (!entry.byrowReady) {
+        // ---- 首次：CPU 计算 byrow CSR + line start/count（原路径）----
+        TempTableEntry& e = const_cast<TempTableEntry&>(entry);
+        int N = e.entryCount;
+        e.lineStartData.assign(e.numLines, 0);
+        e.lineCountData.assign(e.numLines, 0);
+        for (int i = 0; i < N; ++i) {
+            int lid = static_cast<int>(e.mapData[i * 4 + 3]);
+            if (lid >= 0 && lid < e.numLines) {
+                if (e.lineCountData[lid] == 0) e.lineStartData[lid] = i;
+                e.lineCountData[lid]++;
             }
-            h_line_count[lid]++;
         }
-    }
-
-    cv::Mat h_ls(1, activeNumLines_, CV_32SC1, h_line_start.data());
-    cv::Mat h_lc(1, activeNumLines_, CV_32SC1, h_line_count.data());
-    d_map_line_start_.upload(h_ls, stream);
-    d_map_line_count_.upload(h_lc, stream);
-
-    // Build by-row CSR view for global (scan-mode) lookup
-    {
-        int N = activeMapCount_;
         std::vector<std::vector<int>> buckets(MAX_EPIPOLAR_ROWS);
         for (int i = 0; i < N; ++i) {
-            float yL = entry.mapData[i * 4 + 1];
+            float yL = e.mapData[i * 4 + 1];
             int row = (int)std::round(yL / params_.epipolar_row_step);
             if (row < 0) row = 0;
             if (row >= MAX_EPIPOLAR_ROWS) row = MAX_EPIPOLAR_ROWS - 1;
             buckets[row].push_back(i);
         }
-        std::vector<float> h_byrow;
-        std::vector<int> h_row_start(MAX_EPIPOLAR_ROWS, 0);
-        std::vector<int> h_row_count(MAX_EPIPOLAR_ROWS, 0);
+        e.rowStart.assign(MAX_EPIPOLAR_ROWS, 0);
+        e.rowCount.assign(MAX_EPIPOLAR_ROWS, 0);
         int offset = 0;
         for (int r = 0; r < MAX_EPIPOLAR_ROWS; ++r) {
-            h_row_start[r] = offset;
-            h_row_count[r] = (int)buckets[r].size();
+            e.rowStart[r] = offset;
+            e.rowCount[r] = (int)buckets[r].size();
             std::sort(buckets[r].begin(), buckets[r].end(), [&](int a, int b) {
-                return entry.mapData[a * 4] < entry.mapData[b * 4];
+                return e.mapData[a * 4] < e.mapData[b * 4];
             });
             for (int idx : buckets[r]) {
-                h_byrow.push_back(entry.mapData[idx * 4]);
-                h_byrow.push_back(entry.mapData[idx * 4 + 2]);
-                h_byrow.push_back(entry.mapData[idx * 4 + 3]);
-                h_byrow.push_back(entry.mapData[idx * 4 + 1]);
+                e.byrowData.push_back(e.mapData[idx * 4]);
+                e.byrowData.push_back(e.mapData[idx * 4 + 2]);
+                e.byrowData.push_back(e.mapData[idx * 4 + 3]);
+                e.byrowData.push_back(e.mapData[idx * 4 + 1]);
             }
-            offset += h_row_count[r];
+            offset += e.rowCount[r];
         }
-        cv::Mat h_byrow_mat(N, 1, CV_32FC4, h_byrow.data());
-        d_map_byrow_.upload(h_byrow_mat, stream);
-        cv::Mat h_rs(1, MAX_EPIPOLAR_ROWS, CV_32SC1, h_row_start.data());
-        cv::Mat h_rc(1, MAX_EPIPOLAR_ROWS, CV_32SC1, h_row_count.data());
-        d_map_row_start_.upload(h_rs, stream);
-        d_map_row_count_.upload(h_rc, stream);
+        e.byrowReady = true;
+    }
 
-        // 【150FPS·查表桶索引】行内桶下界池：pool[b]＝行内首个 x≥(minX+b·w) 的
-        // 相对偏移。内核桶直达＋跳走替代 13 步二分（锚点逐位一致；JMW_V3BISECT=1 兜底）
-        {
+    // ---- GPU 上传（首次和后续都走——~10ms）----
+    activeMapCount_ = entry.entryCount;
+    activeNumLines_ = entry.numLines;
+
+    cv::Mat h_map(entry.entryCount, 1, CV_32FC4,
+                  const_cast<float*>(entry.mapData.data()));
+    d_map_table_.upload(h_map, stream);
+
+    cv::Mat h_ls(1, entry.numLines, CV_32SC1,
+                 const_cast<int*>(entry.lineStartData.data()));
+    cv::Mat h_lc(1, entry.numLines, CV_32SC1,
+                 const_cast<int*>(entry.lineCountData.data()));
+    d_map_line_start_.upload(h_ls, stream);
+    d_map_line_count_.upload(h_lc, stream);
+
+    cv::Mat h_byrow(entry.entryCount, 1, CV_32FC4,
+                    const_cast<float*>(entry.byrowData.data()));
+    d_map_byrow_.upload(h_byrow, stream);
+    cv::Mat h_rs(1, MAX_EPIPOLAR_ROWS, CV_32SC1,
+                 const_cast<int*>(entry.rowStart.data()));
+    cv::Mat h_rc(1, MAX_EPIPOLAR_ROWS, CV_32SC1,
+                 const_cast<int*>(entry.rowCount.data()));
+    d_map_row_start_.upload(h_rs, stream);
+    d_map_row_count_.upload(h_rc, stream);
+
+    // ---- 桶池（依赖 byrow 数据，也可缓存——放入首次计算）----
+    {
+        if (!entry.bucketPoolReady) {
+            TempTableEntry& e = const_cast<TempTableEntry&>(entry);
             float mnX = FLT_MAX, mxX = -FLT_MAX;
-            for (int i = 0; i < N; ++i) {
-                const float x = entry.mapData[i * 4];
+            for (int i = 0; i < e.entryCount; ++i) {
+                const float x = e.mapData[i * 4];
                 if (x < mnX) mnX = x;
                 if (x > mxX) mxX = x;
             }
             const float w = (mxX - mnX) / kBucketK;
             if (w > 1e-6f) {
-                bucketMinX_ = mnX;
-                bucketInvW_ = 1.f / w;
-                bucketK_ = kBucketK;
-                std::vector<int> h_pool;
-                h_pool.reserve(1024 * (kBucketK + 1));
-                std::vector<int> h_boff(MAX_EPIPOLAR_ROWS, 0);
+                e.bucketMinX = mnX;
+                e.bucketInvW = 1.f / w;
+                std::vector<int> pool;
+                pool.reserve(1024 * (kBucketK + 1));
+                std::vector<int> boff(MAX_EPIPOLAR_ROWS, 0);
                 for (int r = 0; r < MAX_EPIPOLAR_ROWS; ++r) {
-                    if (h_row_count[r] == 0) continue;
-                    h_boff[r] = static_cast<int>(h_pool.size());
-                    const int s = h_row_start[r];
-                    const int cnt = h_row_count[r];
+                    if (e.rowCount[r] == 0) continue;
+                    boff[r] = static_cast<int>(pool.size());
+                    const int s = e.rowStart[r];
+                    const int cnt = e.rowCount[r];
                     int p = 0;
                     for (int b = 0; b <= kBucketK; ++b) {
                         const float xb = mnX + b * w;
                         while (p < cnt &&
-                               h_byrow[static_cast<size_t>(s + p) * 4] < xb)
+                               e.byrowData[static_cast<size_t>(s + p) * 4] < xb)
                             ++p;
-                        h_pool.push_back(p);
+                        pool.push_back(p);
                     }
                 }
-                if (!h_pool.empty()) {
-                    cv::Mat h_bp(1, static_cast<int>(h_pool.size()), CV_32SC1,
-                                 h_pool.data());
-                    d_bucket_pool_.upload(h_bp, stream);
-                    cv::Mat h_bo(1, MAX_EPIPOLAR_ROWS, CV_32SC1, h_boff.data());
-                    d_bucket_row_off_.upload(h_bo, stream);
-                } else {
-                    bucketK_ = 0;   // 空表防御
-                }
-            } else {
-                bucketK_ = 0;
+                e.bucketPoolData = std::move(pool);
+                e.bucketRowOffData = std::move(boff);
+                e.bucketPoolReady = true;
             }
         }
+        if (entry.bucketPoolReady && !entry.bucketPoolData.empty()) {
+            bucketMinX_ = entry.bucketMinX;
+            bucketInvW_ = entry.bucketInvW;
+            bucketK_ = kBucketK;
+            cv::Mat h_bp(1, static_cast<int>(entry.bucketPoolData.size()),
+                         CV_32SC1, const_cast<int*>(entry.bucketPoolData.data()));
+            d_bucket_pool_.upload(h_bp, stream);
+            cv::Mat h_bo(1, MAX_EPIPOLAR_ROWS, CV_32SC1,
+                         const_cast<int*>(entry.bucketRowOffData.data()));
+            d_bucket_row_off_.upload(h_bo, stream);
+        } else {
+            bucketK_ = 0;
+        }
     }
-    // 【B3·基建】map/桶池重传代际 +1（B4 图化签名消费；cacheHit 路径不进本函数
-    //＝同表同温重注入 epoch 不变）
     ++mapEpoch_;
 }
 

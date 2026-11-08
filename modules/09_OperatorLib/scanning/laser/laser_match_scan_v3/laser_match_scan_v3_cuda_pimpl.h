@@ -36,6 +36,19 @@ struct LaserMatchScanCudaV3::Impl {
         std::vector<float> mapData;
         int entryCount = 0;
         int numLines = 0;
+        // 261108 byrow CSR 预计算缓存（uploadMapTable 的 CPU 桶排序 ~80ms/次
+        // 是 T/V 交替端到端 2-3s 的根因——预计算后 uploadMapTable 只剩 GPU
+        // memcpy ~10ms）。首次 uploadMapTable 时填，后续直接用。
+        bool byrowReady = false;
+        std::vector<float> byrowData;      // N×4 (xL,uR,lineId,yL) 按(row,xL)排序
+        std::vector<int> rowStart;         // MAX_EPIPOLAR_ROWS
+        std::vector<int> rowCount;         // MAX_EPIPOLAR_ROWS
+        std::vector<int> lineStartData;    // numLines
+        std::vector<int> lineCountData;    // numLines
+        bool bucketPoolReady = false;
+        std::vector<int> bucketPoolData;
+        std::vector<int> bucketRowOffData;
+        float bucketMinX = 0.f, bucketInvW = 0.f;
     };
     std::vector<TempTableEntry> tempTable_;
     bool tableLoaded_ = false;
