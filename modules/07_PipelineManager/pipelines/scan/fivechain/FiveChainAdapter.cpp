@@ -2439,14 +2439,19 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
     lastRenderPush_ = now;
 
     const size_t curPts = fuse_->GetFusedPointCount();
-    // 261108 延迟修复·终版：点云收缩（融合去重 del 千次级）**中途不再全量**——
-    // 只重置增量基线（被删点 UI 残留至终局全量清除）；中途全量＝百万点
-    // 重传重画＝10s 级周期顿挫实证。首推/周期全量保留。
+    // 261108 v3：收缩限流全量（10s 至多一次）——v2 的"中途禁全量"导致融合
+    // 云收缩后增量基线错位→UI 持续 0 增量→积压到终局一次性蹦出（408万→
+    // UI 0→全量 136 万实证）。限流方案：收缩时做全量但限 10s 一次。
+    static const auto kShrinkFullGap = std::chrono::seconds(10);
+    static std::chrono::steady_clock::time_point lastShrinkFull{};
     const bool shrinkNeedsFull = lastPushedLaserPts_ > curPts;
-    const bool fullPush = forceFull || lastPushedLaserPts_ == 0
-                          || pushSeq_ % static_cast<uint64_t>(renderFullEvery_) == 0;
-    if (shrinkNeedsFull && !fullPush) {
-        lastPushedLaserPts_ = curPts;   // 基线重置续走增量（新点照常显示）
+    bool fullPush = forceFull || lastPushedLaserPts_ == 0
+                    || pushSeq_ % static_cast<uint64_t>(renderFullEvery_) == 0;
+    if (shrinkNeedsFull
+        && (lastShrinkFull.time_since_epoch().count() == 0
+            || now - lastShrinkFull >= kShrinkFullGap)) {
+        fullPush = true;
+        lastShrinkFull = now;
     }
 
     // 融合云下载（设备上下文→dlStream_ 异拷＋同步——LaserFuseAdapter 口径）

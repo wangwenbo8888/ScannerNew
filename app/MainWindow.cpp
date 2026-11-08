@@ -1066,7 +1066,8 @@ void MainWindow::showCameraMonitor() {
     // 261005 用户口径：相机预览监视弹窗隐藏（保留全链实现——需现场调试时
     // 改 true 即恢复弹出；早退同时不挂 debug 帧分路，预览零开销）
     // 261018 用户恢复 true：真机联调期看左右相机实况（补光/标志点可见性排障）
-    static constexpr bool kShowCamMonitor = true;
+    // 261108 用户指令恢复 false：隐藏相机窗口（调试期已过）
+    static constexpr bool kShowCamMonitor = false;
     if (!kShowCamMonitor) return;
     if (!m_appCtx) return;
     if (!m_camDlg) {
