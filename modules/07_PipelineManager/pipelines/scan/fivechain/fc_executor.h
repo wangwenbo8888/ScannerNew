@@ -484,6 +484,8 @@ private:
 
     // —— fivechain 专属算子（温表/参数与 harness v3 同源）——
     std::unique_ptr<calib::LaserMatchScanSplitGpuV3> splitGpu_;
+    // 261108 四管常驻实例：T/V/C/D 各一个，运行期零换表
+    std::array<std::unique_ptr<calib::LaserMatchScanSplitGpuV3>, 4> splitTubes_;
     std::unique_ptr<calib::LaserMatchScanSplitCpuV3> splitCpu_;
     calib::LaserReconstructParams reconP_;
     // 261030/261031 生产侧激光治理件（261103 集成重放）：质量门 scratch/计数
