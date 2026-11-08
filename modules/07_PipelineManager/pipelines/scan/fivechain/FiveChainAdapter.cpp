@@ -331,21 +331,9 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
             const char* e = getenv("JMW_1BBIGGRAPH");
             return !(e != nullptr && e[0] == '0');
         }();
-        // 261107 双组 steger/flat：D 精细（tubeIdx=3）宽带组——组变才切。
-        // ⚠ 必须在 big graph 提交之前（图捕获固化算子参数；SetParams 触发
-        // epoch 失效自动重建图——先切参再提交，本帧即用新参数）
-        if (L.stegerL_ && L.stegerR_) {
-            const bool stgFine = (tubeIdx == 3);
-            if (frontParamGroupStg_.exchange(stgFine ? 2 : 0) != (stgFine ? 2 : 0)) {
-                if (L.stegerL_) L.stegerL_->SetParams(stgFine ? stgFine_ : stgBase_);
-                if (L.stegerR_) L.stegerR_->SetParams(stgFine ? stgFine_ : stgBase_);
-                if (L.flatL_) L.flatL_->SetParams(stgFine ? flatFine_ : flatBase_);
-                if (L.flatR_) L.flatR_->SetParams(stgFine ? flatFine_ : flatBase_);
-            }
-        }
-        // 261107 D 精细（tubeIdx=3）禁 flat 走 steger：标定链（fc 4-4
-        // steger sigma1.5/maxWidth6）抽的带内窄特征点——实扫必须同口径，
-        // flat 平顶中心与表基准系统性错位（匹配死因）
+        // 261107 终版：D 精细（tubeIdx=3）＝flatRowL_/R_ 行模式质心（对齐
+        // fc 标定终版 rms 0.0751 表）——双实例纯选路零切换（单实例 scanAxis
+        // 切换＝OpenCV 异常实证）；细线帧 big graph（列模式捕获不受影响）。
         const bool fineTube = (tubeIdx == 3);
         bool bigDone = false;
         if (bigOn && L.flatL_ && L.flatR_ && !fineTube)
@@ -356,11 +344,13 @@ int FcHarnessCompat::submitLaserFront(LaserOps& L, scr::CycleProductsCompat& p,
             return 1;   // deferred 口径：仍走排水（FinishInterp 幂等——图路径
                         // 只落精确 N/延迟段排水语义同构）
         }
-        if (L.flatL_ && L.flatR_ && !fineTube) {
-            // flat 路径（沙盒 extractor=flat）：延迟提交——双眼连续入队
-            // 不同步（stats 28B D2H 在飞，完成段排水）。分眼实例（计数器私有）
-            p.stegerL = L.flatL_->ExecuteDeferred(gL, *p.sepL.d_laserMask, ls);
-            p.stegerR = L.flatR_->ExecuteDeferred(gR, *p.sepR.d_laserMask, ls);
+        if (L.flatL_ && L.flatR_) {
+            // flat 路径（细线＝列模式 deferred；D 精细＝flatRow 行模式质心——
+            // 261107 终版双实例选路：零切换零 SetParams）
+            auto& flL = fineTube && L.flatRowL_ ? L.flatRowL_ : L.flatL_;
+            auto& flR = fineTube && L.flatRowR_ ? L.flatRowR_ : L.flatR_;
+            p.stegerL = flL->ExecuteDeferred(gL, *p.sepL.d_laserMask, ls);
+            p.stegerR = flR->ExecuteDeferred(gR, *p.sepR.d_laserMask, ls);
             deferred = true;
             if (!p.stegerL.success || !p.stegerR.success) {
                 fail("steger_fast", p, p.stegerL.message + " | " + p.stegerR.message);
@@ -1981,9 +1971,16 @@ Scanner::Result FiveChainAdapter::startRealtime(
             harness_->flatBase_ = fp;
             harness_->flatFine_ = fp;
             try {
-                if (opJson_ && opJson_->contains("flat_center_fine"))
+                if (opJson_ && opJson_->contains("flat_center_fine")) {
                     harness_->flatFine_ = calib::FlatCenterParams::fromJson(
                         (*opJson_)["flat_center_fine"]);
+                    // 行模式专用实例（恒 scanAxis 由 flatFine_ 携带——纯选路）
+                    auto& LOp = harness_->laserOps_;
+                    LOp.flatRowL_ =
+                        std::make_unique<calib::FlatCenterExtractor>(harness_->flatFine_);
+                    LOp.flatRowR_ =
+                        std::make_unique<calib::FlatCenterExtractor>(harness_->flatFine_);
+                }
             } catch (const std::exception& e) {
                 JMW_LOG_WARN("07-FiveChain",
                     "[FiveChainAdapter] flat_center_fine 解析失败（继承基础）: {}",
@@ -2442,9 +2439,15 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
     lastRenderPush_ = now;
 
     const size_t curPts = fuse_->GetFusedPointCount();
+    // 261108 延迟修复·终版：点云收缩（融合去重 del 千次级）**中途不再全量**——
+    // 只重置增量基线（被删点 UI 残留至终局全量清除）；中途全量＝百万点
+    // 重传重画＝10s 级周期顿挫实证。首推/周期全量保留。
+    const bool shrinkNeedsFull = lastPushedLaserPts_ > curPts;
     const bool fullPush = forceFull || lastPushedLaserPts_ == 0
-                          || lastPushedLaserPts_ > curPts
                           || pushSeq_ % static_cast<uint64_t>(renderFullEvery_) == 0;
+    if (shrinkNeedsFull && !fullPush) {
+        lastPushedLaserPts_ = curPts;   // 基线重置续走增量（新点照常显示）
+    }
 
     // 融合云下载（设备上下文→dlStream_ 异拷＋同步——LaserFuseAdapter 口径）
     std::vector<float> fusedXyz;
@@ -2621,6 +2624,7 @@ void FiveChainAdapter::stopRealtime() {
     fcRstatLog(g_fcRstat, std::chrono::steady_clock::now(), /*final=*/true);
     delete harness_; harness_ = nullptr;
     bridge_.reset();
+    retiredSep_.clear();   // 261107 排空后释放退休 mask（在飞帧已无）
 }
 
 } // namespace Scanner::pipeline

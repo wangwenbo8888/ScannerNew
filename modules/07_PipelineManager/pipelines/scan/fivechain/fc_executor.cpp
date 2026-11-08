@@ -718,13 +718,15 @@ void FiveChainExecutor::fcSeparation(FcJob* j) {
     try {
         h_.timeBegin();
         const int slot = j->idx % graySlots_;
-        // 261107 双组 mask：D 精细（tubeIdx=3）用宽带组（低阈值救 30~100px
-        // 竖带），其余细线组（高阈防噪声）——组变才 SetParams
+        // 261107 终版 mask 双组：D 精细帧用宽带组（thr 60 保带连续——行段质心
+        // 前提），细线组走 json 基准。SetParams 直调（ca60730 可用态实证）；
+        // ⚠ 扫描中切模式有瞬态竞态——操作规程：切模式先停扫
         const int sepTube = h_.src_->cycles[static_cast<size_t>(j->idx)].tubeIdx;
         const bool sepFine = (sepTube == 3);
         if (h_.frontParamGroup_.exchange(sepFine ? 2 : 0) != (sepFine ? 2 : 0)) {
-            h_.sepLaserL_->SetParams(sepFine ? h_.sepFine_ : h_.sepBase_);
-            h_.sepLaserR_->SetParams(sepFine ? h_.sepFine_ : h_.sepBase_);
+            const auto& sp = sepFine ? h_.sepFine_ : h_.sepBase_;
+            h_.sepLaserL_->SetParams(sp);
+            h_.sepLaserR_->SetParams(sp);
         }
         cudaStreamWaitEvent(cv::cuda::StreamAccessor::getStream(gS_),
                             evUpl_[static_cast<size_t>(slot)], 0);

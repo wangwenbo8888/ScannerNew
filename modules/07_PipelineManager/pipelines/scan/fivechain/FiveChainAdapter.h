@@ -174,6 +174,8 @@ private:
     std::atomic<bool> active_{false};
 
     std::unique_ptr<calib::LaserMarkingSeparationCUDA> sepL_, sepR_;
+    // 261107 mask 退休列表（组变换参＝重建实例——旧实例在此延寿至 stopRealtime）
+    std::vector<std::unique_ptr<calib::LaserMarkingSeparationCUDA>> retiredSep_;
     std::unique_ptr<calib::LaserCloudFuseCuda> fuse_;
     std::vector<cv::cuda::GpuMat> grayLanesL_, grayLanesR_;
 

@@ -88,7 +88,10 @@ struct ScrFiveChain {
     int maxInflight = 0;                 // 重排/寄存 map 断言界（0=auto=Σ容量+在制推导）
     int memCapMB = 512;                  // fivechain 结构内存硬上限
     long long voxelReserve = 50000000;   // 体素表启动槽位。【2026-10-29 用户裁定】12M→50M＋体素 0.25→0.5：0.5mm 口径 ALL 399 帧唯一体素 ~1.4M（0.25mm 实测 5.7M÷4 面积缩放），50M＝36× 余量，长会话/重复扫描零扩容预期。内存账：每槽 40B（key 8+idx 4+count 4＋点 xyz/normal 24，点容量=槽数）→ 50M＝2.0GB VRAM（本机 Quadro RTX 5000 16GB 承载，现用量 ~0.7GB）。换更小显存设备须按「终值体素 ÷ 0.7」重估并下调
-    double voxelSizeMm = 0.5;            // 体素尺寸（【2026-10-29 用户裁定】0.25→0.5＝算子出厂口径；融合粒度变粗、唯一体素 ~÷4）
+    double voxelSizeMm = 0.5;            // 体素尺寸（算子出厂口径 0.5；密度
+                                         // 归用户调——261108 教训：AI 不擅自
+                                         // 改此值。0.25 参考账：唯一体素
+                                         // ~5.7M vs 50M 槽 8.8× 余量 ✓）
     double voxelLoadFactor = 0.75;       // 负载断言线（超限 fail-fast；算子 70% 自动扩容在前）——50M 槽下本数据集永不触及，仅作保险
     long long voxelGrowSlots = 20000000; // 扩容增量（【2026-10-29】2M→20M：大表步进匹配，防频繁 rehash；每次扩容 = 表搬移 16B/槽＋点 24B/槽）
     int saturationThreshold = 3;         // 体素饱和阈值（【2026-10-29 用户裁定】5→3：同体素吸收 3 点即饱和，更早截断重复点）

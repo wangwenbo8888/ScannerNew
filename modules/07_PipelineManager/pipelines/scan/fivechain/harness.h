@@ -390,6 +390,13 @@ public:
     calib::FlatCenterParams flatBase_, flatFine_;
     std::atomic<int> frontParamGroup_{-1};
     std::atomic<int> frontParamGroupStg_{-1};   // steger/flat 组缓存（与 mask 独立）
+    // 261107 退休列表：组变换参＝重建实例（SetParams 在飞竞态、waitForCompletion
+    // 死 marker 图——两难取重建）；旧实例延迟到 harness 析构（在飞帧持旧 buffer 安全）
+    std::vector<std::unique_ptr<calib::StegerExtractorFast>> retiredStg_;
+    std::vector<std::unique_ptr<calib::FlatCenterExtractor>> retiredFlat_;
+    /// mask 双眼重建回调（adapter 注入——sep 所有权在 adapter sepL_/sepR_；
+    /// executor 组变触发；旧实例移入 adapter 退休列表延寿）
+    std::function<void(bool fine)> rebuildSep_;
 
     // 融合流指针（fc_executor 写入——fuse 共用）
     cv::cuda::Stream* fcFuseStreamPtr_ = nullptr;
@@ -417,6 +424,11 @@ public:
         std::unique_ptr<calib::StegerExtractorFast> stegerR_;
         std::unique_ptr<calib::FlatCenterExtractor> flatL_;
         std::unique_ptr<calib::FlatCenterExtractor> flatR_;
+        // 261107 终版：D 精细行模式（质心）专用实例——scanAxis 切换不能走
+        // SetParams（单实例 1↔0 轴向切换图/缓冲错乱＝OpenCV 异常实证）；
+        // 双实例纯选路零切换（flatRowL_/R_ 恒 scanAxis=1，flatL_/R_ 恒列模式）
+        std::unique_ptr<calib::FlatCenterExtractor> flatRowL_;
+        std::unique_ptr<calib::FlatCenterExtractor> flatRowR_;
         // 双实例（沙盒 undistCudaL_/undistCudaR_ 语义）：离线＝构造期 L/R 参；
         // 实时＝每帧 SetParams（metaValid 分支）
         std::unique_ptr<calib::UndistortPointsCuda> undistGL_;
