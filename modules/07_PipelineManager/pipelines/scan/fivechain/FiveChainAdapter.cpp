@@ -1898,17 +1898,24 @@ Scanner::Result FiveChainAdapter::startRealtime(
         harness_->voxelFuseOp_ = fuse_.get();
         if (hasStereoNominal_) {
             // 261027 名义温档标定（config/camera_calib.json——与产表/离线验证
-            // 同源）：harness 构造期标定注入；逐帧快照注入关闭（metaValid=false
-            // ——在线 21:28 实证快照路径 conic 0/4666 vs 名义口径 20-107/30 帧）
+            // 同源）：harness 构造期标定注入（快照缺失帧的兜底基线）
             harness_->calib_.R1 = snR1_;  harness_->calib_.R2 = snR2_;
             harness_->calib_.P1 = snP1_;  harness_->calib_.P2 = snP2_;
             harness_->calib_.Q = snQ_;
             harness_->calib_.K1c = snK1c_; harness_->calib_.K2c = snK2c_;
             harness_->calib_.D1 = snD1_;  harness_->calib_.D2 = snD2_;
             harness_->calib_.Rext = snRext_; harness_->calib_.Tcomp = snTcomp_;
-            bridge_->useSnapshotCalib_ = false;
+            // 261109 用户指令：逐帧温补快照注入默认开（实测温度查表→流水线重建；
+            // readerLoop 已接线 onFrameMeta——此前该钩子从未被调用，metaValid 恒
+            // false＝重建恒走名义温档的根因）。JMW_FC_SNAPCAL=0 回退名义口径。
+            // 留痕：261027 实证「快照路径 conic 0/4666」系在钩子未接线的环境下
+            // 取得，该结论待重验——真机观察 conic 计数，异常即 env 关回退
+            const char* scal = std::getenv("JMW_FC_SNAPCAL");
+            bridge_->useSnapshotCalib_ = !(scal != nullptr && scal[0] == '0');
             JMW_LOG_INFO("07-FiveChain",
-                "[FiveChainAdapter] 名义温档立体标定生效（快照注入关闭）");
+                "[FiveChainAdapter] 立体标定：名义温档 22.5℃ 构造期注入；逐帧温补"
+                "快照注入={}（JMW_FC_SNAPCAL=0 可关）",
+                bridge_->useSnapshotCalib_ ? "开" : "关");
         }
         harness_->prodProfile_ = true;                     // 产线：跳过沙盒记账
         harness_->onFrameMeta = [this](int idx, scr::CycleProductsCompat& p) {

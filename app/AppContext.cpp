@@ -914,8 +914,9 @@ Scanner::Result AppContext::armScanSession(Scanner::ScanMode mode) {
                     probeMaxFrames_.load(std::memory_order_relaxed));
                 dm->stopCapture();   // 与设备 M 键停采同一收口（灯灭、会话保活）
             }
-            const auto t = dm->getLastTemperatures();
-            const double tempC = (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
+            // 261109 帧温改用帧自带打点（08 转发时同步记录 tempC/tempTs）；
+            // -1=未收到温度帧→25℃ 缺省档（260831 口径不变）
+            const double tempC = (frame.tempC >= 0.0) ? frame.tempC : 25.0;
             scanWf_->pushSessionFrame(frame.leftGray, frame.rightGray, tempC, frame.frameId,
                                       frame.tvKnown, frame.tvLeftSkew, dm->captureMode());
         } else if (scanWf_) {

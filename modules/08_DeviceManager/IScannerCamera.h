@@ -29,6 +29,9 @@ struct StereoFrame {
     int lightPhase = -1;         // 261002 用户标定五态灯序相位（-1=非灯序态；
                                  // 0=补光无激光/1=左斜/2=右斜/3=精细/4=深孔——
                                  // DeviceManager 标定灯序逐帧打点，消费方按灯型分派）
+    double tempC = -1.0;         // 261109 帧温（℃）——DeviceManager 转发时同步打点：
+                                 // MCU 末帧温度互斥快照首路；-1=未收到温度帧
+    TimestampMs tempTs = 0;      // 该温度帧时间戳 ms（新鲜度判据——消费方可校验陈旧度）
     cv::Mat leftGray;   // 左图灰度 CV_8UC1
     cv::Mat rightGray;  // 右图灰度 CV_8UC1
 };

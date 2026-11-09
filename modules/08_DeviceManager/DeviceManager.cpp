@@ -1522,6 +1522,13 @@ Result DeviceManager::startFrameStream(hal::FrameCallback cb) {
             // N11 H0 之后＝N10 重新启采（用户实测偶发"再点 M 停不下"根因）。
             // CAS 失败（相位已被停采置 -1）即放弃本帧推进，不再发 N10
             hal::StereoFrame out = f;
+            // 261109 帧温同步打点（随帧进一切环形缓冲区/会话环）：MCU 末帧温度互斥
+            // 快照首路（ts>0 才有效）；-1=未收到温度帧（消费方回退缺省档）
+            {
+                const serial::TempFrame tf = getLastTemperatures();
+                out.tempC = (tf.ts > 0) ? tf.celsius[0] : -1.0;
+                out.tempTs = tf.ts;
+            }
             int phase = calibPhase_.load(std::memory_order_relaxed);
             if (phase >= 0) {
                 out.lightPhase = phase;

@@ -671,6 +671,10 @@ void FiveChainExecutor::readerLoop() {
         } else {
             job->prod.frameGrayL = gl;
             job->prod.frameGrayR = gr;
+            // 261109 帧元数据接线（根因修复：onFrameMeta 钩子此前只赋值未调用
+            // ——快照 R/P/Q/帧温/metaValid 全程未填＝重建恒走构造期名义温档的断点）：
+            // 读到本帧 L/R 后即填，链线程消费
+            if (h_.onFrameMeta) h_.onFrameMeta(idx, job->prod);
         }
         chRead_.push(job);
         chCount_[0].fetch_add(1);
@@ -807,7 +811,9 @@ void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
             if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
                     != Harness::v3ParamGroupOf(tubeIdx))
                 splitGpu_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
-            splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+            // 261109 按帧温选激光温表档（实测温度→查表→重建；回退名义温＝sim/回放帧温 0）
+            splitGpu_->SetCurrentTemperature(
+                (p.temperature > 0.0) ? p.temperature : h_.cfg_.runtime.nominalTemperature);
             // ══【B4】前段提交图化（【批D·c2】默认开——JMW_V3FRONTGRAPH=0 显式关；
             //    JMW_NOGRAPH=1 总闸优先；发射相位＝排水后窗口，本函数即排水后
             //    调用点——非已证伪的 defer 相位；单 env，禁带 V3DEFER）══
@@ -869,7 +875,10 @@ bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, int tubeIdx,
     if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
             != Harness::v3ParamGroupOf(tubeIdx))
         splitGpu_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
-    splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+    // 261109 按帧温选档（回退名义温——sim/回放帧温 0）
+    splitGpu_->SetCurrentTemperature(
+        (j->prod.temperature > 0.0) ? j->prod.temperature
+                                    : h_.cfg_.runtime.nominalTemperature);
     splitGpu_->ExecuteDeferred(ptsL, idsL, L.interpL_->GetOutputCountPtr(),
                                ptsR, idsR, L.interpR_->GetOutputCountPtr(),
                                ls, j->front);
@@ -2237,7 +2246,10 @@ void FiveChainExecutor::ch2FullGpu_(FcJob* j) {
         if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
                 != Harness::v3ParamGroupOf(tubeIdx))
             matchFull_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
-        matchFull_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        // 261109 按帧温选档（回退名义温——sim/回放帧温 0）
+        matchFull_->SetCurrentTemperature(
+            (j->prod.temperature > 0.0) ? j->prod.temperature
+                                        : h_.cfg_.runtime.nominalTemperature);
         mr = matchFull_->Execute(vPL, vIL, vPR, vIR, cS_);
         j->prod.laserMatched = mr.matchedCount;
         h_.setStepOk(j->prod, "laser_match_scan_v3", mr.success);

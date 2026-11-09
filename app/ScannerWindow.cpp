@@ -356,9 +356,9 @@ void ScannerWindow::onStartScanner()
     dm->startFrameStream([this, dm](const Scanner::hal::StereoFrame& frame) {
         pushFrameToBuffer(frame);                       // ① 预览链
         if (m_appCtx && m_appCtx->scanWorkflow()) {     // ② 扫描链
-            const auto t = dm->getLastTemperatures();
-            const double tempC =
-                (t.ts > 0) ? t.celsius[0] : 25.0;   // 260831：G02 恒 4 路（ts=0=未收帧→25℃ 缺省档）
+            // 261109 帧温改用帧自带打点（08 转发时同步记录 tempC/tempTs）；
+            // -1=未收到温度帧→25℃ 缺省档（260831 口径不变）
+            const double tempC = (frame.tempC >= 0.0) ? frame.tempC : 25.0;
             m_appCtx->scanWorkflow()->pushSessionFrame(frame.leftGray, frame.rightGray,
                                                        tempC, frame.frameId,
                                                        frame.tvKnown, frame.tvLeftSkew,
