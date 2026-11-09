@@ -345,8 +345,9 @@ void ScannerWindow::onStartScanner()
     // 经 setParam 记账，采集中变更即全参重发）
     const int expose = ui.horizontalSlider_ExposeTime->value();
     dm->setParam("exposure", expose, Scanner::device::ParamEntry::Source::Ui);
-    // 261108 用户指令：帧率 60→120（160 带宽饱和杀全链双实证；120 待验证）
-    dm->setParam("freqHz", 120.0, Scanner::device::ParamEntry::Source::Ui);
+    // 261109 用户指令：帧率 120→160（真机测试——配合当日开机链路带宽 4G 限值；
+    // 留痕：160 带宽饱和杀全链 261107/261108 双实证，本次 4G 后复测）
+    dm->setParam("freqHz", 160.0, Scanner::device::ParamEntry::Source::Ui);
 
     // 帧出口接线 + 采集启动（门面 startCapture 内含 N10 启采与相机开流；
     // 帧回调双投递——预览 FrameBuffer ＋ 扫描会话环（02 pushSessionFrame：
