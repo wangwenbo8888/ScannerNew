@@ -358,6 +358,55 @@ int CameraControl::enumerateDevices() {
 }
 
 // ============================================================================
+// 链路带宽限幅（261109 设计 docs/plans/20261109-相机链路带宽4G-design.md）
+// 开机双目各设 DeviceLinkThroughputLimit=4G（bps）——即界面「设备→设备配置
+// 信息→设备链路带宽限制」，默认 ~3G 压带宽；4G 为解除人为限速（USB 物理层
+// 实用上限仍 ~3.1-3.5G/口，见上方帧号回退注释）。限幅是优化项：机型不支持
+// （IsImplemented=false）或设置失败均只记日志、不阻断 open。
+// ============================================================================
+namespace {
+
+void applyLinkThroughputLimit(CGXFeatureControlPointer& fc, int sideIndex) {
+    try {
+        if (!fc->IsImplemented("DeviceLinkThroughputLimit")) {
+            JMW_LOG_INFO("08-CameraControl",
+                "[CameraControl] 链路带宽限值节点不支持（side={}）——跳过", sideIndex);
+            return;
+        }
+        if (fc->IsImplemented("DeviceLinkThroughputLimitMode"))
+            fc->GetEnumFeature("DeviceLinkThroughputLimitMode")->SetValue("On");
+        constexpr int64_t kTargetBps = 4000000000;   // 4G（bps）
+        auto f = fc->GetIntFeature("DeviceLinkThroughputLimit");
+        const int64_t lo = f->GetMin();
+        const int64_t hi = f->GetMax();
+        const int64_t cur = f->GetValue();
+        int64_t target = kTargetBps;
+        if (target > hi) {
+            target = hi;   // 钳制域：超上限设到 max（日志留证据）
+            JMW_LOG_WARN("08-CameraControl",
+                "[CameraControl] 链路带宽 4G 超上限（side={} max={}bps）——钳到 {}bps",
+                sideIndex, hi, target);
+        }
+        if (target < lo) target = lo;
+        f->SetValue(target);
+        const int64_t actual = f->GetValue();
+        JMW_LOG_INFO("08-CameraControl",
+            "[CameraControl] 链路带宽限值（side={}）: {} → {}bps"
+            "（min={} max={} 读回={}）",
+            sideIndex, cur, target, lo, hi, actual);
+    } catch (CGalaxyException& e) {
+        JMW_LOG_WARN("08-CameraControl",
+            "[CameraControl] 链路带宽限值设置失败（side={}）: {}——不阻断启动",
+            sideIndex, e.what());
+    } catch (...) {
+        JMW_LOG_WARN("08-CameraControl",
+            "[CameraControl] 链路带宽限值设置异常（side={}）——不阻断启动", sideIndex);
+    }
+}
+
+}   // namespace
+
+// ============================================================================
 // 打开 / 关闭
 // ============================================================================
 Result CameraControl::open() {
@@ -398,6 +447,7 @@ Result CameraControl::open() {
             side.featureControl = side.device->GetRemoteFeatureControl();
             side.isOpen = true;
             JMW_LOG_INFO("08-CameraControl", "[CameraControl] open 计时: 设备 {} 打开完成 {}ms", idx, el());
+            applyLinkThroughputLimit(side.featureControl, i);   // 261109 开机双目链路带宽默认 4G
         } catch (CGalaxyException& e) {
             JMW_LOG_ERROR("08-CameraControl", "[CameraControl] 打开设备 {} 异常: {}", idx, e.what());
             for (int j = i - 1; j >= 0; --j) {   // 倒序关已开侧，避免半开残留
