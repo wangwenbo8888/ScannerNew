@@ -15,7 +15,7 @@
 namespace Scanner::hal {
 
 struct CaptureParams {              // N10 八参（协议 260831 §下行表＋261105 增补 E；H 1-200 / B 0-100 / T V C D E 0|1 / L 0-100）
-    int freqHz = 160;   // 261109 用户定版 160（60→120→30→120→160；带宽饱和史 261107/261108＋4G 限值联动；账本 makeParamSpecs 同源）
+    int freqHz = 130;   // 261110 用户定版 130——相机问题现最大采集帧率 130（60→120→30→120→160→130；账本 makeParamSpecs 同源、默认即上限）
     int bgLight = 10;
     int laserT = 1, laserV = 1, laserC = 0, laserD = 0;   // 激光管开关 T/V/C/D（261105
                                      // 固件语义：T=左斜 V=右斜 C=深孔 D=精细；ScanMode 映射见 DeviceManager::effectiveN10；默认值从不直发——发送点均逐字段覆写）
