@@ -44,6 +44,7 @@
 
 #include <osgUtil/CullVisitor>
 #include <osgUtil/Optimizer>
+#include <osgUtil/SmoothingVisitor>
 
 
 
@@ -1083,7 +1084,7 @@ void OSGWidget::initializeGL()
     camera->setProjectionMatrixAsPerspective(45.0,
         static_cast<double>(w) / static_cast<double>(h), 1.0, 10000.0);
     m_userProjection = camera->getProjectionMatrix();
-    camera->setClearColor(osg::Vec4(0.412f, 0.412f, 0.412f, 1.0f));
+    camera->setClearColor(osg::Vec4(0.89f, 0.89f, 0.89f, 1.0f));   // 261114 对齐 1.jpg 浅白背景（原中灰 0.412——同时对比令同色 mesh 显浅）
 
     m_gw = new osgViewer::GraphicsWindowEmbedded(0, 0, w, h);
     camera->setGraphicsContext(m_gw.get());
@@ -1094,6 +1095,9 @@ void OSGWidget::initializeGL()
     sceneRoot->getOrCreateStateSet()->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
     sceneRoot->addChild(m_root.get());
     m_viewer->setSceneData(sceneRoot.get());
+
+    // 背景垂直渐变（261114 一轮·已废弃改清色方案）：PRE_RENDER 子相机方案存在
+    // 被主相机清屏覆盖的疑点，弃用——背景由 setClearColor 直接给浅白 0.89。
 
     osgGA::TrackballManipulator* manip = new osgGA::TrackballManipulator();
     manip->setAllowThrow(false);
@@ -2462,28 +2466,90 @@ bool OSGWidget::loadMesh(const QString& filepath)
     geom->setNormalArray(norms, osg::Array::BIND_PER_VERTEX);
     geom->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, (int)verts->size()));
 
-    // 光照材质（参照 LEADSCAN K2 loadModel：GL_LIGHT1 + 双面光照 + LeadScan 蓝材质）
+    // 着色（261114 十轮·用户定值基色＋十一轮手写渐变）：关光照，顶点色直写。
+    // 基色 (20,130,180)＝3.png 对比图实测目标 P50（用户定值命中）；目标为
+    // (0,87,114)→(20,130,180)→(70,178,219) 的渐变分布（P5/P50/P95），纯平色
+    // 相当于只剩亮半区故观感偏浅。渐变在平滑法线后按 N·L 手写进顶点色。
     osg::ref_ptr<osg::StateSet> ss = geom->getOrCreateStateSet();
     ss->setMode(GL_NORMALIZE, osg::StateAttribute::ON);
     ss->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON);
     ss->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
-    ss->setMode(GL_LIGHTING, osg::StateAttribute::ON);
-    ss->setMode(GL_LIGHT1, osg::StateAttribute::ON);
-    osg::ref_ptr<osg::LightModel> lm = new osg::LightModel;
-    lm->setTwoSided(true);
-    ss->setAttributeAndModes(lm);
-    osg::ref_ptr<osg::Material> mat = new osg::Material;
-    mat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));
-    mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4(0.529f, 0.808f, 0.980f, 1.0f));
-    mat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4(0.3f, 0.3f, 0.3f, 1.0f));
-    mat->setShininess(osg::Material::FRONT_AND_BACK, 100.0f);
-    ss->setAttributeAndModes(mat);
+    ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
 
     osg::ref_ptr<osg::Geode> geode = new osg::Geode;
     geode->addDrawable(geom);
     osgUtil::Optimizer optimizer;
     optimizer.optimize(geom);
     optimizer.reset();
+    // 顶点法线平滑（261114）：STL 平面法线→每三角面一块明暗的马赛克观感，
+    // 与 1.jpg 的柔和渐变不同源。手写面积加权平滑（逐面法线累加到三顶点再归一）
+    // ——首版用 osgUtil::SmoothingVisitor::smooth 触发跨模块堆破坏（加载网格必崩，
+    // 崩点漂移至 pause/OperatorLib——堆破坏典型形态），弃库调用改自有实现。
+    {
+        const size_t nv = verts->size();
+        std::vector<osg::Vec3> acc(nv, osg::Vec3(0.f, 0.f, 0.f));
+        const osg::Vec3Array* va = verts.get();
+        for (size_t i = 0; i + 2 < nv; i += 3) {
+            osg::Vec3 n = ((*va)[i + 1] - (*va)[i]) ^ ((*va)[i + 2] - (*va)[i]);
+            acc[i] += n; acc[i + 1] += n; acc[i + 2] += n;
+        }
+        osg::ref_ptr<osg::Vec3Array> sm = new osg::Vec3Array;
+        sm->reserve(nv);
+        for (size_t i = 0; i < nv; ++i) { acc[i].normalize(); sm->push_back(acc[i]); }
+        geom->setNormalArray(sm, osg::Array::BIND_PER_VERTEX);
+        // 明暗渐变（261114 十一轮＋十二轮自动定标）：关光照下顶点色直通屏幕
+        // （3.png 左半平色实测 P5=P50=P95 全等 (20,130,180)——无伽马失真实证）。
+        // 十一轮教训：固定 ramp 下本马法线大面积正对光（t 中位 0.85），表面全
+        // 挤亮端恒"不够深"——目标 t 中位 0.47（半数表面在暗区）。十二轮＝加载时
+        // 按本网格实际 N·L 分布定标：中位 t→基色(0.5)、P95→亮端(1.0)、暗端到底。
+        // 三锚点＝3.png 右半目标实测：暗(0,87,114)/基(20,130,180)/亮(70,178,221)。
+        osg::Vec3 Ln(0.20f, -0.40f, 0.89f); Ln.normalize();
+        std::vector<float> dots(nv, 0.f);
+        for (size_t i = 0; i < nv; ++i) {
+            float t = (*sm)[i] * Ln;
+            dots[i] = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
+        }
+        std::vector<float> sortedD = dots;
+        std::sort(sortedD.begin(), sortedD.end());
+        // 261114 十三轮：可见面（朝相机）是全体顶点的偏亮子集——顶点中位在画面
+        // 落 P25（5.png 实测 (20,129,178)≈基色），可见中位被顶到 (47,156,202)。
+        // 定标锚改用顶点 P78（≈可见中位）→ 画面中位回落基色、暗区下沉。
+        const float tMed = sortedD[(nv * 78) / 100];
+        const float tHi  = sortedD[(nv * 95) / 100];
+        const float dR = 0.f,   dG = 87.f,  dB = 114.f;
+        const float bR = 20.f,  bG = 130.f, bB = 180.f;
+        const float lR = 70.f,  lG = 178.f, lB = 221.f;
+        // 261114 十四轮：杰魔风格背面＝鲜绿 (49,219,71)（1.jpg 实测 19930 像素
+        // 均值）——法线背向默认相机的面整面画绿；正面蓝渐变不变。三角汤结构
+        // 下逐面法线一致，即逐面整色，同杰魔按面显示语义。
+        // 十五轮：分类加死区（dot<-0.2 才绿）——掠射角法线噪声令 0 附近判定
+        // 椒盐翻转（用户报"正反交叉"），死区带归蓝。
+        const osg::Vec3 camDir(0.f, -0.986f, 0.164f);   // 默认相机方向（物体→相机）
+        osg::ref_ptr<osg::Vec4Array> cols = new osg::Vec4Array;
+        cols->reserve(nv);
+        for (size_t i = 0; i < nv; ++i) {
+            if (((*sm)[i] * camDir) < -0.2f) {
+                cols->push_back(osg::Vec4(49.f / 255.f, 219.f / 255.f, 71.f / 255.f, 1.0f));
+                continue;
+            }
+            const float t0 = dots[i];
+            float t;
+            if (t0 <= tMed)   t = (tMed > 1e-4f) ? 0.5f * t0 / tMed : 0.f;
+            else              t = (tHi - tMed > 1e-4f) ? 0.5f + 0.5f * (t0 - tMed) / (tHi - tMed) : 1.f;
+            if (t > 1.f) t = 1.f;
+            float r, g, b;
+            if (t <= 0.5f) {
+                float u = t * 2.f;
+                r = dR + (bR - dR) * u;  g = dG + (bG - dG) * u;  b = dB + (bB - dB) * u;
+            } else {
+                float u = (t - 0.5f) * 2.f;
+                r = bR + (lR - bR) * u;  g = bG + (lG - bG) * u;  b = bB + (lB - bB) * u;
+            }
+            cols->push_back(osg::Vec4(r / 255.f, g / 255.f, b / 255.f, 1.0f));
+        }
+        geom->setColorArray(cols, osg::Array::BIND_PER_VERTEX);
+        geom->dirtyGLObjects();
+    }
     m_root->addChild(geode);
 
     // 相机定位并锁定视图
@@ -2805,7 +2871,7 @@ void OSGWidget::laserRebuildChunks(const std::vector<osg::Vec3>& laser)
     static const osg::Vec2 kQuadCorner[4] = {
         osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
         osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
-    const osg::Vec4ub kLaserColor(134, 206, 250, 255);
+    const osg::Vec4ub kLaserColor(0, 154, 205, 255);   // 261114 对齐原版杰模点云色（modelImport.cpp 硬编码 (0.0,0.6039,0.8039)）——原值 (134,206,250) 系 LeadScan 网格材质色误作点色，恒偏浅
     for (size_t ci = 0; ci < m_laserChunks.size(); ++ci) {
         LaserChunk& ch = m_laserChunks[ci];
         const size_t base = ci * kLaserChunkPts;
@@ -2859,7 +2925,7 @@ void OSGWidget::laserAppendRange(LaserChunk& ch, const std::vector<osg::Vec3>& a
 {
     static const osg::Vec2 kQ[4] = {osg::Vec2(-1.f, -1.f), osg::Vec2(1.f, -1.f),
                                     osg::Vec2(1.f, 1.f), osg::Vec2(-1.f, 1.f)};
-    const osg::Vec4ub kLaserColor(134, 206, 250, 255);
+    const osg::Vec4ub kLaserColor(0, 154, 205, 255);   // 261114 对齐原版杰模点云色（modelImport.cpp 硬编码 (0.0,0.6039,0.8039)）——原值 (134,206,250) 系 LeadScan 网格材质色误作点色，恒偏浅
     const size_t v0 = ch.pts * 4;
     ch.coords->resize(v0 + cnt * 4);
     ch.corners->resize(v0 + cnt * 4);
