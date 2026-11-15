@@ -2,6 +2,7 @@
 #include "FiveChainAdapter.h"
 #include "harness.h"
 
+#include <unordered_map>
 #include "pipelines/ISceneFeed.h"
 #include "ICloudWarehouse.h"
 #include "scanning/preprocess/mask_separation/laser_markingpoint_mask_separation_cuda.h"
@@ -2624,6 +2625,80 @@ void FiveChainAdapter::renderPushIfDue(bool forceFull) {
         }
     }
     renderKeep_ = uiXyz.empty() ? std::move(fusedXyz) : std::move(uiXyz);
+
+    // 【261115 噪点治理】UI 显示前空间孤点滤除：半径 R 内邻居 < K 的点不上屏
+    //（真实激光点多帧观测天然聚簇；偶发噪声点稀疏孤立）。仅过滤**显示**——
+    // 仓库账本（warehouse_）推全量真值不受影响（后期可编辑清理）。
+    // env：JMW_FC_ISLAND_R（网格半径 mm，默认 2.0，0=关）、JMW_FC_ISLAND_K
+    //（最小邻居数，默认 3）。大点阵先抽稀到 ≤50 万再滤（保推送节拍）。
+    {
+        static const double islR = [] {
+            const char* e = getenv("JMW_FC_ISLAND_R");
+            return e ? atof(e) : 2.0;
+        }();
+        static const int islK = [] {
+            const char* e = getenv("JMW_FC_ISLAND_K");
+            return e ? atoi(e) : 3;
+        }();
+        size_t nPts = renderKeep_.size() / 3;
+        if (islR > 0.0 && islK > 0 && nPts > 128) {
+            // 抽稀（>50 万时等步长取样——滤孤立点对密度不敏感）
+            if (nPts > 500000) {
+                const size_t stride = (nPts + 499999) / 500000;
+                std::vector<float> thin;
+                thin.reserve((nPts + stride - 1) / stride * 3);
+                for (size_t i = 0; i < nPts; i += stride) {
+                    thin.push_back(renderKeep_[i * 3 + 0]);
+                    thin.push_back(renderKeep_[i * 3 + 1]);
+                    thin.push_back(renderKeep_[i * 3 + 2]);
+                }
+                renderKeep_ = std::move(thin);
+                nPts = renderKeep_.size() / 3;
+            }
+            // 均匀网格（cell=islR）＋27 邻域计数
+            struct Key3 { long x, y, z; bool operator==(const Key3& o) const {
+                return x == o.x && y == o.y && z == o.z; } };
+            struct Hash3 { size_t operator()(const Key3& k) const {
+                return (static_cast<size_t>(k.x) * 73856093)
+                     ^ (static_cast<size_t>(k.y) * 19349663)
+                     ^ (static_cast<size_t>(k.z) * 83492791); } };
+            std::unordered_map<Key3, int, Hash3> grid;
+            grid.reserve(nPts * 2);
+            const double inv = 1.0 / islR;
+            std::vector<Key3> cellOf(nPts);
+            for (size_t i = 0; i < nPts; ++i) {
+                cellOf[i] = { static_cast<long>(std::floor(renderKeep_[i * 3] * inv)),
+                              static_cast<long>(std::floor(renderKeep_[i * 3 + 1] * inv)),
+                              static_cast<long>(std::floor(renderKeep_[i * 3 + 2] * inv)) };
+                ++grid[cellOf[i]];
+            }
+            std::vector<float> kept;
+            kept.reserve(renderKeep_.size());
+            for (size_t i = 0; i < nPts; ++i) {
+                int nb = 0;
+                for (int dx = -1; dx <= 1 && nb < islK; ++dx)
+                    for (int dy = -1; dy <= 1 && nb < islK; ++dy)
+                        for (int dz = -1; dz <= 1 && nb < islK; ++dz) {
+                            if (!dx && !dy && !dz) continue;
+                            const auto it = grid.find({ cellOf[i].x + dx,
+                                                        cellOf[i].y + dy,
+                                                        cellOf[i].z + dz });
+                            if (it != grid.end()) nb += it->second;
+                        }
+                if (nb >= islK) {
+                    kept.push_back(renderKeep_[i * 3 + 0]);
+                    kept.push_back(renderKeep_[i * 3 + 1]);
+                    kept.push_back(renderKeep_[i * 3 + 2]);
+                }
+            }
+            const size_t dropped = nPts - kept.size() / 3;
+            if (dropped > 0)
+                JMW_LOG_INFO("07-FiveChain",
+                    "[FC-ISLAND] 孤点滤除: {} / {} 点（R={}mm K={}）",
+                    dropped, nPts, islR, islK);
+            renderKeep_ = std::move(kept);
+        }
+    }
 
     CloudViewHandle h;
     h.hostMarker = (markerFuseOp_ && !markerFuseOp_->GetFusedPoints().empty())
