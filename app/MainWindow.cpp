@@ -3549,12 +3549,15 @@ void MainWindow::startInfoTimer()
         updateVirtualKeypadStates();   // P-键盘：每秒刷新——响应 SystemState
                                         // ＋calibArmed/采集等非 StateChanged 驱动态
         updateToolbarEditGate();       // 261017：悬浮工具栏门禁——仅扫描暂停态可用
-        // P-分辨率：滑条与 DM 同步（非拖动时——初始时序偏差自动收敛）
-        if (m_voxelSlider && !m_voxelSlider->isSliderDown()) {
-            auto* dmVox = m_appCtx ? m_appCtx->deviceManager() : nullptr;
-            if (dmVox && m_voxelSlider->value() != dmVox->voxelLadderIndex())
-                m_voxelSlider->setValue(dmVox->voxelLadderIndex());
-        }
+        // P-分辨率：滑条与 DM 同步——已移除（261115 修复：此每秒同步与
+        // setVoxelLadderIndex 的异步 post() 存在竞态——post 未执行时读旧值
+        // 把滑条拉回，导致"设置了就弹回 0.01"。正确的回显由 event 113
+        // 处理（DM 逻辑线程实际变更后广播 p2=新档→滑条更新）。
+        // if (m_voxelSlider && !m_voxelSlider->isSliderDown()) {
+        //     auto* dmVox = m_appCtx ? m_appCtx->deviceManager() : nullptr;
+        //     if (dmVox && m_voxelSlider->value() != dmVox->voxelLadderIndex())
+        //         m_voxelSlider->setValue(dmVox->voxelLadderIndex());
+        // }
         // 显示远近档差锚自愈同步（261004 首按反向二修）：面板构建时快照可能
         // 尚未刷新（成员初值 1≠持久化真档）→ 锚错首按方向反。每秒跟随 DM
         // 快照收敛——112 事件到来时锚必等于 DM 当前真档（跨事件无其他写者，
