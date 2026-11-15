@@ -1064,8 +1064,26 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
                                 && gnorm.dot(globalSet_.normals[static_cast<size_t>(nearLib)])
                                        >= mergeNormalMinCos)
                                 gid = gidByIndex[nearLib];
-                            else
+                            else {
                                 gid = nextGid_++;
+                                // 【诊断 261115】JMW_FC_MINTLOG=1：新号发射打印（定位
+                                //「同位置双标志点」——两个近距 gid 的诞生帧/坐标/最近距
+                                // 一眼可见；正式功能不受影响，默认关）
+                                static const bool sMintLog = [] {
+                                    const char* e = getenv("JMW_FC_MINTLOG");
+                                    return e != nullptr && e[0] == '1';
+                                }();
+                                if (sMintLog)
+                                    fprintf(stderr,
+                                            "[MINT] 新号 gid=%d xyz=(%.2f,%.2f,%.2f) "
+                                            "最近邻距=%.2fmm（%s）\n",
+                                            gid, gpos.x, gpos.y, gpos.z, bestD,
+                                            nearLib < 0
+                                                ? "库空"
+                                                : (bestD < kMergeRadiusMm
+                                                       ? "法线门拒"
+                                                       : "超合并半径"));
+                            }
                         }
                         p.fuseMarkerGids.push_back(gid);   // 261103 fuse 帧观测入链旁路
                         // 写库体检：非有限值不入库（NaN 毒点致索引静默弃组）
