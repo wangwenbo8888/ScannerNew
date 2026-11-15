@@ -112,6 +112,9 @@ public:
 
     // —— 扫描视角跟随（marker 云生长感知自动取景；SceneFeed 更新路径消费）——
     void setAutoViewFit(bool on) { m_autoViewFit = on; }
+    /// 261115 第一人称视角跟随（public——app 位姿信号接线）：按配准位姿 R/T
+    /// 设相机（所见即扫描仪所见）；内部 150ms 节流＋拖拽避让＋maybeAutoFrame 让位
+    void applyScannerPoseView(const double R[9], const double T[3]);
     bool autoViewFit() const { return m_autoViewFit; }
 
     // 渲染观测（P3）：只读快照——app 装配喂 HardwareMonitor（processFps 等）
@@ -486,6 +489,7 @@ private:
                                                     //   （激光/仓库快照/导入云一份数据）
     bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角；丢失 Release 由超时窗自愈）
     std::chrono::steady_clock::time_point m_lastInteractTime{};   // 最近交互时刻（Press/按住拖拽刷新——避让 3s 时间窗）
+    std::chrono::steady_clock::time_point m_lastPoseViewTime{};   // 261115 最近位姿视角时刻（活跃期 maybeAutoFrame 让位）
     bool m_markersVisible = true;                   // 标志点显示开关（右键菜单；NodeMask 0=隐藏）
     bool m_laserVisible = true;                     // 激光点显示开关（右键菜单；NodeMask 0=隐藏）
     size_t m_lastMeshTriangles = 0;                 // 261017 最近导入网格三角面数（树计数用）

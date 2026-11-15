@@ -3104,6 +3104,30 @@ void OSGWidget::setLeftCameraView()
 }
 
 // ============================================================================
+// 第一人称视角跟随（261115 用户口径：所见即扫描仪所见）
+//   R 设备→世界（行主 9 元）、T 平移——左相机位于设备原点，光轴 +z_device，
+//   图像 y 向下。eye=T（光心世界位）、前向=R 第 3 列、up=-R 第 2 列。
+//   150ms 节流＋拖拽避让（3s 窗）；复用现有 manipulator home 保持可拖拽接管。
+// ============================================================================
+void OSGWidget::applyScannerPoseView(const double R[9], const double T[3])
+{
+    if (!m_viewer) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - m_lastPoseViewTime < std::chrono::milliseconds(150)) return;   // ~7Hz
+    if (m_userInteracting && now - m_lastInteractTime < std::chrono::seconds(3)) return;
+    const osg::Vec3d fwd(R[2], R[5], R[8]);          // R·(0,0,1)：光轴世界向（行主第 3 列）
+    if (fwd.length2() < 1e-12) return;
+    const osg::Vec3d up(-(R[1]), -(R[4]), -(R[7]));  // -R·(0,1,0)：图像上方（OpenCV y 向下）
+    const osg::Vec3d eye(T[0], T[1], T[2]);
+    const osg::Vec3d center = eye + fwd * 100.0;     // 注视点沿光轴 100mm
+    if (osgGA::CameraManipulator* manip = m_viewer->getCameraManipulator()) {
+        manip->setHomePosition(eye, center, up);
+        manip->home(0);
+    }
+    m_lastPoseViewTime = now;
+}
+
+// ============================================================================
 // 扫描视角跟随——marker 云生长感知自动取景（P2 配套；UI 线程）
 //   触发：首次有效更新，或场景半径较上次取景增长 >25%（新区域显著出画）
 //   避让：用户拖拽中不抢视角；1s 节流防镜头抖动
@@ -3111,11 +3135,25 @@ void OSGWidget::setLeftCameraView()
 void OSGWidget::maybeAutoFrame()
 {
     const auto now = std::chrono::steady_clock::now();
+    // 261115 拒因探针（定位「扫描中视角不随动」）：被任一门挡住即记（3s 限频）
+    static std::chrono::steady_clock::time_point sVfLastDiag{};
+    const auto vfDiag = [&](const char* reason) {
+        if (now - sVfLastDiag >= std::chrono::seconds(3)) {
+            JMW_LOG_WARN("03-OSGWidget",
+                "[VIEW-FOLLOW] 拒: {}（autoFit={} interacting={} 距上次交互={}ms 上次半径={:.1f}）",
+                reason, m_autoViewFit, m_userInteracting,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - m_lastInteractTime).count(),
+                m_lastFitRadius);
+            sVfLastDiag = now;
+        }
+    };
     // 261114：拖拽避让改时间窗（3s）——Release 丢失（右键菜单/拖出窗）曾令
     // m_userInteracting 永久卡 true，扫描全程不再左相机取景（功能"消失"根因）
-    if (!m_autoViewFit) return;
-    if (m_userInteracting && now - m_lastInteractTime < std::chrono::seconds(3)) return;
-    if (m_lastFitRadius >= 0.0 && now - m_lastFitTime < std::chrono::seconds(1)) return;
+    if (!m_autoViewFit) { vfDiag("总开关关"); return; }
+    if (now - m_lastPoseViewTime < std::chrono::seconds(2)) { vfDiag("位姿跟随中让位"); return; }
+    if (m_userInteracting && now - m_lastInteractTime < std::chrono::seconds(3)) { vfDiag("交互避让"); return; }
+    if (m_lastFitRadius >= 0.0 && now - m_lastFitTime < std::chrono::seconds(1)) { vfDiag("1s节流"); return; }
 
     // 取景基准（261004 稳健化）：优先 robustMarkerBounds（中位数中心＋90 分位
     // 半径——伪标志点离群值不拉爆取景，扫描中点云"逐渐变小"根因修复）；
@@ -3137,7 +3175,7 @@ void OSGWidget::maybeAutoFrame()
                 (m_laserRoot && m_laserRoot->getNumParents() > 0)
                     ? m_laserRoot->getBound()
                     : osg::BoundingSphere();
-            if (!lbs.valid() || lbs.radius() <= 0.0) return;
+            if (!lbs.valid() || lbs.radius() <= 0.0) { vfDiag("无取景基准(标志点/激光均无)"); return; }
             radius = lbs.radius();
         }
     }
@@ -3146,10 +3184,12 @@ void OSGWidget::maybeAutoFrame()
     // 此前只防增大，停止后一次跳走的视角永不回来，点云"消失"假象
     if (m_lastFitRadius >= 0.0 &&
         radius < m_lastFitRadius * 1.25 &&
-        radius > m_lastFitRadius * 0.8) return;
+        radius > m_lastFitRadius * 0.8) { vfDiag("半径带内(不变)"); return; }
 
     // 扫描标志点路径：取景用左相机视角（用户口径）——通用 fitCameraToRoot
     // 斜视角仅导入路径用
+    JMW_LOG_INFO("03-OSGWidget", "[VIEW-FOLLOW] 取景执行: 半径={:.1f}（上次={:.1f}）",
+                 radius, m_lastFitRadius);
     setLeftCameraView();
     m_lastFitRadius = radius;
     m_lastFitTime = now;

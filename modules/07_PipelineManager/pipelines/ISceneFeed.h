@@ -30,6 +30,10 @@ public:
     /// 261018 轻计数通道：会话激光融合累计点数（host 计数器，逐帧零成本）——
     /// 与重推送（3s 节流）解耦，UI 统计列表亚秒刷新用。默认 no-op 兼容测试
     virtual void notifyLaserCount(size_t sessionPts) { (void)sessionPts; }
+    /// 261115 扫描仪位姿通道：每帧配准位姿（R 设备→世界行主 9 元、T 平移 3 元）
+    /// ——UI 第一人称视角跟随（所见即扫描仪所见，用户口径 261115）。采集线程
+    /// 直调零拷贝读；默认 no-op 兼容测试实现。03 侧自节流/避让拖拽。
+    virtual void notifyScannerPose(const double R[9], const double T[3]) { (void)R; (void)T; }
 };
 
 } // namespace Scanner::pipeline

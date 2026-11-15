@@ -341,6 +341,12 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                         m_3dView->loadMarkerPoints(markers, norms);
                     });
             // 激光点云（host 块直推——FuseConsumer 下载的当帧激光块）
+            // 261115 first-person pose-follow: per-frame registration pose -> 03
+            connect(feed, &SceneFeedAdapter::scannerPoseUpdated, this,
+                    [this](const QVector<double>& R, const QVector<double>& T) {
+                        if (!m_3dView || R.size() != 9 || T.size() != 3) return;
+                        m_3dView->applyScannerPoseView(R.constData(), T.constData());
+                    });
             connect(feed, &SceneFeedAdapter::laserCloudUpdated, this,
                     [this](const std::vector<cv::Point3f>& pts) {
                 JMW_LOG_INFO("app-MainWindow",

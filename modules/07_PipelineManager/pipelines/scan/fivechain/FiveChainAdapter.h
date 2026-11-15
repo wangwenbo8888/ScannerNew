@@ -171,6 +171,7 @@ private:
     FrameObsAccumulator& obs_;
     Scanner::data::ICloudWarehouse* warehouse_;
     ISceneFeed* sceneFeed_;
+    std::atomic<bool> firstRegPushed_{false};   // 261115 首配准即推一次性旗标（每会话复位）
     std::atomic<bool> active_{false};
 
     std::unique_ptr<calib::LaserMarkingSeparationCUDA> sepL_, sepR_;

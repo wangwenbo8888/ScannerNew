@@ -2137,6 +2137,7 @@ Scanner::Result FiveChainAdapter::startRealtime(
 // ---------------------------------------------------------------------------
 void FiveChainAdapter::collectorLoop() {
     int idx = 0;
+    firstRegPushed_.store(false, std::memory_order_relaxed);   // 261115 首配准即推：会话复位
     size_t mkGated = 0;   // 261103 标志点累积门拦截计数（验证手段）
     for (;;) {
         scr::CycleProductsCompat prod;
@@ -2144,6 +2145,8 @@ void FiveChainAdapter::collectorLoop() {
         if (!executor_->collect(idx, prod, err)) break;    // F 关闭且空＝会话终
         harness_->diagLaserPts_.fetch_add(prod.laserPoints3D,
                                           std::memory_order_relaxed);
+        // 261115 位姿通道：每帧配准位姿直推 UI（第一人称视角跟随；03 侧自节流）
+        if (sceneFeed_) sceneFeed_->notifyScannerPose(prod.R, prod.T);
         // 261028 标志点融合（体素 5mm＋EMA 精化——替代简单去重）
         // 261103 孪生修复（同激光八轮门）：hold/skip 过期位姿帧的标志点不进
         // C 线累积/显示云——此前仅激光有门，标志点在配准断档期按冻结位姿
@@ -2341,7 +2344,20 @@ void FiveChainAdapter::collectorLoop() {
         }
 
         // ③ 节流渲染推送（时间门 ≥3s——FuseConsumer 261018 口径）
-        renderPushIfDue(/*forceFull=*/false);
+        // 261115 首配准即推：首个配准成功帧（融合云已有货）立即全量上屏
+        // ——省 3s 节流窗，「开扫后激光迟迟不显示」的显示层尾延收掉
+        const bool regOkNow = (prod.regSource == "first" || prod.regSource == "flow"
+                               || prod.regSource == "fuse");
+        if (!firstRegPushed_ && regOkNow && fuse_
+                              && fuse_->GetFusedPointCount() > 0) {
+            firstRegPushed_ = true;
+            JMW_LOG_INFO("07-FiveChain",
+                "[FC-FIRSTPUSH] f={} 首配准成功即全量推送（融合云 {} 点）",
+                idx, fuse_->GetFusedPointCount());
+            renderPushIfDue(/*forceFull=*/true);
+        } else {
+            renderPushIfDue(/*forceFull=*/false);
+        }
         ++idx;
     }
     JMW_LOG_INFO("07-FiveChain", "[FiveChainAdapter] 收割线程退出: {} 帧处理", idx);

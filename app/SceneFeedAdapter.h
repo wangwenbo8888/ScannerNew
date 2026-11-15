@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QVector>
 
 #include "opencv2/core.hpp"
 
@@ -54,6 +55,14 @@ public:
     }
     size_t laserFusedCount() const { return latestLaserCount_.load(std::memory_order_acquire); }
 
+    /// 261115 位姿通道透传：值拷贝进 QVector 跨线程投递（12 个 double 级开销）
+    void notifyScannerPose(const double R[9], const double T[3]) override {
+        QVector<double> r(9), t(3);
+        for (int i = 0; i < 9; ++i) r[i] = R[i];
+        for (int i = 0; i < 3; ++i) t[i] = T[i];
+        emit scannerPoseUpdated(r, t);
+    }
+
 signals:
     // UI 线程消费（MainWindow 接 OSGWidget::loadMarkerPoints；metatype 在 cpp 注册）
     // normals 与 points 等长对齐（NaN 滤除同步）——定向圆盘渲染用（世界系固定朝向）
@@ -63,6 +72,9 @@ signals:
     /// 261018 增量追加（laserAppend 句柄）：points＝自上次推送后的新增尾部
     /// ——显示端只追加不重建整幅；全量纠正仍走 laserCloudUpdated
     void laserCloudAppended(const std::vector<cv::Point3f>& points);
+    /// 261115 扫描仪位姿（第一人称视角跟随）：R 设备→世界行主 9 元/T 平移 3 元
+    /// ——采集线程 emit，UI 队列投递（QVector<double> 内建元类型）
+    void scannerPoseUpdated(const QVector<double>& R, const QVector<double>& T);
     void freezeChanged(bool frozen);
 
 private:
