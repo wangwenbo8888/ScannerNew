@@ -112,6 +112,10 @@ if(BUILD_TESTS)
         target_include_directories(${tname} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/core
             ${CMAKE_SOURCE_DIR})
+        # 【V4/V5 回迁 261115】真数据用例的数据集根＝沙盒目录（不入 git 的检出上
+        # 文件缺席→用例自 GTEST_SKIP；SCR_SOURCE_DIR 原为沙盒 CMake 专属定义）
+        target_compile_definitions(${tname} PRIVATE
+            SCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}/modules/09_OperatorLib/TEST/fullgpu_optimize")
         # CUDA 测试开关（与 3DSCANNER 一致；无害于纯 CPU 测试）
         target_compile_definitions(${tname} PRIVATE WITH_CUDA_TESTS=$<BOOL:${BUILD_CUDA}>)
         # 261005 DLL 化补账：纯 cpp 测试直接调 cudaDeviceReset 等 cudart API

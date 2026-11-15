@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -31,6 +32,15 @@ namespace {
 
 constexpr const char* kPinPending = "[PIN-PENDING]";
 
+// 【v4 默认开·2026-11-07】金样口径保护（静态期钉 v3 臂）：harness 的 lmV4Serial
+// 为进程级一次性冻结静态量——任何 TU 的早期 Harness/fivechain 构造都会先读它。
+// 须在静态初始化期（先于一切用例构造）显式 JMW_LMV4=0；与 test_laser_match_v4.cpp
+// 的静态守卫（同置 0，不再删除变量）无论先后均收敛到 0，无初始化次序竞态。
+// （仿 RLEGRAPH 翻默认先例"off 臂须显式 =0"）
+struct ChainEnvGuard {
+    ChainEnvGuard() { _putenv("JMW_LMV4=0"); }
+} g_chainEnvGuard;
+
 /// 链环境（SetUpTestSuite 一次装载，全 suite 共享）
 struct ChainEnv {
     bool available = false;
@@ -47,6 +57,10 @@ struct ChainEnv {
 ChainEnv& env() {
     static ChainEnv e = [] {
         ChainEnv x;
+        // 【v4 默认开·2026-11-07】金样口径保护：本 suite 的 golden 对拍与
+        // runtime.check 阈值钉在 v3 整版臂——运行期显式钉 JMW_LMV4=0
+        //（先于 Harness 构造；仿 RLEGRAPH 翻默认先例"off 臂须显式 =0"）
+        _putenv("JMW_LMV4=0");
         x.cfg = ScrConfig{};
         // 配置：--config 语义的测试版——exe 旁 → 源码模板
         const std::string cfgPath = ScrConfig::defaultConfigPath();

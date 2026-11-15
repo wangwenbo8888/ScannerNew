@@ -52,6 +52,10 @@ void LaserMatchScanCudaV3::SetFullGpuPath(bool on) {
     pImpl_->fullGpuOn_ = on;
 }
 
+void LaserMatchScanCudaV3::SetEmitCardRes(bool on) {
+    pImpl_->emitCardRes_ = on;   // 【V5】语义见头注；构造期 env JMW_V3CARDRES 为缺省
+}
+
 LaserMatchScanResultV3 LaserMatchScanCudaV3::Execute(
     const cv::cuda::GpuMat& d_left_points,
     const cv::cuda::GpuMat& d_left_line_ids,

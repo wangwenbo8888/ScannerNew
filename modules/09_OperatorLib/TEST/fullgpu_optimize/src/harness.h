@@ -46,6 +46,9 @@
 #include "core/laser/undistort_cuda/undistort_points_cuda.h"
 #include "core/laser/epipolar_interp_dual/epipolar_interp_dual_cuda.h"
 #include "scanning/laser/laser_match_scan_v3/laser_match_scan_v3_cuda.h"
+#include "scanning/laser/laser_match_scan_v3_split/laser_match_scan_v3_split.h"
+#include "scanning/laser/laser_match_scan_v4/laser_match_scan_v4.h"
+#include "scanning/laser/laser_match_scan_v5/laser_match_scan_v5.h"
 #include "core/laser/laser_reconstruct/laser_reconstruct_cuda.h"
 #include "scanning/fusion/laser_cloud_fuse_cuda/laser_cloud_fuse_cuda.h"
 
@@ -118,6 +121,12 @@ struct CycleProducts {
     int laserPoints3D = 0;
     double rowResidMedPx = -1.0; // 激光配对行对齐残差中位数（矫正系极线自洽）
     double dispMedPx = -1.0;     // 视差中位数
+
+    // ——【E2·残差测量 2026-11-08】v4 残差通道样本（res_channel=true 时填充）——
+    // 与 v4 输出对同序同长；采集于宿主 disp_gate 之前（测表预测 vs 匹配命中，
+    // 与输出端过滤无关）。resVal 带符号：>0＝实际右点在表预测右侧＝表预测偏低。
+    std::vector<int> resLid;
+    std::vector<float> resXl, resYl, resXr, resVal;
 };
 
 class Harness {
@@ -148,6 +157,9 @@ public:
     /// 前置仍内存执行——见设计 §6 单步模式 v1 口径）
     void dumpCycleFiltered(int cycleIdx, const CycleProducts& p, bool full,
                            const std::vector<std::string>* onlySteps) const;
+    /// 只落匹配图（--match-img）：输出目录根平铺 frame_NNN.png＋frame_NNN_L/R.csv
+    /// （渲染与全量 dump 的 L4-match_v3.png 同源；不建 cycle 目录、不落 summary）
+    void dumpMatchImage(int cycleIdx, const CycleProducts& p) const;
 
     /// 首帧（配准全局系）是否已初始化
     bool registrationInitialized() const { return !prevState_.empty(); }
@@ -186,6 +198,18 @@ private:
         std::unique_ptr<calib::UndistortPointsCuda> undistCudaL_, undistCudaR_;
         std::unique_ptr<calib::EpipolarInterpDualCuda> interpL_, interpR_;
         std::unique_ptr<calib::LaserMatchScanCudaV3> matchOp_;
+        // 【v4·REA 对标】JMW_LMV4=1 时串行/双 lane 激光链④改走「分体 GPU 前段＋
+        // v4 裁判 CPU 后段」（matchOp_ 不建）；结果上传回 p.matchV3，下游
+        // disp_gate/重建/L4 产物零改动
+        std::unique_ptr<calib::LaserMatchScanSplitGpuV3> matchSplitGpu_;
+        std::unique_ptr<calib::LaserMatchScanSplitCpuV4> matchV4Back_;
+        bool useV4Back = false;
+        // 【v5·人工8步骨架】【默认开·261114】JMW_LMV5=0 显式关；配置含
+        // laser_match_scan_v5 节才启用（优先级 V5>V4>V3；缺节不启用——D8 fail-safe）。
+        // V5 后段零查表（cardRes 前段预存，前段发射开关随 V5 强制开）；
+        // 结果上传回 p.matchV3 同 V4 口径。
+        std::unique_ptr<calib::LaserMatchScanSplitCpuV5> matchV5Back_;
+        bool useV5Back = false;
         std::unique_ptr<calib::LaserReconstructCuda> reconOp_;
         void destroy();
     };

@@ -338,21 +338,49 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
     d_pts_.create(1, eCapPts_, CV_32FC3);
 
     // fivechain 专属算子（参数与 harness v3/recon 同源同值——对拍前提）
-    const auto v3p = calib::LaserMatchScanParamsV3::fromJson(
-        h_.cfg_.opParams("laser_match_scan_v3"));
+    // 【V5 回迁接线 261115】JMW_LMV5 默认开（261114 用户裁定沿用），=0 显式退回
+    // v4/v3（A/B 臂保留）；V5>V4>V3；缺 laser_match_scan_v5 节不启用（D8
+    // fail-safe）。v5 激活时前段参数取 v5 节 v3 基＋发射 cardRes（V5 契约）
+    // ——在 splitGpu_ 构造前裁定，避免二次构造/二次注表（沙盒 fc_executor 口径）。
+    {
+        const char* v5e = getenv("JMW_LMV5");
+        lmV5_ = !(v5e != nullptr && v5e[0] == '0');
+    }
+    calib::LaserMatchScanParamsV5 v5p{};
+    if (lmV5_) {
+        nlohmann::json j5 = h_.cfg_.opParams("laser_match_scan_v5");
+        if (!j5.is_object() || j5.empty()) {
+            lmV5_ = false;   // D8：缺节不启用，回退 V4/V3
+            fprintf(stderr, "[fc] JMW_LMV5 默认开但配置缺 laser_match_scan_v5 节"
+                            "——V5 不启用（fail-safe）\n");
+        } else {
+            v5p = calib::LaserMatchScanParamsV5::fromJson(j5);
+        }
+    }
+    const auto v3p = lmV5_
+        ? v5p.v3   // v5 臂：前段参数随 v5 节走（同沙盒口径；逐管覆盖仍生效）
+        : calib::LaserMatchScanParamsV3::fromJson(
+              h_.cfg_.opParams("laser_match_scan_v3"));
     splitGpu_ = std::make_unique<calib::LaserMatchScanSplitGpuV3>(v3p);
+    if (lmV5_) splitGpu_->SetEmitCardRes(true);   // 【V5 契约】cardRes 必须发射
     splitCpu_ = std::make_unique<calib::LaserMatchScanSplitCpuV3>(v3p);
     // 261007 参数跟帧走：T/V 共用（组 0——面片逐帧交替下每帧 SetParams 会
     // 重置算子 warmup 引发崩溃）；窗 [34,86] 同盖 T 实测 61~87 与 V 39~62
+    //【261115 V5 回迁】V5 臂不套 V3 逐管调优值——V5 门结构独立扫参（窄窗 thr 4.0/
+    // 间距 36.9/容差 3.0），V3 的 12/88/0.30 等口径会破坏 V5 发卡（真机匹配劣化
+    // 根因：逐帧 SetParams 把 v5 节定稿值盖掉——沙盒验证＝单一口径无覆盖）。
+    // V3 臂保留产线 261007 真机实测调优值。V5 真机逐管调参归交接档未决#5。
     for (int t = 0; t < 4; ++t) h_.v3TubeParams_[t] = v3p;
-    h_.v3TubeParams_[0].cascade_spacing_px = 52.0f;   // T 左斜（组 0 与 V 共用）
-    h_.v3TubeParams_[0].cascade_spacing_tol = 0.68f;
-    h_.v3TubeParams_[1] = h_.v3TubeParams_[0];        // V 右斜（同组同值）
-    // C(2) 单线——cascade lidDiff==1 不触发，保持基础包
-    h_.v3TubeParams_[3].cascade_spacing_px = 88.0f;   // D 精细 窗[62,114]（实测 68~108）
-    h_.v3TubeParams_[3].cascade_spacing_tol = 0.30f;
-    h_.v3TubeParams_[3].match_threshold = 12.0f;      // 261107 表 rms 6.4 下收紧
-    //    （32px 窗放重叠窗错卡存活跨线错配；12 只留准预测）
+    if (!lmV5_) {
+        h_.v3TubeParams_[0].cascade_spacing_px = 52.0f;   // T 左斜（组 0 与 V 共用）
+        h_.v3TubeParams_[0].cascade_spacing_tol = 0.68f;
+        h_.v3TubeParams_[1] = h_.v3TubeParams_[0];        // V 右斜（同组同值）
+        // C(2) 单线——cascade lidDiff==1 不触发，保持基础包
+        h_.v3TubeParams_[3].cascade_spacing_px = 88.0f;   // D 精细 窗[62,114]（实测 68~108）
+        h_.v3TubeParams_[3].cascade_spacing_tol = 0.30f;
+        h_.v3TubeParams_[3].match_threshold = 12.0f;      // 261107 表 rms 6.4 下收紧
+        //    （32px 窗放重叠窗错卡存活跨线错配；12 只留准预测）
+    }
     h_.v3ParamGroup_.store(-1, std::memory_order_relaxed);
     reconP_ = calib::LaserReconstructParams::fromJson(
         h_.cfg_.opParams("laser_reconstruct"));
@@ -401,6 +429,41 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
     splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
     splitGpu_->SetTempTable(h_.tableEven_);
     splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+
+    // 【V5 回迁接线 261115】后段 V5/V4 构造。V5 默认开（JMW_LMV5=0 显式关）；
+    // V4＝显式实验臂（JMW_LMV4=1 开——对齐仓内 fullGpu_ 同款「默认关+env 实验臂」
+    // 惯例；沙盒的 V4 默认开属其历史沿革，产线回退语义＝缺 V5 直落 V3 保底）。
+    // V5 后段零查表（无温表/温度注入），仅 Q（深度门可选，未注入自动关）；
+    // V4 后段构造期双管温表预注（双槽缓存）＋执行期按管切表（见 back-end 路由）。
+    {
+        const char* v4e = getenv("JMW_LMV4");
+        lmV4_ = (v4e != nullptr && v4e[0] == '1');
+    }
+    if (lmV5_) {
+        splitCpuV5_ = std::make_unique<calib::LaserMatchScanSplitCpuV5>(v5p);
+        if (!h_.calib_.Q.empty())
+            splitCpuV5_->SetStereoQ(h_.calib_.Q);
+        // 【261115 用户要求】扫码可辨：会话级选路证据（后段=V5）
+        JMW_LOG_INFO("07-FiveChain",
+            "[fc] 激光匹配后段=V5 人工8步（JMW_LMV5 默认开，=0 退 v4/v3）；"
+            "逐帧确认看 \"[fc:v5] cycle=...\"（首帧+每500帧）");
+    } else if (lmV4_) {
+        nlohmann::json j4 = h_.cfg_.opParams("laser_match_scan_v4");
+        if (!j4.is_object() || j4.empty())
+            j4 = h_.cfg_.opParams("laser_match_scan_v3");   // 缺节回读 v3（键为子集）
+        splitCpuV4_ = std::make_unique<calib::LaserMatchScanSplitCpuV4>(
+            calib::LaserMatchScanParamsV4::fromJson(j4));
+        splitCpuV4_->SetTempTable(h_.tableOdd_);
+        splitCpuV4_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        splitCpuV4_->SetTempTable(h_.tableEven_);
+        splitCpuV4_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        if (!h_.calib_.Q.empty())
+            splitCpuV4_->SetStereoQ(h_.calib_.Q);
+    } else {
+        // 【261115 用户要求】扫码可辨：三种后段各打一行，会话启动即知选了谁
+        JMW_LOG_INFO("07-FiveChain",
+            "[fc] 激光匹配后段=V3 分体（JMW_LMV5=0 或配置缺 laser_match_scan_v5 节）");
+    }
 
     // —— 【全GPU链2】默认关（2026-10-27 对齐仓内"默认关+env实验臂"惯例；
     // FG/SP 四轮 ABAB 已证分体更优 80-85 vs 67-73）；JMW_FC_FULLGPU=1 开整体版实验臂 ——
@@ -748,6 +811,7 @@ void FiveChainExecutor::fcSeparation(FcJob* j) {
 }
 
 void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
+    j->tubeIdx = tubeIdx;   // 【V5 回迁 261115】记录本帧管号（V4 回退臂后段按管切温表用）
     auto& p = j->prod;
     auto& L = h_.laserOps_;
     if (!h_.stepOk(p, "epipolar_interp_dual")) return;
@@ -1949,7 +2013,30 @@ void FiveChainExecutor::chain2Loop() {
                         j->front.leftCount > 0 ? j->front.leftStatus[0] : -9);
             }
             h_.timeBegin();
-            cr = splitCpu_->Execute(j->front);
+            // 【V5 回迁接线 261115】JMW_LMV5 默认开 → 人工8步后段（零查表）；
+            // =0 退回 v4（按管切温表）/v3。V5/V4 结果切片赋入 V3 基类
+            //（下游 disp_gate/重建/统计消费面不变）。
+            if (lmV5_ && splitCpuV5_) {
+                cr = splitCpuV5_->Execute(j->front);
+                // 【261115 用户要求】扫码可辨：V5 逐帧确认（首帧+每500帧；
+                // cr.message 含 "| v5: ..." 段＝V5 独有指纹，V3 无此段）
+                {
+                    const int nLog = v5LogN_.fetch_add(1, std::memory_order_relaxed);
+                    if (nLog == 0 || nLog % 500 == 0)
+                        JMW_LOG_INFO("07-FiveChain", "[fc:v5] cycle={} matched={} {}",
+                                     j->idx, cr.matchedCount, cr.message);
+                }
+                if (getenv("JMW_V5BD"))   // 【诊断】后段逐步骤耗时（只读打印）
+                    fprintf(stderr, "[v5:bd] cycle=%d%s\n", j->idx,
+                            splitCpuV5_->LastTimingBreakdown().c_str());
+            } else if (lmV4_ && splitCpuV4_) {
+                splitCpuV4_->SetTempTable(h_.tableFor(j->tubeIdx));
+                splitCpuV4_->SetCurrentTemperature(
+                    h_.cfg_.runtime.nominalTemperature);
+                cr = splitCpuV4_->Execute(j->front);
+            } else {
+                cr = splitCpu_->Execute(j->front);
+            }
             j->prod.laserMatched = cr.matchedCount;   // 原值（门关闭时即最终口径）
             // 【离面鬼影修复 2026-10-30】分体后段补帧级视差一致性门（与 v3
             // 整体版 disp_gate 同源同参）：splitCpu 后段在 host 出对，直接
@@ -2022,7 +2109,11 @@ void FiveChainExecutor::chain2Loop() {
             if (fcbd)   // 【插桩】后段分段串＋front 规模逐帧分布（seg/cards）
                 fprintf(stderr, "[fc:bd] idx=%d seg=%d cards=%d bd=%s\n",
                         j->idx, j->front.segCount, j->front.totalCards,
-                        splitCpu_->LastTimingBreakdown().c_str());
+                        (lmV5_ && splitCpuV5_)
+                            ? splitCpuV5_->LastTimingBreakdown().c_str()
+                            : (lmV4_ && splitCpuV4_)
+                                  ? splitCpuV4_->LastTimingBreakdown().c_str()
+                                  : splitCpu_->LastTimingBreakdown().c_str());
             if (!cr.success)
                 h_.fail("laser_match_scan_v3", j->prod, "后段失败: " + cr.message);
         } else if (!j->readFail) {

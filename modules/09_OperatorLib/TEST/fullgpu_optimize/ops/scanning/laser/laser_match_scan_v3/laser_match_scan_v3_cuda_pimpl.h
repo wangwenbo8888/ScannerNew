@@ -177,7 +177,7 @@ struct LaserMatchScanCudaV3::Impl {
 cv::cuda::GpuMat d_card_lid_;           // leftCount*V3_MAX_CARDS, CV_32SC1
 cv::cuda::GpuMat d_card_hitRx_;         // leftCount*V3_MAX_CARDS, CV_32FC1
 cv::cuda::GpuMat d_card_count_;         // leftCount, CV_32SC1
-cv::cuda::GpuMat d_card_res_;           // leftCount*V3_MAX_CARDS, CV_32FC1（|hitRx-uR|，P3/诊断用）
+cv::cuda::GpuMat d_card_res_;           // leftCount*V3_MAX_CARDS, CV_32FC1（hitRx-uR 带符号；V5 质量道/诊断）
 cv::cuda::GpuMat d_card_hitRidx_;       // leftCount*V3_MAX_CARDS, CV_32SC1（右排序系索引，P4 右占用）
 cv::cuda::GpuMat d_seg_res_;            // segCount*V3_MAX_LIDS, CV_32SC1（段内残差定点累加 1/256px）
     cv::cuda::GpuMat d_diag_;               // 4, CV_32SC1（d_diag_[0]=保留段无 winner 卡点数）
@@ -290,16 +290,19 @@ cv::cuda::GpuMat d_seg_res_;            // segCount*V3_MAX_LIDS, CV_32SC1（段�
     cv::cuda::GpuMat d_tight_lid_;          // totalCards CV_32SC1（紧缩卡表 SoA：lid）
     cv::cuda::GpuMat d_tight_rx_;           // totalCards CV_32FC1（hitRx）
     cv::cuda::GpuMat d_tight_ridx_;         // totalCards CV_32SC1（右排序系索引）
+    cv::cuda::GpuMat d_tight_res_;          // totalCards CV_32FC1（hitRx-uR 带符号；JMW_V3CARDRES=1 才使用）
     PinnedBuf<int> hpin_cardoff_;           // N
     PinnedBuf<int> hpin_ccn_last_;          // 1（【批0·C(c)】card_count 末元素 4B 直拷）
     PinnedBuf<int> hpin_tight_lid_;         // T
     PinnedBuf<float> hpin_tight_rx_;        // T
     PinnedBuf<int> hpin_tight_ridx_;        // T
+    PinnedBuf<float> hpin_tight_res_;       // T（cardRes 发射；开关关时不分配不传输）
     PinnedBuf<int> hpin_lefttrack_;         // N（左点 track D2H）
     // ── 【批N-1·D2H 交织】FinishFront 专用（3 笔 D2H→1 笔；数值同源仅布局改）：
     //    统一交织暂存 d_ff_pack_ 三段布局（int 槽单位）：
-    //      [0, off1)                  = tight 段，off1=3*totalCards（0=空卡帧），
-    //                                 12B/card [lid, rx(__float_as_int), ridx]
+    //      [0, off1)                  = tight 段，off1=cardInts*totalCards（0=空卡帧），
+    //                                 cardInts=3（默认）12B/card [lid, rx, ridx]；
+    //                                 =4（JMW_V3CARDRES=1）16B/card 追加 res(__float_as_int)
     //      [off1, off2)               = int 包段，off2=off1+3*leftCount，
     //                                 12B/行 [segmap, leftStatus, track]
     //      [off2a, off2a+2*leftCount) = 左点段，每 float2 占 2 int 槽；
@@ -329,6 +332,12 @@ cv::cuda::GpuMat d_seg_res_;            // segCount*V3_MAX_LIDS, CV_32SC1（段�
     // 2=再叠加 K2 级联 GPU 实验路径
     bool fullGpuOn_ = false;
     int fullGpuMode_ = 0;
+
+    // 【V5】cardRes 发射开关：构造读 env JMW_V3CARDRES（默认 false），门面
+    // SetEmitCardRes 可覆写。true＝紧缩/D2H/copyout 带 cardRes 列（即时路径
+    // D2H 3→4 笔；延迟路径交织 12→16B/卡）；false＝传输笔数/字节/布局逐字同旧。
+    // 仅 executeFront/finishFront 收尾段消费（紧缩内核不进 CUDA 图，签名不涉）。
+    bool emitCardRes_ = false;
 
     // 【v3全GPU化·K2】级联内核宿主侧缓冲池（grow-only）
     K2Ctx* k2Ctx_ = nullptr;

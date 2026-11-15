@@ -5,7 +5,7 @@
 ## 1. 目标
 
 - 全部算法算子：标志点链/激光链/预处理/融合/全局优化；OperatorLib.dll＋契约指纹热更；退役算子进 retired/
-- 量化锚｜53 个算子目录（在用 44＋闲置/退役候选 9）；每目录自带 tests；指纹不符即拒绝加载
+- 量化锚｜55 个算子目录（在用 46＋闲置/退役候选 9）；每目录自带 tests；指纹不符即拒绝加载
 - 注意点｜算子统一三元组契约（Params/Result/Operator＋pImpl＋Stream&）；global_optim 不入三元组为独立组件
 
 〔待人定稿〕——人确认前为 AI 代拟
@@ -20,7 +20,7 @@
 - OperatorLib.dll＋契约指纹热更：达成｜`api/jmw_op_contract.h`＋`jmw_op_contract_hash.h`（公共头闭包＋工具链串 SHA-256）
 - 指纹不符即拒绝加载：达成｜指纹机制在库；「启动校验不一致直接拒绝」为本目录 AGENTS 口径〔待核：现状段无运行时证据〕
 - 退役算子进 retired/：未达成｜`retired/` 尚不存在（首次退役算子时建）；闲置/退役候选 9 个去留未裁定（见问题段）
-- 53 个算子目录（在用 44＋闲置/退役候选 9）：达成｜每算子目录带 tests/＋两件套；53×两件套铺设见日志 261102〔待核：计数源自日志/问题段，现状段未点名〕
+- 55 个算子目录（在用 46＋闲置/退役候选 9）：达成｜每算子目录带 tests/＋两件套；53×两件套铺设见日志 261102〔261115 +2：v4/v5 自沙盒回迁；待核：计数源自日志/问题段，现状段未点名〕
 - 每目录自带 tests：部分达成｜绝大多数目录带 tests/＋两件套；epipolar_pair_cpu 明言无测试
 - 三元组契约（Params/Result/Operator＋pImpl＋Stream&）：达成｜目录根 README.md＝契约速览（算子规范 v1.9）；Params validate/toJson/fromJson＋Operator 四口＋pImpl 禁拷贝＋QualityFlag 随 Result 不抛业务异常
 - global_optim 不入三元组为独立组件：达成｜global_ba_cpu 为准三元组（无 Warmup）；gba_dataset_runner 独立 exe 不入库（BUILD_GLOBAL_OPTIM 门控）

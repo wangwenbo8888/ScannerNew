@@ -334,6 +334,15 @@ public:
     /// 未实现前恒等效宿主路径。env JMW_V3FULLGPU=1 为构造期缺省值。
     void SetFullGpuPath(bool on);
 
+    /// 【V5·cardRes 发射开关】true＝前段（ExecuteFront/FinishFront 收尾段）紧缩/
+    /// D2H/copyout 携带带符号残差列（front.cardRes 填充，hitRx−uR，>0＝实际右点
+    /// 在表预测右侧）；false＝传输笔数/字节/布局与旧版逐字一致（默认；构造期读
+    /// env JMW_V3CARDRES=1 可开）。只影响收尾段——紧缩内核不进 CUDA 图，图签名
+    /// 不涉；整体 Execute()/票数/输出零影响（d_card_res 设备侧语义已改带符号，
+    /// 唯一消费者 kernelSegVoteV3 已自包 fabs，d_seg_res 定点口径逐位不变）。
+    /// 【261115 自 TEST/fullgpu_optimize 回迁产线（V5 配套依赖）】
+    void SetEmitCardRes(bool on);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pImpl_;

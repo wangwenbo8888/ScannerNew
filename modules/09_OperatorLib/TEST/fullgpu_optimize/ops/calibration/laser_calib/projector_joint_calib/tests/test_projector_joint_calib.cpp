@@ -733,3 +733,67 @@ TEST_F(ProjectorJointCalibTest, RightTermZeroBaseline) {
     ASSERT_TRUE(r.success) << r.message;
     EXPECT_FALSE(r.rightTermUsed) << "baseline=0 应跳过 Phase B";
 }
+
+// T5【F8 雅可比缺口判别·2026-11-08】逐线"沿线方向"位移场景（模拟实测的逐线 uR
+// 偏差族：每线一个常量、随线号爬升）。把每线点沿"投影器光心→点"射线整体挪
+// shift(l)＝0.4·l mm——uR 残差对这种位移全量敏感，而 Sampson 只见其法向分量。
+// 判别目标：uR 行真正进入梯度后，Phase B 应把 urBiasPost 显著压到 pre 之下；
+// 缺口未修时（块路径丢弃 uR 行、正则行错位）Phase B 空转 → post≈pre → 本用例挂。
+TEST_F(ProjectorJointCalibTest, RightTermAlongEpipolarShift) {
+    // 双路径各跑一遍（块稀疏＝默认 / 稠密＝回退）：补丁必须两条路都让 uR 行进梯度
+    double postBlock = -1.0;
+    for (int mode = 0; mode < 2; ++mode) {
+        auto sc = makeMultiScene(8, 600, 0.0, 45, 5);
+        // 逐线沿【左相机视线】位移：P' = P + shift(l)·normalize(P)（左相机光心在原点）。
+        // 沿视线挪动左目投影严格不变 → Sampson 完全失明；深度变 → uR 全量可见——
+        // 这是拟合盲区的纯化场景：只有 uR 行携带信号，uR 行不进梯度则无人能修。
+        for (size_t l = 0; l < sc.input.lines.size(); ++l) {
+            const double shift = 0.4 * static_cast<double>(l);   // mm：0 / 0.4 / … / 1.6
+            if (shift <= 0.0) continue;
+            for (auto& pose : sc.input.lines[l]) {
+                for (auto& P : pose.points3d) {
+                    const cv::Vec3d dir(P[0], P[1], P[2]);
+                    const double n = std::sqrt(dir.dot(dir));
+                    if (n < 1e-9) continue;
+                    P = cv::Vec3f(static_cast<float>(P[0] + shift * dir[0] / n),
+                                  static_cast<float>(P[1] + shift * dir[1] / n),
+                                  static_cast<float>(P[2] + shift * dir[2] / n));
+                }
+            }
+        }
+        sc.input.baseline = 60.0;
+        sc.input.enableRightTerm = true;
+        // 权重>1：修 uR 需以微抬 Sampson 为代价（左目投影不动→曲线挪动必然离投影），
+        // 1:1 权衡下只肯走一小步；加权把 LM 推向 uR——该参数即为此设计（.h:167）。
+        sc.input.rightTermWeight = 5.0;
+        ProjectorJointCalibParams pm = params_;
+        pm.useBlockJtJ = (mode == 0);
+        ProjectorJointCalib op2(pm);
+        auto r = op2.ExecuteMultiLine(sc.input);
+        ASSERT_TRUE(r.success) << r.message;
+        EXPECT_TRUE(r.rightTermUsed) << "应启用右目项";
+        EXPECT_GT(r.urRowCount, 0) << "应有生效 uR 行";
+        std::cerr << "[rt-shift mode=" << (mode == 0 ? "block" : "dense")
+                  << "] pre=" << r.urBiasPreRms
+                  << " post=" << r.urBiasPostRms
+                  << " iters=" << r.phaseBIters
+                  << " cond=" << r.jacobianConditionNumber << "\n";
+        // ——判别断言（缺口未修时必然挂：空转 post/pre==1.000000）——
+        EXPECT_GT(r.phaseBIters, 1) << "Phase B 不应一触即溃（空转特征：iters=1）";
+        EXPECT_LT(r.urBiasPostRms, 0.95 * r.urBiasPreRms)
+            << (mode == 0 ? "[block]" : "[dense]")
+            << " uR 行进梯度后 Phase B 必须真实压低 uR 偏差（pre=" << r.urBiasPreRms
+            << " post=" << r.urBiasPostRms << "）；post≈pre 即雅可比缺口："
+               "uR 行未进 H/g（块路径丢弃）或正则行错位。注：本合成注入不全落二次曲线"
+               "族内，收敛 floor 由可表达性决定（实测 ~0.90），断言只钉'梯度在流'。";
+        if (mode == 0) {
+            postBlock = r.urBiasPostRms;
+        } else {
+            // 容差 5e-3（非 1e-6）：库启 OpenMP，Eigen 归约（JᵀJ）求和顺序随线程
+            // 调度逐次变化（实测漂移 ~6e-4）——并行抖动属正常；真路径病变差
+            // 异在数量级层面，此容差足够分辨。
+            EXPECT_NEAR(postBlock, r.urBiasPostRms, 5e-3)
+                << "块稀疏/稠密两路径的 uR 补丁结果应一致（雅可比同源，OMP 归约抖动除外）";
+        }
+    }
+}

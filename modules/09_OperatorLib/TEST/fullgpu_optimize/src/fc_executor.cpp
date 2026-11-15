@@ -331,10 +331,34 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles)
     for (int i = static_cast<int>(eBlocks_.size()) - 1; i >= 0; --i) eFree_.push_back(i);
     d_pts_.create(1, eCapPts_, CV_32FC3);
 
+    // 【v5】【默认开·2026-11-14 用户裁定】原 JMW_LMV5=1 临时启用改为默认走 v5
+    //（定稿③ 397/399＋11,237,093）；JMW_LMV5=0 显式退回 v4/v3（A/B 臂保留）；
+    // V5>V4>V3；缺节不启用 D8 fail-safe。成员每次构造重读（同 lmV4_）。v5 激活
+    // 时前段参数取 v5 节 v3 基＋发射 cardRes（V5 契约）——在 splitGpu_ 构造前裁定，
+    // 避免二次构造/二次注表。
+    {
+        const char* v5e = getenv("JMW_LMV5");
+        lmV5_ = !(v5e != nullptr && v5e[0] == '0');
+    }
+    calib::LaserMatchScanParamsV5 v5p{};
+    if (lmV5_) {
+        nlohmann::json j5 = h_.cfg_.opParams("laser_match_scan_v5");
+        if (!j5.is_object() || j5.empty()) {
+            lmV5_ = false;   // D8：缺节不启用，回退 V4/V3
+            fprintf(stderr, "[fc] JMW_LMV5 默认开但配置缺 laser_match_scan_v5 节"
+                            "——V5 不启用（fail-safe）\n");
+        } else {
+            v5p = calib::LaserMatchScanParamsV5::fromJson(j5);
+        }
+    }
+
     // fivechain 专属算子（参数与 harness v3/recon 同源同值——对拍前提）
-    const auto v3p = calib::LaserMatchScanParamsV3::fromJson(
-        h_.cfg_.opParams("laser_match_scan_v3"));
+    const auto v3p = lmV5_
+        ? v5p.v3   // v5 臂：前段参数随 v5 节走（同 harness 侧口径）
+        : calib::LaserMatchScanParamsV3::fromJson(
+              h_.cfg_.opParams("laser_match_scan_v3"));
     splitGpu_ = std::make_unique<calib::LaserMatchScanSplitGpuV3>(v3p);
+    if (lmV5_) splitGpu_->SetEmitCardRes(true);   // 【V5 契约】cardRes 必须发射
     splitCpu_ = std::make_unique<calib::LaserMatchScanSplitCpuV3>(v3p);
     reconP_ = calib::LaserReconstructParams::fromJson(
         h_.cfg_.opParams("laser_reconstruct"));
@@ -347,6 +371,32 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles)
     splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
     splitGpu_->SetTempTable(h_.tableEven_);
     splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+
+    // 【v4·REA 对标】v4 裁判型后段。
+    // 【默认开·2026-11-07 用户裁定】原 JMW_LMV4=1 启用改为默认走 v4；JMW_LMV4=0
+    // 显式退回 v3 分体路径（A/B 臂保留）。
+    // 参数节 laser_match_scan_v4 缺失时回退读 v3 节（v3 键为子集，新键取默认值）。
+    {
+        const char* v4e = getenv("JMW_LMV4");
+        lmV4_ = !(v4e != nullptr && v4e[0] == '0');
+    }
+    if (lmV5_) {
+        // 【v5】人工8步后段：零查表（无温表/温度注入），仅 Q（深度门，可选）
+        splitCpuV5_ = std::make_unique<calib::LaserMatchScanSplitCpuV5>(v5p);
+        splitCpuV5_->SetStereoQ(h_.calib_.Q);
+    } else if (lmV4_) {
+        nlohmann::json j4 = h_.cfg_.opParams("laser_match_scan_v4");
+        if (!j4.is_object() || j4.empty())
+            j4 = h_.cfg_.opParams("laser_match_scan_v3");
+        splitCpuV4_ = std::make_unique<calib::LaserMatchScanSplitCpuV4>(
+            calib::LaserMatchScanParamsV4::fromJson(j4));
+        // 双管温表预注（v4 后段双槽缓存；双管交替注入免重转换）＋ Q（深度门）
+        splitCpuV4_->SetTempTable(h_.tableOdd_);
+        splitCpuV4_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        splitCpuV4_->SetTempTable(h_.tableEven_);
+        splitCpuV4_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        splitCpuV4_->SetStereoQ(h_.calib_.Q);
+    }
 
     // —— 【全GPU链2】默认关（2026-10-27 对齐仓内"默认关+env实验臂"惯例；
     // FG/SP 四轮 ABAB 已证分体更优 80-85 vs 67-73）；JMW_FC_FULLGPU=1 开整体版实验臂 ——
@@ -1639,7 +1689,26 @@ void FiveChainExecutor::chain2Loop() {
                         j->front.leftCount > 0 ? j->front.leftStatus[0] : -9);
             }
             h_.timeBegin();
-            cr = splitCpu_->Execute(j->front);
+            // 【v5】【默认开·261114】JMW_LMV5=0 显式关 → 人工8步后段（零查表——无温表/温度注入）；
+            // 返回 V5 结果切片赋入 V3 基类（下游消费面不变）
+            if (lmV5_ && splitCpuV5_) {
+                cr = splitCpuV5_->Execute(j->front);
+                // 【诊断·JMW_V5BD=1】后段逐步骤耗时（LastTimingBreakdown——只读打印）
+                if (getenv("JMW_V5BD"))
+                    fprintf(stderr, "[v5:bd] cycle=%d%s\n", j->idx,
+                            splitCpuV5_->LastTimingBreakdown().c_str());
+            } else if (lmV4_ && splitCpuV4_) {
+                // 【v4】JMW_LMV4=1 → v4 裁判型后段（逐帧按管号激活对应温表槽）；
+                // 返回 V4 结果切片赋入 V3 基类（下游消费面不变）
+                const bool tubeOddB =
+                    h_.src_->cycles[static_cast<size_t>(j->idx)].tubeOdd;
+                splitCpuV4_->SetTempTable(tubeOddB ? h_.tableOdd_ : h_.tableEven_);
+                splitCpuV4_->SetCurrentTemperature(
+                    h_.cfg_.runtime.nominalTemperature);
+                cr = splitCpuV4_->Execute(j->front);
+            } else {
+                cr = splitCpu_->Execute(j->front);
+            }
             j->prod.laserMatched = cr.matchedCount;   // 原值（门关闭时即最终口径）
             // 【离面鬼影修复 2026-10-30】分体后段补帧级视差一致性门（与 v3
             // 整体版 disp_gate 同源同参）：splitCpu 后段在 host 出对，直接
@@ -1696,7 +1765,11 @@ void FiveChainExecutor::chain2Loop() {
             if (fcbd)   // 【插桩】后段分段串＋front 规模逐帧分布（seg/cards）
                 fprintf(stderr, "[fc:bd] idx=%d seg=%d cards=%d bd=%s\n",
                         j->idx, j->front.segCount, j->front.totalCards,
-                        splitCpu_->LastTimingBreakdown().c_str());
+                (lmV5_ && splitCpuV5_
+                     ? splitCpuV5_->LastTimingBreakdown()
+                     : lmV4_ && splitCpuV4_
+                           ? splitCpuV4_->LastTimingBreakdown()
+                           : splitCpu_->LastTimingBreakdown()).c_str());
             if (!cr.success)
                 h_.fail("laser_match_scan_v3", j->prod, "后段失败: " + cr.message);
         } else if (!j->readFail) {

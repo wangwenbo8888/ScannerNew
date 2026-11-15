@@ -19,6 +19,11 @@ struct ScrPaths {
     std::string cameraCalib;   // camera_calib.json
     std::string cmttSidecar;   // curve_map_temp_table.bin（奇号管，兼默认）
     std::string cmttSidecarEven;  // 偶号管 CMTT（可选；空=与奇号管同表）
+    // 【uR 烘表止血 2026-11-08】逐线 uR 补偿 sidecar（JSON：expectTableBytes/
+    // expectRowStep/biasPx[25]）。空=不烘（逐字节旧行为）；非空＝装载层对激活
+    // 温档逐条目 uR += biasPx[lid-1]（全体消费者口径一致）；与表失配＝报错拒载
+    // （防换表忘换补偿的错拷案）。来源与验证：专题-CMTT表uR随线号系统偏差 §10.2
+    std::string cmttBiasSidecar;
     std::string outDir;        // 产物输出目录（相对→以 source root 为基）
 
     bool allExist(std::string& missing) const;
@@ -47,6 +52,10 @@ struct ScrRuntime {
     // 分步可视化总开关（CLI --vis 等价置 true）：开启后整跑强制串行，
     // 仅 selectVisFrames 选中的帧落全量逐步产物（harness 五链/pipeline 分支旁路）
     bool visDump = false;
+    // 只落匹配图模式（CLI --match-img 等价置 true）：每个正式帧仅在输出目录根
+    // 平铺 frame_NNN.png（L4 匹配图同源渲染）＋ frame_NNN_L/R.csv 点表；不建
+    // cycle_NNN 目录、不落 summary——"整跑 N 帧只出匹配图"的快照口径
+    bool matchImageDump = false;
     // —— frame_fuse 兜底链内验收门（2026-10-15 参数化，原为 harness 硬编码；
     //    数据定标：真值残差 ≤0.2mm → rmse 门 2.0mm＝10 倍余量；垃圾解 78~169mm
     //    全拒；对称错解 <1mm 由算子签名法线＋并列弃权扛）——

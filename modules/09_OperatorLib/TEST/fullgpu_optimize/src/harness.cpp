@@ -399,6 +399,78 @@ Harness::LaserOps Harness::makeLaserOps(int laneIdx, std::string& err) {
     lo.interpL_ = std::make_unique<calib::EpipolarInterpDualCuda>(ip);
     lo.interpR_ = std::make_unique<calib::EpipolarInterpDualCuda>(ip);
 
+    // 【v5·人工8步骨架】【默认开·2026-11-14 用户裁定】原 JMW_LMV5=1 临时启用改为
+    // 默认走 v5（定稿③ 397/399＋11,237,093）；JMW_LMV5=0 显式退回 v4/v3（A/B 臂保留）；
+    // 优先级 V5 > V4 > V3。缺 laser_match_scan_v5 节 → 不启用（D8 fail-safe，
+    // 防 V4「配置缺节吃代码默认值」翻车模式）。V5 前段发射开关随启用强制开
+    //（发射关＋V5 开＝配置矛盾，就地拦截于启动期）。
+    static const bool lmV5Serial = [] {
+        const char* e = getenv("JMW_LMV5");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    lo.useV5Back = lmV5Serial;
+    if (lo.useV5Back) {
+        auto j5 = cfg_.opParams("laser_match_scan_v5");
+        if (!j5.is_object() || j5.empty()) {
+            lo.useV5Back = false;   // D8：缺节不启用，静默回退 V4/V3（告警一行）
+            std::cout << "[calib] JMW_LMV5 默认开但配置缺 laser_match_scan_v5 节"
+                         "——V5 不启用（fail-safe），回退 V4/V3" << std::endl;
+        }
+    }
+    if (lo.useV5Back) {
+        auto j5 = cfg_.opParams("laser_match_scan_v5");
+        const calib::LaserMatchScanParamsV5 p5 =
+            calib::LaserMatchScanParamsV5::fromJson(j5);
+        // 前段参数取 v5 节的 v3 基（发卡参数随 v5 配置走，与 v3/v4 臂解耦）
+        lo.matchSplitGpu_ = std::make_unique<calib::LaserMatchScanSplitGpuV3>(p5.v3);
+        if (!lo.matchSplitGpu_->SetTempTable(tableOdd_)) {
+            err = "laser_match_scan_v3(SetTempTable, v5 前段) 失败";
+            return lo;
+        }
+        // 【V5 契约】cardRes 必须发射（后段第7步/清洗/⑫的核心输入）
+        lo.matchSplitGpu_->SetEmitCardRes(true);
+        lo.matchV5Back_ = std::make_unique<calib::LaserMatchScanSplitCpuV5>(p5);
+        lo.matchV5Back_->SetStereoQ(calib_.Q);   // 深度门（补丁⑩）；Q 空自动关
+        if (laneIdx == 0)
+            std::cout << "[calib] 激光链④ v5 人工8步后段（默认开；JMW_LMV5=0 退回 v4/v3）"
+                      << std::endl;
+    } else
+    // 【v4·REA 对标】激光链④「分体 GPU 前段＋v4 裁判后段」。
+    // 【默认开·2026-11-07 用户裁定】原 JMW_LMV4=1 临时启用改为默认走 v4（线覆盖
+    // 优化定稿口径 387/399=97% 满线）；JMW_LMV4=0 显式退回 v3 整版路径（A/B 臂保留）。
+    {
+    static const bool lmV4Serial = [] {
+        const char* e = getenv("JMW_LMV4");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    lo.useV4Back = lmV4Serial;
+    if (lmV4Serial) {
+        // v4 前段参数取自 v4 节的 v3 基（match_threshold 等发卡参数随 v4 配置走，
+        // 与 v3 臂彻底解耦——2026-11-06 线覆盖优化前置接线修正）
+        auto j4f = cfg_.opParams("laser_match_scan_v4");
+        if (!j4f.is_object() || j4f.empty())
+            j4f = cfg_.opParams("laser_match_scan_v3");
+        lo.matchSplitGpu_ = std::make_unique<calib::LaserMatchScanSplitGpuV3>(
+            calib::LaserMatchScanParamsV4::fromJson(j4f).v3);
+        if (!lo.matchSplitGpu_->SetTempTable(tableOdd_)) {
+            err = "laser_match_scan_v3(SetTempTable, v4 前段) 失败";
+            return lo;
+        }
+        auto j4 = cfg_.opParams("laser_match_scan_v4");
+        if (!j4.is_object() || j4.empty())
+            j4 = cfg_.opParams("laser_match_scan_v3");
+        lo.matchV4Back_ = std::make_unique<calib::LaserMatchScanSplitCpuV4>(
+            calib::LaserMatchScanParamsV4::fromJson(j4));
+        // 双管温表双槽预激活＋Q（深度门用；两管共表时第二次注入走槽命中）
+        lo.matchV4Back_->SetTempTable(tableOdd_);
+        lo.matchV4Back_->SetCurrentTemperature(cfg_.runtime.nominalTemperature);
+        lo.matchV4Back_->SetTempTable(tableEven_);
+        lo.matchV4Back_->SetCurrentTemperature(cfg_.runtime.nominalTemperature);
+        lo.matchV4Back_->SetStereoQ(calib_.Q);
+        if (laneIdx == 0)
+            std::cout << "[calib] 激光链④ v4 裁判后段（默认开；JMW_LMV4=0 退回 v3）"
+                      << std::endl;
+    } else {
     lo.matchOp_ = std::make_unique<calib::LaserMatchScanCudaV3>(
         calib::LaserMatchScanParamsV3::fromJson(
             cfg_.opParams("laser_match_scan_v3")));
@@ -436,6 +508,8 @@ Harness::LaserOps Harness::makeLaserOps(int laneIdx, std::string& err) {
                           << " lids" << std::endl;
         }
     }
+    }
+    }   // 【v5】useV5Back else 块收口（V5 > V4 > V3 三级优先）
 
     lo.reconOp_ = std::make_unique<calib::LaserReconstructCuda>(
         calib::LaserReconstructParams::fromJson(cfg_.opParams("laser_reconstruct")));
@@ -1262,15 +1336,239 @@ void Harness::runLaserTail(LaserOps& L, CycleProducts& p, bool record, bool tube
         return;
     }
 
-    try {
-        timeBegin();
-        // 按管注表（奇偶＝激光管号，不同管不同标定参数；缺省两管共表）＋逐帧温度
+        try {
+            timeBegin();
+            // 按管注表（奇偶＝激光管号，不同管不同标定参数；缺省两管共表）＋逐帧温度
+            if (L.useV5Back && L.matchSplitGpu_ && L.matchV5Back_) {
+                // 【v5】分体 GPU 前段（cardRes 发射开）＋v5 人工8步 CPU 后段；
+                // 后段零查表（无温表/温度注入）。结果上传回 p.matchV3（下游零改动）
+                L.matchSplitGpu_->SetTempTable(tubeOdd ? tableOdd_ : tableEven_);
+                L.matchSplitGpu_->SetCurrentTemperature(cfg_.runtime.nominalTemperature);
+                calib::LaserMatchSplitFrontV3 front;
+                L.matchSplitGpu_->Execute(*p.interpL.d_interpPoints,
+                                          *p.interpL.d_interp_line_ids,
+                                          *p.interpR.d_interpPoints,
+                                          *p.interpR.d_interp_line_ids, ls, front);
+                calib::LaserMatchScanCpuResultV5 cr = L.matchV5Back_->Execute(front);
+                if (getenv("JMW_V5DIAG")) {
+                    int lidCards[26] = {0}, lidMatch[26] = {0};
+                    for (int c : front.cardLid)
+                        if (c >= 1 && c <= 25) ++lidCards[c];
+                    if (cr.matchedCount > 0) {
+                        const int* li = cr.matched_line_ids.ptr<int>();
+                        for (int i = 0; i < cr.matchedCount; ++i)
+                            if (li[i] >= 1 && li[i] <= 25) ++lidMatch[li[i]];
+                    }
+                    std::fprintf(stderr,
+                                 "[v5:diag] cycle=%d front: L=%d R=%d seg=%d cards=%d | "
+                                 "matched=%d judge=%d flip=%d noCardS=%d noSup=%d "
+                                 "elimAll=%d exitDrop=%d depth=%d clean=%d | %s\n",
+                                 cycleCount_ - 1, front.leftCount, front.rightCount,
+                                 front.segCount, front.totalCards, cr.matchedCount,
+                                 cr.qualityJudgedCount, cr.qualityFlipCount,
+                                 cr.noCardSegCount, cr.noSupportSegCount,
+                                 cr.eliminatedAllVotesSegCount,
+                                 cr.exitDroppedSegCount, cr.depthDroppedCards,
+                                 cr.resCleanDropped, cr.message.c_str());
+                    std::fprintf(stderr, "[v5:lid] cards: ");
+                    for (int l = 1; l <= 25; ++l) std::fprintf(stderr, "%d ", lidCards[l]);
+                    std::fprintf(stderr, "\n[v5:lid] match: ");
+                    for (int l = 1; l <= 25; ++l) std::fprintf(stderr, "%d ", lidMatch[l]);
+                    // 【v5:lidn/lidr】每线号健康度行（真满线判据数据源）：
+                    // lidn＝各线号输出条数；lidr＝各线号平均|残差|×100（无输出＝-1）。
+                    // 真满线＝全部 lidn≥下限 且 lidr≤阈值（错误线号的残差显著高于正确线，
+                    // frame_001 实证：正常≈60，错标块≈121——残差即测谎仪）。
+                    {
+                        double sumR[26] = {0.0};
+                        int cntR[26] = {0};
+                        if (!cr.matched_res.empty() && cr.matchedCount > 0 &&
+                            !cr.matched_line_ids.empty()) {
+                            const int* li = cr.matched_line_ids.ptr<int>();
+                            const size_t rn = std::min(cr.matched_res.size(),
+                                                       static_cast<size_t>(cr.matchedCount));
+                            for (size_t i = 0; i < rn; ++i) {
+                                const int l = li[i];
+                                if (l >= 1 && l <= 25) {
+                                    sumR[l] += std::fabs(cr.matched_res[i]);
+                                    ++cntR[l];
+                                }
+                            }
+                        }
+                        std::fprintf(stderr, "\n[v5:lidn]");
+                        for (int l = 1; l <= 25; ++l)
+                            std::fprintf(stderr, " %d", lidMatch[l]);
+                        std::fprintf(stderr, "\n[v5:lidr]");
+                        for (int l = 1; l <= 25; ++l)
+                            std::fprintf(stderr, " %d",
+                                         cntR[l] ? static_cast<int>(sumR[l] / cntR[l] * 100.0 + 0.5)
+                                                 : -1);
+                    }
+                    // 紧凑掩码行（快扫口径用这行——同 [v4:mask] 契约）
+                    unsigned mask = 0;
+                    int cnt = 0;
+                    for (int l = 1; l <= 25; ++l)
+                        if (lidMatch[l] > 0) { mask |= 1u << (l - 1); ++cnt; }
+                    std::fprintf(stderr, "\n[v5:mask] %u %u\n", cnt, mask);
+                    unsigned cmask = 0;
+                    for (int l = 1; l <= 25; ++l)
+                        if (lidCards[l] > 0) cmask |= 1u << (l - 1);
+                    std::fprintf(stderr, "[v5:cmask] %u\n", cmask);
+                }
+                // 【v5·⑫】带符号残差样本回填（同 v4 res_channel 消费面——
+                // dumpMatchImage 落盘/标定观测；先于下游 disp_gate）
+                if (!cr.matched_res.empty() && cr.matchedCount > 0
+                    && !cr.matched_left.empty()) {
+                    const int* rli = cr.matched_line_ids.ptr<int>();
+                    const auto* rml = cr.matched_left.ptr<cv::Point2f>();
+                    const auto* rmr = cr.matched_right.ptr<cv::Point2f>();
+                    const size_t rn = std::min(cr.matched_res.size(),
+                                               static_cast<size_t>(cr.matchedCount));
+                    p.resVal.assign(cr.matched_res.begin(),
+                                    cr.matched_res.begin() + static_cast<long>(rn));
+                    p.resLid.assign(rli, rli + rn);
+                    p.resXl.resize(rn);
+                    p.resYl.resize(rn);
+                    p.resXr.resize(rn);
+                    for (size_t i = 0; i < rn; ++i) {
+                        p.resXl[i] = rml[i].x;
+                        p.resYl[i] = rml[i].y;
+                        p.resXr[i] = rmr[i].x;
+                    }
+                }
+                p.matchV3 = calib::LaserMatchScanResultV3{};
+                p.matchV3.success = cr.success;
+                p.matchV3.message = cr.message;
+                p.matchV3.qualityFlag = cr.qualityFlag;
+                p.matchV3.matchedCount = cr.matchedCount;
+                p.matchV3.totalLeftPoints = cr.totalLeftPoints;
+                p.matchV3.totalRightPoints = cr.totalRightPoints;
+                p.matchV3.excludedLeftCount = cr.excludedLeftCount;
+                p.matchV3.excludedRightCount = cr.excludedRightCount;
+                p.matchV3.noMapLeftCount = cr.noMapLeftCount;
+                p.matchV3.noWinnerCardCount = cr.noWinnerCardCount;
+                p.matchV3.emptyWinnerSegCount = cr.emptyWinnerSegCount;
+                p.matchV3.trackTotal = cr.trackTotal;
+                p.matchV3.trackDropped = cr.trackDropped;
+                if (cr.success && cr.matchedCount > 0 && !cr.matched_left.empty()) {
+                    auto gl = std::make_shared<cv::cuda::GpuMat>();
+                    auto gr = std::make_shared<cv::cuda::GpuMat>();
+                    auto gi = std::make_shared<cv::cuda::GpuMat>();
+                    auto gt = std::make_shared<cv::cuda::GpuMat>();
+                    gl->upload(cr.matched_left, ls);
+                    gr->upload(cr.matched_right, ls);
+                    gi->upload(cr.matched_line_ids, ls);
+                    gt->upload(cr.matched_track_ids, ls);
+                    ls.waitForCompletion();
+                    p.matchV3.d_matched_left = gl;
+                    p.matchV3.d_matched_right = gr;
+                    p.matchV3.d_matched_line_ids = gi;
+                    p.matchV3.d_matched_track_ids = gt;
+                }
+            } else if (L.useV4Back && L.matchSplitGpu_ && L.matchV4Back_) {
+            // 【v4·REA 对标】分体 GPU 前段＋v4 裁判 CPU 后段；结果上传回
+            // p.matchV3（下游 disp_gate/重建/L4 产物零改动）
+            L.matchSplitGpu_->SetTempTable(tubeOdd ? tableOdd_ : tableEven_);
+            L.matchSplitGpu_->SetCurrentTemperature(cfg_.runtime.nominalTemperature);
+            calib::LaserMatchSplitFrontV3 front;
+            L.matchSplitGpu_->Execute(*p.interpL.d_interpPoints,
+                                      *p.interpL.d_interp_line_ids,
+                                      *p.interpR.d_interpPoints,
+                                      *p.interpR.d_interp_line_ids, ls, front);
+            L.matchV4Back_->SetTempTable(tubeOdd ? tableOdd_ : tableEven_);
+            L.matchV4Back_->SetCurrentTemperature(cfg_.runtime.nominalTemperature);
+            calib::LaserMatchScanCpuResultV4 cr = L.matchV4Back_->Execute(front);
+            if (getenv("JMW_V4DIAG")) {
+                int lidCards[26] = {0}, lidMatch[26] = {0};
+                for (int c : front.cardLid)
+                    if (c >= 1 && c <= 25) ++lidCards[c];
+                if (cr.matchedCount > 0) {
+                    const int* li = cr.matched_line_ids.ptr<int>();
+                    for (int i = 0; i < cr.matchedCount; ++i)
+                        if (li[i] >= 1 && li[i] <= 25) ++lidMatch[li[i]];
+                }
+                std::fprintf(stderr,
+                             "[v4:diag] cycle=%d front: L=%d R=%d seg=%d cards=%d | "
+                             "matched=%d flip=%d abstain=%d winDrop=%d noCardPts=%d "
+                             "spacingMiss=%d | %s\n",
+                             cycleCount_ - 1, front.leftCount, front.rightCount,
+                             front.segCount, front.totalCards, cr.matchedCount,
+                             cr.qualityFlipCount, cr.abstainSegCount,
+                             cr.windowShrinkDropped, cr.adaptNoCardPts,
+                             cr.spacingMissCount, cr.message.c_str());
+                std::fprintf(stderr, "[v4:lid] cards: ");
+                for (int l = 1; l <= 25; ++l) std::fprintf(stderr, "%d ", lidCards[l]);
+                std::fprintf(stderr, "\n[v4:lid] match: ");
+                for (int l = 1; l <= 25; ++l) std::fprintf(stderr, "%d ", lidMatch[l]);
+                // 紧凑掩码行（抗 stderr 交错断行；快扫口径用这行）
+                unsigned mask = 0;
+                int cnt = 0;
+                for (int l = 1; l <= 25; ++l)
+                    if (lidMatch[l] > 0) { mask |= 1u << (l - 1); ++cnt; }
+                std::fprintf(stderr, "\n[v4:mask] %u %u\n", cnt, mask);
+                unsigned cmask = 0;
+                for (int l = 1; l <= 25; ++l)
+                    if (lidCards[l] > 0) cmask |= 1u << (l - 1);
+                std::fprintf(stderr, "[v4:cmask] %u\n", cmask);
+            }
+            // 【E2·残差测量 2026-11-08】res_channel 样本回填 CycleProducts（供
+            // dumpMatchImage 落盘 frame_NNN_res.csv）；与 cr 输出对同序，先于
+            // 下游 disp_gate（测表预测 vs 匹配命中，与输出过滤无关）
+            if (!cr.matched_res.empty() && cr.matchedCount > 0
+                && !cr.matched_left.empty()) {
+                const int* rli = cr.matched_line_ids.ptr<int>();
+                const auto* rml = cr.matched_left.ptr<cv::Point2f>();
+                const auto* rmr = cr.matched_right.ptr<cv::Point2f>();
+                const size_t rn = std::min(cr.matched_res.size(),
+                                           static_cast<size_t>(cr.matchedCount));
+                p.resVal.assign(cr.matched_res.begin(),
+                                cr.matched_res.begin() + static_cast<long>(rn));
+                p.resLid.assign(rli, rli + rn);
+                p.resXl.resize(rn);
+                p.resYl.resize(rn);
+                p.resXr.resize(rn);
+                for (size_t i = 0; i < rn; ++i) {
+                    p.resXl[i] = rml[i].x;
+                    p.resYl[i] = rml[i].y;
+                    p.resXr[i] = rmr[i].x;
+                }
+            }
+            p.matchV3 = calib::LaserMatchScanResultV3{};
+            p.matchV3.success = cr.success;
+            p.matchV3.message = cr.message;
+            p.matchV3.qualityFlag = cr.qualityFlag;
+            p.matchV3.matchedCount = cr.matchedCount;
+            p.matchV3.totalLeftPoints = cr.totalLeftPoints;
+            p.matchV3.totalRightPoints = cr.totalRightPoints;
+            p.matchV3.excludedLeftCount = cr.excludedLeftCount;
+            p.matchV3.excludedRightCount = cr.excludedRightCount;
+            p.matchV3.noMapLeftCount = cr.noMapLeftCount;
+            p.matchV3.noWinnerCardCount = cr.noWinnerCardCount;
+            p.matchV3.emptyWinnerSegCount = cr.emptyWinnerSegCount;
+            p.matchV3.trackTotal = cr.trackTotal;
+            p.matchV3.trackDropped = cr.trackDropped;
+            if (cr.success && cr.matchedCount > 0 && !cr.matched_left.empty()) {
+                auto gl = std::make_shared<cv::cuda::GpuMat>();
+                auto gr = std::make_shared<cv::cuda::GpuMat>();
+                auto gi = std::make_shared<cv::cuda::GpuMat>();
+                auto gt = std::make_shared<cv::cuda::GpuMat>();
+                gl->upload(cr.matched_left, ls);
+                gr->upload(cr.matched_right, ls);
+                gi->upload(cr.matched_line_ids, ls);
+                gt->upload(cr.matched_track_ids, ls);
+                ls.waitForCompletion();
+                p.matchV3.d_matched_left = gl;
+                p.matchV3.d_matched_right = gr;
+                p.matchV3.d_matched_line_ids = gi;
+                p.matchV3.d_matched_track_ids = gt;
+            }
+        } else {
         L.matchOp_->SetTempTable(tubeOdd ? tableOdd_ : tableEven_);
         L.matchOp_->SetCurrentTemperature(cfg_.runtime.nominalTemperature);
         p.matchV3 = L.matchOp_->Execute(*p.interpL.d_interpPoints,
                                       *p.interpL.d_interp_line_ids,
                                        *p.interpR.d_interpPoints,
                                        *p.interpR.d_interp_line_ids, ls);
+        }
         // 【离面鬼影修复 2026-10-30】帧级视差一致性门（host 版，与 fc_executor
         // 分体后段同源同参）：段级投票在曲线收敛区整段错投线号，错配对视差
         // 系统性偏离主面（本数据集实测 −145px → 重建 +120~170mm 离面鬼影片）。
@@ -1336,6 +1634,17 @@ void Harness::runLaserTail(LaserOps& L, CycleProducts& p, bool record, bool tube
                 }
                 p.matchV3.dispGateDropped = n - w;
                 p.matchV3.matchedCount = w;
+                // 【v4·快扫】出闸后紧凑掩码行（与出闸前 [v4:mask] 对比＝视差门杀伤）
+                if (getenv("JMW_V4DIAG")) {
+                    int lidPost[26] = {0};
+                    for (int i = 0; i < w; ++i)
+                        if (li[i] >= 1 && li[i] <= 25) ++lidPost[li[i]];
+                    unsigned maskPost = 0;
+                    int cntPost = 0;
+                    for (int l = 1; l <= 25; ++l)
+                        if (lidPost[l] > 0) { maskPost |= 1u << (l - 1); ++cntPost; }
+                    std::fprintf(stderr, "[v4:maskpost] %u %u\n", cntPost, maskPost);
+                }
                 // 【审核⑧】丢弃占比>40% 告警：超 50% 时帧中位翻转、门会弃好保坏
                 if (n - w > n * 2 / 5)
                     std::fprintf(stderr,
@@ -2093,7 +2402,10 @@ bool Harness::runCycle(int cycleIdx, CycleProducts& p, bool recordTiming,
     // CPU链3/CPU链2/CUDA链2/主线程收割）。标记链 CPU 化与 pipe 同因。
     // 【--vis 旁路】visDump=1 时整跑串行——选中帧需帧尾保留全部 16 步中间产物，
     // 五链在飞产物收帧时已释放，无法逐帧全量 dump。
+    // 【--match-img 同款旁路】匹配图逐帧消费 d_matched_* 视图（有效期至下一次
+    // Execute），五链在飞产物收帧即释——同样须整跑串行。
     if (!cfg_.runtime.markerOnly && !cfg_.runtime.visDump
+        && !cfg_.runtime.matchImageDump
         && (cfg_.fivechain.executor == "fivechain"
             || getenv("JMW_FIVECHAIN") != nullptr)) {
         if (cclPath_ != "cpu") {
@@ -2118,8 +2430,9 @@ bool Harness::runCycle(int cycleIdx, CycleProducts& p, bool recordTiming,
     // 配准线程）。串行头（warmup＋dumpFullFrames 帧）仍走原串行路径——逐帧全量
     // dump 与金样口径逐字节一致；流水线帧只落 summary（report/PLY 口径不变）。
     // 流水线标记点链在 CPU lane——强制 CPU ccl（GPU ccl 的 streamMarker_ 单流
-    // 不可跨 lane 并发）。
+    // 不可跨 lane 并发）。【--match-img 旁路同 fivechain：须整跑串行保视图】
     if (!cfg_.runtime.markerOnly && !cfg_.runtime.visDump
+        && !cfg_.runtime.matchImageDump
         && getenv("JMW_PIPELINE") != nullptr) {
         if (cclPath_ != "cpu") {
             cclPath_ = "cpu";
@@ -2242,6 +2555,45 @@ double Harness::checkConsistency(const CycleProducts& p, std::string& detail) co
        << " dP1=" << dP1 << " dP2=" << dP2 << " dQ=" << dQ << ")";
     detail = os.str();
     return mx;
+}
+
+// ============================================================================
+// renderMatchImage — L4 匹配图渲染（dumpCycleFiltered 全量 dump 与 dumpMatchImage
+// 平铺快照共用同一份代码，保证两种口径的图逐像素同源）：白=未匹配（左右各自
+// 插值点），彩色=匹配对（按激光线号同色同编号，编号稀疏化每 60 点一次）。
+// 下载好的左/右匹配点与线号经出参交回调用方（L4t CSV 复用，免二次下载）。
+// ============================================================================
+static cv::Mat renderMatchImage(const CycleProducts& p, cv::cuda::Stream& cs,
+                                std::vector<cv::Point2f>& ml,
+                                std::vector<cv::Point2f>& mr,
+                                std::vector<int>& ids) {
+    ml = downloadP2(p.matchV3.d_matched_left, cs);
+    mr = downloadP2(p.matchV3.d_matched_right, cs);
+    ids = downloadIds(p.matchV3.d_matched_line_ids, cs);
+    auto il = downloadP2(p.interpL.d_interpPoints, cs);
+    auto ir = downloadP2(p.interpR.d_interpPoints, cs);
+    cv::Mat cl(p.frameGrayL.rows, p.frameGrayL.cols, CV_8UC3, cv::Scalar(20, 20, 20));
+    cv::Mat cr = cl.clone();
+    drawPts(cl, il, cv::Scalar(255, 255, 255), 2);      // 白=未匹配左点
+    drawPts(cr, ir, cv::Scalar(255, 255, 255), 2);      // 白=未匹配右点
+    const size_t n = std::min({ml.size(), mr.size(), ids.size()});
+    // 编号稀疏化：每条线号首点＋每隔 60 点标一次（万级点全标会糊成一片）
+    std::map<int, int> lidSeen;
+    for (size_t i = 0; i < n; ++i) {
+        const cv::Scalar c = paletteColor(ids[i]);   // 同线号同色
+        cv::circle(cl, cv::Point(cvRound(ml[i].x), cvRound(ml[i].y)), 3, c, -1);
+        cv::circle(cr, cv::Point(cvRound(mr[i].x), cvRound(mr[i].y)), 3, c, -1);
+        const int seen = lidSeen[ids[i]]++;
+        if (seen == 0 || seen % 60 == 0) {
+            cv::putText(cl, std::to_string(ids[i]),
+                        cv::Point(cvRound(ml[i].x) + 5, cvRound(ml[i].y) - 5), 0, 0.7,
+                        c, 2);   // 编号=激光线号（放大加粗便于缩放查看）
+            cv::putText(cr, std::to_string(ids[i]),
+                        cv::Point(cvRound(mr[i].x) + 5, cvRound(mr[i].y) - 5), 0, 0.7,
+                        c, 2);   // 右目同号（左右同色同编号对应）
+        }
+    }
+    return mergeLR(cl, cr);
 }
 
 void Harness::dumpCycle(int cycleIdx, const CycleProducts& p, bool full) const {
@@ -2484,35 +2836,13 @@ void Harness::dumpCycleFiltered(int cycleIdx, const CycleProducts& p, bool full,
         saveGpuMatP2((dir / "L4-match_L.csv").string(), *p.matchV3.d_matched_left, cs);
         if (p.matchV3.d_matched_right)
             saveGpuMatP2((dir / "L4-match_R.csv").string(), *p.matchV3.d_matched_right, cs);
-        auto ml = downloadP2(p.matchV3.d_matched_left, cs);
-        auto mr = downloadP2(p.matchV3.d_matched_right, cs);
-        auto ids = downloadIds(p.matchV3.d_matched_line_ids, cs);
-        auto il = downloadP2(p.interpL.d_interpPoints, cs);
-        auto ir = downloadP2(p.interpR.d_interpPoints, cs);
-        cv::Mat cl(p.frameGrayL.rows, p.frameGrayL.cols, CV_8UC3, cv::Scalar(20, 20, 20));
-        cv::Mat cr = cl.clone();
-        drawPts(cl, il, cv::Scalar(255, 255, 255), 2);      // 白=未匹配左点
-        drawPts(cr, ir, cv::Scalar(255, 255, 255), 2);      // 白=未匹配右点
-        const size_t n = std::min({ml.size(), mr.size(), ids.size()});
-        // 编号稀疏化：每条线号首点＋每隔 60 点标一次（万级点全标会糊成一片）
-        std::map<int, int> lidSeen;
-        for (size_t i = 0; i < n; ++i) {
-            const cv::Scalar c = paletteColor(ids[i]);   // 同线号同色
-            cv::circle(cl, cv::Point(cvRound(ml[i].x), cvRound(ml[i].y)), 3, c, -1);
-            cv::circle(cr, cv::Point(cvRound(mr[i].x), cvRound(mr[i].y)), 3, c, -1);
-            const int seen = lidSeen[ids[i]]++;
-            if (seen == 0 || seen % 60 == 0) {
-                cv::putText(cl, std::to_string(ids[i]),
-                            cv::Point(cvRound(ml[i].x) + 5, cvRound(ml[i].y) - 5), 0, 0.7,
-                            c, 2);   // 编号=激光线号（放大加粗便于缩放查看）
-                cv::putText(cr, std::to_string(ids[i]),
-                            cv::Point(cvRound(mr[i].x) + 5, cvRound(mr[i].y) - 5), 0, 0.7,
-                            c, 2);   // 右目同号（左右同色同编号对应）
-            }
-        }
-        savePng((dir / "L4-match_v3.png").string(), mergeLR(cl, cr));
+        std::vector<cv::Point2f> ml, mr;
+        std::vector<int> ids;
+        cv::Mat img = renderMatchImage(p, cs, ml, mr, ids);
+        savePng((dir / "L4-match_v3.png").string(), img);
         {   // L4t：匹配对段 ID（含 lid，诊断投票/丢段用）
             auto mtrk = downloadIds(p.matchV3.d_matched_track_ids, cs);
+            const size_t n = std::min({ml.size(), mr.size(), ids.size()});
             const size_t tn = std::min({n, mtrk.size()});
             std::ofstream f((dir / "L4t-match-tracks.csv").string());
             f << "x,y,lid,track\n" << std::fixed << std::setprecision(2);
@@ -2844,6 +3174,41 @@ void Harness::dumpCycleFiltered(int cycleIdx, const CycleProducts& p, bool full,
         if (trajT_.size() >= 2)
             savePng((dir.parent_path() / "M11-trajectory.png").string(),
                     makeTrajectory(trajT_, 640, 640));
+    }
+}
+
+// ============================================================================
+// 只落匹配图（--match-img / runtime.matchImageDump）：输出目录根平铺
+// frame_NNN.png＋frame_NNN_L/R.csv——渲染与全量 dump 的 L4-match_v3.png 同源
+// （renderMatchImage 共用）。不建 cycle_NNN 目录、不落 summary；匹配未产出
+// 的帧（步骤失败）跳过不落。预热帧由调用方（main）过滤。
+// ============================================================================
+void Harness::dumpMatchImage(int cycleIdx, const CycleProducts& p) const {
+    if (!p.matchV3.d_matched_left) return;   // 匹配未产出：跳过（不落空图）
+    cv::cuda::Stream cs;                     // dump 专用流（同 dumpCycleFiltered）
+    char base[32];
+    std::snprintf(base, sizeof(base), "frame_%03d", cycleIdx);
+    const fs::path root = fs::path(outDir_);
+    saveGpuMatP2((root / (std::string(base) + "_L.csv")).string(),
+                 *p.matchV3.d_matched_left, cs);
+    if (p.matchV3.d_matched_right)
+        saveGpuMatP2((root / (std::string(base) + "_R.csv")).string(),
+                     *p.matchV3.d_matched_right, cs);
+    std::vector<cv::Point2f> ml, mr;
+    std::vector<int> ids;
+    cv::Mat img = renderMatchImage(p, cs, ml, mr, ids);
+    if (!img.empty()) savePng((root / (std::string(base) + ".png")).string(), img);
+
+    // 【E2·残差测量 2026-11-08】frame_NNN_res.csv：lid,xL,yL,xR,res（带符号；
+    // res>0＝表预测偏低）。样本先于 disp_gate，行数可与 _L/_R.csv 不同。
+    if (!p.resVal.empty()) {
+        std::ofstream f((root / (std::string(base) + "_res.csv")).string());
+        if (f) {
+            f << "lid,xL,yL,xR,res\n" << std::fixed << std::setprecision(3);
+            for (size_t i = 0; i < p.resVal.size(); ++i)
+                f << p.resLid[i] << ',' << p.resXl[i] << ',' << p.resYl[i] << ','
+                  << p.resXr[i] << ',' << p.resVal[i] << '\n';
+        }
     }
 }
 

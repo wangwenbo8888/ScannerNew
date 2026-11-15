@@ -4,8 +4,8 @@ param(
     [Parameter(Mandatory=$true)][string]$ExeA,
     [Parameter(Mandatory=$true)][string]$ExeB,
     [int]$Repeat = 3,
-    [string]$Config = "E:\JEAMMWARE2601001\modules\09_operatorlib\TEST\fullgpu_optimize\configs\config_baseline.json",
-    [string]$DataDir = "E:\JEAMMWARE2601001\modules\09_operatorlib\TEST\fullgpu_optimize\date_in\laser-mark1688-1006\ALL_raw",
+    [string]$Config = "E:\JEAMMWARE260705\modules\09_OperatorLib\TEST\fullgpu_optimize\configs\config_baseline.json",
+    [string]$DataDir = "E:\JEAMMWARE260705\modules\09_OperatorLib\TEST\fullgpu_optimize\date_in\laser-mark1688-1006\ALL_raw",
     [string]$OutRoot = "C:\Users\DUUMM\AppData\Local\Temp\opencode\abba",
     [hashtable]$ArmBEnv = $null,   # arm-B-only env injection (e.g. @{ 'JMW_V3FRONTGRAPH' = '1' }; arm A never gets these)
     [hashtable]$BaseEnv = $null    # common env for BOTH arms (e.g. @{ 'JMW_1BGRAPH' = '1' })
@@ -29,7 +29,7 @@ foreach ($arm in $order) {
     # [batch H] expanded: legacy six + new graph-family gates (FLATGRAPH/RLEGRAPH/
     # FUSEGRAPH/1BBIGGRAPH) + master switch NOGRAPH - stale residues silently
     # pin an arm to a non-default graph stack (red-team A S1-2)
-    Remove-Item Env:JMW_FC_FULLGPU, Env:JMW_CENSUS, Env:JMW_CENSUS_TRACE, Env:JMW_CENSUS_OUT, Env:JMW_1BGRAPH, Env:JMW_V3FRONTGRAPH, Env:JMW_FLATGRAPH, Env:JMW_RLEGRAPH, Env:JMW_FUSEGRAPH, Env:JMW_1BBIGGRAPH, Env:JMW_NOGRAPH -ErrorAction SilentlyContinue
+    Remove-Item Env:JMW_FC_FULLGPU, Env:JMW_CENSUS, Env:JMW_CENSUS_TRACE, Env:JMW_CENSUS_OUT, Env:JMW_1BGRAPH, Env:JMW_V3FRONTGRAPH, Env:JMW_FLATGRAPH, Env:JMW_RLEGRAPH, Env:JMW_FUSEGRAPH, Env:JMW_1BBIGGRAPH, Env:JMW_NOGRAPH, Env:JMW_LMV5, Env:JMW_LMV4, Env:JMW_V5DIAG, Env:JMW_V5BD, Env:JMW_V5VOTES, Env:JMW_V5JOBS, Env:JMW_V3CARDRES, Env:JMW_FCBD, Env:JMW_FCDIAG, Env:JMW_V3FRT, Env:JMW_FCPIN_CH2 -ErrorAction SilentlyContinue
     $env:JMW_FIVECHAIN = '1'
     if ($BaseEnv) { foreach ($k in $BaseEnv.Keys) { Set-Item "Env:$k" $BaseEnv[$k] } }
     if ($arm -eq 'B' -and $ArmBEnv) {
@@ -55,14 +55,29 @@ foreach ($arm in $order) {
         Write-Output ("arm {0}{1}: attempt {2} aborted (exit={3}), no summary - retry" -f $arm, $seq, $try, $exit)
     }
     $fc = Join-Path $dir 'fc_summary.csv'
+    $ch2 = -1.0
     if (Test-Path $fc) {
         foreach ($l in Get-Content $fc) {
             if ($l -match '^steady_fps_median,([\d.]+)') { $steady = [double]$Matches[1] }
+            if ($l -match '^wallCh2,([\d.]+)') { $ch2 = [double]$Matches[1] }
+        }
+    }
+    # [v5opt 261114] BD median: with JMW_V5BD=1, run.err.log has [v5:bd] ... total=<ms> N=...
+    $bd = -1.0
+    $errLog = Join-Path $dir 'run.err.log'
+    if (Test-Path $errLog) {
+        $bdVals = New-Object System.Collections.Generic.List[double]
+        foreach ($l in Get-Content $errLog) {
+            if ($l -match 'total=([\d.]+)\s+N=') { $bdVals.Add([double]$Matches[1]) }
+        }
+        if ($bdVals.Count -gt 0) {
+            $srt = $bdVals | Sort-Object
+            $bd = $srt[[int](($srt.Count - 1) / 2)]
         }
     }
     $t = (Get-Item $exe).LastWriteTime.ToString('HH:mm')
-    Write-Output ("arm {0}{1}: exit={2} median={3:F1} steady={4:F1}" -f $arm, $seq, $exit, $med, $steady)
-    $results[("{0}{1}" -f $arm, $seq)] = @{ med = $med; steady = $steady }
+    Write-Output ("arm {0}{1}: exit={2} median={3:F1} steady={4:F1} wallCh2med={5:F2}ms bdMed={6:F2}ms" -f $arm, $seq, $exit, $med, $steady, $ch2, $bd)
+    $results[("{0}{1}" -f $arm, $seq)] = @{ med = $med; steady = $steady; ch2 = $ch2; bd = $bd }
     $seq++
 }
 Remove-Item Env:JMW_FIVECHAIN -ErrorAction SilentlyContinue
@@ -97,5 +112,26 @@ if ($diffs.Count -ge 3) {
         else { Write-Output "VERDICT: NO-REGRESSION (B not worse; gain within noise band)" }
     } else {
         Write-Output "VERDICT: REGRESSION SUSPECT (needs investigation)"
+    }
+}
+
+# [v5opt 261114] paired wallCh2/BD median diff (B=new minus A=old; negative = B faster).
+# Requires both arms to run with JMW_V5BD=1 (inject via -BaseEnv).
+foreach ($metric in @('ch2','bd')) {
+    $mdiffs = New-Object System.Collections.Generic.List[double]
+    foreach ($p in $pairs) {
+        $ra = $results[$p.a]; $rb = $results[$p.b]
+        if (-not $ra -or -not $rb) { continue }
+        $va = $ra[$metric]; $vb = $rb[$metric]
+        if ($va -lt 0 -or $vb -lt 0) { continue }
+        $d = if ($p.d -eq 'B-A') { $vb - $va } else { $va - $vb }
+        $mdiffs.Add($d)
+    }
+    if ($mdiffs.Count -ge 3) {
+        $srt2 = $mdiffs | Sort-Object
+        $med2 = $srt2[[int](($srt2.Count - 1) / 2)]
+        Write-Output ("median(d{0}ms)={1:+0.00;-0.00}  pairs={2}/4" -f $metric, $med2, $mdiffs.Count)
+    } else {
+        Write-Output ("median(d{0}ms): insufficient pairs ({1}) - run with JMW_V5BD=1 in BaseEnv" -f $metric, $mdiffs.Count)
     }
 }

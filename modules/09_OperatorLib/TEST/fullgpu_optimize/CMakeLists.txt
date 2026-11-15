@@ -89,7 +89,10 @@ file(GLOB_RECURSE SO_OP_CU CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/core/*.cu"
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/scanning/preprocess/*.cu"
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/scanning/laser/*.cu"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ops/scanning/fusion/laser_cloud_fuse_cuda/*.cu")
+    "${CMAKE_CURRENT_SOURCE_DIR}/ops/scanning/fusion/laser_cloud_fuse_cuda/*.cu"
+    # 【fcscan 平替 2026-11-08】标定链 CUDA 算子（laser_label/laser_match 的 Impl
+    # 在 .cu 里）——此前无人消费故未入 glob；pjc_refit 需要。
+    "${CMAKE_CURRENT_SOURCE_DIR}/ops/calibration/*.cu")
 
 set(SO_SOURCES "")
 foreach(f ${SO_OP_CPP} ${SO_OP_CU})
@@ -218,6 +221,39 @@ if(MSVC)
     target_link_options(test_speed_replay PRIVATE /MAP)   # 【案件三】崩溃打印机栈离线符号化用
 endif()
 so_deploy_crt(test_speed_replay)
+
+# 【F8 雅可比缺口修复验证 2026-11-08】PJC 算子单测目标：ops/**/tests/ 默认不参编
+# （:96），此目标显式收录该测试文件。判别用例 RightTermAlongEpipolarShift 守护
+# "uR 行进梯度"补丁——缺口未修时（块路径丢 uR 行＋正则行错位）该用例必挂。
+add_executable(test_pjc
+    ops/calibration/laser_calib/projector_joint_calib/tests/test_projector_joint_calib.cpp)
+target_link_libraries(test_pjc PRIVATE speed_ops GTest::gtest_main)
+if(MSVC)
+    target_compile_options(test_pjc PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+endif()
+so_deploy_crt(test_pjc)
+add_test(NAME test_pjc COMMAND test_pjc)
+
+# 【fcscan 平替 2026-11-08】照片→多线重拟合（F8 右目残差）→CMTT 表再生＋对拍。
+# 根治方案（专题-CMTT表uR随线号系统偏差 §10.1 步骤 1-4）的仓内执行体：
+#   identity=生成器口径对拍 / refit=20 姿态重拟合 / regen=表再生。
+# 依赖 2026-11-08 补拷的 ops/core/laser/{steger,epipolar_interp} 两算子目录。
+add_executable(pjc_refit tools/pjc_refit.cpp)
+target_link_libraries(pjc_refit PRIVATE speed_ops)
+if(MSVC)
+    target_compile_options(pjc_refit PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+endif()
+so_deploy_crt(pjc_refit)
+
+# 【算子耗时探针 2026-11-14】零落盘·可循环长跑计时：全量数据集 × N 遍，
+# 只在内存累计每算子每帧毫秒（不建 outDir/无任何管线产物落盘；--out 才存
+# 一份统计 CSV）。用法见 tools/op_time_probe.cpp 文件头。
+add_executable(op_time_probe tools/op_time_probe.cpp)
+target_link_libraries(op_time_probe PRIVATE scr_runner_speed)
+if(MSVC)
+    target_compile_options(op_time_probe PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+endif()
+so_deploy_crt(op_time_probe)
 
 # ---- cupti DLL 部署（cuda_census 普查模式运行期需要）----
 if(JMW_CUPTI_DLL)

@@ -1,5 +1,7 @@
 # fullgpu_optimize — 链2全GPU实验沙箱
 
+> **⚡现状速览（2026-11-15 交接，新读者从这里开始）**：本沙盒当前主体＝**V5 激光匹配算子**（GPU 前段发卡＋CPU 后段判定）已定稿并完成性能优化（等价重构，配对 11,237,093／397 满线逐位不变，后段同窗配对 −1.17ms）。V5 **默认开**（`JMW_LMV5=0` 退回 v4/v3）。金样对拍＝`golden/v5_all399/`＋`tools/compare_*.ps1`；改代码必过五道门禁（金样逐位／逐点残差／23 单测／ctest／同窗 ABBA）。新工具：`op_time_probe`（零落盘循环计时＋帧率）。**接手入口＝`归档/记录文档/沙盒交接-2026-11-15.md`**（含坑清单/红线/未决事项/验收单）。下述 2026-10-26 的全 GPU 实验为历史背景（结论：整体版吞吐输分体版，已回退）。
+
 > 2026-10-26 自 speed_optimize 复制。主实验：五链链2 切整体版 GPU 激光匹配（LaserMatchScanCudaV3）＋GPU 重建（fc_executor ch2FullGpu_，interp 环槽 D2D＋跨流事件交接）。默认开，`JMW_FC_FULLGPU=0` 回退分体旧路径（单 exe A/B）。结论：正确性对拍逐位一致（gtest 全绿）；吞吐分体仍更优（热机稳态 80-85 vs 67-73——分体的 CPU 后段是免费并行度，整体版把工作串行化到 GPU）。数据：归档/实测数据/fps_{FG_a1,SP_b1,FG_a2,SP_b2}。
 
 # scan_replay 扫描链回放测试 · 使用说明
@@ -44,10 +46,12 @@ fullgpu_optimize/
 ```
 
 **三条快速通道**：
-- 查当前进度/接力 → `归档/记录文档/会话交接-离面点云查BUG修复收官-2026-10-30.md`（自包含；2026-10-30 离面点云双根因修复＋五轮审核，未 commit）
+- 查当前进度/接力 → **`归档/记录文档/温度补偿-汇总-激光匹配V4与uR偏差-2026-11-08至09.md`**（★总入口：两案全量事实/数字/挂账/工具速查）；根因定谳 → `归档/记录文档/温度补偿-定谳-uR偏差根因跨采集漂移终裁-2026-11-09.md`（fcscan 在仓审计无辜＋生产输入≠扫描采集＋漂移终裁＋温度机制两假设判定＋升温实验工具）；`归档/记录文档/会话交接-2026-11-09-uR偏差根因追查与V4部署.md`（uR 专题交接：烘表止血/F8 补丁/pjc_refit 全就位）；技术详情 `REA对标-v4新算子-2026-11-05.md`；**V4 一站式大白话汇总 → `归档/记录文档/专题-激光匹配算子laser_match_scan_v4-汇总-2026-11-07.md`**（含 2026-11-07 起默认开 V4＋--match-img 出图模式＋使用速查）；**V4 内部流程/步骤/参数/原理详解（优化前置基线）→ `归档/记录文档/专题-V4算子流程逻辑与参数原理-大白话-2026-11-11.md`**；**uR 随线号系统偏差成因调查 → `归档/记录文档/温度补偿-专题-CMTT表uR随线号偏差成因调查-2026-11-08.md`**（⚠ 已被 11-09 终裁部分推翻，见其头部注记）
+- 📌 **档案命名约定（2026-11-11 起）**：温度补偿族文档统一 `温度补偿-<类型>-<主题>-<日期>.md` 前缀命名，检索"温度补偿"整族可见
 - 改参数/开关 → 只改 `configs/config_baseline.json`（全中文注释；env 仅 A/B 测试时临时覆盖）
 - 跑测速 → `speed_replay.exe --config configs\config_baseline.json --data-dir <数据> --cycles 0 --repeat N --lean --quiet`（纯 JSON 驱动，无需任何环境变量）
 - 跑分步可视化 → `speed_replay.exe --config configs\config_baseline.json --vis`（整跑串行，第 3/中位/倒数第 3 帧落全量 16 步产物到 `vis_out/run_<时间戳>/`，自动带全局点云 PLY；等价 JSON `runtime.visDump:true`）
+- 只看逐帧匹配图 → `speed_replay.exe --config configs\config_baseline.json --match-img`（每个正式帧仅平铺 `frame_NNN.png`＋`frame_NNN_L/R.csv` 到 `vis_out/match_<时间戳>/`，渲染与 L4 同源；跑满 399 帧即 399 张匹配图；等价 JSON `runtime.matchImageDump:true`；与 `--vis`/`--markers-only` 互斥、可与 `--lean` 组合）
 
 > 历史：2026-10-22 首次整理归档；2026-10-29 配置收纳（configs/）＋JSON 单源＋本地图。
 

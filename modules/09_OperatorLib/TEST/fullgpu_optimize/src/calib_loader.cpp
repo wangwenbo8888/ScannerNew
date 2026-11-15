@@ -195,6 +195,90 @@ bool loadCalib(const ScrConfig& cfg, CalibData& out, std::string& err) {
         } else {
             out.laserTableEven = out.laserTable;   // 缺省两管共表
         }
+
+        // ——【uR 烘表止血 2026-11-08】装载层逐线补偿（专题 §10.2 方案 C）——
+        // 实测（E2）：表 uR 预测随线号偏差 0→+2.9px（逐线常数、随批次变化）。
+        // 烘在装载层＝v3 整版/v4 前段/v4 后段残差口径全体一致，无算子改动。
+        // sidecar 绑表校验（字节数＋rowStep），失配＝报错拒载（防错拷案复发）。
+        // 与 2026-10-11 停用的两代算子内补偿的差异：偏差已由 399 帧残差实测钉死
+        // ＋绑表校验＋过 E5 验证闸（后 199 帧每线中位 |res|≤0.3px、斜率≤0.02）。
+        if (!cfg.paths.cmttBiasSidecar.empty()) {
+            std::ifstream bf(cfg.paths.cmttBiasSidecar);
+            if (!bf) {
+                err = "uR 烘表 sidecar 不可读: " + cfg.paths.cmttBiasSidecar;
+                return false;
+            }
+            nlohmann::json sj;
+            try {
+                bf >> sj;
+            } catch (const std::exception& e) {
+                err = std::string("uR 烘表 sidecar JSON 解析失败: ") + e.what();
+                return false;
+            }
+            std::vector<float> bias;
+            if (sj.contains("biasPx") && sj.at("biasPx").is_array())
+                for (const auto& v : sj.at("biasPx")) bias.push_back(v.get<float>());
+            if (bias.size() != 25) {
+                err = "uR 烘表 sidecar biasPx 须恰 25 个（实际 "
+                      + std::to_string(bias.size()) + "）";
+                return false;
+            }
+            // 绑表校验①：表文件字节数
+            const long long expectBytes =
+                sj.value("expectTableBytes", (long long)-1);
+            std::error_code ec;
+            const auto actualBytes = static_cast<long long>(
+                std::filesystem::file_size(cfg.paths.cmttSidecar, ec));
+            if (ec || actualBytes != expectBytes) {
+                err = "uR 烘表 sidecar 与表失配（字节 " +
+                      std::to_string(actualBytes) + " ≠ 期望 " +
+                      std::to_string(expectBytes) + "）——换表必须重测并更新 sidecar，"
+                      "拒载防静默错拷（专题 §10.2 红线）";
+                return false;
+            }
+            // 绑表校验②：rowStep（装载回传值）
+            const float expectRowStep = sj.value("expectRowStep", 0.0f);
+            if (std::fabs(out.laserRowStep - expectRowStep) > 1e-6f) {
+                err = "uR 烘表 sidecar 与表失配（rowStep " +
+                      std::to_string(out.laserRowStep) + " ≠ 期望 " +
+                      std::to_string(expectRowStep) + "）";
+                return false;
+            }
+            // 烘表：激活温档逐条目 uR += bias[lid-1]（uR 列不参与行内 xL 有序性，
+            // 排序不变；两管共表时指针相等只烘一次；CalibData 表为 const 共享
+            // 指针——按 DISP_BAND 先例产出新表替换）
+            const auto bake =
+                [&](const std::shared_ptr<const calib::LaserPlaneMapTempTable>& t)
+                -> std::shared_ptr<const calib::LaserPlaneMapTempTable> {
+                    const calib::LaserPlaneMap* src =
+                        t->lookup(cfg.runtime.nominalTemperature);
+                    auto baked = std::make_shared<calib::LaserPlaneMapTempTable>();
+                    calib::LaserPlaneMap dst;
+                    dst.temperature = src->temperature;
+                    cv::Mat m = src->leftToRightMap.clone();
+                    long long touched = 0;
+                    for (int i = 0; i < m.rows; ++i) {
+                        cv::Vec4f& e = m.at<cv::Vec4f>(i);
+                        const int lid = cvRound(e[3]);
+                        if (lid >= 1 && lid <= 25) {
+                            e[2] += bias[static_cast<size_t>(lid - 1)];
+                            ++touched;
+                        }
+                    }
+                    dst.leftToRightMap = m;
+                    dst.totalPairs = src->totalPairs;
+                    baked->table[cfg.runtime.nominalTemperature] = std::move(dst);
+                    return baked;
+                };
+            const auto oldOdd = out.laserTable;
+            const auto oldEven = out.laserTableEven;
+            out.laserTable = bake(oldOdd);
+            out.laserTableEven =
+                (oldEven == oldOdd) ? out.laserTable : bake(oldEven);
+            std::cout << "[calib][uRBias] 烘表生效：bias L1=" << bias[0]
+                      << " L25=" << bias[24] << "px（sidecar="
+                      << cfg.paths.cmttBiasSidecar << "）" << std::endl;
+        }
         std::cout << "[calib] 立体温表选档 " << out.tierTemperature << "°C | CMTT 档 idx="
                   << out.laserTierIdx << " temp=" << out.laserTierTemp
                   << "°C rowStep=" << out.laserRowStep << std::endl;

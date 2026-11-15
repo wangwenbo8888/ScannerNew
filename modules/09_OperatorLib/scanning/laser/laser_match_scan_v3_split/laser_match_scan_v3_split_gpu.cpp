@@ -146,6 +146,10 @@ void LaserMatchScanSplitGpuV3::SetuRBiasModel(float wx, float wy, float wz, floa
     if (op_) op_->SetuRBiasModel(wx, wy, wz, dtx);
 }
 
+void LaserMatchScanSplitGpuV3::SetEmitCardRes(bool on) {
+    if (op_) op_->SetEmitCardRes(on);   // 【V5】语义见 laser_match_scan_v3_cuda.h 头注
+}
+
 std::string LaserMatchScanSplitGpuV3::LastTimingBreakdown() const {
     return lastBd_;
 }

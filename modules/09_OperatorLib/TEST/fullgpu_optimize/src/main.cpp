@@ -64,6 +64,9 @@ void printHelp() {
         "  --vis                分步可视化：整跑强制串行，第 3/中位/倒数第 3 帧\n"
         "                       落全量逐步产物（PNG/CSV/PLY）到 vis_out/run_<时间戳>/，\n"
         "                       自动带全局点云 PLY；与 --markers-only 互斥，优先于 --lean\n"
+        "  --match-img          只落匹配图：每个正式帧仅平铺 frame_NNN.png（L4 匹配\n"
+        "                       图同源渲染）＋frame_NNN_L/R.csv 到 vis_out/match_<时间戳>/，\n"
+        "                       不建 cycle 目录不落 summary；与 --vis/--markers-only 互斥\n"
         "  --dump-global-ply <f> 全帧跑完后导出全局标记点＋全局激光合并 PLY\n"
         "  --temp-compare t1,t2 双名义温各跑一遍出对比（诊断）\n"
         "  --quiet              静默算子日志（spdlog→err；计时跑推荐）\n"
@@ -121,6 +124,7 @@ int main(int argc, char** argv) {
     bool listSteps = false;
     bool markersOnly = false;
     bool visFlag = false;        // --vis：分步可视化总开关（置 cfg.runtime.visDump）
+    bool matchImgFlag = false;   // --match-img：只落匹配图模式（置 runtime.matchImageDump）
     bool leanMode = false;       // --lean：只输出全局点云＋计时，跳过逐帧 dump/报告
     // 【产线口径 2026-10-19·用户裁定】JMW_PROD=1：跳过回放测试专用记账（逐帧
     // 控制台行；harness 侧行残差统计等）——产线不消费这些输出
@@ -169,6 +173,8 @@ int main(int argc, char** argv) {
             markersOnly = true;
         } else if (a == "--vis") {
             visFlag = true;
+        } else if (a == "--match-img") {
+            matchImgFlag = true;
         } else if (a == "--dump-global-ply") {
             globalPlyPath = next("--dump-global-ply");
         } else if (a == "--lean") {
@@ -248,6 +254,34 @@ int main(int argc, char** argv) {
         if (globalPlyPath.empty())
             globalPlyPath = (std::filesystem::path(cfg.paths.outDir)
                              / "global_cloud.ply").string();
+    }
+
+    // —— --match-img：只落匹配图（JSON runtime.matchImageDump 亦可开；CLI 优先）——
+    // 每个正式帧在输出目录根平铺 frame_NNN.png＋frame_NNN_L/R.csv（渲染与全量
+    // dump 的 L4-match_v3.png 同源）；不建 cycle 目录、不落 summary——"整跑 N 帧
+    // 只出匹配图"的快照口径。与 --vis/--markers-only 互斥；可与 --lean 组合
+    //（lean 关闭的只是其它逐帧产物，匹配图照落）。
+    if (matchImgFlag) cfg.runtime.matchImageDump = true;
+    if (cfg.runtime.matchImageDump) {
+        if (cfg.runtime.visDump) {
+            std::cerr << "--match-img 与 --vis 互斥" << std::endl;
+            return 1;
+        }
+        if (cfg.runtime.markerOnly) {
+            std::cerr << "--match-img 与 --markers-only 互斥" << std::endl;
+            return 1;
+        }
+        if (dumpDirOverride.empty()) {
+            std::time_t now = std::time(nullptr);
+            std::tm tmv;
+            localtime_s(&tmv, &now);
+            char buf[32];
+            std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tmv);
+            cfg.paths.outDir = (std::filesystem::path(SCR_SOURCE_DIR) / "vis_out"
+                                / ("match_" + std::string(buf))).string();
+        }
+        std::cout << "[match-img] 只落匹配图模式，产物目录: "
+                  << cfg.paths.outDir << std::endl;
     }
 
     // —— 方案 B：PNG → raw 一次性转换后退出 ——
@@ -511,8 +545,13 @@ jmw::census::noteFrames(0);  // 占位：循环结束处以实数覆写（census
                 continue;
             }
 
+            // —— --match-img：只落匹配图——每正式帧平铺 frame_NNN.png＋点表，
+            //    跳过普通 dump（lean 与否都落——lean 关闭的只是其它逐帧产物）
+            if (cfgT.runtime.matchImageDump) {
+                if (!isWarmup) harness.dumpMatchImage(c, prod);
+            }
             // —— lean 模式：跳过逐帧 dump / 一致性 / report——只输出计时＋全局点云
-            if (!leanMode) {
+            else if (!leanMode) {
                 // 双链一致性（首个成功 undistort_cpu 的 cycle 一次性记录）
                 if (consistencyMax < 0.0 && prod.stepSuccess.count("undistort_cpu")
                     && prod.stepSuccess.at("undistort_cpu")) {

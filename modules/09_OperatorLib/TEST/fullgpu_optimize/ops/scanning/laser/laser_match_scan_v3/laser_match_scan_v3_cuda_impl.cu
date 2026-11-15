@@ -205,6 +205,13 @@ LaserMatchScanCudaV3::Impl::Impl(const LaserMatchScanParamsV3& params)
         const int v = atoi(c);
         if (v >= 16 && v < kSegCap) segCapEff_ = v;
     }
+    // 【V5·cardRes 发射开关】JMW_V3CARDRES=1 开（默认关＝前段行为/传输逐字不变；
+    // 开＝紧缩内核多拷一列＋D2H 加笔/交织 12→16B 每卡，front.cardRes 填充）。
+    // 只影响 executeFront/finishFront 收尾段（紧缩内核不进任何 CUDA 图——
+    // FrontGraphSig 不涉），构造期一次读取。
+    if (const char* e = getenv("JMW_V3CARDRES")) {
+        emitCardRes_ = (e[0] == '1');
+    }
     // 【v3全GPU化·K2】级联内核缓冲池（grow-only；首次 Execute 按需 ensure）
     k2Ctx_ = new K2Ctx();
 }
@@ -790,7 +797,7 @@ __global__ void kernelIssueCardsV3(
     float match_window,
     int*   __restrict__ d_card_lid,               // [i*V3_MAX_CARDS + c]
     float* __restrict__ d_card_hitRx,
-    float* __restrict__ d_card_res,               // |hitRx-uR|（诊断/P3 备用）
+    float* __restrict__ d_card_res,               // hitRx-uR 带符号（V5 质量道/诊断；kernelSegVoteV3 消费处自包 fabs 保口径）
     int*   __restrict__ d_card_hitRidx,           // 右排序系索引（P4 右占用）
     int*   __restrict__ d_card_count,
     const float* __restrict__ d_ur_bias,          // 逐线 uR 补偿（V3_MAX_LIDS；空＝全零）
@@ -944,7 +951,7 @@ __global__ void kernelIssueCardsV3(
         if (hitRidx < 0) continue;                // card fails HIT
         d_card_lid[i * V3_MAX_CARDS + out] = locLid[c];
         d_card_hitRx[i * V3_MAX_CARDS + out] = hitRx;
-        d_card_res[i * V3_MAX_CARDS + out] = fabsf(hitRx - uR);
+        d_card_res[i * V3_MAX_CARDS + out] = hitRx - uR;   // 【V5】带符号（>0＝实际右点在预测右侧）；d_seg_res 口径由票内核 fabs 保持逐位不变
         d_card_hitRidx[i * V3_MAX_CARDS + out] = hitRidx;
         ++out;
     }
@@ -978,7 +985,7 @@ __global__ void kernelSegVoteV3(
         if (lid >= 1 && lid <= V3_MAX_LIDS) {
             atomicAdd(&d_seg_votes[seg * V3_MAX_LIDS + (lid - 1)], 1);
             atomicAdd(&d_seg_res[seg * V3_MAX_LIDS + (lid - 1)],
-                      __float2int_rn(d_card_res[i * V3_MAX_CARDS + c] * 256.0f));
+                      __float2int_rn(fabsf(d_card_res[i * V3_MAX_CARDS + c]) * 256.0f));   // 【V5】d_card_res 已改带符号，此处 fabs 保 d_seg_res 定点口径逐位不变
         }
     }
 }

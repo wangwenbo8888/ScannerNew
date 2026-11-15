@@ -876,8 +876,11 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
                                      + " = " + std::to_string(driftRatio) + "x baseline]";
             }
         }
+        // 【261115 用户定档】帧融合门 3→4：本帧与地图匹配到的标志点 ≥4 才采纳
+        // 光流位姿并融进全局点云（<4 走 relock/frame_fuse/hold）——与 fuse 兜底
+        // 门 runtime.fuseMinMatched=4、首帧建系门 ≥4 全链统一口径。
         const bool flowOk = !driftRejected && p.regFlow.success
-                            && static_cast<int>(p.regFlow.getMatchedCount()) >= 3;
+                            && static_cast<int>(p.regFlow.getMatchedCount()) >= 4;
         // 261030 运动合理性门（飞点-sheet 根治）：帧间平移/旋转跳变超物理界限
         // ＝光流劣解（真机位姿增量实测 P95=16.1mm/最大 28.9mm 每帧＝55fps 下
         // 1.6m/s 不可能——劣解整帧平面被甩离＝"成片飞点"）。拒采纳 → 走既有

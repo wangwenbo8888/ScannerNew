@@ -56,11 +56,14 @@ struct LaserMatchSplitFrontV3 {
     std::vector<int> cardLid;            // totalCards 紧缩卡表 SoA：lid
     std::vector<float> cardRx;           // totalCards：hitRx（命中右点 x）
     std::vector<int> cardRidx;           // totalCards：右排序系索引
+    std::vector<float> cardRes;          // 【V5】totalCards：hitRx−uR 带符号残差
+                                         //（发射开关 JMW_V3CARDRES/SetEmitCardRes 关＝恒空；
+                                         //  V3/V4 后段消费端忽略——向后兼容）
 
     std::string timing;      // 前段阶段耗时串（观测用）
 
     // 【批2·A1】字段级复位：与 `*this = LaserMatchSplitFrontV3{}` 逐字段等价，
-    // 唯一差别＝8 个 vector 只 clear() 不释放容量（string clear 亦不缩容）——
+    // 唯一差别＝9 个 vector 只 clear() 不释放容量（string clear 亦不缩容）——
     // 池化调用方（FcJob::resetForReuse）的容量复用不再被入口整体复位击穿，
     // 稳态帧零堆分配（实测 copyout 0.6-0.7ms 中 malloc/缺页占大头）。
     void resetKeepCapacity() {
@@ -70,6 +73,7 @@ struct LaserMatchSplitFrontV3 {
         leftCount = 0; rightCount = 0; segCount = 0; segOverflow = 0; totalCards = 0;
         leftPts.clear(); leftTracks.clear(); segmap.clear(); leftStatus.clear();
         cardPtr.clear(); cardLid.clear(); cardRx.clear(); cardRidx.clear();
+        cardRes.clear();
     }
 };
 
@@ -138,6 +142,11 @@ public:
     const LaserMatchScanParamsV3& GetParams() const;
     void SetuRBias(const std::vector<float>& biasPerLid);
     void SetuRBiasModel(float wx, float wy, float wz, float dtx);
+
+    /// 【V5·cardRes 发射开关】true＝紧缩/D2H/copyout 携带带符号残差列
+    ///（front.cardRes 填充）；false（默认，env JMW_V3CARDRES 构造期读）＝
+    /// 传输笔数/字节/布局与旧版逐字一致。转发 LaserMatchScanCudaV3::SetEmitCardRes。
+    void SetEmitCardRes(bool on);
 
     /// 前段最近一次阶段耗时串（同 front.timing）
     std::string LastTimingBreakdown() const;

@@ -52,6 +52,8 @@ bool ScrConfig::fromJson(const nlohmann::json& j, ScrConfig& out, std::string& e
             if (p.contains("dataDir"))     out.paths.dataDir = expandPath(p.at("dataDir").get<std::string>());
             if (p.contains("cameraCalib")) out.paths.cameraCalib = expandPath(p.at("cameraCalib").get<std::string>());
             if (p.contains("cmttSidecar")) out.paths.cmttSidecar = expandPath(p.at("cmttSidecar").get<std::string>());
+            if (p.contains("cmttBiasSidecar") && p.at("cmttBiasSidecar").is_string())
+                out.paths.cmttBiasSidecar = expandPath(p.at("cmttBiasSidecar").get<std::string>());
             if (p.contains("cmttSidecarEven") && p.at("cmttSidecarEven").is_string())
                 out.paths.cmttSidecarEven = expandPath(p.at("cmttSidecarEven").get<std::string>());
             if (p.contains("outDir"))      out.paths.outDir = expandPath(p.at("outDir").get<std::string>());
@@ -72,6 +74,7 @@ bool ScrConfig::fromJson(const nlohmann::json& j, ScrConfig& out, std::string& e
             if (r.contains("cclPath"))             out.runtime.cclPath = r.at("cclPath").get<std::string>();
             if (r.contains("markerOnly"))          out.runtime.markerOnly = r.at("markerOnly").get<bool>();
             if (r.contains("visDump"))             out.runtime.visDump = r.at("visDump").get<bool>();
+            if (r.contains("matchImageDump"))      out.runtime.matchImageDump = r.at("matchImageDump").get<bool>();
             if (r.contains("fuseMinMatched"))      out.runtime.fuseMinMatched = r.at("fuseMinMatched").get<int>();
             if (r.contains("fuseMaxRmseMm"))       out.runtime.fuseMaxRmseMm = r.at("fuseMaxRmseMm").get<double>();
             if (r.contains("fuseSubsetMax"))       out.runtime.fuseSubsetMax = r.at("fuseSubsetMax").get<int>();

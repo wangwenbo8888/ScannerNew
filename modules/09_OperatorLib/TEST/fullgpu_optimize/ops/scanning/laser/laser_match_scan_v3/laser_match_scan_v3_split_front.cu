@@ -603,12 +603,14 @@ __global__ void kernelTightenCardsSplitV3(
     const int*   __restrict__ d_card_lid,       // [i*32 + c]
     const float* __restrict__ d_card_hitRx,
     const int*   __restrict__ d_card_hitRidx,
+    const float* __restrict__ d_card_res,       // 【V5】带符号残差（输入）
     const int*   __restrict__ d_card_count,     // N
     const int*   __restrict__ d_card_off,       // N（ExclusiveSum 前置）
     int leftCount,
     int*   __restrict__ d_tight_lid,            // totalCards
     float* __restrict__ d_tight_rx,
-    int*   __restrict__ d_tight_ridx)
+    int*   __restrict__ d_tight_ridx,
+    float* __restrict__ d_tight_res)            // 【V5】nullptr＝不发射（JMW_V3CARDRES=0 旧行为）
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= leftCount) return;
@@ -620,6 +622,8 @@ __global__ void kernelTightenCardsSplitV3(
         d_tight_lid[off + c] = d_card_lid[base + c];
         d_tight_rx[off + c] = d_card_hitRx[base + c];
         d_tight_ridx[off + c] = d_card_hitRidx[base + c];
+        if (d_tight_res != nullptr)
+            d_tight_res[off + c] = d_card_res[base + c];
     }
 }
 
@@ -634,11 +638,13 @@ __global__ void kernelTightenPackSplitV3(
     const int*   __restrict__ d_card_lid,       // [i*32 + c]
     const float* __restrict__ d_card_hitRx,
     const int*   __restrict__ d_card_hitRidx,
+    const float* __restrict__ d_card_res,       // 【V5】带符号残差（cardInts==4 才消费）
     const int*   __restrict__ d_card_count,     // N
     const int*   __restrict__ d_card_off,       // N（ExclusiveSum 前置）
     int leftCount,
     int*   __restrict__ d_pack_base,            // 统一暂存基址（三段：tight|int 包|左点）
-    int   intPackOff,                           // int 包段起始槽（=3*totalCards；0=空卡帧）
+    int   intPackOff,                           // int 包段起始槽（=cardInts*totalCards；0=空卡帧）
+    int   cardInts,                             // 【V5】每卡 int 槽数：3=旧行为（12B）/4=含 res（16B）
     const float2* __restrict__ d_left_pts,      // N（提交段保存视图——左点源）
     int   leftPtsBaseInt,                       // 左点段起始槽（8B 对齐后，恒偶数）
     const int*   __restrict__ d_seg_map,        // N
@@ -659,10 +665,12 @@ __global__ void kernelTightenPackSplitV3(
     const int off = d_card_off[i];
     const int base = i * V3_MAX_CARDS;
     for (int c = 0; c < nc; ++c) {
-        int* o = d_pack_base + 3 * (off + c);
+        int* o = d_pack_base + cardInts * (off + c);
         o[0] = d_card_lid[base + c];
         o[1] = __float_as_int(d_card_hitRx[base + c]);
         o[2] = d_card_hitRidx[base + c];
+        if (cardInts == 4)
+            o[3] = __float_as_int(d_card_res[base + c]);
     }
 }
 
@@ -1057,21 +1065,30 @@ void LaserMatchScanCudaV3::Impl::executeFront(
         int* h_tlid = nullptr;
         float* h_trx = nullptr;
         int* h_tridx = nullptr;
+        float* h_tres = nullptr;
         if (totalCards > 0) {
             splitFrontGrowOnly(d_tight_lid_, totalCards, CV_32SC1);
             splitFrontGrowOnly(d_tight_rx_, totalCards, CV_32FC1);
             splitFrontGrowOnly(d_tight_ridx_, totalCards, CV_32SC1);
+            float* d_tres = nullptr;
+            if (emitCardRes_) {
+                splitFrontGrowOnly(d_tight_res_, totalCards, CV_32FC1);
+                d_tres = d_tight_res_.ptr<float>();
+            }
             int grid = (leftCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
             kernelTightenCardsSplitV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
                 d_card_lid_.ptr<int>(), d_card_hitRx_.ptr<float>(),
-                d_card_hitRidx_.ptr<int>(), d_card_count_.ptr<int>(),
+                d_card_hitRidx_.ptr<int>(), d_card_res_.ptr<float>(),
+                d_card_count_.ptr<int>(),
                 d_card_off_.ptr<int>(), leftCount,
                 d_tight_lid_.ptr<int>(), d_tight_rx_.ptr<float>(),
-                d_tight_ridx_.ptr<int>());
+                d_tight_ridx_.ptr<int>(), d_tres);
             h_tlid = hpin_tight_lid_.ensure(static_cast<size_t>(totalCards));
             h_trx = hpin_tight_rx_.ensure(static_cast<size_t>(totalCards));
             h_tridx = hpin_tight_ridx_.ensure(static_cast<size_t>(totalCards));
-            if (!h_tlid || !h_trx || !h_tridx) {
+            if (emitCardRes_)
+                h_tres = hpin_tight_res_.ensure(static_cast<size_t>(totalCards));
+            if (!h_tlid || !h_trx || !h_tridx || (emitCardRes_ && !h_tres)) {
                 out.success = false;
                 out.message = "pinned host buffer alloc failed (tight)";
                 CALIB_LOG_ERROR("executeFront(): {}", out.message);
@@ -1086,6 +1103,10 @@ void LaserMatchScanCudaV3::Impl::executeFront(
             cudaMemcpyAsync(h_tridx, d_tight_ridx_.ptr<int>(),
                             static_cast<size_t>(totalCards) * sizeof(int),
                             cudaMemcpyDeviceToHost, cuda_stream);
+            if (emitCardRes_)   // 【V5】第 4 笔（开关关＝传输笔数与旧版逐字一致）
+                cudaMemcpyAsync(h_tres, d_tight_res_.ptr<float>(),
+                                static_cast<size_t>(totalCards) * sizeof(float),
+                                cudaMemcpyDeviceToHost, cuda_stream);
         }
         // 【批2·B1】主批四笔已前移至 sync#1 前（见上）——此处仅剩紧缩批
         cudaStreamSynchronize(cuda_stream);
@@ -1112,11 +1133,14 @@ void LaserMatchScanCudaV3::Impl::executeFront(
             out.cardLid.assign(h_tlid, h_tlid + totalCards);
             out.cardRx.assign(h_trx, h_trx + totalCards);
             out.cardRidx.assign(h_tridx, h_tridx + totalCards);
+            if (emitCardRes_ && h_tres != nullptr)
+                out.cardRes.assign(h_tres, h_tres + totalCards);
         } else {
             out.cardLid.clear();
             out.cardRx.clear();
             out.cardRidx.clear();
         }
+        if (!emitCardRes_) out.cardRes.clear();   // 空态契约：开关关＝恒空
         bd += fmt::format(" copyout={:.2f} total={:.2f}", tSince(),
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count());
@@ -1628,7 +1652,10 @@ void LaserMatchScanCudaV3::Impl::finishFront(int leftCount, int rightCount,
         // 【批N-1·D2H 交织】批E 的 3 笔（tight 包＋int 包＋左点）→ 1 笔：统一
         //   暂存 d_ff_pack_ 三段 [tight | int 包 | 左点 float2(int×2)]；左点段
         //   起始 off2a 8B 对齐（奇数 +1 填充槽）。数值同源仅布局改。
-        const int off1 = 3 * totalCards;                      // int 包段起始（0=空卡帧）
+        // 【V5·cardRes】cardInts=3（默认，JMW_V3CARDRES=0）＝旧 12B/card 布局
+        //   逐字不变；=4 追加 res 槽（16B/card），单笔 D2H 仍 1 笔（变大）。
+        const int cardInts = emitCardRes_ ? 4 : 3;
+        const int off1 = cardInts * totalCards;               // int 包段起始（0=空卡帧）
         const int off2 = off1 + 3 * leftCount;
         const int off2a = (off2 & 1) ? off2 + 1 : off2;       // 左点段起始（恒偶）
         const int totalInts = off2a + 2 * leftCount;
@@ -1643,9 +1670,10 @@ void LaserMatchScanCudaV3::Impl::finishFront(int leftCount, int rightCount,
             int grid = (leftCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
             kernelTightenPackSplitV3<<<grid, BLOCK_SIZE, 0, cuda_stream>>>(
                 d_card_lid_.ptr<int>(), d_card_hitRx_.ptr<float>(),
-                d_card_hitRidx_.ptr<int>(), d_card_count_.ptr<int>(),
+                d_card_hitRidx_.ptr<int>(), d_card_res_.ptr<float>(),
+                d_card_count_.ptr<int>(),
                 d_card_off_.ptr<int>(), leftCount,
-                d_ff_pack_.ptr<int>(), off1,
+                d_ff_pack_.ptr<int>(), off1, cardInts,
                 d_defer_ptsL_.ptr<float2>(), off2a,
                 d_seg_map_.ptr<int>(), d_left_status_[gen].ptr<int>(),
                 d_defer_idsL_.ptr<int>());
@@ -1686,16 +1714,21 @@ void LaserMatchScanCudaV3::Impl::finishFront(int leftCount, int rightCount,
             out.cardLid.resize(static_cast<size_t>(totalCards));
             out.cardRx.resize(static_cast<size_t>(totalCards));
             out.cardRidx.resize(static_cast<size_t>(totalCards));
+            if (cardInts == 4)
+                out.cardRes.resize(static_cast<size_t>(totalCards));
             for (int i = 0; i < totalCards; ++i) {
-                out.cardLid[static_cast<size_t>(i)] = h_ff[3 * i + 0];
-                out.cardRx[static_cast<size_t>(i)] = h_tpackF[3 * i + 1];
-                out.cardRidx[static_cast<size_t>(i)] = h_ff[3 * i + 2];
+                out.cardLid[static_cast<size_t>(i)] = h_ff[cardInts * i + 0];
+                out.cardRx[static_cast<size_t>(i)] = h_tpackF[cardInts * i + 1];
+                out.cardRidx[static_cast<size_t>(i)] = h_ff[cardInts * i + 2];
+                if (cardInts == 4)
+                    out.cardRes[static_cast<size_t>(i)] = h_tpackF[cardInts * i + 3];
             }
         } else {
             out.cardLid.clear();
             out.cardRx.clear();
             out.cardRidx.clear();
         }
+        if (cardInts != 4) out.cardRes.clear();   // 空态契约：开关关＝恒空
         status_gen_++;   // 代际推进（与 Execute 同契约）
         out.success = true;
         out.message = fmt::format(

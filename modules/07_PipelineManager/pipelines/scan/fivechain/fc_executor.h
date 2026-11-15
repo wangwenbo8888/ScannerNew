@@ -37,6 +37,10 @@
 #include <opencv2/core/cuda.hpp>
 
 #include "harness.h"
+// 【V5 回迁接线 261115】激光匹配后段 V4/V5（消费 v3 前段产物；JMW_LMV5 默认开，
+// =0 退回 v4/v3；V5>V4>V3；缺 laser_match_scan_v5 节不启用 D8 fail-safe）
+#include "scanning/laser/laser_match_scan_v4/laser_match_scan_v4.h"
+#include "scanning/laser/laser_match_scan_v5/laser_match_scan_v5.h"
 #include "scr_config.h"
 
 #include "fc_probe.h"   // 【probe v2】jmw::probe::ProbeSnapshot/FrameProbe（快照制）
@@ -174,6 +178,8 @@ private:
 // ============================================================================
 struct FcJob {
     int idx = -1;
+    int tubeIdx = 0;                 // 【V5 回迁 261115】本帧激光管号（前段线程填；
+                                     //  V4 回退臂后段按管切温表用；V3/V5 后段零查表不消费）
     bool record = true;
     bool readFail = false;          // 读帧失败＝全程墓碑
     bool rleOverflow = false;       // RLE 溢出＝A 墓碑（ccl 记失败、配准走 skip）
@@ -200,6 +206,7 @@ struct FcJob {
     /// 下帧 Execute 的 assign/resize 直接复用容量，零分配）
     void resetForReuse() {
         idx = -1;
+        tubeIdx = 0;
         record = true;
         readFail = rleOverflow = sepDone = v3Deferred = false;
         err.clear();
@@ -485,6 +492,14 @@ private:
     // —— fivechain 专属算子（温表/参数与 harness v3 同源）——
     std::unique_ptr<calib::LaserMatchScanSplitGpuV3> splitGpu_;
     std::unique_ptr<calib::LaserMatchScanSplitCpuV3> splitCpu_;
+    // 【V5 回迁接线 261115】后段 V5>V4>V3：V5 人工8步（零查表，仅 Q 供深度门
+    // 可选）默认开；V4 裁判型回退臂（按管切温表）；V3 保底。结果切片赋入
+    // V3 基类——下游消费面（disp_gate/重建/统计）零改动。
+    std::unique_ptr<calib::LaserMatchScanSplitCpuV4> splitCpuV4_;
+    bool lmV4_ = false;
+    std::unique_ptr<calib::LaserMatchScanSplitCpuV5> splitCpuV5_;
+    bool lmV5_ = false;
+    std::atomic<int> v5LogN_{0};        // 【261115】V5 逐帧确认日志节流（首帧+每500帧）
     calib::LaserReconstructParams reconP_;
     // 261030/261031 生产侧激光治理件（261103 集成重放）：质量门 scratch/计数
     // ＋飞线门阈值（0=关；config operators.laser_reconstruct.linePlaneGateMm

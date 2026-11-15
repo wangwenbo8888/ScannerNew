@@ -39,6 +39,8 @@
 #include "scr_config.h"
 
 #include "laser_match_scan_v3_split.h"
+#include "laser_match_scan_v4.h"
+#include "laser_match_scan_v5.h"
 #include "laser_reconstruct_cpu.h"
 
 namespace scr {
@@ -213,6 +215,7 @@ struct FcJob {
         front.cardLid.clear();
         front.cardRx.clear();
         front.cardRidx.clear();
+        front.cardRes.clear();   // 【V5】与 FrontV3::resetKeepCapacity 逐字段镜像（漏改＝池化帧间脏数据）
         eSlot = -1;
         eCount = 0;
         bPushNs = 0;
@@ -433,6 +436,13 @@ private:
     // —— fivechain 专属算子（温表/参数与 harness v3 同源）——
     std::unique_ptr<calib::LaserMatchScanSplitGpuV3> splitGpu_;
     std::unique_ptr<calib::LaserMatchScanSplitCpuV3> splitCpu_;
+    // —— 【v4·REA 对标】JMW_LMV4=1 启用的裁判型后段（默认关＝v3 分体路径零改动）——
+    std::unique_ptr<calib::LaserMatchScanSplitCpuV4> splitCpuV4_;
+    bool lmV4_ = false;
+    // 【v5】【默认开·261114】JMW_LMV5=0 显式关；配置含 laser_match_scan_v5 节才启用
+    //（V5>V4>V3；缺节不启用 D8）。成员变量每次构造重读（同 lmV4_ 语义——测试 A/B 依赖此行为）。
+    std::unique_ptr<calib::LaserMatchScanSplitCpuV5> splitCpuV5_;
+    bool lmV5_ = false;
     calib::LaserReconstructParams reconP_;
     std::unique_ptr<calib::LaserReconstructCpu> reconCpu_;
 

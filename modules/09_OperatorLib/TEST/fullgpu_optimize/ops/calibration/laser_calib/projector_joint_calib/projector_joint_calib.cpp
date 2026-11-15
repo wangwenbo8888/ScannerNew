@@ -923,6 +923,12 @@ void computeMultiResidualsLine(const MultiLineData& d, size_t li,
     const auto& pts = (*d.linePts)[li];
     const NormParams& np = (*d.nps)[li];
     const double C[6] = {Cs[li][0], Cs[li][1], Cs[li][2], Cs[li][3], Cs[li][4], Cs[li][5]};
+    // 【F8 雅可比缺口补丁 2026-11-08】线内版补算 uR 行（全量版 computeMultiResiduals
+    // 在 rtOn 时写 [nTotal, 2·nTotal)，线内版此前只写 Sampson 段——C_l 列的 uR
+    // 雅可比因此恒零。此处逐字镜像全量版主路径算术（含 Ws/rho/门控）。
+    const bool rtOn = d.urCtx && d.urCtx->on;
+    double Craw[6] = {0,0,0,0,0,0};
+    if (rtOn) denormalizeCurve(Cs[li].data(), np, Craw);
     size_t ptIdx = 0;
     const size_t nPoses = d.ptsPerPose && !d.ptsPerPose->empty()
         ? (*d.ptsPerPose)[li].size() : 0;
@@ -944,6 +950,20 @@ void computeMultiResidualsLine(const MultiLineData& d, size_t li,
             else wt *= robustWeight(dd, d.huberDelta, d.cauchyC);
             r_out(ri) = std::sqrt(wt) * dd;
             costS += wt * dd * dd;
+            if (rtOn) {
+                const Eigen::Index urRow = d.urCtx->nTotal + ri;
+                if (d.urCtx->mask[static_cast<size_t>(ri)]) {
+                    double dur; bool dual;
+                    if (evalRightResidual(pts[ptIdx], t, Craw, d.f, d.pp,
+                                          d.urCtx->B, d.urCtx->gates, dur, dual)) {
+                        const double rho =
+                            std::sqrt(Fu*Fu/(np.su*np.su) + Fv*Fv/(np.sv*np.sv)) / denom;
+                        const double wtU = Ws * d.urCtx->lambda_ * d.urCtx->ramp;
+                        r_out(urRow) = std::sqrt(wtU) * dur * rho;
+                        costS += wtU * dur * dur * rho * rho;
+                    } else r_out(urRow) = 0.0;
+                } else r_out(urRow) = 0.0;
+            }
             ++ri;
         }
     }
@@ -959,6 +979,20 @@ void computeMultiResidualsLine(const MultiLineData& d, size_t li,
         const double dd = F / denom;
         r_out(ri) = std::sqrt(w) * dd;
         costS += w * dd * dd;
+        if (rtOn) {   // 镜像全量版兜底段（无 Ws）
+            const Eigen::Index urRow = d.urCtx->nTotal + ri;
+            if (d.urCtx->mask[static_cast<size_t>(ri)]) {
+                double dur; bool dual;
+                if (evalRightResidual(pts[ptIdx], t, Craw, d.f, d.pp,
+                                      d.urCtx->B, d.urCtx->gates, dur, dual)) {
+                    const double rho =
+                        std::sqrt(Fu*Fu/(np.su*np.su) + Fv*Fv/(np.sv*np.sv)) / denom;
+                    const double wtU = d.urCtx->lambda_ * d.urCtx->ramp;
+                    r_out(urRow) = std::sqrt(wtU) * dur * rho;
+                    costS += wtU * dur * dur * rho * rho;
+                } else r_out(urRow) = 0.0;
+            } else r_out(urRow) = 0.0;
+        }
     }
     const double sl = std::sqrt(d.lambdaReg);
     regOut[0] = sl * Cs[li][0];
@@ -1135,16 +1169,34 @@ MultiLineResult ProjectorJointCalib::ExecuteMultiLine(const MultiLineInput& inpu
             msJac += tMs(tTA);
             Eigen::VectorXd lineBuf(static_cast<Eigen::Index>(
                 mdata.urCtx && mdata.urCtx->on ? 2 * nTotal : nTotal));
+            // 【F8 雅可比缺口补丁 2026-11-08】uR 行进梯度（块路径）：
+            // ① t 列的全量差分 r1t 本就含 uR 行（computeMultiResiduals 写
+            //    [nTotal,2·nTotal)）——此前按线切片只取 Sampson 段，uR 段被丢弃；
+            // ② C_l 列的线内差分 lineBuf 此前不含 uR 行（computeMultiResidualsLine
+            //    未算）——补丁后逐字镜像全量版算术；
+            // ③ 正则行落位：rtOn 时全量残差布局＝Sampson[nTotal)+uR[nTotal)+reg[3L)，
+            //    原 regOff=nTotal+3l 在 rtOn 时错指 uR 行——按布局修正。
+            const bool rtOnB = mdata.urCtx && mdata.urCtx->on;
+            const Eigen::Index urBase = static_cast<Eigen::Index>(
+                mdata.urCtx ? mdata.urCtx->nTotal : nTotal);
             for (size_t l = 0; l < L; ++l) {
                 const Eigen::Index offL = lineOff[l];
                 const Eigen::Index nL = static_cast<Eigen::Index>(linePts[l].size());
-                const Eigen::Index regOff = static_cast<Eigen::Index>(nTotal) + 3 * static_cast<Eigen::Index>(l);
+                const Eigen::Index nUr = rtOnB ? nL : 0;
+                const Eigen::Index regOff =
+                    (rtOnB ? 2 : 1) * static_cast<Eigen::Index>(nTotal)
+                    + 3 * static_cast<Eigen::Index>(l);
                 const auto tTB = tNow();
-                Eigen::MatrixXd Jl(nL + 3, 9);
+                Eigen::MatrixXd Jl(nL + nUr + 3, 9);
                 Jl.setZero();
-                for (int j = 0; j < 3; ++j)
+                for (int j = 0; j < 3; ++j) {
                     Jl.col(j).head(nL) = (r1t[static_cast<size_t>(j)].segment(offL, nL)
                                           - r0Cur.segment(offL, nL)) / eps;
+                    if (nUr > 0)
+                        Jl.col(j).segment(nL, nUr) =
+                            (r1t[static_cast<size_t>(j)].segment(urBase + offL, nUr)
+                             - r0Cur.segment(urBase + offL, nUr)) / eps;
+                }
                 for (int ci = 0; ci < 6; ++ci) {   // C_l 列：线内差分（A·computeMultiResidualsLine）
                     std::vector<std::array<double, 6>> Cp = CsCur;
                     Cp[l][static_cast<size_t>(ci)] += eps;
@@ -1153,13 +1205,18 @@ MultiLineResult ProjectorJointCalib::ExecuteMultiLine(const MultiLineInput& inpu
                     computeMultiResidualsLine(mdata, l, tCur, Cp, lineBuf, c1, offL, reg1);
                     Jl.col(3 + ci).head(nL) = (lineBuf.segment(offL, nL)
                                                - r0Cur.segment(offL, nL)) / eps;
+                    if (nUr > 0)
+                        Jl.col(3 + ci).segment(nL, nUr) =
+                            (lineBuf.segment(urBase + offL, nUr)
+                             - r0Cur.segment(urBase + offL, nUr)) / eps;
                     for (int k = 0; k < 3; ++k)    // 正则行导数（同差分口径；k∈{3,4,5} 恒 0 不写）
-                        Jl(nL + k, 3 + ci) = (reg1[k] - r0Cur(regOff + k)) / eps;
+                        Jl(nL + nUr + k, 3 + ci) = (reg1[k] - r0Cur(regOff + k)) / eps;
                 }
                 msJac += tMs(tTB);
                 const auto tTC = tNow();
-                Eigen::VectorXd r0l(nL + 3);
+                Eigen::VectorXd r0l(nL + nUr + 3);
                 r0l.head(nL) = r0Cur.segment(offL, nL);
+                if (nUr > 0) r0l.segment(nL, nUr) = r0Cur.segment(urBase + offL, nUr);
                 r0l.tail(3) = r0Cur.segment(regOff, 3);
                 const int c0 = 3 + 6 * static_cast<int>(l);
                 const int cols[9] = {0, 1, 2, c0, c0 + 1, c0 + 2, c0 + 3, c0 + 4, c0 + 5};
@@ -1204,7 +1261,20 @@ MultiLineResult ProjectorJointCalib::ExecuteMultiLine(const MultiLineInput& inpu
                     computeMultiResidualsLine(mdata, ls, t, Cp, r1, c1, offL, reg1);
                     for (Eigen::Index k = 0; k < nL; ++k)
                         J(offL + k, j) = (r1(offL + k) - r0Cur(offL + k)) / eps;
-                    const Eigen::Index regOff = static_cast<Eigen::Index>(nTotal) + 3 * static_cast<Eigen::Index>(li);
+                    // 【F8 雅可比缺口补丁 2026-11-08】C_l 列的 uR 行：线内差分
+                    // 此前不含 uR 行（该列 uR 段恒零填充）——补丁后 line 版已写。
+                    if (mdata.urCtx && mdata.urCtx->on) {
+                        const Eigen::Index urBase =
+                            static_cast<Eigen::Index>(mdata.urCtx->nTotal);
+                        for (Eigen::Index k = 0; k < nL; ++k)
+                            J(urBase + offL + k, j) =
+                                (r1(urBase + offL + k) - r0Cur(urBase + offL + k)) / eps;
+                    }
+                    // 【同补丁】正则行落位：rtOn 时 reg 段在 2·nTotal 之后
+                    const Eigen::Index regOff =
+                        (mdata.urCtx && mdata.urCtx->on ? 2 : 1)
+                            * static_cast<Eigen::Index>(nTotal)
+                        + 3 * static_cast<Eigen::Index>(li);
                     J(regOff, j) = (reg1[0] - r0Cur(regOff)) / eps;
                     J(regOff + 1, j) = (reg1[1] - r0Cur(regOff + 1)) / eps;
                     J(regOff + 2, j) = (reg1[2] - r0Cur(regOff + 2)) / eps;
