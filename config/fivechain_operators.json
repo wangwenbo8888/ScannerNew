@@ -15,7 +15,7 @@
     "mask_separation": {
       "_": "预处理①·同帧掩膜分离（CUDA，细激光形态：腐蚀级联 3/9/37＋双 top-hat 减法＋边缘膨胀 9/7）",
       "_c_threshold": "二值化阈值（高斯平滑后灰度标度）",
-      "threshold": 150,
+      "threshold": 120,
       "_c_noiseErodeSize": "去小噪点腐蚀核",
       "noiseErodeSize": 3,
       "_c_laserKillSize": "杀激光腐蚀核",
