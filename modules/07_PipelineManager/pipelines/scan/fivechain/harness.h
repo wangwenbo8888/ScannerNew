@@ -66,7 +66,12 @@ struct ScrConfigCompat {
         double flowRmseDriftRatio = 10.0;   // 光流误差趋势门倍率（0=关）
         double mintDedupRadiusMm = 5.0;     // 新点发号查重半径（累积漂移口径）
         int fuseSubsetMax = 16;             // 兜底子集装配上限（min 算子上限）
-        int fuseMinMatched = 3;             // 261115 用户裁定 4→3：「扫到一半接不上」实测最后段视场有效点长期 0~3、≥4 恒拒致融合门长闭；3＝非共线刚体解数学下限（跳变门 dT>500mm 且 matched<7 拒 仍在防护）             // 兜底验收门 matched≥
+        int fuseMinMatched = 4;             // 261115 用户裁定全链统一 4（撤销同日早前
+                                            // 的 4→3）：3 点非共线刚体解位姿质量差，
+                                            // 低质位姿帧把同一物理标志点投影进相邻
+                                            // 体素＝「同位置多个标志点」显示来源之一；
+                                            // 统一 4 后 <4 点帧 hold 不融合（宁缺毋滥）。
+                                            // 兜底验收门 matched≥             // 兜底验收门 matched≥
         double fuseMaxRmseMm = 2.0;         // 兜底验收门 rmse<
         // 261027 诊断：hold 帧强制融合（无标志点场景验证激光链——R/T 为上帧
         // 沿用值，仅诊断用，非测量口径）。env JMW_FC_FUSE_ON_HOLD=1 开
@@ -243,6 +248,23 @@ public:
         // 真机调参 y_tolerance 6.0/max_points 300）
         const bool sj = !cfg_.operators.empty();
         if (sj) {
+            // 【261115 修复】sep 双组基参在此兜底装载（rig/离线路径必经点）——原实现
+            // 仅在 startRealtime 装载，未走 startRealtime 的路径下 fc_executor 首帧
+            // 组切换 SetParams(sepBase_) 会用「未初始化的算子默认值」覆盖 adapter
+            // 构造期注入的 config 参数 → 标志点掩膜垃圾化（实测 bboxSum 146 万 vs
+            // 沙盒 3.4 万 px）→ 标志点/激光两链齐崩。真机 startRealtime 后续装载
+            // 同值幂等；operators 为空（产线默认配方）不装载、保持原行为。
+            try {
+                sepBase_ = calib::LaserMarkingSeparationParams::fromJson(
+                    cfg_.opParams("mask_separation"));
+                sepFine_ = sepBase_;
+                if (cfg_.operators.contains("mask_separation_fine"))
+                    sepFine_ = calib::LaserMarkingSeparationParams::fromJson(
+                        cfg_.operators.at("mask_separation_fine"));
+            } catch (const std::exception& e) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[FC-MKOPS] sep 双组装载失败（保持现状）: {}", e.what());
+            }
             ops->split = std::make_unique<calib::ImageSplitCPU>(
                 calib::ImageSplitCPUParams::fromJson(cfg_.opParams("image_split")));
             ops->zernike = std::make_unique<calib::ZernikeEdgeCPU>(

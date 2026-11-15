@@ -113,6 +113,50 @@ bool loadTestCalib(const fs::path& camJson, const fs::path& cmttBin,
     } catch (const std::exception& e) { err = std::string("json 解析: ") + e.what(); return false; }
     out.laserTable = calib::LoadTempTableFromCmtt(cmttBin.string(), nominalTemp, err);
     if (!out.laserTable) return false;
+    // 【261115】uR 烘表 sidecar（沙盒 261108 方案 C 同款）：数据集配套的逐线
+    // uR 补偿（biasPx[25]，uR 列 += bias[lid-1]）——沙盒金样/新鲜基准均烘过表，
+    // rig 不烘则 uR 系统偏 1~2px（发卡边缘差 7.7%＝对拍 3% 残差根因）。
+    // 缺 sidecar＝不烘（产线新数据集无此文件时保持旧行为）。
+    {
+        const fs::path biasJson = cmttBin.parent_path() / "curve_map_temp_table.ur_bias.json";
+        std::error_code ec0;
+        if (fs::exists(biasJson, ec0)) {
+            std::ifstream bf(biasJson);
+            if (bf) {
+                try {
+                    nlohmann::json sj;
+                    bf >> sj;
+                    std::vector<float> bias;
+                    if (sj.contains("biasPx") && sj.at("biasPx").is_array())
+                        for (const auto& v : sj.at("biasPx"))
+                            bias.push_back(v.get<float>());
+                    if (bias.size() == 25) {
+                        const calib::LaserPlaneMap* src =
+                            out.laserTable->lookup(nominalTemp);
+                        auto baked = std::make_shared<calib::LaserPlaneMapTempTable>();
+                        calib::LaserPlaneMap dst;
+                        dst.temperature = src->temperature;
+                        cv::Mat m = src->leftToRightMap.clone();
+                        for (int i = 0; i < m.rows; ++i) {
+                            cv::Vec4f& e = m.at<cv::Vec4f>(i);
+                            const int lid = cvRound(e[3]);
+                            if (lid >= 1 && lid <= 25)
+                                e[2] += bias[static_cast<size_t>(lid - 1)];
+                        }
+                        dst.leftToRightMap = m;
+                        dst.totalPairs = src->totalPairs;
+                        baked->table[nominalTemp] = std::move(dst);
+                        out.laserTable = baked;
+                        fprintf(stderr,
+                                "[rig][uRBias] 烘表生效（bias L1=%.3f L25=%.3f px）\n",
+                                bias[0], bias[24]);
+                    }
+                } catch (const std::exception&) {
+                    // 坏 sidecar＝不烘（对拍口径回退旧行为）
+                }
+            }
+        }
+    }
     return true;
 }
 

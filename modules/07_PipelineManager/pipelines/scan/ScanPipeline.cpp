@@ -162,6 +162,55 @@ Scanner::Result ScanPipeline::start() {
             std::string lerr;
             auto t = calib::LoadTempTableFromCmtt(cmttPath, 22.5, lerr);
             if (t) {
+                // 【261115】uR 烘表 sidecar（沙盒 261108 方案 C 同款）：表同目录
+                // curve_map_temp_table.ur_bias.json 存在时 uR+=biasPx[lid-1]。
+                // 缺文件＝不烘（新机表无 sidecar 时零影响）。离线对拍实证：不烘
+                // uR 系统偏 1~2px → 发卡边缘差 7.7%（对拍 3% 残差根因）。
+                try {
+                    // sidecar 命名＝表名 .bin→.ur_bias.json 替换（数据集约定）
+                    std::string biasPath = cmttPath;
+                    const auto pp = biasPath.find_last_of('.');
+                    if (pp != std::string::npos
+                        && biasPath.substr(pp) == ".bin")
+                        biasPath = biasPath.substr(0, pp) + ".ur_bias.json";
+                    std::ifstream bf(biasPath);
+                    if (!bf && cmttPath.size() > 4) {
+                        // 兜底：追加式（.bin.ur_bias.json）
+                        std::ifstream bf2(cmttPath + ".ur_bias.json");
+                        if (bf2) { bf = std::move(bf2); }
+                    }
+                    if (bf) {
+                        nlohmann::json sj;
+                        bf >> sj;
+                        std::vector<float> bias;
+                        if (sj.contains("biasPx") && sj.at("biasPx").is_array())
+                            for (const auto& v : sj.at("biasPx"))
+                                bias.push_back(v.get<float>());
+                        if (bias.size() == 25) {
+                            const calib::LaserPlaneMap* src = t->lookup(22.5);
+                            auto baked =
+                                std::make_shared<calib::LaserPlaneMapTempTable>();
+                            calib::LaserPlaneMap dst;
+                            dst.temperature = src->temperature;
+                            cv::Mat m = src->leftToRightMap.clone();
+                            for (int i = 0; i < m.rows; ++i) {
+                                cv::Vec4f& e = m.at<cv::Vec4f>(i);
+                                const int lid = cvRound(e[3]);
+                                if (lid >= 1 && lid <= 25)
+                                    e[2] += bias[static_cast<size_t>(lid - 1)];
+                            }
+                            dst.leftToRightMap = m;
+                            dst.totalPairs = src->totalPairs;
+                            baked->table[22.5] = std::move(dst);
+                            t = baked;
+                            JMW_LOG_INFO("07-ScanPipeline",
+                                "[ScanPipeline] uR 烘表生效（bias L1={:.3f} L25={:.3f}px）",
+                                bias[0], bias[24]);
+                        }
+                    }
+                } catch (const std::exception&) {
+                    // 坏 sidecar＝不烘（保持裸表行为）
+                }
                 fcTable = t;
                 JMW_LOG_INFO("07-ScanPipeline",
                     "[ScanPipeline] 五链 CMTT 曲线表装载: {}（referenceTemp={:.1f}℃）",
@@ -225,6 +274,21 @@ Scanner::Result ScanPipeline::start() {
         fcAdapter_->attachCalib(K1_, D1_, K2_, D2_, imageWidth_, imageHeight_,
                                 fcTable ? fcTable : laserTable_,
                                 fcTable2);
+        // 【261115】测试数据回放（真机显示链验证口）：JMW_FC_REPLAY_DIR=<帧目录>
+        // 时装载测试帧覆写帧源（raw bin/PNG 同离线对拍口径；单遍播放、M 键启停、
+        // 真机显示/融合链全程照常）。配套 env：JMW_FC_CMTT/JMW_FC_CAMJSON 指测试
+        // 标定；帧目录同目录放 ur_bias sidecar 自动烘表。
+        if (const char* replayDir = getenv("JMW_FC_REPLAY_DIR")) {
+            const auto rl = fcAdapter_->loadTestData(replayDir);
+            if (rl.success) {
+                JMW_LOG_INFO("07-ScanPipeline",
+                    "[ScanPipeline] 测试回放已装载: {}（M 键启停，单遍）", replayDir);
+            } else {
+                JMW_LOG_WARN("07-ScanPipeline",
+                    "[ScanPipeline] 测试回放装载失败（按在线流继续）: {} {}",
+                    replayDir, rl.message);
+            }
+        }
         // 名义温档立体标定（config/camera_calib.json——产表同源；env
         // JMW_FC_CAMJSON 可指定路径；缺文件回退逐帧快照注入并 WARN）
         {

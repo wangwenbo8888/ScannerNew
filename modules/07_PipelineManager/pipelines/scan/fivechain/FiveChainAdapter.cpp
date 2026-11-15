@@ -541,6 +541,10 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
     }
     // 261025 实时链：帧温快照注入（生产口径——ScanChains L853-857/L333-346 同源；
     // 沙盒对拍路径 metaValid=false 用 harness 构造期标定）
+    // 【261115 修复】metaValid=false（回放/无帧温）补构造期标定注入——原实现仅
+    // metaValid 分支有注入，离线路径 R1/P1/Q 全程为空 → undistort_cpu 输出垃圾
+    // → 标志点链 det 崩（det 9→1）。真机帧温链路通不受影响；回放自 261025
+    // 重构起必崩。现恢复「metaValid=false 用构造期标定」的设计原意。
     if (p.metaValid) {
         const cv::Mat R1(p.snapR1), R2(p.snapR2), P1(p.snapP1), P2(p.snapP2);
         if (ops->undist) ops->undist->SetRectifyMatrices(R1, R2, P1, P2, p.snapQ);
@@ -553,6 +557,23 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
                     cK2(r, c) = p.snapP2(r, c);
                 }
             const cv::Vec3d cT2(p.snapP2(0, 3), p.snapP2(1, 3), p.snapP2(2, 3));
+            const cv::Vec3d cC2 = -(cK2.inv() * cT2);
+            ops->conic->SetProjectionMatrices(cK1, cK2, cC2);
+        }
+    } else if (!calib_.P1.empty()) {
+        // 构造期标定（rig/离线装配期注入的名义温档）
+        const auto& cb = calib_;
+        if (ops->undist)
+            ops->undist->SetRectifyMatrices(cb.R1, cb.R2, cb.P1, cb.P2, cb.Q);
+        if (ops->conic && !cb.P2.empty()) {
+            cv::Matx33d cK1 = cv::Matx33d::eye(), cK2 = cv::Matx33d::eye();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    cK1(r, c) = cb.P1.at<double>(r, c);
+                    cK2(r, c) = cb.P2.at<double>(r, c);
+                }
+            const cv::Vec3d cT2(cb.P2.at<double>(0, 3), cb.P2.at<double>(1, 3),
+                                cb.P2.at<double>(2, 3));
             const cv::Vec3d cC2 = -(cK2.inv() * cT2);
             ops->conic->SetProjectionMatrices(cK1, cK2, cC2);
         }
@@ -1883,19 +1904,38 @@ Scanner::Result FiveChainAdapter::startRealtime(
         }
         if (getenv("JMW_FC_FUSE_ON_HOLD") != nullptr)
             harness_->cfg_.runtime.fuseOnHold = true;   // 诊断：hold 帧强制融合（无标志点验激光链）
-        harness_->cfg_.runtime.nominalTemperature =
-            rtLaserTable_ ? rtLaserTable_->referenceTemperature : 25.0;   // 表参考温（离线 golden 同口径 22.5）
-        harness_->K1_ = rtK1_; harness_->D1_ = rtD1_;
-        harness_->K2_ = rtK2_; harness_->D2_ = rtD2_;
+        // 【261115 修复·标定注入空守卫】注入源（attachCalib/ScanPipeline）有效才
+        // 覆盖；空则保持既有值（rig/测试装配期注入的表、K/D、图像宽高、名义温
+        // 不再被清空）。原实现无条件覆盖：CMTT 未部署或离线对拍（rtLaserTable_
+        // 空、rtW_=0）时，激光表被清空＋图像宽高归零＋名义温顶成 25.0 → 两链
+        // 齐崩（回放 det=9→1、匹配 1123 万→53 万；真机无 CMTT 部署同源）。
+        if (rtLaserTable_) {
+            harness_->cfg_.runtime.nominalTemperature = rtLaserTable_->referenceTemperature;
+            harness_->tableOdd_ = rtLaserTable_;               // T 管（左斜）表
+            // 261007 交叉扫描：tableEven_ 独立装 V 管（右斜）表——缺第二表时回退单表
+            harness_->tableEven_ = rtLaserTable2_ ? rtLaserTable2_ : rtLaserTable_;
+            harness_->tableC_ = rtLaserTableC_ ? rtLaserTableC_ : rtLaserTable_;   // C 深孔（缺→回退）
+            harness_->tableD_ = rtLaserTableD_ ? rtLaserTableD_ : rtLaserTable_;   // D 精细（缺→回退）
+        } else if (!harness_->tableOdd_) {
+            // 双空（无注入且装配期也没表）才回退 25.0 保底（原语义兜底不变）
+            harness_->cfg_.runtime.nominalTemperature = 25.0;
+        }
+        if (!rtK1_.empty()) {
+            harness_->K1_ = rtK1_; harness_->D1_ = rtD1_;
+            harness_->K2_ = rtK2_; harness_->D2_ = rtD2_;
+        }
         // 标定几何口径：K/P/Q/激光表全 1688×1400——undistCpu 边界检查等用算法
         // 几何（非采集几何；采集 2048×1536 已在桥居中裁剪）
-        harness_->imageWidth_ = bridge_->algoW_ > 0 ? bridge_->algoW_ : rtW_;
-        harness_->imageHeight_ = bridge_->algoH_ > 0 ? bridge_->algoH_ : rtH_;
-        harness_->tableOdd_ = rtLaserTable_;               // T 管（左斜）表
-        // 261007 交叉扫描：tableEven_ 独立装 V 管（右斜）表——缺第二表时回退单表
-        harness_->tableEven_ = rtLaserTable2_ ? rtLaserTable2_ : rtLaserTable_;
-        harness_->tableC_ = rtLaserTableC_ ? rtLaserTableC_ : rtLaserTable_;   // C 深孔（缺→回退）
-        harness_->tableD_ = rtLaserTableD_ ? rtLaserTableD_ : rtLaserTable_;   // D 精细（缺→回退）
+        const int injW = bridge_ ? bridge_->algoW_ : 0;
+        const int injH = bridge_ ? bridge_->algoH_ : 0;
+        if (injW > 0 && injH > 0) {
+            harness_->imageWidth_ = injW;
+            harness_->imageHeight_ = injH;
+        } else if (rtW_ > 0 && rtH_ > 0
+                   && harness_->imageWidth_ <= 0) {   // 注入缺位才用 rt 几何
+            harness_->imageWidth_ = rtW_;
+            harness_->imageHeight_ = rtH_;
+        }
         harness_->sepLaserL_ = sepL_.get();
         harness_->sepLaserR_ = sepR_.get();
         harness_->voxelFuseOp_ = fuse_.get();

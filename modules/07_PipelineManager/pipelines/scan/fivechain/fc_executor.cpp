@@ -357,30 +357,29 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
             v5p = calib::LaserMatchScanParamsV5::fromJson(j5);
         }
     }
-    const auto v3p = lmV5_
-        ? v5p.v3   // v5 臂：前段参数随 v5 节走（同沙盒口径；逐管覆盖仍生效）
-        : calib::LaserMatchScanParamsV3::fromJson(
-              h_.cfg_.opParams("laser_match_scan_v3"));
+    // 【261115 产线参数口径】前段（发卡几何）参数恒取产线 v3 节＝新扫描仪单一
+    // 真源；V5 节只携带骨架/门结构参数（跨机通用），不再内嵌 v3 基（沙盒扫参
+    // 值已从 config 移除）。v5p.v3 显式对齐产线 v3 节——后段消费的
+    // epipolar_row_step 等与前段同源。
+    const auto v3p = calib::LaserMatchScanParamsV3::fromJson(
+        h_.cfg_.opParams("laser_match_scan_v3"));
+    v5p.v3 = v3p;
     splitGpu_ = std::make_unique<calib::LaserMatchScanSplitGpuV3>(v3p);
     if (lmV5_) splitGpu_->SetEmitCardRes(true);   // 【V5 契约】cardRes 必须发射
     splitCpu_ = std::make_unique<calib::LaserMatchScanSplitCpuV3>(v3p);
     // 261007 参数跟帧走：T/V 共用（组 0——面片逐帧交替下每帧 SetParams 会
-    // 重置算子 warmup 引发崩溃）；窗 [34,86] 同盖 T 实测 61~87 与 V 39~62
-    //【261115 V5 回迁】V5 臂不套 V3 逐管调优值——V5 门结构独立扫参（窄窗 thr 4.0/
-    // 间距 36.9/容差 3.0），V3 的 12/88/0.30 等口径会破坏 V5 发卡（真机匹配劣化
-    // 根因：逐帧 SetParams 把 v5 节定稿值盖掉——沙盒验证＝单一口径无覆盖）。
-    // V3 臂保留产线 261007 真机实测调优值。V5 真机逐管调参归交接档未决#5。
+    // 重置算子 warmup 引发崩溃）；窗 [34,86] 同盖 T 实测 61~87 与 V 39~62。
+    // 【261115 产线口径】逐管覆盖对全部后段臂生效（V5/V4/V3——新机四管
+    // 实测调优值；V5 前段若需独立窄窗调参，产线扫参后写入 v3 节即可）。
     for (int t = 0; t < 4; ++t) h_.v3TubeParams_[t] = v3p;
-    if (!lmV5_) {
-        h_.v3TubeParams_[0].cascade_spacing_px = 52.0f;   // T 左斜（组 0 与 V 共用）
-        h_.v3TubeParams_[0].cascade_spacing_tol = 0.68f;
-        h_.v3TubeParams_[1] = h_.v3TubeParams_[0];        // V 右斜（同组同值）
-        // C(2) 单线——cascade lidDiff==1 不触发，保持基础包
-        h_.v3TubeParams_[3].cascade_spacing_px = 88.0f;   // D 精细 窗[62,114]（实测 68~108）
-        h_.v3TubeParams_[3].cascade_spacing_tol = 0.30f;
-        h_.v3TubeParams_[3].match_threshold = 12.0f;      // 261107 表 rms 6.4 下收紧
-        //    （32px 窗放重叠窗错卡存活跨线错配；12 只留准预测）
-    }
+    h_.v3TubeParams_[0].cascade_spacing_px = 52.0f;   // T 左斜（组 0 与 V 共用）
+    h_.v3TubeParams_[0].cascade_spacing_tol = 0.68f;
+    h_.v3TubeParams_[1] = h_.v3TubeParams_[0];        // V 右斜（同组同值）
+    // C(2) 单线——cascade lidDiff==1 不触发，保持基础包
+    h_.v3TubeParams_[3].cascade_spacing_px = 88.0f;   // D 精细 窗[62,114]（实测 68~108）
+    h_.v3TubeParams_[3].cascade_spacing_tol = 0.30f;
+    h_.v3TubeParams_[3].match_threshold = 12.0f;      // 261107 表 rms 6.4 下收紧
+    //    （32px 窗放重叠窗错卡存活跨线错配；12 只留准预测）
     h_.v3ParamGroup_.store(-1, std::memory_order_relaxed);
     reconP_ = calib::LaserReconstructParams::fromJson(
         h_.cfg_.opParams("laser_reconstruct"));
@@ -2018,6 +2017,46 @@ void FiveChainExecutor::chain2Loop() {
             //（下游 disp_gate/重建/统计消费面不变）。
             if (lmV5_ && splitCpuV5_) {
                 cr = splitCpuV5_->Execute(j->front);
+                // 【诊断 261115】JMW_FC_V5DUMP=<dir>：V5 输出按沙盒 L4-match_L.csv
+                // 同格式（x,y）落盘——3% 残差定谳对拍口（首 3 帧）
+                if (const char* fd5 = getenv("JMW_FC_V5DUMP")) {
+                    static std::atomic<int> sV5DumpN_{0};
+                    const int nd = sV5DumpN_.fetch_add(1, std::memory_order_relaxed);
+                    if (nd < 3) {
+                        char db[512];
+                        std::snprintf(db, sizeof db, "%s/v5_L_%d.csv", fd5, nd);
+                        std::ofstream of(db);
+                        if (of) {
+                            of << "x,y\n";
+                            const cv::Point2f* pl = cr.matched_left.ptr<cv::Point2f>();
+                            for (int q = 0; q < cr.matchedCount; ++q)
+                                of << std::fixed << std::setprecision(6)
+                                   << pl[q].x << ',' << pl[q].y << '\n';
+                        }
+                        std::snprintf(db, sizeof db, "%s/v5_R_%d.csv", fd5, nd);
+                        std::ofstream of2(db);
+                        if (of2) {
+                            of2 << "x,y\n";
+                            const cv::Point2f* pr = cr.matched_right.ptr<cv::Point2f>();
+                            for (int q = 0; q < cr.matchedCount; ++q)
+                                of2 << std::fixed << std::setprecision(6)
+                                    << pr[q].x << ',' << pr[q].y << '\n';
+                        }
+                        // front 卡表（定谳 3% 残差：对拍沙盒侧同 dump）
+                        std::snprintf(db, sizeof db, "%s/front_%d.csv", fd5, nd);
+                        std::ofstream ff(db);
+                        if (ff) {
+                            const auto& f = j->front;
+                            ff << "lid,hitRx,ridx,res\n";
+                            for (int q = 0; q < f.totalCards; ++q)
+                                ff << f.cardLid[q] << ',' << std::fixed
+                                   << std::setprecision(6) << f.cardRx[q] << ','
+                                   << f.cardRidx[q] << ','
+                                   << (q < (int)f.cardRes.size() ? f.cardRes[q] : 0.f)
+                                   << '\n';
+                        }
+                    }
+                }
                 // 【261115 用户要求】扫码可辨：V5 逐帧确认（首帧+每500帧；
                 // cr.message 含 "| v5: ..." 段＝V5 独有指纹，V3 无此段）
                 {
