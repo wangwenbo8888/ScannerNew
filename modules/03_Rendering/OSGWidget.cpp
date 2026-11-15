@@ -125,6 +125,7 @@ void OSGWidget::clearScene(){
     m_viewLocked = false;  // 解除视图锁定
     m_lastFitRadius = -1.0;   // 视角跟随基准复位（新会话重新首取景）
     m_lastFitTime = {};
+    m_userInteracting = false;  // 261114：拖拽避让旗标复位——Release 丢失（右键菜单/拖出窗）会永久卡 true，maybeAutoFrame 全程短路＝「扫描中左相机视角消失」根因
     m_streamTimer->stop();
     if (m_streamFile.is_open())
         m_streamFile.close();
@@ -460,7 +461,7 @@ osg::ref_ptr<osg::Geode> OSGWidget::buildCloudGeode(const std::vector<osg::Vec3>
     for (size_t i = 0; i < n; ++i) {
         const osg::Vec4ub col = (colors && i < colors->size())
             ? (*colors)[i]
-            : osg::Vec4ub(134, 206, 250, 255);   // LeadScan 蓝
+            : osg::Vec4ub(0, 154, 205, 255);   // 261114 杰魔点蓝——与 kLaserColor 同源（GBA 终版云/仓库快照/导入云无逐点色时的默认；原 134,206,250 系误抄网格材质色致全局优化后变色）
         for (int k = 0; k < 4; ++k) {
             v->push_back(points[i]);
             c->push_back(col);
@@ -1258,6 +1259,8 @@ void OSGWidget::mouseMoveEvent(QMouseEvent *event)
     if ((event->buttons() & Qt::RightButton) &&
         (event->globalPos() - m_rightPressGlobalPos).manhattanLength() > 6)
         m_suppressContextMenu = true;       // 右键拖拽＝平移视角，松开不弹菜单
+    if (event->buttons() != Qt::NoButton)
+        m_lastInteractTime = std::chrono::steady_clock::now();   // 真拖拽中持续刷新（避让时间窗）
     if (!m_gw.valid()) return;
     float x = event->pos().x();
     float y = event->pos().y();
@@ -1277,7 +1280,8 @@ void OSGWidget::mouseMoveEvent(QMouseEvent *event)
 
 void OSGWidget::mousePressEvent(QMouseEvent *event)
 {
-    m_userInteracting = true;              // 视角跟随避让（Release 复位）
+    m_userInteracting = true;              // 视角跟随避让（Release 复位；超时自愈见 maybeAutoFrame）
+    m_lastInteractTime = std::chrono::steady_clock::now();
     if (m_lassoMode)
     {
         if (event->button() == Qt::LeftButton)
@@ -3106,8 +3110,11 @@ void OSGWidget::setLeftCameraView()
 // ============================================================================
 void OSGWidget::maybeAutoFrame()
 {
-    if (!m_autoViewFit || m_userInteracting) return;
     const auto now = std::chrono::steady_clock::now();
+    // 261114：拖拽避让改时间窗（3s）——Release 丢失（右键菜单/拖出窗）曾令
+    // m_userInteracting 永久卡 true，扫描全程不再左相机取景（功能"消失"根因）
+    if (!m_autoViewFit) return;
+    if (m_userInteracting && now - m_lastInteractTime < std::chrono::seconds(3)) return;
     if (m_lastFitRadius >= 0.0 && now - m_lastFitTime < std::chrono::seconds(1)) return;
 
     // 取景基准（261004 稳健化）：优先 robustMarkerBounds（中位数中心＋90 分位

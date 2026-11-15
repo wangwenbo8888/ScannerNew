@@ -484,7 +484,8 @@ private:
     osg::ref_ptr<osg::Uniform> m_laserCamUpUni;     // uCamUp（每帧回调＝视图矩阵列 1）
     osg::ref_ptr<osg::Program> m_sqProg;            // 261017 方块点共享 program
                                                     //   （激光/仓库快照/导入云一份数据）
-    bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角）
+    bool m_userInteracting = false;                 // 鼠标拖拽中（Press/Release 维护——交互期不抢视角；丢失 Release 由超时窗自愈）
+    std::chrono::steady_clock::time_point m_lastInteractTime{};   // 最近交互时刻（Press/按住拖拽刷新——避让 3s 时间窗）
     bool m_markersVisible = true;                   // 标志点显示开关（右键菜单；NodeMask 0=隐藏）
     bool m_laserVisible = true;                     // 激光点显示开关（右键菜单；NodeMask 0=隐藏）
     size_t m_lastMeshTriangles = 0;                 // 261017 最近导入网格三角面数（树计数用）
