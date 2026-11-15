@@ -66,7 +66,7 @@ struct ScrConfigCompat {
         double flowRmseDriftRatio = 10.0;   // 光流误差趋势门倍率（0=关）
         double mintDedupRadiusMm = 5.0;     // 新点发号查重半径（累积漂移口径）
         int fuseSubsetMax = 16;             // 兜底子集装配上限（min 算子上限）
-        int fuseMinMatched = 4;             // 兜底验收门 matched≥
+        int fuseMinMatched = 3;             // 261115 用户裁定 4→3：「扫到一半接不上」实测最后段视场有效点长期 0~3、≥4 恒拒致融合门长闭；3＝非共线刚体解数学下限（跳变门 dT>500mm 且 matched<7 拒 仍在防护）             // 兜底验收门 matched≥
         double fuseMaxRmseMm = 2.0;         // 兜底验收门 rmse<
         // 261027 诊断：hold 帧强制融合（无标志点场景验证激光链——R/T 为上帧
         // 沿用值，仅诊断用，非测量口径）。env JMW_FC_FUSE_ON_HOLD=1 开

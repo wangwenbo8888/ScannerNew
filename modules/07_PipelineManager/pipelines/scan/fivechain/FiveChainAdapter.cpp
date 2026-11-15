@@ -2268,6 +2268,10 @@ void FiveChainAdapter::collectorLoop() {
             sceneFeed_->notifyLaserCount(fuse_->GetFusedPointCount());
 
         // 261028 逐帧 conic 诊断（前 200 帧——定位 conic 率随时间衰减）
+        // 261115 全程化（用户报「扫到一半标志点匹配接不上、后扫点挂不上」——
+        // 原 200 帧后零可见性，断链不可见）：①前 200 帧每 10 帧原样；②全程每
+        // 200 帧补一条；③regSource 迁移即记 WARN（断链/恢复事件，1s 限频防
+        // flow↔hold 抖动刷屏）。
         if (idx < 200 && (idx % 10) == 0) {
             JMW_LOG_INFO("07-FiveChain",
                 "[FC-CONIC] f={} conic={} valid={} det={} match={} regSrc={}",
@@ -2283,6 +2287,29 @@ void FiveChainAdapter::collectorLoop() {
                         dg.leftIdx, dg.rightIdx,
                         calib::ConicFailReasonName(dg.failReason),
                         dg.reconstructedRadiusMm, dg.reprojResidualPx);
+                }
+            }
+        } else if ((idx % 200) == 0) {
+            JMW_LOG_INFO("07-FiveChain",
+                "[FC-CONIC] f={} conic={} valid={} det={} match={} regSrc={}",
+                idx, prod.conic.statistics.validCount, prod.markersValid,
+                prod.markersDetected, prod.mm.centerMatches.size(),
+                prod.regSource);
+        }
+        {
+            static std::string lastRegSrc;
+            static std::chrono::steady_clock::time_point lastRegLog{};
+            if (prod.regSource != lastRegSrc) {
+                const auto nowT = std::chrono::steady_clock::now();
+                if (nowT - lastRegLog >= std::chrono::seconds(1)) {
+                    JMW_LOG_WARN("07-FiveChain",
+                        "[FC-REGSRC] f={} {} -> {} (det={} match={} valid={})",
+                        idx, lastRegSrc.empty() ? "(init)" : lastRegSrc.c_str(),
+                        prod.regSource, prod.markersDetected,
+                        prod.mm.centerMatches.size(),
+                        prod.conic.statistics.validCount);
+                    lastRegSrc = prod.regSource;
+                    lastRegLog = nowT;
                 }
             }
         }
