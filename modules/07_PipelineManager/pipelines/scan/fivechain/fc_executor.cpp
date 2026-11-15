@@ -809,6 +809,22 @@ void FiveChainExecutor::fcSeparation(FcJob* j) {
     }
 }
 
+// ============================================================================
+// 【261115 临时口径·同上午验证口径】激光 CMTT 选档温度固定（不跟帧温）。
+// 背景：新机 CMTT 未标定，config 回退 laser_calib 内嵌表（范围 ~22.x℃），
+// 真机实测帧温 35~40℃ 出范围→算子钳边界档→uR 预测偏＝误匹配散点源。
+// 上午全部对拍/修复验证均在固定名义温 22.5 下完成（沙盒 harness 同口径）。
+// env JMW_FC_LMTEMP：数字（默认 22.5）＝固定选档温度；"follow"＝恢复按帧温
+//（新机 CMTT 表部署后切回）。
+// ============================================================================
+static double fcLaserTableTemp_(double frameTempC, double nominalC) {
+    static const char* e = getenv("JMW_FC_LMTEMP");
+    if (e != nullptr && std::strcmp(e, "follow") == 0)
+        return frameTempC > 0.0 ? frameTempC : nominalC;
+    static const double fixedT = (e != nullptr && e[0] != '\0') ? atof(e) : 22.5;
+    return fixedT;
+}
+
 void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
     j->tubeIdx = tubeIdx;   // 【V5 回迁 261115】记录本帧管号（V4 回退臂后段按管切温表用）
     auto& p = j->prod;
@@ -875,8 +891,9 @@ void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
                     != Harness::v3ParamGroupOf(tubeIdx))
                 splitGpu_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
             // 261109 按帧温选激光温表档（实测温度→查表→重建；回退名义温＝sim/回放帧温 0）
+            // 【261115】临时固定 22.5（同上午口径）——见 fcLaserTableTemp_ 注释
             splitGpu_->SetCurrentTemperature(
-                (p.temperature > 0.0) ? p.temperature : h_.cfg_.runtime.nominalTemperature);
+                fcLaserTableTemp_(p.temperature, h_.cfg_.runtime.nominalTemperature));
             // ══【B4】前段提交图化（【批D·c2】默认开——JMW_V3FRONTGRAPH=0 显式关；
             //    JMW_NOGRAPH=1 总闸优先；发射相位＝排水后窗口，本函数即排水后
             //    调用点——非已证伪的 defer 相位；单 env，禁带 V3DEFER）══
@@ -939,9 +956,9 @@ bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, int tubeIdx,
             != Harness::v3ParamGroupOf(tubeIdx))
         splitGpu_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
     // 261109 按帧温选档（回退名义温——sim/回放帧温 0）
+    // 【261115】临时固定 22.5（同上午口径）——见 fcLaserTableTemp_ 注释
     splitGpu_->SetCurrentTemperature(
-        (j->prod.temperature > 0.0) ? j->prod.temperature
-                                    : h_.cfg_.runtime.nominalTemperature);
+        fcLaserTableTemp_(j->prod.temperature, h_.cfg_.runtime.nominalTemperature));
     splitGpu_->ExecuteDeferred(ptsL, idsL, L.interpL_->GetOutputCountPtr(),
                                ptsR, idsR, L.interpR_->GetOutputCountPtr(),
                                ls, j->front);
@@ -2377,9 +2394,9 @@ void FiveChainExecutor::ch2FullGpu_(FcJob* j) {
                 != Harness::v3ParamGroupOf(tubeIdx))
             matchFull_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
         // 261109 按帧温选档（回退名义温——sim/回放帧温 0）
+        // 【261115】临时固定 22.5（同上午口径）——见 fcLaserTableTemp_ 注释
         matchFull_->SetCurrentTemperature(
-            (j->prod.temperature > 0.0) ? j->prod.temperature
-                                        : h_.cfg_.runtime.nominalTemperature);
+            fcLaserTableTemp_(j->prod.temperature, h_.cfg_.runtime.nominalTemperature));
         mr = matchFull_->Execute(vPL, vIL, vPR, vIR, cS_);
         j->prod.laserMatched = mr.matchedCount;
         h_.setStepOk(j->prod, "laser_match_scan_v3", mr.success);
