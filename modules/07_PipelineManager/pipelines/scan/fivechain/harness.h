@@ -526,6 +526,10 @@ public:
     std::vector<double> flowRmseBaseline_;      // 光流误差趋势门基线（前 50 成功帧）
     double flowRmseBaselineMed_ = -1.0;
     int holdStreak_ = 0;                        // 连续 hold 帧数（捞点半径自适应＋停手门）
+    // 【261115 配准超时恢复】上次配准成功（flow/fuse）的时刻——超 3s 未成功时
+    // 自动重置 holdStreak（恢复 fuse 快+慢路径每帧尝试），防止 long hold 期
+    // fuse 被节流到每 3 帧一次导致"等了好久"。
+    std::chrono::steady_clock::time_point lastRegSuccessTime_{};
     size_t libVersion_ = 1;                     // 库写入递增版本（索引脏标记）
     std::unique_ptr<scr::TriangleLibraryIndex> libIndex_;   // 慢路径全库三角索引
     size_t libIndexVersion_ = 0;                // 索引对应库版本

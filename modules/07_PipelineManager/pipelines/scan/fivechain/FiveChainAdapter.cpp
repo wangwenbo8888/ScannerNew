@@ -935,8 +935,28 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
             p.regSource = prevState_.empty() ? "first" : "flow";
             p.regMatched = static_cast<int>(p.regFlow.getMatchedCount());
             adoptRegistration(p.regFlow, p);
+            lastRegSuccessTime_ = std::chrono::steady_clock::now();
         } else if (!prevState_.empty() && !globalSet_.empty()) {
             // —— frame_fuse 兜底：快路径视野捞点 → 慢路径三角索引全库投票 ——
+            // 【261115 超时恢复模式】连续 hold 超 3 秒 → 进入恢复模式：
+            // 重置 holdStreak（恢复快路径+每帧慢路径），大幅提升 fuse 命中率。
+            // 恢复模式期间跳过光流（prevState 已过期不可靠），fuse 成功后
+            // 自然退出（holdStreak 归零+prev 刷新→光流恢复）。
+            static constexpr auto kFuseRecoveryTimeout = std::chrono::seconds(3);
+            if (lastRegSuccessTime_.time_since_epoch().count() > 0
+                && std::chrono::steady_clock::now() - lastRegSuccessTime_
+                       > kFuseRecoveryTimeout
+                && holdStreak_ > 15) {
+                if (holdStreak_ <= 15 + 10) {   // 只打一次日志（进入恢复模式时）
+                    JMW_LOG_WARN("07-FiveChain",
+                        "[fivechain] 配准超时恢复: holdStreak={}（{:.1f}s 无成功配准）"
+                        "——重置 streak，fuse 快+慢路径全开",
+                        holdStreak_,
+                        std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - lastRegSuccessTime_).count());
+                }
+                holdStreak_ = 0;   // 重置 → 快路径恢复 + 慢路径每帧尝试
+            }
             calib::MarkerPointSet cur;
             for (const auto& m : p.conic.markers) {
                 if (!m.validCircle) continue;
@@ -1004,6 +1024,7 @@ void FcHarnessCompat::runRegistration(scr::CycleProductsCompat& p, bool record) 
                     p.regMatched = static_cast<int>(p.regFuse.matchedCount);
                     for (int i = 0; i < 9; ++i) p.R[i] = p.regFuse.R.val[i];
                     for (int i = 0; i < 3; ++i) p.T[i] = p.regFuse.T.val[i];
+                    lastRegSuccessTime_ = std::chrono::steady_clock::now();
                     // 子集局部下标 → 库下标（快/慢路径按胜出来源译码）
                     const bool slowWon = fromSlow && !sel2.empty();
                     const std::vector<int>& usedSel = slowWon ? sel2 : sel;
