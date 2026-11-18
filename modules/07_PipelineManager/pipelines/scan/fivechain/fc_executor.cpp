@@ -389,8 +389,12 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
         const auto& jn = h_.cfg_.opParams("laser_reconstruct");
         if (jn.contains("linePlaneGateMm"))
             linePlaneGateMm_ = jn.value("linePlaneGateMm", 0);
+        // 261118 深度带门（同节点 devZBandMm；默认 40mm；env JMW_FC_ZBAND 覆盖）
+        if (jn.contains("devZBandMm"))
+            devZBandMm_ = jn.value("devZBandMm", 40);
     }
     if (const char* e = getenv("JMW_FC_LINEPLANE")) linePlaneGateMm_ = atoi(e);
+    if (const char* e2 = getenv("JMW_FC_ZBAND")) devZBandMm_ = atoi(e2);
     reconCpu_ = std::make_unique<calib::LaserReconstructCpu>(reconP_);
     // 261031 口径统一：CMTT uR 偏置模型注册（离线拟合产物——FitUrbiasModel
     // 测试消费 checkpoint 生成 config/urbias.json；env JMW_FC_URBIAS=wx,wy,wz
@@ -2254,6 +2258,39 @@ void FiveChainExecutor::chain2Loop() {
 void FiveChainExecutor::applyLaserQualityGates_(FcJob* j, int slot,
                                                 const int* ids) {
     if (j->eCount <= 200) return;
+    // —— 261118 深度带门：帧内中位 Z ±band，带外剔除（双线交叉配对产的
+    //    近/远悬浮层——板面带内保留、257/445 层带外杀）。先于其余门执行。
+    if (devZBandMm_ > 0) {
+        float* ebB = eBlocks_[static_cast<size_t>(slot)];
+        zScratch_.resize(static_cast<size_t>(j->eCount));
+        for (int q = 0; q < j->eCount; ++q)
+            zScratch_[static_cast<size_t>(q)] = ebB[q * 3 + 2];
+        std::sort(zScratch_.begin(), zScratch_.end());
+        const float medZ = zScratch_[zScratch_.size() / 2];
+        const float band = static_cast<float>(devZBandMm_);
+        int w = 0;
+        for (int q = 0; q < j->eCount; ++q) {
+            const float z = ebB[q * 3 + 2];
+            if (std::abs(z - medZ) <= band) {
+                ebB[w * 3] = ebB[q * 3];
+                ebB[w * 3 + 1] = ebB[q * 3 + 1];
+                ebB[w * 3 + 2] = z;
+                ++w;
+            }
+        }
+        if (w < j->eCount) {
+            zBandPruned_.fetch_add(static_cast<size_t>(j->eCount - w),
+                                   std::memory_order_relaxed);
+            if (zBandPruned_.load(std::memory_order_relaxed) % 5000 < 2000u)
+                fprintf(stderr,
+                        "[fc:zband] idx=%d 深度带±%dmm 剔除 %d/%d 点（medZ=%.0f，"
+                        "累计=%zu）\n",
+                        j->idx, devZBandMm_, j->eCount - w, j->eCount, medZ,
+                        static_cast<size_t>(zBandPruned_.load()));
+            j->eCount = w;
+            if (w <= 200) return;   // 剔残了（带内几乎无点）——后续门无意义
+        }
+    }
     // —— Z-IQR 弥散门 ——
     static const int sZgate = [] {
         const char* e = getenv("JMW_FC_ZIQR");
