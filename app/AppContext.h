@@ -232,6 +232,11 @@ private:
     std::thread devStartThread_;                // 设备启动后台线程（shutdown 先 join）
     std::atomic<bool> shutdownDone_{false};     // shutdown once 守卫（析构链防重复关）
     std::thread scanStartThread_;               // 扫描装配后台线程（§3.3 handler 毫秒级契约；
+    std::atomic<bool> scanStartBusy_{false};    // 【261120】装配在飞标志（线程出口清零）：
+                                                //   joinable() 对已结束未 join 的线程恒真——
+                                                //   装配失败后复点恒拒「正在启动中」直到
+                                                //   停止/重置才收口（261120 真机日志实证），
+                                                //   判忙改用本标志，不忙即 join 回收再起新
     std::thread finishThread_;                  // finish background (260920: stop()+GBA final pass, minutes — was blocking UI)
     std::function<void(int, const std::string&)> finalBAProgress_;   // 终局遍进度出口（可空）
     std::function<void(bool, const std::string&)> postProcessFinished_;  // 261017 后处理完成出口（可空）

@@ -509,29 +509,6 @@ private:
     std::atomic<size_t> zGateDrops_{0};       // 弥散弃帧累计（观测口径）
     std::atomic<size_t> zLinePruned_{0};      // 飞线剪枝点累计（chain2 统计）
     int linePlaneGateMm_ = 0;                 // 飞线门（0=关；config/env）
-    // 261118 深度带门：帧内中位 Z ±band，带外点剔除——杀双线交叉配对产的
-    // 近/远悬浮层（实测板面 325±5 / 近层 257 / 远层 445-480）。config
-    // operators.laser_reconstruct.devZBandMm / env JMW_FC_ZBAND（0=关）。
-    // ⚠ 深度起伏超带内范围的目标（台阶/曲面）会误杀真实结构——按目标几何调档
-    int devZBandMm_ = 40;
-    std::atomic<size_t> zBandPruned_{0};      // 深度带剔除点累计（观测口径）
-    // 261118 四层自适应噪点防线
-    // ① 局部视差一致性：同行同 lid 的 MAD×5σ 门（自适应，无硬编码像素阈值）
-    int applyDisparityConsistency_(cv::Point2f* mL, cv::Point2f* mR, int* lids,
-                                   int count);
-    std::atomic<size_t> dispConsRejected_{0};
-    // ② 左右互检（保留——反查表几何验证）
-    std::unordered_map<int64_t, std::vector<std::pair<float, float>>> biCheckIdx_;
-    void buildBiCheckIndex_();
-    int applyBidirectionalCheck_(cv::Point2f* mL, cv::Point2f* mR, int* lids,
-                                 int count);
-    std::atomic<size_t> biCheckRejected_{0};
-    // ③ 空间孤立（保留——半径自适应于中位最近邻距离×5）
-    // ④ 跨帧时域支撑：当前 E 块点须在前帧 E 块中有 ≥1 邻居（自适应半径）
-    std::vector<float> prevEBlock_;       // 前帧 E 块点（质量门后快照）
-    bool prevEBlockValid_ = false;
-    int applyTemporalSupport_(int slot, int eCount);
-    std::atomic<size_t> temporalRejected_{0};
     std::unique_ptr<calib::LaserReconstructCpu> reconCpu_;
 
     // —— 【全GPU链2】整体版 GPU 匹配＋GPU 重建（本沙箱主实验；JMW_FC_FULLGPU=0

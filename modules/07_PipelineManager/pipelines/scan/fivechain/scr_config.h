@@ -94,7 +94,7 @@ struct ScrFiveChain {
                                          // ~5.7M vs 50M 槽 8.8× 余量 ✓）
     double voxelLoadFactor = 0.75;       // 负载断言线（超限 fail-fast；算子 70% 自动扩容在前）——50M 槽下本数据集永不触及，仅作保险
     long long voxelGrowSlots = 20000000; // 扩容增量（【2026-10-29】2M→20M：大表步进匹配，防频繁 rehash；每次扩容 = 表搬移 16B/槽＋点 24B/槽）
-    int saturationThreshold = 3;         // 体素饱和阈值（【2026-10-29 用户裁定】5→3；261120 曾试 1 → OperatorLib 融合算子崩溃，已回滚）
+    int saturationThreshold = 3;         // 体素饱和阈值（【2026-10-29 用户裁定】5→3：同体素吸收 3 点即饱和，更早截断重复点）
     std::string pinRoles = "1a,1b,marker,ch2";  // 绑核角色集（E1：ch2=CPU链2 绑核2-LP1）
     bool priorityBoost = true;           // 绑核线程提最高优先级
     // CUDA链1 二分（1a/1b 双流交叉）：默认开——2026-10-21 调优会话 A/B/A/B

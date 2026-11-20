@@ -42,6 +42,7 @@
 #include "pipelines/globaloptim/GlobalOptimObject.h"   // GBA 全链验证用例
 #include "pipelines/calibcompute/CalibComputeTypes.h"  // CancelToken
 #include "SlotRing.h"   // startRealtime 帧环仿真
+#include "EnhancedFrame.h"   // 【261120 回归】缺温表在线链喂帧（完整类型）
 #include "scanning/laser/laser_match_scan_v3/cmtt_table_loader.h"
 
 namespace fs = std::filesystem;
@@ -3216,6 +3217,88 @@ TEST(FcReplay, StartRealtimeNominalPath) {
     adapter->stopRealtime();
     SUCCEED() << "startRealtime 名义标定路径离线复现通过（真机断言未再现＝"
                  "环境相关，需真机再查）";
+}
+
+// ============================================================================
+// 【261120 回归】缺激光温表在线链复现（真机「面片扫描→M 开扫→~130ms cv::error
+// 崩」——本机 config 无 CMTT sidecar＋档表无 mapData，attachCalib 激光表=null）
+// 预期（261120 用户口径）：startRealtime 成功（缺表默认 22.5℃ 名义温）＋
+// 喧帧激光段逐帧跳过＋会话存活＋干净停。复现崩溃则本用例直接崩/挂——即定位。
+// env JMW_FC_RT=1 启用（同 NominalPath 家族）；JMW_FC_RT_GEOM=big 喂 2048×1536
+// 居中嵌帧（真机采集几何，桥走居中裁剪路径），缺省=1688×1400 直通。
+// JMW_FC_FULLGPU=1 顺带覆盖全 GPU 臂（真机崩溃当晚实跑臂）。
+// ============================================================================
+TEST(FcReplay, StartRealtimeNoLaserTable) {
+    if (getenv("JMW_FC_RT") == nullptr)
+        GTEST_SKIP() << "JMW_FC_RT=1 未设";
+
+    const fs::path sb = locateSandbox();
+    ASSERT_FALSE(sb.empty()) << "沙盒根未定位（JMW_FC_SANDBOX 或 CWD 向上搜索）";
+    ReplayRig rig;
+    std::string err;
+    ASSERT_TRUE(buildRig(sb, rig, err)) << err;
+
+    const bool bigGeom = [] {
+        const char* e = getenv("JMW_FC_RT_GEOM");
+        return e != nullptr && std::strcmp(e, "big") == 0;
+    }();
+    Scanner::data::SlotRing<Scanner::data::EnhancedFrame> ring(4);
+    auto adapter = std::make_unique<Scanner::pipeline::FiveChainAdapter>(
+        Scanner::pipeline::FiveChainConfig{}, *rig.obs, nullptr, nullptr,
+        &rig.operators);
+    // ★复现点：激光表=null（缺 CMTT——261120 前此形态 startRealtime 硬失败，
+    // 修复后应 WARN 继续）
+    adapter->attachCalib(rig.tc.K1, rig.tc.D1, rig.tc.K2, rig.tc.D2,
+                         rig.tc.W, rig.tc.H, nullptr);
+    // ★复现点二：真机 261120 形态＝config/camera_calib.json 缺失→名义标定
+    // （含 Q）不注入。JMW_FC_RT_NOMINAL=1 时注入（对照臂——Q 基准三角化走通）
+    if (getenv("JMW_FC_RT_NOMINAL") != nullptr) {
+        adapter->attachStereoNominal(rig.tc.R1, rig.tc.R2, rig.tc.P1, rig.tc.P2,
+                                     rig.tc.Q, rig.tc.K1c, rig.tc.K2c,
+                                     rig.tc.D1, rig.tc.D2, rig.tc.Rext, rig.tc.Tcomp);
+    }
+    auto sr = adapter->startRealtime(ring, 0);
+    ASSERT_TRUE(sr.success) << "缺温表启动被拒（261120 口径应默认 22.5 继续）: "
+                            << sr.message;
+
+    const int N = std::min(60, rig.total);
+    const size_t frameBytes =
+        static_cast<size_t>(rig.rawW) * static_cast<size_t>(rig.rawH);
+    for (int i = 0; i < N; ++i) {
+        auto f = std::make_shared<Scanner::data::EnhancedFrame>();
+        f->frameId = static_cast<uint64_t>(i);
+        cv::Mat rawL(rig.rawH, rig.rawW, CV_8UC1,
+                     rig.rawL.data() + frameBytes * static_cast<size_t>(i));
+        cv::Mat rawR(rig.rawH, rig.rawW, CV_8UC1,
+                     rig.rawR.data() + frameBytes * static_cast<size_t>(i));
+        if (bigGeom) {   // 真机几何：2048×1536 居中嵌 1688×1400（桥居中裁剪复原）
+            f->grayL = cv::Mat::zeros(1536, 2048, CV_8UC1);
+            f->grayR = cv::Mat::zeros(1536, 2048, CV_8UC1);
+            rawL.copyTo(f->grayL(cv::Rect(180, 68, rig.rawW, rig.rawH)));
+            rawR.copyTo(f->grayR(cv::Rect(180, 68, rig.rawW, rig.rawH)));
+        } else {
+            f->grayL = rawL.clone();
+            f->grayR = rawR.clone();
+        }
+        f->temperature = 25.0;          // 真机缺 MCU 温时的缺省帧温
+        f->tvKnown = true;
+        f->tvLeftSkew = (i % 2 == 0);   // B 模式 T/V 灯序交替
+        f->scanMode = Scanner::ScanMode::MarkerPlusLaser;
+        // 真机等价：02 出口查表快照（61 档立体档命中→R/P/Q 随帧透传）——
+        // 标志点链逐帧温补注入走此路；缺快照则 markersValid 恒 0，Q-BASIS
+        // 路径到不了（首版测试漏此条件＝离线不复现的原因）
+        f->snapshot.R1 = rig.tc.R1; f->snapshot.R2 = rig.tc.R2;
+        f->snapshot.P1 = rig.tc.P1; f->snapshot.P2 = rig.tc.P2;
+        f->snapshot.Q = rig.tc.Q;
+        f->snapshot.stereoTier = 35;    // 真机 261120 实测命中档
+        f->snapshot.laserTier = 35;
+        ring.write(f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // 尾帧走完全链（ch2/fuse/collector 尾延迟＋E 池回收）
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    adapter->stopRealtime();
+    SUCCEED() << "缺温表在线链 " << N << " 帧存活＋干净停（261120 回归）";
 }
 
 // ============================================================================

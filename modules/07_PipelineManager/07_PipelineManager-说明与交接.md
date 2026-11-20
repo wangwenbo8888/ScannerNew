@@ -35,9 +35,12 @@
 - 〔待定〕问题：五链 v1 限制未补齐｜方法：A 模式/暂停续扫/检查点/marker 编辑账本逐项补齐｜提出 261102｜解决 —
 - 〔待定〕问题：resume 持久水位决策与 v1 现码不符（决策称 resume 不得从 0 重扫；现码 pause＝停止、checkpoint 不在库）｜方法：待人工裁决去留｜提出 261102｜解决 —
 - 〔待定〕问题：激光点飞离标志点平面（离线回放 399 帧正确、在线实拍飞出；已排除新旧标定差异/对比度增强/坐标系偏移；嫌疑 CMTT 表(10-13)与 camera_calib.json(10-31) 微差被查表匹配放大，或在线图像特性[增益噪声]对 steger→undistort→interp→match 链的累积影响）｜方法：用在线 dump 帧过离线回放路径跑，定位「图像内容」还是「在线处理路径」问题｜提出 261102｜解决 —
+- 〔待定〕问题：相机内参标定未启用 LU 求解（09 算子已预留 calib_flags 通道：intrinsic_calib_cpu.h:23/cpp:275/281，默认 0＝SVD 慢路径；全仓无任何设置点——07 CameraChain 代码拼参不读配置）｜方法：pipelines/calibcompute/CameraChain.cpp:128（ip.plate_temp 行）后加一行 `ip.calib_flags = cv::CALIB_USE_LU;`——仅重编 07（replace_dlls.ps1 -Only pm），09 零改动、契约指纹不变；依据 fc opt_bench E1 实测 92.4×（578→6.3s，K 相对差 7e-14，fc 2026-10-13 批次一）；验证＝真机相机标定全流程对比 K/rms＋07 test_calib_camera 消费链｜提出 261117｜解决 261117（批1c，commit 978fadc；09 侧 LU 通道实测全绿）
 
 ## 4. 日志
 
+- 261117｜速赢批三笔落地：外参 LU `3afec80`／内参 A1＋并行 `a69e393`／07 内参 LU `978fadc`（§3 LU 条目销账）——全量 ctest 109/110 与基线一致；唯一红＝test_steger_fast 计时门（已知负载噪声：3ms 门两侧抖动 2.2~3.6ms，代码未动，fc 文档在案同款）｜人工触发·AI 代笔｜规范 §2.3
+- 261117｜内参 LU 待改点挂账（问题池新增；**代码未动，待人工批准**）：CameraChain.cpp:128 后一行 `ip.calib_flags = cv::CALIB_USE_LU` 即启用（fc E1 证据 92×/K 差 7e-14；09 算子零改动）｜人工触发·AI 代笔｜规范 §2.3
 - 261107｜DumpSeparationOnline 缺数据 FAIL 改 SKIP（261103 wip 快照遗留无守卫——在线 dump 帧不入库，对齐 CropOffsetSolve 惯例；全量 ctest 恢复 107/107）｜人工触发｜规范 §2.3
 
 - 261104｜重置项目四轮迭代后撤回（数据回魂根因深入到五链 stop 时序，问题挂账）｜人工触发｜规范 §2.3

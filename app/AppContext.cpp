@@ -227,9 +227,14 @@ void AppContext::initialize() {
             spec.handler = [this]() {
                 if (!scanWf_) return Scanner::Result::fail("扫描工作流未装配");
                 ++scanActGen_;                   // 会话代递增：作废更早装配线程的回滚资格
-                if (scanStartThread_.joinable())
+                // 【261120】判忙改标志位（joinable 对已结束未 join 线程恒真——装配
+                // 失败后复点恒拒「正在启动中」直到停止/重置，261120 真机日志实证）；
+                // 不忙=线程已结束：join 回收（瞬时）后安全赋新线程
+                if (scanStartBusy_.load(std::memory_order_acquire))
                     return Scanner::Result::fail("扫描正在启动中（后台装配未完）");
+                if (scanStartThread_.joinable()) scanStartThread_.join();
                 const uint64_t gen = scanActGen_.load();
+                scanStartBusy_.store(true, std::memory_order_release);
                 scanStartThread_ = std::thread([this, gen]() {
                     Scanner::Result r = Scanner::Result::fail("未知");
                     auto* repo = wfCtx_ ? wfCtx_->calibRepo() : nullptr;
@@ -287,6 +292,9 @@ void AppContext::initialize() {
                         JMW_LOG_INFO("app-AppContext", "[AppContext] 扫描后台装配完成{}",
                                      simSource_ ? "（中段模拟提取=开）" : "");
                     }
+                    // 【261120】出口清忙（本 lambda 无早退路径——置尾即全路径覆盖）：
+                    // 下次 start_scan 凭此判「已结束可复点」
+                    scanStartBusy_.store(false, std::memory_order_release);
                 });
                 return Scanner::Result::ok("扫描启动中（后台装配）");
             };

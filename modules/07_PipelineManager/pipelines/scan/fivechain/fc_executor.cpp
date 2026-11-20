@@ -389,12 +389,8 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
         const auto& jn = h_.cfg_.opParams("laser_reconstruct");
         if (jn.contains("linePlaneGateMm"))
             linePlaneGateMm_ = jn.value("linePlaneGateMm", 0);
-        // 261118 深度带门（同节点 devZBandMm；默认 40mm；env JMW_FC_ZBAND 覆盖）
-        if (jn.contains("devZBandMm"))
-            devZBandMm_ = jn.value("devZBandMm", 40);
     }
     if (const char* e = getenv("JMW_FC_LINEPLANE")) linePlaneGateMm_ = atoi(e);
-    if (const char* e2 = getenv("JMW_FC_ZBAND")) devZBandMm_ = atoi(e2);
     reconCpu_ = std::make_unique<calib::LaserReconstructCpu>(reconP_);
     // 261031 口径统一：CMTT uR 偏置模型注册（离线拟合产物——FitUrbiasModel
     // 测试消费 checkpoint 生成 config/urbias.json；env JMW_FC_URBIAS=wx,wy,wz
@@ -428,10 +424,16 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
     // 【N4·测量卫生】温表预注：双管表构造期注入，把 140MB 级上传＋流同步挪出
     // 首帧计时窗（此前落在 fc 帧 3/4 的 1b 线程——Warmup 只分配缓冲不注表；
     // 两管共表时第二次注入走 skip-fast-path 天然无害）。2026-10-23 第三轮 N4。
-    splitGpu_->SetTempTable(h_.tableOdd_);
-    splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
-    splitGpu_->SetTempTable(h_.tableEven_);
-    splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+    // 【261120·缺温表默认 22.5℃】无表不注（SetCurrentTemperature 无表即抛）——
+    // 缺表会话按名义温 22.5 继续，激光段逐帧跳过（fcV3Front 守卫）
+    if (h_.tableOdd_) {
+        splitGpu_->SetTempTable(h_.tableOdd_);
+        splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+    }
+    if (h_.tableEven_) {
+        splitGpu_->SetTempTable(h_.tableEven_);
+        splitGpu_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+    }
 
     // 【V5 回迁接线 261115】后段 V5/V4 构造。V5 默认开（JMW_LMV5=0 显式关）；
     // V4＝显式实验臂（JMW_LMV4=1 开——对齐仓内 fullGpu_ 同款「默认关+env 实验臂」
@@ -456,10 +458,12 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
             j4 = h_.cfg_.opParams("laser_match_scan_v3");   // 缺节回读 v3（键为子集）
         splitCpuV4_ = std::make_unique<calib::LaserMatchScanSplitCpuV4>(
             calib::LaserMatchScanParamsV4::fromJson(j4));
-        splitCpuV4_->SetTempTable(h_.tableOdd_);
-        splitCpuV4_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        splitCpuV4_->SetTempTable(h_.tableOdd_);   // 【261120】缺表守卫同 splitGpu_
+        if (h_.tableOdd_)
+            splitCpuV4_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
         splitCpuV4_->SetTempTable(h_.tableEven_);
-        splitCpuV4_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        if (h_.tableEven_)
+            splitCpuV4_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
         if (!h_.calib_.Q.empty())
             splitCpuV4_->SetStereoQ(h_.calib_.Q);
     } else {
@@ -477,10 +481,12 @@ FiveChainExecutor::FiveChainExecutor(Harness& h, int firstIdx, int totalCycles,
     if (fullGpu_) {
         matchFull_ = std::make_unique<calib::LaserMatchScanCudaV3>(v3p);
         matchFull_->Warmup(40000, 40000);   // 与 splitGpu_ 同容量口径
-        matchFull_->SetTempTable(h_.tableOdd_);
-        matchFull_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        matchFull_->SetTempTable(h_.tableOdd_);    // 【261120】缺表守卫同 splitGpu_
+        if (h_.tableOdd_)
+            matchFull_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
         matchFull_->SetTempTable(h_.tableEven_);
-        matchFull_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
+        if (h_.tableEven_)
+            matchFull_->SetCurrentTemperature(h_.cfg_.runtime.nominalTemperature);
         // 261103 集成重放：整体版同注 uR 偏置（与 splitGpu_ 同参）
         if (const char* e = std::getenv("JMW_FC_URBIAS"); e) {
             float ux = 0, uy = 0, uz = 0;
@@ -890,6 +896,13 @@ void FiveChainExecutor::fcV3Front(FcJob* j, int tubeIdx, cv::cuda::Stream& ls) {
             splitGpu_->FinishFront(p.interpL.interpCount, p.interpR.interpCount,
                                    ls, j->front);
         } else {
+            // 【261120·缺温表默认 22.5℃】无表帧跳过激光前段（front.success 缺省
+            // false→ch2 后段随门跳过）；标志点链不受影响——部署 CMTT 恢复全链
+            if (!h_.tableFor(tubeIdx)) {
+                j->front.message = "激光温表缺失——本帧激光段跳过（名义温 22.5℃）";
+                h_.fail("laser_match_scan_v3", p, j->front.message);
+                return;
+            }
             splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
             if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
                     != Harness::v3ParamGroupOf(tubeIdx))
@@ -955,6 +968,8 @@ bool FiveChainExecutor::submitV3FrontCapacity_(FcJob* j, int tubeIdx,
     cv::cuda::GpuMat ptsR = L.interpR_->GetCapacityPointsView();
     cv::cuda::GpuMat idsR = L.interpR_->GetCapacityIdsView();
     if (ptsL.empty() || ptsR.empty() || idsL.empty() || idsR.empty()) return false;
+    if (!h_.tableFor(tubeIdx))
+        return false;   // 【261120】缺温表：回退旧路径（fcV3Front 顶部跳段）
     splitGpu_->SetTempTable(h_.tableFor(tubeIdx));
     if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
             != Harness::v3ParamGroupOf(tubeIdx))
@@ -2090,9 +2105,11 @@ void FiveChainExecutor::chain2Loop() {
                     fprintf(stderr, "[v5:bd] cycle=%d%s\n", j->idx,
                             splitCpuV5_->LastTimingBreakdown().c_str());
             } else if (lmV4_ && splitCpuV4_) {
-                splitCpuV4_->SetTempTable(h_.tableFor(j->tubeIdx));
-                splitCpuV4_->SetCurrentTemperature(
-                    h_.cfg_.runtime.nominalTemperature);
+                if (const auto& tbV4 = h_.tableFor(j->tubeIdx)) {   // 【261120】缺表不注
+                    splitCpuV4_->SetTempTable(tbV4);
+                    splitCpuV4_->SetCurrentTemperature(
+                        h_.cfg_.runtime.nominalTemperature);
+                }
                 cr = splitCpuV4_->Execute(j->front);
             } else {
                 cr = splitCpu_->Execute(j->front);
@@ -2188,41 +2205,6 @@ void FiveChainExecutor::chain2Loop() {
             // ReconstructInto 本收 const Point2f*；缓冲属后段 Impl 本帧有效）
             const cv::Point2f* ml = cr.matched_left.ptr<cv::Point2f>();
             const cv::Point2f* mr = cr.matched_right.ptr<cv::Point2f>();
-            // ── 261118 左右互检（实验 JMW_FC_BICHECK=1）──
-            // 反查验证：R→查表→L' 若 L'≠L → 交叉配对 → 拒
-            static const bool sBiCheck = [] {
-                const char* e = getenv("JMW_FC_BICHECK");
-                return e != nullptr && e[0] == '1';
-            }();
-            int matchCount = cr.matchedCount;
-            // ① 局部视差一致性（自适应 MAD——普适）
-            // [261120] JMW_FC_G1=0 disables gate1 (row-local disparity MAD kills
-            // real off-plane geometry e.g. suction-cup domes when frames are clean)
-            static const bool sG1On = [] {
-                const char* e = getenv("JMW_FC_G1");
-                return !(e != nullptr && e[0] == '0');
-            }();
-            if (sG1On && matchCount > 20) {
-                const int before1 = matchCount;
-                matchCount = applyDisparityConsistency_(
-                    const_cast<cv::Point2f*>(ml),
-                    const_cast<cv::Point2f*>(mr),
-                    cr.matched_line_ids.ptr<int>(), matchCount);
-                if (matchCount < before1 && j->idx < 3)
-                    fprintf(stderr, "[fc:4gate] idx=%d ①视差 %d→%d\n",
-                            j->idx, before1, matchCount);
-            }
-            // ② 左右互检（反查表几何验证）
-            if (sBiCheck && matchCount > 0) {
-                const int before2 = matchCount;
-                matchCount = applyBidirectionalCheck_(
-                    const_cast<cv::Point2f*>(ml),
-                    const_cast<cv::Point2f*>(mr),
-                    cr.matched_line_ids.ptr<int>(), matchCount);
-                if (matchCount < before2 && j->idx < 3)
-                    fprintf(stderr, "[fc:4gate] idx=%d ②互检 %d→%d\n",
-                            j->idx, before2, matchCount);
-            }
             const long long ewT0 = fcdiag ? steadyNs() : 0;   // 【插桩】E 池等待
             const int s = acquireEBlock();
             if (fcdiag)
@@ -2233,7 +2215,7 @@ void FiveChainExecutor::chain2Loop() {
                 j->eCount = calib::LaserReconstructCpu::ReconstructInto(
                     ml, mr,
                     cr.matched_line_ids.ptr<int>(),
-                    matchCount, h_.calib_.Q,
+                    cr.matchedCount, h_.calib_.Q,
                     reconP_.minDepth, reconP_.maxDepth,
                     eBlocks_[static_cast<size_t>(s)], idsScratch.data(), eCapPts_);
                 if (cr.matchedCount > eCapPts_)
@@ -2293,202 +2275,6 @@ void FiveChainExecutor::chain2Loop() {
 void FiveChainExecutor::applyLaserQualityGates_(FcJob* j, int slot,
                                                 const int* ids) {
     if (j->eCount <= 200) return;
-    // —— 261118 深度带门：帧内中位 Z ±band，带外剔除（双线交叉配对产的
-    //    近/远悬浮层——板面带内保留、257/445 层带外杀）。先于其余门执行。
-    if (devZBandMm_ > 0) {
-        float* ebB = eBlocks_[static_cast<size_t>(slot)];
-        zScratch_.resize(static_cast<size_t>(j->eCount));
-        for (int q = 0; q < j->eCount; ++q)
-            zScratch_[static_cast<size_t>(q)] = ebB[q * 3 + 2];
-        std::sort(zScratch_.begin(), zScratch_.end());
-        const float medZ = zScratch_[zScratch_.size() / 2];
-        const float band = static_cast<float>(devZBandMm_);
-        int w = 0;
-        for (int q = 0; q < j->eCount; ++q) {
-            const float z = ebB[q * 3 + 2];
-            if (std::abs(z - medZ) <= band) {
-                ebB[w * 3] = ebB[q * 3];
-                ebB[w * 3 + 1] = ebB[q * 3 + 1];
-                ebB[w * 3 + 2] = z;
-                ++w;
-            }
-        }
-        if (w < j->eCount) {
-            zBandPruned_.fetch_add(static_cast<size_t>(j->eCount - w),
-                                   std::memory_order_relaxed);
-            if (zBandPruned_.load(std::memory_order_relaxed) % 5000 < 2000u)
-                fprintf(stderr,
-                        "[fc:zband] idx=%d 深度带±%dmm 剔除 %d/%d 点（medZ=%.0f，"
-                        "累计=%zu）\n",
-                        j->idx, devZBandMm_, j->eCount - w, j->eCount, medZ,
-                        static_cast<size_t>(zBandPruned_.load()));
-            j->eCount = w;
-            if (w <= 200) return;   // 剔残了（带内几乎无点）——后续门无意义
-        }
-    }
-    // —— 261118 空间孤立门：帧内 5mm 半径邻居数 <2 → 剔除（悬浮孤点零容忍）——
-    // 真表面点密度 ~1点/2.3mm²（5mm 球内 10+ 邻居）；悬浮噪点距面 30-68mm
-    // （5mm 球内 0 邻居）——5mm 门宽对真点余量巨大、对噪点确定性清除。
-    // O(n) 网格哈希，26k 点 <1ms。
-    if (j->eCount > 100) {
-        const float cell = 5.0f;
-        float* ebS = eBlocks_[static_cast<size_t>(slot)];
-        const int nS = j->eCount;
-        std::unordered_map<int64_t, int> grid;
-        grid.reserve(static_cast<size_t>(nS) * 2);
-        auto skey = [&](int x, int y, int z) -> int64_t {
-            return (static_cast<int64_t>(x & 0x1FFFFF) << 42)
-                 | (static_cast<int64_t>(y & 0x1FFFFF) << 21)
-                 | static_cast<int64_t>(z & 0x1FFFFF);
-        };
-        for (int q = 0; q < nS; ++q) {
-            const int gx = static_cast<int>(std::floor(ebS[q * 3] / cell));
-            const int gy = static_cast<int>(std::floor(ebS[q * 3 + 1] / cell));
-            const int gz = static_cast<int>(std::floor(ebS[q * 3 + 2] / cell));
-            ++grid[skey(gx, gy, gz)];
-        }
-        int wS = 0;
-        for (int q = 0; q < nS; ++q) {
-            const int gx = static_cast<int>(std::floor(ebS[q * 3] / cell));
-            const int gy = static_cast<int>(std::floor(ebS[q * 3 + 1] / cell));
-            const int gz = static_cast<int>(std::floor(ebS[q * 3 + 2] / cell));
-            int nb = 0;
-            for (int dx = -1; dx <= 1 && nb < 2; ++dx)
-                for (int dy = -1; dy <= 1 && nb < 2; ++dy)
-                    for (int dz = -1; dz <= 1; ++dz) {
-                        const auto it = grid.find(skey(gx + dx, gy + dy, gz + dz));
-                        if (it != grid.end()) nb += it->second;
-                    }
-            if (nb >= 2) {   // ≥2（含自身）＝有邻居——保留
-                ebS[wS * 3] = ebS[q * 3];
-                ebS[wS * 3 + 1] = ebS[q * 3 + 1];
-                ebS[wS * 3 + 2] = ebS[q * 3 + 2];
-                ++wS;
-            }
-            // else: 空间孤立 → 剔除
-        }
-        if (wS < nS) {
-            zBandPruned_.fetch_add(static_cast<size_t>(nS - wS),
-                                   std::memory_order_relaxed);
-            j->eCount = wS;
-        }
-    }
-    // —— ④ 跨帧时域支撑 ——
-    // 门④ 跨帧时域支撑（env JMW_FC_G4=0 可关——261120 实验：稀疏帧杀 17%，顿挫嫌疑）
-    static const bool sG4On = [] {
-        const char* e = getenv("JMW_FC_G4");
-        return !(e != nullptr && e[0] == '0');
-    }();
-    if (sG4On) {
-    {
-        const int before = j->eCount;
-        j->eCount = applyTemporalSupport_(slot, j->eCount);
-        if (j->eCount < before) {
-            temporalRejected_.fetch_add(static_cast<size_t>(before - j->eCount),
-                                        std::memory_order_relaxed);
-            static int sTDiag = 0;
-            if (sTDiag < 5)
-                fprintf(stderr, "[fc:4gate] ④时域 %d→%d（剔 %d）\n",
-                        before, j->eCount, before - j->eCount);
-            ++sTDiag;
-        }
-    }
-    }  // end sG4On (JMW_FC_G4=0 disables gate 4)
-    // —— ⑤ 帧内平面残差自适应门（MAD×5σ——与视差一致性同构的 3D 版）——
-    // 逐帧拟合平面 → 各点残差 → MAD 自适应阈值 → 离面离群剔除。
-    // 平静数据 MAD 小→门紧（捕捉 10-20mm 微悬浮）；复杂表面 MAD 大→门松。
-    {
-        // [261120] JMW_FC_G5=0 disables gate5 (plane-residual MAD assumes a flat
-        // board; kills real raised geometry like suction-cup domes on clean frames)
-        static const bool sG5On = [] {
-            const char* e = getenv("JMW_FC_G5");
-            return !(e != nullptr && e[0] == '0');
-        }();
-        if (!sG5On) goto skip5;
-        const int n = j->eCount;
-        if (n > 200) {
-            float* eb5 = eBlocks_[static_cast<size_t>(slot)];
-            // 质心
-            double mx = 0, my = 0, mz = 0;
-            for (int q = 0; q < n; ++q) {
-                mx += eb5[q * 3]; my += eb5[q * 3 + 1]; mz += eb5[q * 3 + 2];
-            }
-            mx /= n; my /= n; mz /= n;
-            // 协方差
-            double a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
-            for (int q = 0; q < n; ++q) {
-                const double x = eb5[q * 3] - mx, y = eb5[q * 3 + 1] - my,
-                             z = eb5[q * 3 + 2] - mz;
-                a += x * x; b += x * y; c += x * z;
-                d += y * y; e += y * z; f += z * z;
-            }
-            // 幂迭代求最大特征向量 v1（板面主方向）
-            double v1[3] = {1, 0, 0};
-            for (int it = 0; it < 30; ++it) {
-                double r0 = a * v1[0] + b * v1[1] + c * v1[2];
-                double r1 = b * v1[0] + d * v1[1] + e * v1[2];
-                double r2 = c * v1[0] + e * v1[1] + f * v1[2];
-                double L = std::sqrt(r0 * r0 + r1 * r1 + r2 * r2);
-                if (L < 1e-12) break;
-                v1[0] = r0 / L; v1[1] = r1 / L; v1[2] = r2 / L;
-            }
-            // deflation 求 v2（板面次方向）
-            double v2[3] = {v1[0] + 0.37, v1[1] + 0.61, v1[2] + 0.93};
-            for (int it = 0; it < 30; ++it) {
-                double r0 = a * v2[0] + b * v2[1] + c * v2[2];
-                double r1 = b * v2[0] + d * v2[1] + e * v2[2];
-                double r2 = c * v2[0] + e * v2[1] + f * v2[2];
-                double dot = v1[0] * r0 + v1[1] * r1 + v1[2] * r2;
-                r0 -= v1[0] * dot; r1 -= v1[1] * dot; r2 -= v1[2] * dot;
-                double L = std::sqrt(r0 * r0 + r1 * r1 + r2 * r2);
-                if (L < 1e-12) break;
-                v2[0] = r0 / L; v2[1] = r1 / L; v2[2] = r2 / L;
-            }
-            // 法矢＝v1×v2（最小特征方向＝板面法向）
-            const double nx = v1[1] * v2[2] - v1[2] * v2[1];
-            const double ny = v1[2] * v2[0] - v1[0] * v2[2];
-            const double nz = v1[0] * v2[1] - v1[1] * v2[0];
-            const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
-            if (nl < 1e-12) goto skip5;   // 退化——跳过
-            // 残差
-            std::vector<float> resid(static_cast<size_t>(n));
-            for (int q = 0; q < n; ++q)
-                resid[static_cast<size_t>(q)] = static_cast<float>(
-                    (nx * (eb5[q * 3] - mx) + ny * (eb5[q * 3 + 1] - my)
-                     + nz * (eb5[q * 3 + 2] - mz)) / nl);
-            // MAD
-            std::vector<float> sorted(resid);
-            std::nth_element(sorted.begin(),
-                             sorted.begin() + static_cast<long>(n / 2),
-                             sorted.end());
-            const float med = sorted[static_cast<size_t>(n / 2)];
-            std::vector<float> dev(static_cast<size_t>(n));
-            for (int q = 0; q < n; ++q)
-                dev[static_cast<size_t>(q)] =
-                    std::abs(resid[static_cast<size_t>(q)] - med);
-            std::nth_element(dev.begin(), dev.begin() + static_cast<long>(n / 2),
-                             dev.end());
-            const float mad = std::max(dev[static_cast<size_t>(n / 2)], 0.3f);
-            constexpr float kSigma5 = 5.0f * 1.4826f;
-            const float gate = kSigma5 * mad;
-            // 剔除
-            int w5 = 0;
-            for (int q = 0; q < n; ++q) {
-                if (std::abs(resid[static_cast<size_t>(q)] - med) <= gate) {
-                    eb5[w5 * 3] = eb5[q * 3];
-                    eb5[w5 * 3 + 1] = eb5[q * 3 + 1];
-                    eb5[w5 * 3 + 2] = eb5[q * 3 + 2];
-                    ++w5;
-                }
-            }
-            if (w5 < n) {
-                zBandPruned_.fetch_add(static_cast<size_t>(n - w5),
-                                       std::memory_order_relaxed);
-                j->eCount = w5;
-            }
-        }
-    }
-    skip5:;
     // —— Z-IQR 弥散门 ——
     static const int sZgate = [] {
         const char* e = getenv("JMW_FC_ZIQR");
@@ -2624,15 +2410,20 @@ void FiveChainExecutor::ch2FullGpu_(FcJob* j) {
         cudaStreamWaitEvent(cv::cuda::StreamAccessor::getStream(cS_),
                             evIRing_[static_cast<size_t>(s)], 0);
         h_.timeBegin();
-        matchFull_->SetTempTable(h_.tableFor(tubeIdx));
-        if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
-                != Harness::v3ParamGroupOf(tubeIdx))
-            matchFull_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
-        // 261109 按帧温选档（回退名义温——sim/回放帧温 0）
-        // 【261115】临时固定 22.5（同上午口径）——见 fcLaserTableTemp_ 注释
-        matchFull_->SetCurrentTemperature(
-            fcLaserTableTemp_(j->prod.temperature, h_.cfg_.runtime.nominalTemperature));
-        mr = matchFull_->Execute(vPL, vIL, vPR, vIR, cS_);
+        if (h_.tableFor(tubeIdx)) {   // 【261120】缺温表：跳注入与匹配（mr 置败跳帧）
+            matchFull_->SetTempTable(h_.tableFor(tubeIdx));
+            if (h_.v3ParamGroup_.exchange(Harness::v3ParamGroupOf(tubeIdx))
+                    != Harness::v3ParamGroupOf(tubeIdx))
+                matchFull_->SetParams(h_.v3ParamsFor(tubeIdx));   // 261007 组变才换参
+            // 261109 按帧温选档（回退名义温——sim/回放帧温 0）
+            // 【261115】临时固定 22.5（同上午口径）——见 fcLaserTableTemp_ 注释
+            matchFull_->SetCurrentTemperature(
+                fcLaserTableTemp_(j->prod.temperature, h_.cfg_.runtime.nominalTemperature));
+            mr = matchFull_->Execute(vPL, vIL, vPR, vIR, cS_);
+        } else {
+            mr.success = false;
+            mr.message = "激光温表缺失——本帧激光段跳过（名义温 22.5℃）";
+        }
         j->prod.laserMatched = mr.matchedCount;
         h_.setStepOk(j->prod, "laser_match_scan_v3", mr.success);
         h_.timeEnd("laser_match_scan_v3", j->prod, j->record, false);
@@ -3214,249 +3005,6 @@ void FiveChainExecutor::writeMetricsCsv_() {
     fclose(f);
     cudaGetLastError();   // 兜底查询探测残留清账（防毒害后续消费者）
     std::cout << "[fc:metrics] fc_metrics.csv＋fc_summary.csv → " << dir << std::endl;
-}
-
-// ============================================================================
-// 261118 左右互检（实验 JMW_FC_BICHECK=1）
-// ============================================================================
-void FiveChainExecutor::buildBiCheckIndex_() {
-    if (!biCheckIdx_.empty()) return;
-    const auto* map = h_.tableOdd_->lookup(h_.cfg_.runtime.nominalTemperature);
-    if (!map || map->leftToRightMap.empty()) return;
-    const auto jn = h_.cfg_.opParams("laser_match_scan_v3");
-    const float rowStep = jn.value("epipolar_row_step", 0.67f);
-    const cv::Mat& tm = map->leftToRightMap;
-    for (int i = 0; i < tm.rows; ++i) {
-        const cv::Vec4f& e = tm.at<cv::Vec4f>(i);
-        const int row = cvRound(e[1] / rowStep);
-        const int lid = cvRound(e[3]);
-        if (lid < 1 || lid > 25 || row < 0 || row >= 8192) continue;
-        biCheckIdx_[static_cast<int64_t>(row) * 100 + lid].emplace_back(e[2], e[0]);
-    }
-    for (auto& [k, v] : biCheckIdx_) std::sort(v.begin(), v.end());
-    fprintf(stderr, "[fc:bicheck] reverse index: %zu (row,lid) keys\n",
-            biCheckIdx_.size());
-}
-
-int FiveChainExecutor::applyBidirectionalCheck_(
-    cv::Point2f* mL, cv::Point2f* mR, int* lids, int count) {
-    buildBiCheckIndex_();
-    if (biCheckIdx_.empty()) return count;
-    const auto jn = h_.cfg_.opParams("laser_match_scan_v3");
-    const float rowStep = jn.value("epipolar_row_step", 0.67f);
-    constexpr float kTol = 3.0f;   // 收紧实验
-    static int sDiagN = 0;
-    static long sHist[10] = {};   // |dx| 直方图（0-1,1-2,...,8-9,9+px）
-    int w = 0;
-    for (int i = 0; i < count; ++i) {
-        const int row = cvRound(mL[i].y / rowStep);
-        const auto it = biCheckIdx_.find(static_cast<int64_t>(row) * 100 + lids[i]);
-        if (it == biCheckIdx_.end() || it->second.empty()) {
-            mL[w] = mL[i]; mR[w] = mR[i]; lids[w] = lids[i]; ++w;
-            continue;
-        }
-        const auto& v = it->second;
-        const auto ub = std::lower_bound(
-            v.begin(), v.end(), mR[i].x,
-            [](const std::pair<float, float>& p, float val) {
-                return p.first < val;
-            });
-        float bestXL = -1, bestDist = 1e30;
-        if (ub != v.begin()) {
-            const auto prev = std::prev(ub);
-            const float d = std::abs(prev->first - mR[i].x);
-            if (d < bestDist) { bestDist = d; bestXL = prev->second; }
-        }
-        if (ub != v.end()) {
-            const float d = std::abs(ub->first - mR[i].x);
-            if (d < bestDist) { bestDist = d; bestXL = ub->second; }
-        }
-        // 首帧前 10 点诊断 + |dx| 直方图
-        if (bestXL >= 0) {
-            const float dx = std::abs(mL[i].x - bestXL);
-            ++sHist[std::min(9, static_cast<int>(dx))];
-        }
-        if (sDiagN < 10) {
-            fprintf(stderr,
-                    "[fc:bicheck:diag] pt%d: L.x=%.1f R.x=%.1f lid=%d row=%d "
-                    "→ revXL=%.1f |dx|=%.1f tol=%.0f %s\n",
-                    i, mL[i].x, mR[i].x, lids[i], row, bestXL,
-                    bestXL >= 0 ? std::abs(mL[i].x - bestXL) : -1.0f, kTol,
-                    (bestXL >= 0 && std::abs(mL[i].x - bestXL) <= kTol)
-                        ? "PASS" : "REJECT");
-            ++sDiagN;
-        }
-        if (bestXL < 0 || std::abs(mL[i].x - bestXL) <= kTol) {
-            mL[w] = mL[i]; mR[w] = mR[i]; lids[w] = lids[i]; ++w;
-        } else {
-            biCheckRejected_.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    if (sDiagN >= 10) {   // 每万次打印直方图
-        static long sCalls = 0;
-        if (++sCalls % 100000 == 0) {
-            fprintf(stderr, "[fc:bicheck:hist] |dx| 分布: ");
-            for (int b = 0; b < 10; ++b)
-                fprintf(stderr, "%d-%d:%ld ", b, b + 1, sHist[b]);
-            fprintf(stderr, "| 拒绝=%zu\n",
-                    biCheckRejected_.load());
-        }
-    }
-    return w;
-}
-
-// ============================================================================
-// ① 局部视差一致性（自适应 MAD——普适，零硬编码像素阈值）
-// 原理：同一行同一线号(lid)的配对视差应平滑连续（物理表面连续）。
-// 交叉配对/次级反射的视差会跳变——用中位绝对偏差(MAD)×5σ 自适应门控：
-// 平静数据 MAD 小→门紧，噪声大 MAD 大→门松。k=5 是统计常数（非物理量）。
-// ============================================================================
-int FiveChainExecutor::applyDisparityConsistency_(
-    cv::Point2f* mL, cv::Point2f* mR, int* lids, int count) {
-    if (count < 20) return count;
-    const auto jn = h_.cfg_.opParams("laser_match_scan_v3");
-    const float rowStep = jn.value("epipolar_row_step", 0.67f);
-    // 按 (row, lid) 分组 —— [261120 perf] 计数排序版：原 std::map<pair<vector>> 版在
-    // ~2.5 万点/帧下 ~40ms（红黑树+海量小组分配）；键打包(row*64+lid) + 两趟计数排序
-    // + 复用缓冲 ~1ms。判拒语义与原版完全一致（组内 MAD×5σ，<5 样本跳过）。
-    constexpr int kLidBits = 6;                     // lid < 64
-    constexpr int kLidSpan = 1 << kLidBits;
-    static thread_local std::vector<int> keys, order, hist, cursor;
-    static thread_local std::vector<float> dispBuf, vals, devv;
-    keys.resize(static_cast<size_t>(count));
-    dispBuf.resize(static_cast<size_t>(count));
-    int maxKey = 0;
-    for (int i = 0; i < count; ++i) {
-        int row = cvRound(mL[i].y / rowStep);
-        if (row < 0) row = 0;
-        const int lid = lids[i] & (kLidSpan - 1);
-        const int key = row * kLidSpan + lid;
-        keys[static_cast<size_t>(i)] = key;
-        dispBuf[static_cast<size_t>(i)] = mL[i].x - mR[i].x;
-        if (key > maxKey) maxKey = key;
-    }
-    hist.assign(static_cast<size_t>(maxKey) + 2, 0);
-    for (int i = 0; i < count; ++i)
-        ++hist[static_cast<size_t>(keys[static_cast<size_t>(i)]) + 1];
-    for (int k = 0; k <= maxKey; ++k)
-        hist[static_cast<size_t>(k) + 1] += hist[static_cast<size_t>(k)];
-    cursor = hist;
-    order.resize(static_cast<size_t>(count));
-    for (int i = 0; i < count; ++i)
-        order[static_cast<size_t>(cursor[static_cast<size_t>(keys[static_cast<size_t>(i)])]++)] = i;
-    std::vector<bool> reject(static_cast<size_t>(count), false);
-    constexpr float kSigma = 5.0f * 1.4826f;   // 5σ（MAD→σ 换算 1.4826）
-    constexpr float kMadFloor = 0.5f;           // MAD 下限（防过洁）
-    for (int k = 0; k <= maxKey; ++k) {
-        const int b = hist[static_cast<size_t>(k)];
-        const int e = hist[static_cast<size_t>(k) + 1];
-        const int n = e - b;
-        if (n < 5) continue;   // 样本不足——跳过（宁漏勿错）
-        vals.resize(static_cast<size_t>(n));
-        for (int q = 0; q < n; ++q)
-            vals[static_cast<size_t>(q)] =
-                dispBuf[static_cast<size_t>(order[static_cast<size_t>(b + q)])];
-        std::nth_element(vals.begin(), vals.begin() + n / 2, vals.end());
-        const float med = vals[static_cast<size_t>(n / 2)];
-        devv.resize(static_cast<size_t>(n));
-        for (int q = 0; q < n; ++q)
-            devv[static_cast<size_t>(q)] =
-                std::abs(dispBuf[static_cast<size_t>(order[static_cast<size_t>(b + q)])] - med);
-        std::nth_element(devv.begin(), devv.begin() + n / 2, devv.end());
-        const float mad = std::max(devv[static_cast<size_t>(n / 2)], kMadFloor);
-        const float gate = kSigma * mad;
-        for (int q = 0; q < n; ++q) {
-            const int idx = order[static_cast<size_t>(b + q)];
-            if (std::abs(dispBuf[static_cast<size_t>(idx)] - med) > gate)
-                reject[static_cast<size_t>(idx)] = true;
-        }
-    }
-    int w = 0;
-    for (int i = 0; i < count; ++i) {
-        if (!reject[static_cast<size_t>(i)]) {
-            mL[w] = mL[i]; mR[w] = mR[i]; lids[w] = lids[i]; ++w;
-        } else {
-            dispConsRejected_.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    return w;
-}
-
-// ============================================================================
-// ④ 跨帧时域支撑：当前 E 块点须在前帧 E 块中有 ≥1 邻居。
-// 原理：扫描仪逐帧扫过表面——真表面点被连续多帧观测到（设备坐标近似，
-// 帧间运动 ~0.7mm）。噪点只出现在单帧，前帧没有对应物。
-// 自适应半径：中位最近邻距离 × 3（随扫描密度自动调整）。
-// ============================================================================
-int FiveChainExecutor::applyTemporalSupport_(int slot, int eCount) {
-    if (!prevEBlockValid_ || prevEBlock_.empty() || eCount <= 0) {
-        const float* eb0 = eBlocks_[static_cast<size_t>(slot)];
-        prevEBlock_.assign(eb0, eb0 + static_cast<size_t>(eCount) * 3);
-        prevEBlockValid_ = true;
-        return eCount;
-    }
-    float* eb = eBlocks_[static_cast<size_t>(slot)];
-    const int n = eCount;
-    const int nPrev = static_cast<int>(prevEBlock_.size() / 3);
-    // 自适应半径：前帧点间中位最近邻距离 × 3
-    // 简化：用体素网格（cell = 自适应半径）做邻居查找
-    // 先估前帧点密度 → 等效最近邻距离
-    float bbox[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
-    for (int q = 0; q < nPrev; ++q) {
-        for (int d = 0; d < 3; ++d) {
-            const float v = prevEBlock_[q * 3 + d];
-            bbox[d] = std::min(bbox[d], v);
-            bbox[d + 3] = std::max(bbox[d + 3], v);
-        }
-    }
-    const float vol = std::max(1.0f, (bbox[3] - bbox[0]) * (bbox[4] - bbox[1])
-                                      * (bbox[5] - bbox[2]));
-    const float density = static_cast<float>(nPrev) / vol;   // 点/mm³
-    const float nnDist = std::pow(1.0f / std::max(density, 1e-10f), 1.0f / 3.0f);
-    const float radius = std::max(nnDist * 3.0f, 1.0f);      // ≥1mm 下限
-    // 前帧点网格哈希（整数格键——不做二次坐标变换）
-    std::unordered_map<int64_t, int> prevGrid;
-    prevGrid.reserve(static_cast<size_t>(nPrev));
-    const float inv = 1.0f / radius;
-    auto gkey = [&](int gx, int gy, int gz) -> int64_t {
-        return (static_cast<int64_t>(gx & 0x1FFFFF) << 42)
-             | (static_cast<int64_t>(gy & 0x1FFFFF) << 21)
-             | static_cast<int64_t>(gz & 0x1FFFFF);
-    };
-    for (int q = 0; q < nPrev; ++q) {
-        const int gx = static_cast<int>(std::floor(prevEBlock_[q * 3] * inv));
-        const int gy = static_cast<int>(std::floor(prevEBlock_[q * 3 + 1] * inv));
-        const int gz = static_cast<int>(std::floor(prevEBlock_[q * 3 + 2] * inv));
-        ++prevGrid[gkey(gx, gy, gz)];
-    }
-    // 检查当前帧每个点：27 邻域查前帧格
-    int w = 0;
-    for (int q = 0; q < n; ++q) {
-        const float x = eb[q * 3], y = eb[q * 3 + 1], z = eb[q * 3 + 2];
-        const int cx = static_cast<int>(std::floor(x * inv));
-        const int cy = static_cast<int>(std::floor(y * inv));
-        const int cz = static_cast<int>(std::floor(z * inv));
-        bool found = false;
-        int nbCount = 0;
-        for (int dx = -1; dx <= 1; ++dx)
-            for (int dy = -1; dy <= 1; ++dy)
-                for (int dz = -1; dz <= 1; ++dz) {
-                    const auto it2 = prevGrid.find(gkey(cx + dx, cy + dy, cz + dz));
-                    if (it2 != prevGrid.end()) nbCount += it2->second;
-                }
-        found = nbCount >= 2;   // ≥2 邻居（含跨格累计）——比 ≥1 更严
-        if (found || q == 0) {
-            eb[w * 3] = eb[q * 3];
-            eb[w * 3 + 1] = eb[q * 3 + 1];
-            eb[w * 3 + 2] = eb[q * 3 + 2];
-            ++w;
-        } else {
-            temporalRejected_.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    // 保存当前帧（门后）供下帧
-    prevEBlock_.assign(eb, eb + static_cast<size_t>(w) * 3);
-    return w;
 }
 
 } // namespace fc

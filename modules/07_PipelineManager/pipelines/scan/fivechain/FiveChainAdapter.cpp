@@ -701,7 +701,13 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
             const char* e = getenv("JMW_FC_QBASIS");
             return e ? atoi(e) != 0 : true;   // 默认开
         }();
-        if (sQBasis && p.markersValid > 0) {
+        // 【261120·崩溃根因修复】Q 空守卫：camera_calib.json 缺失（名义标定未
+        // 注入）时 calib_.Q 为空 Mat——原码直接绑 const Matx44d& 触发隐式转换
+        //（mat.inl.hpp:1151 内联断言 data&&4×4）在标志点链线程 CV_Error 未捕获
+        // →整进程崩（真机 261120 实证：面片扫描开扫 ~130ms 首个有效标志点帧）。
+        // 缺 Q＝跳过 Q 基准三角化，位置保留 conic 锥面相交值（与 JMW_FC_QBASIS=0
+        // 同语义）；一次性 WARN 留痕
+        if (sQBasis && p.markersValid > 0 && !calib_.Q.empty()) {
             const cv::Matx44d& Qm = calib_.Q;
             int replaced = 0;
             int skipped = 0;
@@ -742,6 +748,14 @@ void FcHarnessCompat::runMarkerChainCore(scr::CycleProductsCompat& p,
             }
             if (diagConicValid_.load() < 50)
                 fprintf(stderr, "[Q-BASIS] replaced=%d skipped=%d\n", replaced, skipped);
+        } else if (sQBasis && p.markersValid > 0 && calib_.Q.empty()) {
+            // 【261120】缺 Q 一次性留痕（多车道首帧竞态最多重复三条——可容忍）
+            static std::atomic<bool> sQWarned{false};
+            if (!sQWarned.exchange(true)) {
+                JMW_LOG_WARN("07-FiveChain",
+                    "[Q-BASIS] calib_.Q 为空（camera_calib.json 缺失/名义标定未注入）"
+                    "——Q 基准三角化跳过，标志点位置保留 conic 锥面值");
+            }
         }
     }
     // ── 261031 标志点-激光坐标系对齐（B 方案：经验 Z 校正；四轮定常数）──
@@ -1861,8 +1875,15 @@ Scanner::Result FiveChainAdapter::startRealtime(
     if (rtActive_.load()) return Scanner::Result::fail("五链实时链已在运行");
     if (rtK1_.empty() || rtK2_.empty())
         return Scanner::Result::fail("五链实时链: 标定未注入（先 attachCalib）");
-    if (!rtLaserTable_)
-        return Scanner::Result::fail("五链实时链: 激光温表为空（v1 需激光链）");
+    if (!rtLaserTable_) {
+        // 【261120·用户口径】缺激光温表（CMTT sidecar 未部署＋档表无 mapData）
+        // 不再拦会话——默认 22.5℃ 名义温继续（下方双空保底同步 25.0→22.5）；
+        // 激光段逐帧检表跳过（fc_executor 注入点守卫），标志点链不受影响。
+        // 恢复激光全链＝部署 config/curve_map_temp_table.bin（CMTT 标定产物）
+        JMW_LOG_WARN("07-FiveChain",
+            "[FiveChainAdapter] 激光温表为空——默认 22.5℃ 名义温继续"
+            "（激光匹配段逐帧跳过；部署 CMTT sidecar 恢复全链）");
+    }
     if (rtActive_.exchange(true)) return Scanner::Result::fail("五链实时链并发启动");
 
     try {
@@ -1962,8 +1983,9 @@ Scanner::Result FiveChainAdapter::startRealtime(
             harness_->tableC_ = rtLaserTableC_ ? rtLaserTableC_ : rtLaserTable_;   // C 深孔（缺→回退）
             harness_->tableD_ = rtLaserTableD_ ? rtLaserTableD_ : rtLaserTable_;   // D 精细（缺→回退）
         } else if (!harness_->tableOdd_) {
-            // 双空（无注入且装配期也没表）才回退 25.0 保底（原语义兜底不变）
-            harness_->cfg_.runtime.nominalTemperature = 25.0;
+            // 双空（无注入且装配期也没表）保底【261120·用户口径】25.0→22.5——
+            // 与 fcLaserTableTemp_ 固定 22.5/CMTT tempBase 22.5 同口径
+            harness_->cfg_.runtime.nominalTemperature = 22.5;
         }
         if (!rtK1_.empty()) {
             harness_->K1_ = rtK1_; harness_->D1_ = rtD1_;
@@ -2386,26 +2408,6 @@ void FiveChainAdapter::collectorLoop() {
                 idx, prod.conic.statistics.validCount, prod.markersValid,
                 prod.markersDetected, prod.mm.centerMatches.size(),
                 prod.regSource);
-        }
-        // [261120 pose-trace] per-frame pose-chain CSV trace (CWD-relative,
-        // append). For offline pose-jump / gate-attribution forensics.
-        {
-            static std::ofstream tf;
-            if (!tf.is_open()) {
-                tf.open("fivechain_pose_trace.csv", std::ios::app);
-                if (tf.is_open())
-                    tf << "idx,regSrc,det,match,valid,laserPts,"
-                          "R00,R01,R02,R10,R11,R12,R20,R21,R22,Tx,Ty,Tz,fused\n";
-            }
-            if (tf.is_open()) {
-                tf << idx << ',' << prod.regSource << ','
-                   << prod.markersDetected << ',' << prod.mm.centerMatches.size()
-                   << ',' << prod.conic.statistics.validCount << ','
-                   << prod.laserPoints3D;
-                for (int r = 0; r < 9; ++r) tf << ',' << prod.R[r];
-                tf << ',' << prod.T[0] << ',' << prod.T[1] << ',' << prod.T[2]
-                   << ',' << (fuse_ ? fuse_->GetFusedPointCount() : 0) << '\n';
-            }
         }
         {
             static std::string lastRegSrc;
