@@ -2196,7 +2196,13 @@ void FiveChainExecutor::chain2Loop() {
             }();
             int matchCount = cr.matchedCount;
             // ① 局部视差一致性（自适应 MAD——普适）
-            if (matchCount > 20) {
+            // [261120] JMW_FC_G1=0 disables gate1 (row-local disparity MAD kills
+            // real off-plane geometry e.g. suction-cup domes when frames are clean)
+            static const bool sG1On = [] {
+                const char* e = getenv("JMW_FC_G1");
+                return !(e != nullptr && e[0] == '0');
+            }();
+            if (sG1On && matchCount > 20) {
                 const int before1 = matchCount;
                 matchCount = applyDisparityConsistency_(
                     const_cast<cv::Point2f*>(ml),
@@ -2368,6 +2374,12 @@ void FiveChainExecutor::applyLaserQualityGates_(FcJob* j, int slot,
         }
     }
     // —— ④ 跨帧时域支撑 ——
+    // 门④ 跨帧时域支撑（env JMW_FC_G4=0 可关——261120 实验：稀疏帧杀 17%，顿挫嫌疑）
+    static const bool sG4On = [] {
+        const char* e = getenv("JMW_FC_G4");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    if (sG4On) {
     {
         const int before = j->eCount;
         j->eCount = applyTemporalSupport_(slot, j->eCount);
@@ -2381,10 +2393,18 @@ void FiveChainExecutor::applyLaserQualityGates_(FcJob* j, int slot,
             ++sTDiag;
         }
     }
+    }  // end sG4On (JMW_FC_G4=0 disables gate 4)
     // —— ⑤ 帧内平面残差自适应门（MAD×5σ——与视差一致性同构的 3D 版）——
     // 逐帧拟合平面 → 各点残差 → MAD 自适应阈值 → 离面离群剔除。
     // 平静数据 MAD 小→门紧（捕捉 10-20mm 微悬浮）；复杂表面 MAD 大→门松。
     {
+        // [261120] JMW_FC_G5=0 disables gate5 (plane-residual MAD assumes a flat
+        // board; kills real raised geometry like suction-cup domes on clean frames)
+        static const bool sG5On = [] {
+            const char* e = getenv("JMW_FC_G5");
+            return !(e != nullptr && e[0] == '0');
+        }();
+        if (!sG5On) goto skip5;
         const int n = j->eCount;
         if (n > 200) {
             float* eb5 = eBlocks_[static_cast<size_t>(slot)];
@@ -3296,38 +3316,60 @@ int FiveChainExecutor::applyDisparityConsistency_(
     if (count < 20) return count;
     const auto jn = h_.cfg_.opParams("laser_match_scan_v3");
     const float rowStep = jn.value("epipolar_row_step", 0.67f);
-    // 按 (row, lid) 分组
-    std::map<std::pair<int, int>, std::vector<int>> groups;
+    // 按 (row, lid) 分组 —— [261120 perf] 计数排序版：原 std::map<pair<vector>> 版在
+    // ~2.5 万点/帧下 ~40ms（红黑树+海量小组分配）；键打包(row*64+lid) + 两趟计数排序
+    // + 复用缓冲 ~1ms。判拒语义与原版完全一致（组内 MAD×5σ，<5 样本跳过）。
+    constexpr int kLidBits = 6;                     // lid < 64
+    constexpr int kLidSpan = 1 << kLidBits;
+    static thread_local std::vector<int> keys, order, hist, cursor;
+    static thread_local std::vector<float> dispBuf, vals, devv;
+    keys.resize(static_cast<size_t>(count));
+    dispBuf.resize(static_cast<size_t>(count));
+    int maxKey = 0;
     for (int i = 0; i < count; ++i) {
-        const int row = cvRound(mL[i].y / rowStep);
-        groups[{row, lids[i]}].push_back(i);
+        int row = cvRound(mL[i].y / rowStep);
+        if (row < 0) row = 0;
+        const int lid = lids[i] & (kLidSpan - 1);
+        const int key = row * kLidSpan + lid;
+        keys[static_cast<size_t>(i)] = key;
+        dispBuf[static_cast<size_t>(i)] = mL[i].x - mR[i].x;
+        if (key > maxKey) maxKey = key;
     }
+    hist.assign(static_cast<size_t>(maxKey) + 2, 0);
+    for (int i = 0; i < count; ++i)
+        ++hist[static_cast<size_t>(keys[static_cast<size_t>(i)]) + 1];
+    for (int k = 0; k <= maxKey; ++k)
+        hist[static_cast<size_t>(k) + 1] += hist[static_cast<size_t>(k)];
+    cursor = hist;
+    order.resize(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i)
+        order[static_cast<size_t>(cursor[static_cast<size_t>(keys[static_cast<size_t>(i)])]++)] = i;
     std::vector<bool> reject(static_cast<size_t>(count), false);
     constexpr float kSigma = 5.0f * 1.4826f;   // 5σ（MAD→σ 换算 1.4826）
     constexpr float kMadFloor = 0.5f;           // MAD 下限（防过洁）
-    for (const auto& [key, idx] : groups) {
-        if (idx.size() < 5) continue;   // 样本不足——跳过（宁漏勿错）
-        // 视差（保留原始值）
-        const size_t n = idx.size();
-        std::vector<float> disp(n);
-        for (size_t q = 0; q < n; ++q)
-            disp[q] = mL[idx[q]].x - mR[idx[q]].x;
-        // 中位数
-        std::vector<float> sorted(disp);
-        std::nth_element(sorted.begin(), sorted.begin() + static_cast<long>(n / 2),
-                         sorted.end());
-        const float med = sorted[n / 2];
-        // MAD
-        std::vector<float> dev(n);
-        for (size_t q = 0; q < n; ++q)
-            dev[q] = std::abs(disp[q] - med);
-        std::nth_element(dev.begin(), dev.begin() + static_cast<long>(n / 2),
-                         dev.end());
-        const float mad = std::max(dev[n / 2], kMadFloor);
-        // 拒绝离群
-        for (size_t q = 0; q < n; ++q)
-            if (std::abs(disp[q] - med) > kSigma * mad)
-                reject[static_cast<size_t>(idx[q])] = true;
+    for (int k = 0; k <= maxKey; ++k) {
+        const int b = hist[static_cast<size_t>(k)];
+        const int e = hist[static_cast<size_t>(k) + 1];
+        const int n = e - b;
+        if (n < 5) continue;   // 样本不足——跳过（宁漏勿错）
+        vals.resize(static_cast<size_t>(n));
+        for (int q = 0; q < n; ++q)
+            vals[static_cast<size_t>(q)] =
+                dispBuf[static_cast<size_t>(order[static_cast<size_t>(b + q)])];
+        std::nth_element(vals.begin(), vals.begin() + n / 2, vals.end());
+        const float med = vals[static_cast<size_t>(n / 2)];
+        devv.resize(static_cast<size_t>(n));
+        for (int q = 0; q < n; ++q)
+            devv[static_cast<size_t>(q)] =
+                std::abs(dispBuf[static_cast<size_t>(order[static_cast<size_t>(b + q)])] - med);
+        std::nth_element(devv.begin(), devv.begin() + n / 2, devv.end());
+        const float mad = std::max(devv[static_cast<size_t>(n / 2)], kMadFloor);
+        const float gate = kSigma * mad;
+        for (int q = 0; q < n; ++q) {
+            const int idx = order[static_cast<size_t>(b + q)];
+            if (std::abs(dispBuf[static_cast<size_t>(idx)] - med) > gate)
+                reject[static_cast<size_t>(idx)] = true;
+        }
     }
     int w = 0;
     for (int i = 0; i < count; ++i) {

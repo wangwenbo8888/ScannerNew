@@ -39,6 +39,28 @@ public:
             return;
         }
 
+        // [261120 rx-rate] actual camera reception-rate telemetry (5s cadence)
+        {
+            static std::atomic<uint64_t> sRxCount[2]{};
+            static std::atomic<long long> sRxT0[2]{};
+            const long long nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const auto si = static_cast<size_t>(m_sideIndex);
+            const uint64_t n = sRxCount[si].fetch_add(1, std::memory_order_relaxed) + 1;
+            const long long t0 = sRxT0[si].load(std::memory_order_relaxed);
+            if (t0 == 0) {
+                sRxT0[si].store(nowNs, std::memory_order_relaxed);
+            } else if (nowNs - t0 >= 5000000000ll) {
+                const double fps = static_cast<double>(n - 1) * 1e9
+                                   / static_cast<double>(nowNs - t0);
+                JMW_LOG_WARN("08-CameraControl",
+                    "[CameraControl] RX-FPS 实收帧率（side={} 累计 {} 平均 {:.1f} fps）",
+                    m_sideIndex, n, fps);
+                sRxCount[si].store(0, std::memory_order_relaxed);
+                sRxT0[si].store(nowNs, std::memory_order_relaxed);
+            }
+        }
+
         try {
         int w = static_cast<int>(imageData->GetWidth());
         int h = static_cast<int>(imageData->GetHeight());
@@ -368,6 +390,20 @@ namespace {
 
 void applyLinkThroughputLimit(CGXFeatureControlPointer& fc, int sideIndex) {
     try {
+        // [261120] JMW_FC_NOLINKLIMIT=1：完全不动链路限制（对照实验——厂家软件 130fps
+        // vs 本软件 ~27fps，双盲嫌疑：本函数把限制钳到相机误报的 max=400Mbps=USB2 速率）
+        static const bool sNoLimit = [] {
+            const char* e = getenv("JMW_FC_NOLINKLIMIT");
+            return e != nullptr && e[0] == '1';
+        }();
+        if (sNoLimit) {
+            const int64_t curLimit = fc->IsImplemented("DeviceLinkThroughputLimit")
+                ? fc->GetIntFeature("DeviceLinkThroughputLimit")->GetValue() : -1;
+            JMW_LOG_WARN("08-CameraControl",
+                "[CameraControl] 链路限制旁路生效（side={} 当前限值={}bps 不修改）",
+                sideIndex, curLimit);
+            return;
+        }
         if (!fc->IsImplemented("DeviceLinkThroughputLimit")) {
             JMW_LOG_INFO("08-CameraControl",
                 "[CameraControl] 链路带宽限值节点不支持（side={}）——跳过", sideIndex);
