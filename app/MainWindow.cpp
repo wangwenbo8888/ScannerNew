@@ -1074,7 +1074,8 @@ void MainWindow::showCameraMonitor() {
     // 261018 用户恢复 true：真机联调期看左右相机实况（补光/标志点可见性排障）
     // 261108 用户指令恢复 false：隐藏相机窗口（调试期已过）
     // 261115 恢复 false：排障完成（空图像/接不上两案已定位），用户指令隐藏。
-    static constexpr bool kShowCamMonitor = false;
+    // 261119 恢复 true：检查左斜激光线是否发射（噪点调查）
+    static constexpr bool kShowCamMonitor = true;
     if (!kShowCamMonitor) return;
     if (!m_appCtx) return;
     if (!m_camDlg) {
