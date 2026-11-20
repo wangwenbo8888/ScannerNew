@@ -114,6 +114,79 @@ SyntheticScene makeScene(int numPoses, int pointsPerPose, double noiseSigma, uin
 
 } // namespace
 
+// ============================================================================
+// 多线联合求解测试
+// ============================================================================
+
+namespace {
+
+// 多线场景生成器: 共享 t_true, L 条不同偏置的抛物线发射曲线（模拟 25 线扇面投影机）
+struct MultiScene {
+    MultiLineInput input;
+    cv::Vec3d t_true;
+};
+
+MultiScene makeMultiScene(int numPoses, int pointsPerPose, double noiseSigma,
+                          uint32_t seed, int numLines) {
+    MultiScene sc;
+    sc.t_true = cv::Vec3d(80.0, 3.0, 3.0);
+    sc.input.f = 1500.0;
+    sc.input.principalPoint = cv::Point2d(1024.0, 768.0);
+
+    std::mt19937 rng(seed);
+    const bool addNoise = noiseSigma > 0.0;
+    std::normal_distribution<double> noiseDist(0.0, addNoise ? noiseSigma : 1.0);
+    auto noise = [&]() -> double { return addNoise ? noiseDist(rng) : 0.0; };
+
+    struct PoseSpec { double nx, ny, nz, depth; };
+    std::vector<PoseSpec> specs = {
+        {0.00, 0.00, 1.00, 200.0}, {0.00, 0.00, 1.00, 500.0},
+        {0.15, 0.00, 0.989, 300.0}, {0.00, 0.20, 0.980, 350.0},
+        {-0.18, 0.10, 0.978, 250.0}, {0.12, -0.15, 0.981, 450.0},
+        {-0.10, 0.08, 0.992, 280.0}, {0.20, 0.12, 0.973, 400.0},
+    };
+
+    const double cx = sc.input.principalPoint.x;
+    const double cy = sc.input.principalPoint.y;
+    const double f  = sc.input.f;
+
+    sc.input.lines.resize(static_cast<size_t>(numLines));
+    for (int k = 0; k < numPoses; ++k) {
+        const PoseSpec& sp = specs[k % specs.size()];
+        Eigen::Vector3d n(sp.nx, sp.ny, sp.nz);
+        n.normalize();
+        for (int l = 0; l < numLines; ++l) {
+            // 每线曲线: 弧矢高 20~40px 递变 + 垂直偏置（25 线在虚拟像面错开）
+            const double sag = 20.0 + 20.0 * l / std::max(1, numLines - 1);
+            const double vOff = (l - numLines / 2.0) * 40.0;
+            const double halfSpan = 780.0 / std::max(1, numLines);
+
+            PosePointSet pset;
+            for (int i = 0; i < pointsPerPose; ++i) {
+                const double u = cx - halfSpan + (2.0 * halfSpan) * i / (pointsPerPose - 1);
+                const double v = cy + vOff + sag * std::pow((u - cx) / halfSpan, 2.0);
+                Eigen::Vector3d r(u - cx, v - cy, f);
+                r.normalize();
+                const double ndotr = n.dot(r);
+                if (ndotr < 1e-6) continue;
+                const double s = sp.depth / ndotr;
+                const Eigen::Vector3d P(sc.t_true[0] + s * r.x() + noise(),
+                                        sc.t_true[1] + s * r.y() + noise(),
+                                        sc.t_true[2] + s * r.z() + noise());
+                pset.points3d.push_back(cv::Vec3f(static_cast<float>(P.x()),
+                                                  static_cast<float>(P.y()),
+                                                  static_cast<float>(P.z())));
+                pset.lineIds.push_back(l + 1);
+            }
+            if (static_cast<int>(pset.points3d.size()) >= 10)
+                sc.input.lines[static_cast<size_t>(l)].push_back(std::move(pset));
+        }
+    }
+    sc.input.initialT = sc.t_true + cv::Vec3d(5.0, -3.0, 8.0);
+    return sc;
+}
+
+} // namespace
 
 class ProjectorJointCalibTest : public ::testing::Test {
 protected:
@@ -506,4 +579,264 @@ TEST_F(ProjectorJointCalibTest, QualityFlagValidation) {
                   << " flag=" << static_cast<int>(r.qualityFlag) << "\n";
     }
     SUCCEED() << "Quality flag validation done";
+}
+
+// ============================================================================
+// 多线联合求解（ExecuteMultiLine）
+// ============================================================================
+
+TEST_F(ProjectorJointCalibTest, MultiLineEmptyInput) {
+    MultiLineInput in;
+    in.f = 1500.0;
+    in.principalPoint = cv::Point2d(1024.0, 768.0);
+    auto r = op_->ExecuteMultiLine(in);
+    EXPECT_TRUE(r.success);
+    EXPECT_EQ(r.lineCount, 0);
+}
+
+TEST_F(ProjectorJointCalibTest, MultiLineInsufficientPoses) {
+    auto sc = makeMultiScene(2, 51, 0.0, 1, 5);   // 每线仅 2 姿态
+    auto r = op_->ExecuteMultiLine(sc.input);
+    EXPECT_FALSE(r.success);
+}
+
+TEST_F(ProjectorJointCalibTest, MultiLineSyntheticExact) {
+    auto sc = makeMultiScene(8, 800, 0.0, 42, 5); // 5 线 × 8 姿态 无噪声
+    auto r = op_->ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(r.success) << r.message;
+    EXPECT_EQ(r.lineCount, 5);
+    EXPECT_NEAR(r.projectorT[0], sc.t_true[0], 1.0);
+    EXPECT_NEAR(r.projectorT[1], sc.t_true[1], 1.0);
+    EXPECT_NEAR(r.projectorT[2], sc.t_true[2], 5.0);
+    EXPECT_LT(r.finalSampsonRms, r.initialSampsonRms);
+    EXPECT_EQ(r.emissionCurves.size(), static_cast<size_t>(5));
+}
+
+TEST_F(ProjectorJointCalibTest, MultiLineSyntheticWithNoise) {
+    auto sc = makeMultiScene(8, 800, 0.2, 7, 5);
+    auto r = op_->ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(r.success) << r.message;
+    EXPECT_NEAR(r.projectorT[0], sc.t_true[0], 3.0);
+    EXPECT_NEAR(r.projectorT[1], sc.t_true[1], 3.0);
+    EXPECT_NEAR(r.projectorT[2], sc.t_true[2], 8.0);
+}
+
+// ============================================================================
+// 解析雅可比（B3-261114）：FD ↔ 解析等价对拍
+// 同起点同迭代数 → 轨迹重合度即雅可比装配正确性检验（漏项/反号是 O(1) 误差必被抓）
+// ============================================================================
+
+namespace {
+void expectMultiResultsClose(const MultiLineResult& a, const MultiLineResult& b,
+                             double tTol, double cTol) {
+    ASSERT_EQ(a.success, b.success);
+    for (int k = 0; k < 3; ++k)
+        EXPECT_NEAR(a.projectorT[k], b.projectorT[k], tTol) << "t[" << k << "]";
+    ASSERT_EQ(a.emissionCurves.size(), b.emissionCurves.size());
+    for (size_t l = 0; l < a.emissionCurves.size(); ++l)
+        for (int k = 0; k < 6; ++k)
+            EXPECT_NEAR(a.emissionCurves[l].coeffs[k], b.emissionCurves[l].coeffs[k], cTol)
+                << "line " << l << " coeff " << k;
+}
+} // namespace
+
+// 1 步 L2（F7/探针口径）：第一步 LM 步由 J 决定——FD(eps=1e-7 截断 ~1e-6 相对) 与
+// 解析在同起点的步后状态差应 ~1e-5 量级（首步 ~10mm 位移 × 1e-6）
+TEST_F(ProjectorJointCalibTest, AnalyticJacOneStepMatchesFD_L2) {
+    auto sc = makeMultiScene(8, 300, 0.0, 42, 4);
+    ProjectorJointCalibParams p1 = params_;
+    p1.maxIterations = 1;
+    p1.robustEnabled = false;
+    p1.irlsMaxRounds = 0;
+    p1.jacThreads = 1;
+    ProjectorJointCalib opFD(p1);
+    auto rFD = opFD.ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rFD.success) << rFD.message;
+
+    ProjectorJointCalibParams p2 = p1;
+    p2.analyticJacobians = true;
+    ProjectorJointCalib opAN(p2);
+    auto rAN = opAN.ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rAN.success) << rAN.message;
+
+    expectMultiResultsClose(rFD, rAN, 1e-4, 1e-5);
+}
+
+// 鲁棒核多步（噪声触发 Huber 内/尾区与 Cauchy 相, 覆盖 w_rob' 分支与 α 全式）
+TEST_F(ProjectorJointCalibTest, AnalyticJacRobustMatchesFD) {
+    auto sc = makeMultiScene(8, 300, 0.2, 7, 4);
+    ProjectorJointCalibParams p1 = params_;
+    p1.maxIterations = 5;
+    p1.robustEnabled = true;
+    p1.irlsMaxRounds = 0;
+    p1.jacThreads = 1;
+    ProjectorJointCalib opFD(p1);
+    auto rFD = opFD.ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rFD.success) << rFD.message;
+
+    ProjectorJointCalibParams p2 = p1;
+    p2.analyticJacobians = true;
+    ProjectorJointCalib opAN(p2);
+    auto rAN = opAN.ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rAN.success) << rAN.message;
+
+    expectMultiResultsClose(rFD, rAN, 1e-3, 1e-4);
+}
+
+// IRLS 外部权（robustW 冻结 → 解析导数≡0 分支）
+TEST_F(ProjectorJointCalibTest, AnalyticJacIRLSMatchesFD) {
+    auto sc = makeMultiScene(8, 300, 0.2, 7, 4);
+    ProjectorJointCalibParams p1 = params_;
+    p1.maxIterations = 4;
+    p1.robustEnabled = true;
+    p1.irlsMaxRounds = 1;
+    p1.jacThreads = 1;
+    ProjectorJointCalib opFD(p1);
+    auto rFD = opFD.ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rFD.success) << rFD.message;
+
+    ProjectorJointCalibParams p2 = p1;
+    p2.analyticJacobians = true;
+    ProjectorJointCalib opAN(p2);
+    auto rAN = opAN.ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rAN.success) << rAN.message;
+
+    expectMultiResultsClose(rFD, rAN, 1e-3, 1e-4);
+}
+
+// 全程收敛等价（终点同盆, 终态指标差在数值门内）
+TEST_F(ProjectorJointCalibTest, AnalyticJacFullSolveMatchesFD) {
+    auto sc = makeMultiScene(8, 400, 0.1, 11, 4);
+    ProjectorJointCalibParams p1 = params_;
+    p1.maxIterations = 60;
+    p1.robustEnabled = true;
+    p1.irlsMaxRounds = 1;
+    p1.jacThreads = 1;
+    ProjectorJointCalib opFD(p1);
+    auto rFD = opFD.ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rFD.success) << rFD.message;
+
+    ProjectorJointCalibParams p2 = p1;
+    p2.analyticJacobians = true;
+    ProjectorJointCalib opAN(p2);
+    auto rAN = opAN.ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rAN.success) << rAN.message;
+
+    // 终点比较：t 收敛到同极小点（容差按优化器收敛水平）
+    expectMultiResultsClose(rFD, rAN, 5e-3, 5e-3);
+    EXPECT_NEAR(rFD.finalSampsonRms, rAN.finalSampsonRms,
+                1e-3 * std::max(1.0, rFD.finalSampsonRms));
+}
+
+// 对照: 同一多线数据混喂单线 Execute 应崩坏（rms 高）, ExecuteMultiLine 应正常
+TEST_F(ProjectorJointCalibTest, MultiLineVsMixedSingleLine) {
+    auto sc = makeMultiScene(8, 800, 0.2, 7, 5);
+    // 混喂: 全部线点并进同一姿态组
+    ProjectorJointCalibInput mixed;
+    mixed.f = sc.input.f;
+    mixed.principalPoint = sc.input.principalPoint;
+    mixed.initialT = sc.input.initialT;
+    const size_t nPoses = sc.input.lines[0].size();
+    for (size_t p = 0; p < nPoses; ++p) {
+        PosePointSet all;
+        for (const auto& line : sc.input.lines) {
+            if (p < line.size())
+                for (const auto& pt : line[p].points3d)
+                    all.points3d.push_back(pt);
+        }
+        mixed.poses.push_back(std::move(all));
+    }
+    auto rMixed = run(mixed);
+    auto rMulti = op_->ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rMulti.success) << rMulti.message;
+    EXPECT_LT(rMulti.finalSampsonRms, rMixed.finalSampsonRms)
+        << "多线联合 rms 应显著低于混线单线版";
+    EXPECT_NEAR(rMulti.projectorT[2], sc.t_true[2],
+                std::fabs(rMixed.projectorT[2] - sc.t_true[2]) + 1.0);
+}
+
+// 多线对 t_z 的增强: 单线（仅线0）vs 多线（5 线）误差对比
+TEST_F(ProjectorJointCalibTest, MultiLineImprovesTz) {
+    auto sc = makeMultiScene(8, 800, 0.2, 7, 5);
+    // 单线: 只喂线 0
+    ProjectorJointCalibInput single;
+    single.f = sc.input.f;
+    single.principalPoint = sc.input.principalPoint;
+    single.initialT = sc.input.initialT;
+    single.poses = sc.input.lines[0];
+    auto rSingle = run(single);
+    auto rMulti = op_->ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(rSingle.success);
+    ASSERT_TRUE(rMulti.success) << rMulti.message;
+    const double eSingle = std::fabs(rSingle.projectorT[2] - sc.t_true[2]);
+    const double eMulti = std::fabs(rMulti.projectorT[2] - sc.t_true[2]);
+    std::cerr << "[multi-tz] single err=" << eSingle
+              << " multi err=" << eMulti << "\n";
+    EXPECT_LE(eMulti, eSingle + 1.0);   // 多线不劣于单线
+}
+
+// ===== F8 右目重投影残差（Phase B）测试 =====
+
+// T1: 默认关闭=回归（rightTermUsed 应为 false，行为与现状一致）
+TEST_F(ProjectorJointCalibTest, RightTermDefaultOff) {
+    auto sc = makeMultiScene(8, 800, 0.2, 42, 5);
+    auto r = op_->ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(r.success) << r.message;
+    EXPECT_FALSE(r.rightTermUsed) << "默认应不启用右目项";
+    EXPECT_EQ(r.phaseBIters, 0);
+}
+
+// T2: 启用右目项，干净数据（机制验证：不崩溃、有诊断、不劣化）
+TEST_F(ProjectorJointCalibTest, RightTermCleanData) {
+    auto sc = makeMultiScene(8, 800, 0.0, 42, 5);
+    sc.input.baseline = 60.0;   // mm
+    sc.input.enableRightTerm = true;
+    sc.input.rightTermWeight = 1.0;
+    auto r = op_->ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(r.success) << r.message;
+    EXPECT_TRUE(r.rightTermUsed) << "应启用右目项";
+    EXPECT_GT(r.phaseBIters, 0) << "Phase B 应有迭代";
+    EXPECT_GT(r.urRowCount, 0) << "应有生效 uR 行";
+    std::cerr << "[rt-clean] urBiasPre=" << r.urBiasPreRms
+              << " post=" << r.urBiasPostRms
+              << " iters=" << r.phaseBIters
+              << " gate=" << r.urGateCount
+              << " rows=" << r.urRowCount << "\n";
+    // 干净数据下 Phase B 可能已是最优（pre≈post 合理），只需不显著劣化
+    EXPECT_LT(r.urBiasPostRms, r.urBiasPreRms + 0.5)
+        << "uR bias 不应劣化 (pre=" << r.urBiasPreRms << " post=" << r.urBiasPostRms << ")";
+    // Sampson 不劣化
+    EXPECT_LT(r.finalSampsonRms, 1.0) << "Sampson RMS 不应劣化";
+}
+
+// T3: 启用右目项，带噪声数据（uR 偏差应收敛或至少不劣化）
+TEST_F(ProjectorJointCalibTest, RightTermNoisyData) {
+    auto sc = makeMultiScene(8, 600, 0.3, 43, 5);
+    sc.input.baseline = 60.0;
+    sc.input.enableRightTerm = true;
+    sc.input.rightTermWeight = 1.0;
+    auto r = op_->ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(r.success) << r.message;
+    EXPECT_TRUE(r.rightTermUsed);
+    std::cerr << "[rt-noisy] urBiasPre=" << r.urBiasPreRms
+              << " post=" << r.urBiasPostRms
+              << " iters=" << r.phaseBIters
+              << " cond=" << r.jacobianConditionNumber << "\n";
+    // post 不应显著劣化（允许噪声波动）
+    EXPECT_LT(r.urBiasPostRms, r.urBiasPreRms + 1.0)
+        << "uR bias 不应显著劣化 (pre=" << r.urBiasPreRms
+        << " post=" << r.urBiasPostRms << ")";
+    // projectorT 仍在真值附近
+    EXPECT_NEAR(r.projectorT[2], sc.t_true[2], 3.0)
+        << "tz 不应漂移过远";
+}
+
+// T4: enableRightTerm 但 baseline=0（应安全跳过 Phase B）
+TEST_F(ProjectorJointCalibTest, RightTermZeroBaseline) {
+    auto sc = makeMultiScene(8, 400, 0.0, 44, 3);
+    sc.input.baseline = 0.0;   // 无基线
+    sc.input.enableRightTerm = true;
+    auto r = op_->ExecuteMultiLine(sc.input);
+    ASSERT_TRUE(r.success) << r.message;
+    EXPECT_FALSE(r.rightTermUsed) << "baseline=0 应跳过 Phase B";
 }

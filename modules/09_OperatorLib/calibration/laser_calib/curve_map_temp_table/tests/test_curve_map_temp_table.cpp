@@ -612,3 +612,53 @@ TEST(Gen, TempGridNotDivisibleRejected) {
     }
     EXPECT_TRUE(threw);
 }
+
+// ============================================================================
+// 非对称档位（261117 自 fc 镜像）：tiersBelow/tiersAbove 双正覆盖对称路径
+// 断言口径抄 fc test_cmtt_cuda SyntheticAsymmetricTiers 的 CPU 段
+// ============================================================================
+
+TEST(Gen, AsymmetricTiersBelowAbove) {
+    SCR_CMTT_DEBUG_SKIP();
+    auto gp = genParams();
+    gp.tiersBelow = 2;          // 10 档: ref-2 .. ref+7（step 1.0）
+    gp.tiersAbove = 7;
+    gp.tempStep = 1.0f;
+    CurveMapTempTableGenerator gen(gp);
+    auto r = gen.Generate(makeCurves(), makeRectify(tiersFull()),
+                          makeLaser(tiersFull()), kImageSize);
+    ASSERT_TRUE(r.success) << r.message;
+    ASSERT_EQ(r.tiers.size(), size_t{10});
+    EXPECT_DOUBLE_EQ(r.tiers.front().temperature, gp.referenceTemp - 2.0);
+    EXPECT_DOUBLE_EQ(r.tiers[2].temperature, gp.referenceTemp);
+    EXPECT_DOUBLE_EQ(r.tiers.back().temperature, gp.referenceTemp + 7.0);
+    EXPECT_EQ(r.referenceIndex(), size_t{2});
+    ASSERT_TRUE(r.tiers[r.referenceIndex()].ok);
+    // 源表仅覆盖 24~26℃: 越界档 clamp（flag 置位）、端点档不缺整档
+    EXPECT_GT(r.okCount(), size_t{2});
+
+    CmttReader rd;
+    ASSERT_TRUE(rd.load(r.sidecarBytes.data(), r.sidecarBytes.size()));
+    EXPECT_EQ(rd.tierCount(), size_t{10});
+    EXPECT_EQ(rd.header().tempStepX10, 10);   // 1.0℃ ×10
+}
+
+TEST(Gen, AsymmetricTiersPairwiseRejected) {
+    SCR_CMTT_DEBUG_SKIP();
+    auto mk = [] {
+        CurveMapTempTableGenParams p = genParams();
+        p.tiersBelow = 2;
+        p.tiersAbove = 0;      // 双正成对校验: 单边 >0 拒绝
+        return p;
+    };
+    bool threw = false;
+    try {
+        CurveMapTempTableGenerator g(mk());
+        (void)g;
+    } catch (const std::invalid_argument& e) {
+        threw = true;
+        const std::string m = e.what();
+        EXPECT_NE(m.find("asymmetric"), std::string::npos) << m;
+    }
+    EXPECT_TRUE(threw);
+}

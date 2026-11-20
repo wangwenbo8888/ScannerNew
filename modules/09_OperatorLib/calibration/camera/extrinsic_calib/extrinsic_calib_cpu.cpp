@@ -557,7 +557,7 @@ ExtrinsicCalibCpuResult ExtrinsicCalibCpu::Impl::Execute(
             cameraMatrixL, distCoeffsL, cameraMatrixR, distCoeffsR,
             params_.imageSize,
             R, T, E, F,
-            cv::CALIB_FIX_INTRINSIC,
+            cv::CALIB_FIX_INTRINSIC | cv::CALIB_USE_LU,   // LU 分解提速（fc E6 实测 61×，R/T 差 ~1e-12；261117 批1a 自 fc 镜像）
             cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 100, 1e-6)
         );
 

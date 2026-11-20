@@ -15,7 +15,7 @@
     "mask_separation": {
       "_": "预处理①·同帧掩膜分离（CUDA，细激光形态：腐蚀级联 3/9/37＋双 top-hat 减法＋边缘膨胀 9/7）",
       "_c_threshold": "二值化阈值（高斯平滑后灰度标度）",
-      "threshold": 200,
+      "threshold": 150,
       "_c_noiseErodeSize": "去小噪点腐蚀核",
       "noiseErodeSize": 3,
       "_c_laserKillSize": "杀激光腐蚀核",
@@ -260,7 +260,7 @@
       "_c_mode": "0=Auto 1=Labeled 2=Scan",
       "mode": 2,
       "_c_epipolar_row_step": "极线栅格行距（px）：2026-10-13 换 10 档窄窗 0.67 表（4.0°C/下2上7/[200,500]，表源 cmtt_4deg_10tiers_dw200_500）",
-      "epipolar_row_step": 0.67,
+      "disp_gate": true, "disp_gate_px": 65, "epipolar_row_step": 0.67,
       "_c_window_offset": "上下窗半径（px，-1=自动取行距）",
       "window_offset": 1.0,
       "_c_max_x_diff": "上下窗配对 |Δx| 上限（px）",
@@ -276,9 +276,9 @@
     "laser_match_scan_v3": {
       "_": "激光链④·线匹配 V3（CUDA，段级投票＋冲突双弃）",
       "_c_match_threshold": "验卡窗口（px）",
-      "match_threshold": 7.0,
+      "match_threshold": 10.0,
       "_c_epipolar_row_step": "行桶行距（px）：2026-10-13 换 10 档窄窗 0.67 表（与 epipolar_interp_dual 同值）",
-      "epipolar_row_step": 0.67,
+      "disp_gate": true, "disp_gate_px": 65, "epipolar_row_step": 0.67,
       "_c_max_right_per_row": "单行桶右点数上限（防爆）",
       "max_right_per_row": 1024,
       "_c_vL_tolerance": "左点查表横向容差（px）",
@@ -302,7 +302,7 @@
       "_c_disp_gate": "【261115 噪点治理】帧级视差一致性门：帧内视差中位 ±此窗外的对剔除（整段错投线号的跨线错配视差系统性偏离主面＝离面噪点主源；丢弃>40%告警）。沙盒 261030 定稿口径",
       "disp_gate": true,
       "_c_disp_gate_px": "视差窗半宽（px）",
-      "disp_gate_px": 60
+      "disp_gate_px": 65
     },
     "laser_reconstruct": {
       "_": "激光链⑤·三维重建（CUDA，Q 按调用传入=档内 Q）",

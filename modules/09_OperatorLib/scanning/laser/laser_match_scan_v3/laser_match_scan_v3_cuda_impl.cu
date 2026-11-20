@@ -820,11 +820,7 @@ __global__ void kernelIssueCardsV3(
     float bucket_min_x, float bucket_inv_w, int bucket_k, int use_buckets,
     // 【前段提前提交】设备计数尾闸：容量发射时尾部陈旧点不得发卡/写状态
     //（默认 nullptr＝旧调用行为逐字不变）
-    const int* __restrict__ d_n = nullptr,
-    // 261118 线号一致性门：right 点自身检出线号须与卡片 lid 一致——
-    // 双线（真线＋鬼影/反射）交叉配对时 right 在错误线上，lid 不匹配即拒。
-    // nullptr＝关（旧调用兼容）
-    const int* __restrict__ d_right_sorted_lids = nullptr)
+    const int* __restrict__ d_n = nullptr)
 {
     // 【B3·TP2】2 点/线程跨步（ILP 换 TLP；探针 kChamp<false,2> 同构实测 −54%）。
     // 四守卫 return→continue（线程界/尾闸/行界/空行）；d_card_count/d_left_status
@@ -963,12 +959,6 @@ __global__ void kernelIssueCardsV3(
             }
         }
         if (hitRidx < 0) continue;                // card fails HIT
-        // 261118 线号一致性门（实验中——right lid 编号体系与查表不同，
-        // 启用经 launch 侧传指针＋JMW_V3LIDGATE=1；默认 nullptr=关）
-        if (d_right_sorted_lids != nullptr
-            && locLid[c] > 0
-            && d_right_sorted_lids[hitRidx] > 0
-            && d_right_sorted_lids[hitRidx] != locLid[c]) continue;
         d_card_lid[i * V3_MAX_CARDS + out] = locLid[c];
         d_card_hitRx[i * V3_MAX_CARDS + out] = hitRx;
         d_card_res[i * V3_MAX_CARDS + out] = hitRx - uR;   // 【V5】带符号（>0＝实际右点在预测右侧）；d_seg_res 口径由票内核 fabs 保持逐位不变
@@ -3085,11 +3075,7 @@ LaserMatchScanResultV3 LaserMatchScanCudaV3::Impl::process(
                             fg.ic_urBias, fg.ic_biasParams,
                             d_left_status_[gen].ptr<int>(), d_diag_.ptr<int>() + 1,
                             fg.ic_bucketPool, fg.ic_bucketRowOff,
-                            fg.ic_bMinX, fg.ic_bInvW, fg.ic_bK, fg.ic_useB,
-            nullptr,   // d_n（图路径不使用尾闸）
-            getenv("JMW_V3LIDGATE") != nullptr && getenv("JMW_V3LIDGATE")[0] == '1'
-                ? d_right_sorted_lids_.ptr<int>()
-                : (const int*)nullptr);
+                            fg.ic_bMinX, fg.ic_bInvW, fg.ic_bK, fg.ic_useB);
                         cudaGraph_t g = nullptr;
                         if (cudaStreamEndCapture(cuda_stream, &g) == cudaSuccess && g) {
                             fg.graph = g;
@@ -3231,11 +3217,7 @@ LaserMatchScanResultV3 LaserMatchScanCudaV3::Impl::process(
                         bucketK_ > 0 && !d_bucket_row_off_.empty()
                             ? d_bucket_row_off_.ptr<int>() : nullptr,
                         bucketMinX_, bucketInvW_, bucketK_,
-                        issueUseBuckets_(),
-                nullptr,   // d_n
-                getenv("JMW_V3LIDGATE") != nullptr && getenv("JMW_V3LIDGATE")[0] == '1'
-                    ? d_right_sorted_lids_.ptr<int>()
-                    : (const int*)nullptr);
+                        issueUseBuckets_());
                 }
             }
         }

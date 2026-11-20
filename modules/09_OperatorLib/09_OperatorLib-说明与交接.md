@@ -34,6 +34,8 @@
 
 ## 4. 日志
 
+- 261117｜fullgpu_optimize 迁出 TEST/ → 根级 sandbox/（同事窗口确认后执行）：git mv 1065 件保历史，date_in 4.94GB 随迁；随改两处路径（沙盒 CMake JMW_ROOT ../../../..→../..；本文件 SCR_SOURCE_DIR→${CMAKE_SOURCE_DIR}/sandbox/fullgpu_optimize）＋根 .gitignore 负向豁免（sandbox/*＋!sandbox/fullgpu_optimize/）——验证：v3_split 真数据用例执行非 SKIP＋沙盒新构建目录 configure 通过＋git 状态干净；TEST/ 仍存 speed_optimize（冻结），本模块沙箱条款继续适用｜人工触发·AI 代笔｜规范 §2.3
+- 261117｜W1 指纹窗三笔落地（fb3c9b3/81600b9/c200303）：PJC 整体升级 fc 版（20.1→5.0s 战役全套＋JMW_PJC_ANALYTIC 回退开关，15→29 用例）＋CMTT 非对称档位（装机 10 档表再生能力恢复＋2 新用例）＋cmtt_cuda/curve_map_cuda 引入（OpenMP 启用＋vcomp140 交付补丁＋-fmad=false 红线）；新算子目录两件套已建；全量 110/111 零回归（唯一红＝steger_fast 计时门假红：隔离重跑 1.66ms<3ms 门，fc 文档同款在案）｜人工触发·AI 代笔｜规范 §2.3
 - 261102｜在线调参：CCL/椭圆/增益修复＋标志点链打通；激光飞点未解（详见会话总结）｜—｜—
 - 261102｜现状改目标达成对照制（对象级细节精简，证据留真名）｜规范 §2.3
 - 261102｜转四段新制：目标待人定稿（含原全局决策注意点）；问题段自下一步+全局挂账迁入（均〔待定〕）｜规范 §2.3

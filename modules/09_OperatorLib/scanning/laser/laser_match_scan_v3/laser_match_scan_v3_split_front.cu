@@ -96,8 +96,7 @@ __global__ void kernelIssueCardsV3(
     const int* __restrict__ d_bucket_pool,
     const int* __restrict__ d_bucket_row_off,
     float bucket_min_x, float bucket_inv_w, int bucket_k, int use_buckets,
-    const int* __restrict__ d_n = nullptr,   //【前段提前提交】设备计数尾闸（与定义同步）
-    const int* __restrict__ d_right_sorted_lids = nullptr);   // 261118 线号一致性门
+    const int* __restrict__ d_n = nullptr);   //【前段提前提交】设备计数尾闸（与定义同步）
 
 __global__ void kernelCopySeq(
     const int* __restrict__ src,
@@ -908,11 +907,7 @@ void LaserMatchScanCudaV3::Impl::executeFront(
                 bucketK_ > 0 && !d_bucket_row_off_.empty()
                     ? d_bucket_row_off_.ptr<int>() : nullptr,
                 bucketMinX_, bucketInvW_, bucketK_,
-                issueUseBuckets_(),
-                nullptr,   // d_n（即时路径）
-                getenv("JMW_V3LIDGATE") != nullptr && getenv("JMW_V3LIDGATE")[0] == '1'
-                    ? (const int*)nullptr
-                    : d_right_sorted_lids_.ptr<int>());
+                issueUseBuckets_());
         }
 
         if ((kernel_err = cudaGetLastError()) != cudaSuccess) {
@@ -1326,10 +1321,7 @@ void LaserMatchScanCudaV3::Impl::executeFrontDeferred(
                 ? d_bucket_row_off_.ptr<int>() : nullptr,
             bucketMinX_, bucketInvW_, bucketK_,
             issueUseBuckets_(),
-            d_leftCount,
-            getenv("JMW_V3LIDGATE") != nullptr && getenv("JMW_V3LIDGATE")[0] == '1'
-                ? d_right_sorted_lids_.ptr<int>()
-                : (const int*)nullptr);
+            d_leftCount);
 
         // ── Step 6：GPU 段表【B2 两步法】（容量网格＋左计数尾闸；Rank 全域安全）──
         // 【批3】融合开启时标签链已随右链前置完成（同主路径）——本步跳过。

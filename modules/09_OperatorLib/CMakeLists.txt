@@ -23,6 +23,8 @@ foreach(f ${OP_ALL_CPP} ${OP_ALL_CU})
         # 跳过：bench/benchmark/非 test_ 的 tests 目录内文件
     elseif(f MATCHES "gba_dataset_runner\\.cpp$")
         # 独立 exe，不入库
+    elseif(f MATCHES "cmtt_regen\\.cpp$")
+        # 独立 exe（CMTT 温表再生工具），不入库
     else()
         list(APPEND OP_SOURCES ${f})
     endif()
@@ -66,6 +68,19 @@ target_link_libraries(OperatorLib PUBLIC
     nlohmann_json::nlohmann_json
 )
 
+# === OpenMP（261117 W1 自 fc 启用）==========================================
+# 服务：PJC 解析雅可比/C2 按线并行＋CMTT 档级并行＋curve_map 行级并行。
+# 线程数无关确定性红线不变（CMTT 硬规则 #8：嵌套并行禁用＋档独立槽位＋串行组装；
+# fc 侧 1/4/8 线程 sha256 对拍先例）。勿开 OMP_NESTED。
+find_package(OpenMP REQUIRED COMPONENTS CXX)   # 261120 修：限定 CXX——工程启用 CUDA 语言后 FindOpenMP 会连带探测 OpenMP_CUDA（nvcc 不支持探测）致整包失败
+target_link_libraries(OperatorLib PRIVATE OpenMP::OpenMP_CXX)
+
+# curve_map_cuda 等价性红线（fc fc2_curve_map_cuda 同款目的）：-fmad=false
+# 保与 CPU 版逐条目等价；仅此一文件专用，禁波及全库既有算子旗标。
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/calibration/laser_calib/curve_map_cuda/curve_map_cuda.cu"
+    PROPERTIES COMPILE_OPTIONS "-fmad=false")
+
 if(BUILD_CUDA)
     target_compile_definitions(OperatorLib PUBLIC BUILD_CUDA=1)
 else()
@@ -101,6 +116,17 @@ if(BUILD_GLOBAL_OPTIM)
     jmw_deploy_crt(gba_dataset_runner)   # 部署 VS2022 CRT DLL（OpenCV 运行时依赖）
 endif()
 
+# === cmtt_regen exe（CMTT 温表再生入口工具，261117 W1）=====================
+# 补产线 09 侧"生成器零调用方"缺口：装机位/产物 JSON 三源 → CMTT sidecar。
+# 档位/深度窗/rowStep 全参数化（默认＝2026-10-13 产线终态定稿口径）。
+add_executable(cmtt_regen
+    ${CMAKE_CURRENT_SOURCE_DIR}/calibration/laser_calib/cmtt_cuda/cmtt_regen.cpp)
+target_link_libraries(cmtt_regen PRIVATE OperatorLib)
+if(MSVC)
+    target_compile_options(cmtt_regen PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+endif()
+jmw_deploy_crt(cmtt_regen)
+
 # ============================================================================
 # 算子单测：每文件一个 exe + 注册 ctest
 # ============================================================================
@@ -115,7 +141,7 @@ if(BUILD_TESTS)
         # 【V4/V5 回迁 261115】真数据用例的数据集根＝沙盒目录（不入 git 的检出上
         # 文件缺席→用例自 GTEST_SKIP；SCR_SOURCE_DIR 原为沙盒 CMake 专属定义）
         target_compile_definitions(${tname} PRIVATE
-            SCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}/modules/09_OperatorLib/TEST/fullgpu_optimize")
+            SCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}/sandbox/fullgpu_optimize")
         # CUDA 测试开关（与 3DSCANNER 一致；无害于纯 CPU 测试）
         target_compile_definitions(${tname} PRIVATE WITH_CUDA_TESTS=$<BOOL:${BUILD_CUDA}>)
         # 261005 DLL 化补账：纯 cpp 测试直接调 cudaDeviceReset 等 cudart API

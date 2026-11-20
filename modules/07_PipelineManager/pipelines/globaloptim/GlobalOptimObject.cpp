@@ -72,14 +72,8 @@ public:
               // GBA 期与 live fuse（同 50M）并存 ~4GB——显存/pinned 压力下
               // 分配失败即崩。重放终版云实测 ~4.5M 点 → 8M 槽 + 2M 步进
               // （~330MB）充裕；不够会走 grow（有全检护栏）
-              // 261103 GBA 尾融合降载：原默认 reserve=50M（live 同款）实测到 ~2GB 显存
-              // （keys 400M+idx/counts ~200M+xyz/normal ~600M），GBA 撞上 live fuse 同 50M
-              // 会到 ~4GB（显存/pinned 压力），故按当时实测 ~4.5M 格 → 扩 8M 格 + 2M 增量
-              // （~330MB，定证）。261120：devZ/G4 关闭后存活点量 ~4x，8M 溢出触发扩容路径
-              // 崩溃（OperatorLib 融合算子）——扩 32M + 8M 增量（~1.3GB 显存，16G 卡安全）。
-              fp.reserveVoxelCount = 32000000;
-              fp.growSlotCount = 8000000;
-              // 261120 曾试 saturationThreshold=1 → 融合算子崩溃，已回滚（保持 09 默认 5）
+              fp.reserveVoxelCount = 8000000;
+              fp.growSlotCount = 2000000;
               return fp;
           }()) {}
     bool fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) override {

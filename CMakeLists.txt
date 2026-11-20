@@ -172,11 +172,23 @@ function(jmw_deploy_crt target)
         message(WARNING "jmw_deploy_crt: redist CRT 目录未找到: ${JMW_MSVC_REDIST_CRT_DIR} (跳过)")
         return()
     endif()
+    # 261117 W1：09 链接 OpenMP 后 OperatorLib.dll 导入 VCOMP140.DLL——交付目录
+    # 缺件＝exe 拒启（开发机 System32 有、测不出，works-on-my-machine 陷阱）。
+    # 无条件部署（无论是否用 OpenMP，成本为零）；先例 sandbox_client_calib L80-87。
+    set(_jmw_omp_dll
+        "${JMW_MSVC_REDIST_CRT_DIR}/../Microsoft.VC143.OpenMP/vcomp140.dll")
+    set(_jmw_extra "")
+    if(EXISTS "${_jmw_omp_dll}")
+        list(APPEND _jmw_extra "${_jmw_omp_dll}")
+    else()
+        message(WARNING "jmw_deploy_crt: vcomp140.dll 未找到于 ${_jmw_omp_dll}（OpenMP 交付将缺件）")
+    endif()
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${JMW_MSVC_REDIST_CRT_DIR}/msvcp140.dll"
             "${JMW_MSVC_REDIST_CRT_DIR}/vcruntime140.dll"
             "${JMW_MSVC_REDIST_CRT_DIR}/vcruntime140_1.dll"
+            ${_jmw_extra}
             "$<TARGET_FILE_DIR:${target}>"
         COMMENT "部署 VS2022 CRT DLL 到 ${target} 目录")
 endfunction()

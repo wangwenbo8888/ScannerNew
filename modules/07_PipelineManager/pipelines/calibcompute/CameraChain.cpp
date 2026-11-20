@@ -126,6 +126,7 @@ Scanner::Result CameraChain::run(const PostureSessionData& in,
         ip.image_width = init.imageSize.width;
         ip.image_height = init.imageSize.height;
         ip.plate_temp = 20.0;         // 关板热膨胀：boardPoints3D 已是温度补偿后物方点
+        ip.calib_flags = cv::CALIB_USE_LU;   // LU 求解提速（fc E1 实测 92×，K 差 7e-14；261117 问题池批1c 落地）
         calib::IntrinsicCalibCPU intrinsicOp(ip);
         calib::IntrinsicCalibResult ires;
         if (!intrinsicOp.Execute(origL, origR, ires) || !ires.success)
