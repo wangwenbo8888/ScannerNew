@@ -29,6 +29,10 @@
 
 ## 4. 日志
 
+- 261117｜键控状态卡图标双前缀修复：`MainWindow.cpp` 信息卡第 7 项 icon 键 `"icon/left/marklist-black-11"`→`"marklist-black-11"`（模板 `":/icons/resources/icons/icon/left/%1.svg"` 再拼一层前缀→路径失效→QSvgRenderer 静默空图，图标自始隐形）——沙盒 ui_render_bench 同函数同 diff 共修（回迁通道首例实弹）；界面 BUG 清单二档第 5 项销账｜人工授权（排版优化执行方案批复）·AI 实施｜规范 §2.3
+
+- 261117｜DPI 策略显式化：main.cpp 删 `AA_EnableHighDpiScaling`，env 锁死自动探测，缩放唯一入口 `JMW_UI_SCALE`（缺省 1.0＝设备基准；4K@250% 开发机建议 1.25）；新增 app.rc＋LeadScannerK2.manifest（System Aware，构建期固定感知级别）——根治多 DPI 源开发机「图标放大裁剪/排版混乱」（实测记录见《开发进度.md》261117 条）；**待真机确认屏缩放=100%，非则设备启动器设 JMW_UI_SCALE**｜人工授权·AI 实施｜规范 §2.3
+
 - 261107｜初始化弹窗 20s 硬等修复：done 旗标移入 notifySelfCheckItem（license 改弹窗上报后可能晚于设备末项——旧回调路径漏设；07:44 会话日志实证 Standby 已切而弹窗等满兜底）＋验证码定值 88888888｜人工触发｜规范 §2.3
 
 - 261107｜授权验证过渡方案落地：验证码弹窗＋软门禁守卫＋08 LicenseGate（TDD 六用例全绿）；license 默认 false=未验先锁｜人工触发｜规范 §2.3

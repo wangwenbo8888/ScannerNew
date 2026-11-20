@@ -15,6 +15,7 @@ set(OSG_ROOT "F:/osg3.6.5/install" CACHE PATH "OSG 安装目录")
 if(Qt5_FOUND AND Qt5Svg_FOUND AND Qt5SerialPort_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/stubs/LEADSCANSeries.h")
 
 # === app 核心文件 ===
+# （app.rc→LeadScannerK2.manifest：261117 DPI System Aware 清单，构建期固定感知级别）
 set(APP_SOURCES
     main.cpp
     AppContext.cpp
@@ -25,6 +26,7 @@ set(APP_SOURCES
     MainWindow.h
     WorkflowContext.cpp
     WorkflowContext.h
+    app.rc
 )
 
 # === 模块文件（物理在 modules/ 下，编译进 LeadScannerK2）===
@@ -84,6 +86,9 @@ add_executable(LeadScannerK2
 # 261004 排障：Release 链接带 /DEBUG 出 PDB（仅加调试目录不改代码布局；
 # 性能不受影响——此后崩溃转储可直接符号化）
 target_link_options(LeadScannerK2 PRIVATE $<$<CONFIG:Release>:/DEBUG>)
+# 261117 manifest 经 app.rc 内嵌（RT_MANIFEST ID 1）——须关闭链接器默认
+# manifest 生成，否则 CVTRES CVT1100 资源重复（类 MANIFEST/名称 1 冲突）
+target_link_options(LeadScannerK2 PRIVATE "/MANIFEST:NO")
 
 target_include_directories(LeadScannerK2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

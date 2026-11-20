@@ -1,0 +1,4 @@
+// 261117 DPI 策略：内嵌 manifest（System Aware）——进程 DPI 感知级别构建期固定。
+// 资源 ID 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID（exe 清单标准槽位）。
+// 说明见 LeadScannerK2.manifest 内注释与《开发进度.md》261117 日志。
+1 24 "LeadScannerK2.manifest"

@@ -16,6 +16,7 @@
 #include "pipelines/scan/ScanTypes.h"           // IMarkerFuse（261027 自 FuseConsumer.h 迁入）
 #include "pipelines/scan/FrameObsAccumulator.h" // 07 obs（excludeMarkerObs 契约）
 #include "file_io.h"
+#include "UiTokens.h"
 #include "PerfMonitor.h"   // A-T17：updateInfoSection 内 perfMonitor()->poll() 需完整类型
 #include "base/EventBus.h" // P2 渲染事件桥：faultSink lambda 需完整类型（publish）
 #include "IState.h"        // P1-2 UI 状态图标：SystemState 7 态完整枚举（switch/映射）
@@ -1074,8 +1075,7 @@ void MainWindow::showCameraMonitor() {
     // 261018 用户恢复 true：真机联调期看左右相机实况（补光/标志点可见性排障）
     // 261108 用户指令恢复 false：隐藏相机窗口（调试期已过）
     // 261115 恢复 false：排障完成（空图像/接不上两案已定位），用户指令隐藏。
-    // 261119 恢复 true：检查左斜激光线是否发射（噪点调查）
-    static constexpr bool kShowCamMonitor = true;
+    static constexpr bool kShowCamMonitor = false;
     if (!kShowCamMonitor) return;
     if (!m_appCtx) return;
     if (!m_camDlg) {
@@ -1314,6 +1314,7 @@ void MainWindow::showCameraMonitor() {
 void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
     if (!m_scanReadyDlg) {
         m_scanReadyDlg = new QDialog(this);
+        m_scanReadyDlg->setObjectName("benchCardScanReady");
         m_scanReadyDlg->setWindowTitle(QStringLiteral("扫描就绪"));
         m_scanReadyDlg->setModal(false);
         // 260705 卡片化（与菜单/全局优化/表盘同风）
@@ -1327,6 +1328,7 @@ void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
         lay->setContentsMargins(20, 16, 20, 16);
         lay->setSpacing(8);
         auto* title = new QLabel(QStringLiteral("扫描就绪"), m_scanReadyDlg);
+        title->setObjectName("cardTitle");
         title->setAlignment(Qt::AlignCenter);
         title->setStyleSheet(
             "font-size: 15px; font-weight: bold; color: #8B1A2B; padding: 0 0 8px 0;");
@@ -1337,6 +1339,7 @@ void MainWindow::showScanReadyPrompt(const QString& modeTitle, int btnIdx) {
             "font-size:14px; padding:12px 8px; color:#202225;");
         lay->addWidget(m_scanReadyLabel);
         auto* cancel = new QPushButton(QStringLiteral("取消（终止会话）"), m_scanReadyDlg);
+        cancel->setObjectName("cardBtnDanger");
         cancel->setStyleSheet(
             "QPushButton { background-color: #C0392B; color: white; border: none;"
             " border-radius: 6px; font-size: 14px; font-weight: bold; padding: 8px 12px; }"
@@ -1399,6 +1402,7 @@ void MainWindow::showVirtualKeypad() {
         m_vkeyPad->setWindowFlag(Qt::FramelessWindowHint, true);
         m_vkeyPad->setAttribute(Qt::WA_TranslucentBackground);
         m_vkeyPad->setWindowTitle(QStringLiteral("虚拟按键表盘"));
+        m_vkeyPad->setObjectName("benchCardVkeyPad");
         m_vkeyPad->setModal(false);
         m_vkeyPad->setStyleSheet(
             "QDialog { background-color: white; border: 1px solid #e0e0e0;"
@@ -1409,6 +1413,7 @@ void MainWindow::showVirtualKeypad() {
         lay->setVerticalSpacing(5);
         // 卡片标题（frameless 无系统标题栏——内置品牌标题行＋✕ 收掉表盘，同菜单弹窗）
         auto* padTitle = new QLabel(QStringLiteral("虚拟按键表盘"), m_vkeyPad);
+        padTitle->setObjectName("cardTitle");
         padTitle->setAlignment(Qt::AlignCenter);
         padTitle->setStyleSheet(
             "font-size: 13px; font-weight: bold; color: #8B1A2B; padding: 0 0 6px 0;");
@@ -1430,6 +1435,7 @@ void MainWindow::showVirtualKeypad() {
             QStringLiteral("单击"), QStringLiteral("双击"), QStringLiteral("长按")};
         for (int g = 0; g < 3; ++g) {
             auto* h = new QLabel(gestures[g], m_vkeyPad);
+            h->setObjectName("vkeyGestureLbl");
             h->setAlignment(Qt::AlignCenter);
             h->setStyleSheet("font-weight: bold; font-size: 12px; padding: 2px;");
             lay->addWidget(h, 1, g + 1);
@@ -1469,12 +1475,14 @@ void MainWindow::showVirtualKeypad() {
         for (int r = 0; r < 5; ++r) {
             const auto& row = rows[r];
             auto* lbl = new QLabel(row.name, m_vkeyPad);
+            lbl->setObjectName("vkeyRowLbl");
             lbl->setStyleSheet(row.inProto
                 ? "font-weight: bold; font-size: 12px; padding: 2px;"
                 : "color:#999; font-size: 12px; padding: 2px;");
             lay->addWidget(lbl, r + 2, 0);
             for (int g = 0; g < 3; ++g) {
                 auto* btn = new QPushButton(row.btnText[g], m_vkeyPad);
+                btn->setObjectName("vkeyBtn");
                 btn->setMinimumHeight(28);           // 261017 缩小表盘（原 44 手指高度）
                 btn->setMinimumWidth(72);            // 文字不截断
                 m_vkeyBtns[r][g] = btn;               // 存指针（态同步用）
@@ -1708,7 +1716,7 @@ void MainWindow::createFloatingToolbar()
     m_floatingToolbar->setStyleSheet("background-color: white; border: 1px solid #e0e0e0; border-radius: 8px;");
     m_floatingToolbar->setMinimumWidth(400);
     m_floatingToolbar->setMaximumWidth(800);
-    m_floatingToolbar->setFixedHeight(47);
+    m_floatingToolbar->setFixedHeight(UiT::HFloatBar);
     // 261017 用户口径：悬浮工具栏仅扫描暂停态可用（M 停采→暂停；其它任何时候
     // ——未开会话/扫描中/会话已关——圈选/删除一律不可操作）。创建即置灰，
     // updateToolbarEditGate 每秒随 infoTimer 刷新（覆盖 09-21 口径的 S2 待机
@@ -1788,6 +1796,7 @@ void MainWindow::showBanner(const QString& text, bool danger)
 {
     if (!m_banner) {
         m_banner = new QLabel(this);
+        m_banner->setObjectName("bannerLabel");
         m_banner->setAttribute(Qt::WA_TransparentForMouseEvents);  // 点击穿透——不挡关闭按钮
         m_banner->setAlignment(Qt::AlignCenter);
         m_banner->setWordWrap(false);
@@ -1831,6 +1840,7 @@ void MainWindow::refreshMenuDialog() {
     // 无边框浮层）＋navBar 品牌酒红标题；条目去 ①-⑤ 序号
     if (!m_menuDlg) {
         m_menuDlg = new QDialog(nullptr);
+        m_menuDlg->setObjectName("benchCardMenu");
         m_menuDlg->setWindowFlag(Qt::WindowStaysOnTopHint, true);
         m_menuDlg->setWindowFlag(Qt::FramelessWindowHint, true);
         m_menuDlg->setAttribute(Qt::WA_TranslucentBackground);
@@ -1845,6 +1855,7 @@ void MainWindow::refreshMenuDialog() {
         lay->setSpacing(6);
         // 卡片标题（frameless 无系统标题栏——内置品牌标题行）
         auto* title = new QLabel(QStringLiteral("菜  单"), m_menuDlg);
+        title->setObjectName("cardTitle");
         title->setAlignment(Qt::AlignCenter);
         title->setStyleSheet(
             "font-size: 15px; font-weight: bold; color: #8B1A2B; padding: 0 0 10px 0;");
@@ -1854,6 +1865,7 @@ void MainWindow::refreshMenuDialog() {
         };
         for (int i = 0; i < 5; ++i) {
             m_menuItems[i] = new QLabel(QString::fromUtf8(kNames[i]), m_menuDlg);
+            m_menuItems[i]->setObjectName("menuItem");
             m_menuItems[i]->setMinimumHeight(36);
             m_menuItems[i]->setAlignment(Qt::AlignCenter);
             lay->addWidget(m_menuItems[i]);
@@ -1908,6 +1920,7 @@ void MainWindow::refreshMenuDialog() {
 void MainWindow::ensureFinalBADlg() {
     if (m_finalBADlg) return;
     m_finalBADlg = new QProgressDialog(QString(), QString(), 0, 100, this);
+    m_finalBADlg->setObjectName("benchCardProgress");
     m_finalBADlg->setWindowTitle(QStringLiteral("全局优化"));
     m_finalBADlg->setWindowModality(Qt::ApplicationModal);
     m_finalBADlg->setMinimumDuration(0);
@@ -1981,8 +1994,8 @@ QWidget *MainWindow::createTitleBar()
 {
     QWidget *bar = new QWidget();
     bar->setObjectName("titleBar");
-    bar->setMinimumHeight(28);
-    bar->setMaximumHeight(36);
+    bar->setMinimumHeight(UiT::HTitleBar);
+    bar->setMaximumHeight(UiT::HTitleBar);
     QHBoxLayout *layout = new QHBoxLayout(bar);
     layout->setContentsMargins(8, 0, 0, 0);
     layout->setSpacing(0);
@@ -2026,21 +2039,21 @@ QWidget *MainWindow::createTitleBar()
 
     QPushButton *btnSave = new QPushButton();
     btnSave->setObjectName("btnTitleAction");
-    btnSave->setFixedSize(40, 36);
+    btnSave->setFixedSize(40, UiT::HTitleBar);
     btnSave->setIcon(QIcon(renderSvg(":/icons/resources/icons/保存-黑-13.svg", 14)));
     btnSave->setIconSize(QSize(14, 14));
     layout->addWidget(btnSave);
 
     QPushButton *btnMin = new QPushButton();
     btnMin->setObjectName("btnWindowControl");
-    btnMin->setFixedSize(40, 36);
+    btnMin->setFixedSize(40, UiT::HTitleBar);
     btnMin->setText(QStringLiteral("--"));
     connect(btnMin, &QPushButton::clicked, this, &QWidget::showMinimized);
     layout->addWidget(btnMin);
 
     QPushButton *btnClose = new QPushButton();
     btnClose->setObjectName("btnWindowControl");
-    btnClose->setFixedSize(40, 36);
+    btnClose->setFixedSize(40, UiT::HTitleBar);
     btnClose->setText("X");
     connect(btnClose, &QPushButton::clicked, this, &QWidget::close);
     layout->addWidget(btnClose);
@@ -2059,8 +2072,8 @@ QWidget *MainWindow::createNavBar()
 {
     QWidget *bar = new QWidget();
     bar->setObjectName("navBar");
-    bar->setMinimumHeight(32);
-    bar->setMaximumHeight(42);
+    bar->setMinimumHeight(UiT::HNavBar);
+    bar->setMaximumHeight(UiT::HNavBar);
     bar->setStyleSheet("background-color: #8B1A2B; color: white;");
     QHBoxLayout *layout = new QHBoxLayout(bar);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -2075,14 +2088,14 @@ QWidget *MainWindow::createNavBar()
 
     QPushButton *btnFile = new QPushButton(QStringLiteral("菜单"));
     btnFile->setObjectName("navButton");
-    btnFile->setFixedHeight(42);
+    btnFile->setFixedHeight(UiT::HNavBar);
     btnFile->setFixedWidth(50);
     leftLayout->addWidget(btnFile);
     m_navLeftButtons.append(btnFile);
 
     QPushButton *btnScan = new QPushButton(QStringLiteral("扫描"));
     btnScan->setObjectName("navButtonActive");
-    btnScan->setFixedHeight(42);
+    btnScan->setFixedHeight(UiT::HNavBar);
     btnScan->setFixedWidth(50);
     leftLayout->addWidget(btnScan);
     m_navLeftButtons.append(btnScan);
@@ -2090,14 +2103,14 @@ QWidget *MainWindow::createNavBar()
 
     QPushButton *btnManage = new QPushButton(QStringLiteral("管理"));
     btnManage->setObjectName("navButton");
-    btnManage->setFixedHeight(42);
+    btnManage->setFixedHeight(UiT::HNavBar);
     btnManage->setFixedWidth(50);
     leftLayout->addWidget(btnManage);
     m_navLeftButtons.append(btnManage);
 
     QPushButton *btnIntegrateTest = new QPushButton(QStringLiteral("集成测试"));
     btnIntegrateTest->setObjectName("navButton");
-    btnIntegrateTest->setFixedHeight(42);
+    btnIntegrateTest->setFixedHeight(UiT::HNavBar);
     btnIntegrateTest->setFixedWidth(75);
     leftLayout->addWidget(btnIntegrateTest);
     m_navLeftButtons.append(btnIntegrateTest);
@@ -2105,7 +2118,7 @@ QWidget *MainWindow::createNavBar()
 
     QPushButton *btnReloadCloud = new QPushButton(QStringLiteral("加载点云"));
     btnReloadCloud->setObjectName("navButton");
-    btnReloadCloud->setFixedHeight(42);
+    btnReloadCloud->setFixedHeight(UiT::HNavBar);
     btnReloadCloud->setFixedWidth(75);
     leftLayout->addWidget(btnReloadCloud);
     m_navLeftButtons.append(btnReloadCloud);
@@ -2114,7 +2127,7 @@ QWidget *MainWindow::createNavBar()
     // 虚拟按键表盘（261002 临时测试机·无实体键）：弹窗模拟扫描仪面板五键
     QPushButton *btnVKeys = new QPushButton(QStringLiteral("⌨ 按键"));
     btnVKeys->setObjectName("navButton");
-    btnVKeys->setFixedHeight(42);
+    btnVKeys->setFixedHeight(UiT::HNavBar);
     btnVKeys->setFixedWidth(64);
     btnVKeys->setToolTip(QStringLiteral(
         "虚拟按键表盘（261002 临时测试机）：模拟扫描仪面板按键，G01 注入与真机同链路"));
@@ -2147,7 +2160,7 @@ QWidget *MainWindow::createNavBar()
     for (int i = 0; i < scanModes.size(); ++i) {
         QPushButton *btn = new QPushButton();
         btn->setObjectName("scanModeButton");
-        btn->setFixedHeight(42);
+        btn->setFixedHeight(UiT::HNavBar);
         btn->setFixedWidth(84);
 
         QHBoxLayout *btnLayout = new QHBoxLayout(btn);
@@ -2179,8 +2192,8 @@ QWidget *MainWindow::createToolBar()
 {
     QWidget *bar = new QWidget();
     bar->setObjectName("toolBar");
-    bar->setMinimumHeight(40);
-    bar->setMaximumHeight(56);
+    bar->setMinimumHeight(UiT::HToolBar);
+    bar->setMaximumHeight(UiT::HToolBar);
     QHBoxLayout *layout = new QHBoxLayout(bar);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(32);
@@ -2918,7 +2931,7 @@ QWidget *MainWindow::createParamSection()
         QLabel *valueLbl = new QLabel(QStringLiteral("10/20"));
         valueLbl->setObjectName("paramValue");
         valueLbl->setFixedWidth(48);
-        valueLbl->setFixedHeight(20);
+        valueLbl->setFixedHeight(UiT::HValTag);
         valueLbl->setAlignment(Qt::AlignCenter);
         valueLbl->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000;");
         QObject::connect(slider, &QSlider::valueChanged, valueLbl, [valueLbl](int val) {
@@ -2970,7 +2983,7 @@ QWidget *MainWindow::createParamSection()
             m_voxelValLbl = voxVal;                 // 成员存（113 事件回显直更）
             voxVal->setObjectName("paramValue");
             voxVal->setFixedWidth(70);
-            voxVal->setFixedHeight(20);
+            voxVal->setFixedHeight(UiT::HValTag);
             voxVal->setAlignment(Qt::AlignCenter);
             voxVal->setStyleSheet("border: 1px solid #C0C0C0; border-radius: 4px; background-color: #FFFFFF; color: #000000; font-weight: bold;");
             {
@@ -3088,7 +3101,7 @@ QWidget *MainWindow::createInfoSection()
         {"temprature-black-11",  QStringLiteral("MCU温度")},
         {"cloudlist-black-11",   QStringLiteral("CPU占用率")},
         {"memory-black-11",      QStringLiteral("内存状态")},
-        {"icon/left/marklist-black-11", QStringLiteral("键控状态")}
+        {"marklist-black-11", QStringLiteral("键控状态")}   // 261117 修双前缀（原 "icon/left/marklist-black-11" 拼模板后路径失效→图标隐形；沙盒/产线同修）
     };
 
     QLabel** labelPtrs[] = {
@@ -3193,7 +3206,7 @@ QWidget *MainWindow::createBottomToolBar()
 {
     QWidget *bar = new QWidget();
     bar->setObjectName("bottomToolBar");
-    bar->setFixedHeight(47);
+    bar->setFixedHeight(UiT::HFloatBar);
     QHBoxLayout *layout = new QHBoxLayout(bar);
     layout->setContentsMargins(10, 0, 10, 0);
     layout->setSpacing(0);

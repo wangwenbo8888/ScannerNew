@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="JeamM.LeadScannerK2" version="0.1.0.0" processorArchitecture="*"/>
+  <description>LeadScanner K2</description>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0" processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <!-- 261117 DPI 策略：System Aware——进程感知级别在构建期固定，不再依赖运行时
+       探测（多 DPI 源环境下运行时探测曾是排版混乱根因之一）。实际缩放系数由
+       main.cpp 的 JMW_UI_SCALE / QT_SCALE_FACTOR 统一控制，缺省 1.0。 -->
+  <asmv3:application xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+    <asmv3:windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+</assembly>

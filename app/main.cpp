@@ -98,7 +98,19 @@ int main(int argc, char *argv[])
     }
 
     _putenv_s("OSG_PLUGIN_PATH", "F:/osg3.6.5/install/bin/osgPlugins-3.6.5");
-    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    // ── 261117 DPI 策略显式化（根治开发机高 DPI 排版混乱，方案与实测记录见
+    // 《开发进度.md》261117 日志）──
+    // UI 为绝对像素布局（固定尺寸按 96dpi 基准逐像素调定），隐含契约＝缩放系数
+    // 全局唯一且稳定。Qt 自动屏幕缩放（原 AA_EnableHighDpiScaling）在多 DPI 源
+    // 环境（4K@250%＋向日葵 Oray 虚拟屏）下各代码路径取值不一致（实测同一窗口
+    // 1.2/2.5/3 并存）→ 图标放大裁剪/排版混乱。改为：关闭一切自动探测，缩放系数
+    // 唯一入口 JMW_UI_SCALE（缺省 1.0＝设备基准；开发机可设 1.25/1.5/2.0，全局
+    // 统一、处处一致）。⚠ 勿再加回 AA_EnableHighDpiScaling——会重新引入环境探测。
+    qputenv("QT_ENABLE_HIGHDPI_SCALING", "0");       // AA 属性的 env 覆盖通道（关闭）
+    qputenv("QT_AUTO_SCREEN_SCALE_FACTOR", "0");     // 屏幕因子自动探测（关闭）
+    if (const char* uiScale = qgetenv("JMW_UI_SCALE"))   // 唯一缩放入口 → Qt 统一因子
+        qputenv("QT_SCALE_FACTOR", uiScale);
+    // AA_UseHighDpiPixmaps 保留：JMW_UI_SCALE>1 时位图 DPR 标记仍生效（保清晰）
     QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
 
     // 8x MSAA 抗锯齿（参照 LEADSCAN K2 的 setNumMultiSamples(8)），消除网格鱼鳞/闪烁
