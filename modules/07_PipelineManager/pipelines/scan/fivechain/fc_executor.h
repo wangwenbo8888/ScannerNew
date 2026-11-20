@@ -196,6 +196,17 @@ struct FcJob {
     // E 载荷（锁页块句柄）
     int eSlot = -1;
     int eCount = 0;
+    // [261120 noise-dump] per-gate kill ledger for JMW_FC_NOISEDUMP forensics.
+    // -1 = gate not executed for this frame (path not taken / gate disabled).
+    int ndbg_m0 = -1;    // matched count from v3, before gate 1
+    int ndbg_m1 = -1;    // after gate 1 (disparity consistency)
+    int ndbg_m2 = -1;    // after gate 2 (bidirectional check)
+    int ndbg_e0 = -1;    // E-block points from ReconstructInto, before all gates
+    int ndbg_eZ = -1;    // after devZ band gate
+    int ndbg_e3 = -1;    // after gate 3 (spatial isolation)
+    int ndbg_e4 = -1;    // after gate 4 (temporal support)
+    int ndbg_e5 = -1;    // after gate 5 (plane residual)
+    int ndbg_eEnd = -1;  // after applyLaserQualityGates_ returns
     // 【指标】B 通道入队时间戳（链3 唤醒 P99 分子——生产者侧记录）
     long long bPushNs = 0;
     // 【probe v2】命中帧宿主快照（产出线程分线程段 D2H 填充；E 段 maybeDump
@@ -228,6 +239,8 @@ struct FcJob {
         front.cardRidx.clear();
         eSlot = -1;
         eCount = 0;
+        ndbg_m0 = ndbg_m1 = ndbg_m2 = -1;
+        ndbg_e0 = ndbg_eZ = ndbg_e3 = ndbg_e4 = ndbg_e5 = ndbg_eEnd = -1;
         bPushNs = 0;
         probeSnap.reset();   // 【probe v2】快照随槽归还释放
         prod = CycleProducts{};
@@ -515,6 +528,23 @@ private:
     // ⚠ 深度起伏超带内范围的目标（台阶/曲面）会误杀真实结构——按目标几何调档
     int devZBandMm_ = 40;
     std::atomic<size_t> zBandPruned_{0};      // 深度带剔除点累计（观测口径）
+    // 261118 四层自适应噪点防线
+    // ① 局部视差一致性：同行同 lid 的 MAD×5σ 门（自适应，无硬编码像素阈值）
+    int applyDisparityConsistency_(cv::Point2f* mL, cv::Point2f* mR, int* lids,
+                                   int count);
+    std::atomic<size_t> dispConsRejected_{0};
+    // ② 左右互检（保留——反查表几何验证）
+    std::unordered_map<int64_t, std::vector<std::pair<float, float>>> biCheckIdx_;
+    void buildBiCheckIndex_();
+    int applyBidirectionalCheck_(cv::Point2f* mL, cv::Point2f* mR, int* lids,
+                                 int count);
+    std::atomic<size_t> biCheckRejected_{0};
+    // ③ 空间孤立（保留——半径自适应于中位最近邻距离×5）
+    // ④ 跨帧时域支撑：当前 E 块点须在前帧 E 块中有 ≥1 邻居（自适应半径）
+    std::vector<float> prevEBlock_;       // 前帧 E 块点（质量门后快照）
+    bool prevEBlockValid_ = false;
+    int applyTemporalSupport_(int slot, int eCount);
+    std::atomic<size_t> temporalRejected_{0};
     std::unique_ptr<calib::LaserReconstructCpu> reconCpu_;
 
     // —— 【全GPU链2】整体版 GPU 匹配＋GPU 重建（本沙箱主实验；JMW_FC_FULLGPU=0

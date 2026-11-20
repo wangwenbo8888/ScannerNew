@@ -2188,6 +2188,52 @@ void FiveChainExecutor::chain2Loop() {
             // ReconstructInto 本收 const Point2f*；缓冲属后段 Impl 本帧有效）
             const cv::Point2f* ml = cr.matched_left.ptr<cv::Point2f>();
             const cv::Point2f* mr = cr.matched_right.ptr<cv::Point2f>();
+            // ── 261118 左右互检（实验 JMW_FC_BICHECK=1）──
+            // 反查验证：R→查表→L' 若 L'≠L → 交叉配对 → 拒
+            static const bool sBiCheck = [] {
+                const char* e = getenv("JMW_FC_BICHECK");
+                return e != nullptr && e[0] == '1';
+            }();
+            int matchCount = cr.matchedCount;
+            j->ndbg_m0 = matchCount;
+            // [261120 noise-dump] JMW_FC_NOISEDUMP=<dir>: dump pre-gate 2D matches
+            static const char* sNoiseDump = getenv("JMW_FC_NOISEDUMP");
+            if (sNoiseDump != nullptr && matchCount > 0) {
+                char ndbuf[512];
+                std::snprintf(ndbuf, sizeof ndbuf, "%s/match2d_%04d.csv", sNoiseDump, j->idx);
+                std::ofstream ndf(ndbuf);
+                if (ndf) {
+                    ndf << "lx,ly,rx,ry,lid\n" << std::fixed << std::setprecision(3);
+                    const int* ndLids = cr.matched_line_ids.ptr<int>();
+                    for (int q = 0; q < matchCount; ++q)
+                        ndf << ml[q].x << ',' << ml[q].y << ',' << mr[q].x << ','
+                            << mr[q].y << ',' << ndLids[q] << '\n';
+                }
+            }
+            // ① 局部视差一致性（自适应 MAD——普适）
+            if (matchCount > 20) {
+                const int before1 = matchCount;
+                matchCount = applyDisparityConsistency_(
+                    const_cast<cv::Point2f*>(ml),
+                    const_cast<cv::Point2f*>(mr),
+                    cr.matched_line_ids.ptr<int>(), matchCount);
+                if (matchCount < before1 && j->idx < 3)
+                    fprintf(stderr, "[fc:4gate] idx=%d ①视差 %d→%d\n",
+                            j->idx, before1, matchCount);
+            }
+            // ② 左右互检（反查表几何验证）
+            j->ndbg_m1 = matchCount;   // [261120 noise-dump] after gate 1
+            if (sBiCheck && matchCount > 0) {
+                const int before2 = matchCount;
+                matchCount = applyBidirectionalCheck_(
+                    const_cast<cv::Point2f*>(ml),
+                    const_cast<cv::Point2f*>(mr),
+                    cr.matched_line_ids.ptr<int>(), matchCount);
+                if (matchCount < before2 && j->idx < 3)
+                    fprintf(stderr, "[fc:4gate] idx=%d ②互检 %d→%d\n",
+                            j->idx, before2, matchCount);
+            }
+            j->ndbg_m2 = matchCount;   // [261120 noise-dump] after gate 2
             const long long ewT0 = fcdiag ? steadyNs() : 0;   // 【插桩】E 池等待
             const int s = acquireEBlock();
             if (fcdiag)
@@ -2198,12 +2244,29 @@ void FiveChainExecutor::chain2Loop() {
                 j->eCount = calib::LaserReconstructCpu::ReconstructInto(
                     ml, mr,
                     cr.matched_line_ids.ptr<int>(),
-                    cr.matchedCount, h_.calib_.Q,
+                    matchCount, h_.calib_.Q,
                     reconP_.minDepth, reconP_.maxDepth,
                     eBlocks_[static_cast<size_t>(s)], idsScratch.data(), eCapPts_);
                 if (cr.matchedCount > eCapPts_)
                     eTruncPts_.fetch_add(cr.matchedCount - eCapPts_);
+                // [261120 noise-dump] E-block snapshot BEFORE quality gates
+                j->ndbg_e0 = j->eCount;
+                if (sNoiseDump != nullptr && j->eCount > 0) {
+                    char ndbuf[512];
+                    std::snprintf(ndbuf, sizeof ndbuf, "%s/epre_%04d.ply", sNoiseDump, j->idx);
+                    std::ofstream ndf(ndbuf);
+                    if (ndf) {
+                        const float* ndb = eBlocks_[static_cast<size_t>(s)];
+                        ndf << "ply\nformat ascii 1.0\nelement vertex " << j->eCount
+                            << "\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
+                            << std::fixed << std::setprecision(3);
+                        for (int q = 0; q < j->eCount; ++q)
+                            ndf << ndb[3 * q] << ' ' << ndb[3 * q + 1] << ' '
+                                << ndb[3 * q + 2] << '\n';
+                    }
+                }
                 applyLaserQualityGates_(j, s, idsScratch.data());
+                j->ndbg_eEnd = j->eCount;   // [261120 noise-dump] final after all gates
                 j->prod.laserPoints3D = j->eCount;
                 // 【probe v2】命中帧激光 3D 快照（E 块锁页宿主直拷——门后口径；
                 // 在线 prod.recon 从不赋值，E 段唯一来源即此处快照）
@@ -2288,9 +2351,162 @@ void FiveChainExecutor::applyLaserQualityGates_(FcJob* j, int slot,
                         j->idx, devZBandMm_, j->eCount - w, j->eCount, medZ,
                         static_cast<size_t>(zBandPruned_.load()));
             j->eCount = w;
+            j->ndbg_eZ = w;   // [261120 noise-dump] after devZ band gate
             if (w <= 200) return;   // 剔残了（带内几乎无点）——后续门无意义
         }
     }
+    // —— 261118 空间孤立门：帧内 5mm 半径邻居数 <2 → 剔除（悬浮孤点零容忍）——
+    // 真表面点密度 ~1点/2.3mm²（5mm 球内 10+ 邻居）；悬浮噪点距面 30-68mm
+    // （5mm 球内 0 邻居）——5mm 门宽对真点余量巨大、对噪点确定性清除。
+    // O(n) 网格哈希，26k 点 <1ms。
+    if (j->eCount > 100) {
+        const float cell = 5.0f;
+        float* ebS = eBlocks_[static_cast<size_t>(slot)];
+        const int nS = j->eCount;
+        std::unordered_map<int64_t, int> grid;
+        grid.reserve(static_cast<size_t>(nS) * 2);
+        auto skey = [&](int x, int y, int z) -> int64_t {
+            return (static_cast<int64_t>(x & 0x1FFFFF) << 42)
+                 | (static_cast<int64_t>(y & 0x1FFFFF) << 21)
+                 | static_cast<int64_t>(z & 0x1FFFFF);
+        };
+        for (int q = 0; q < nS; ++q) {
+            const int gx = static_cast<int>(std::floor(ebS[q * 3] / cell));
+            const int gy = static_cast<int>(std::floor(ebS[q * 3 + 1] / cell));
+            const int gz = static_cast<int>(std::floor(ebS[q * 3 + 2] / cell));
+            ++grid[skey(gx, gy, gz)];
+        }
+        int wS = 0;
+        for (int q = 0; q < nS; ++q) {
+            const int gx = static_cast<int>(std::floor(ebS[q * 3] / cell));
+            const int gy = static_cast<int>(std::floor(ebS[q * 3 + 1] / cell));
+            const int gz = static_cast<int>(std::floor(ebS[q * 3 + 2] / cell));
+            int nb = 0;
+            for (int dx = -1; dx <= 1 && nb < 2; ++dx)
+                for (int dy = -1; dy <= 1 && nb < 2; ++dy)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        const auto it = grid.find(skey(gx + dx, gy + dy, gz + dz));
+                        if (it != grid.end()) nb += it->second;
+                    }
+            if (nb >= 2) {   // ≥2（含自身）＝有邻居——保留
+                ebS[wS * 3] = ebS[q * 3];
+                ebS[wS * 3 + 1] = ebS[q * 3 + 1];
+                ebS[wS * 3 + 2] = ebS[q * 3 + 2];
+                ++wS;
+            }
+            // else: 空间孤立 → 剔除
+        }
+        if (wS < nS) {
+            zBandPruned_.fetch_add(static_cast<size_t>(nS - wS),
+                                   std::memory_order_relaxed);
+            j->eCount = wS;
+        }
+        j->ndbg_e3 = j->eCount;   // [261120 noise-dump] after gate 3
+    }
+    // —— ④ 跨帧时域支撑 ——
+    {
+        const int before = j->eCount;
+        j->eCount = applyTemporalSupport_(slot, j->eCount);
+        j->ndbg_e4 = j->eCount;   // [261120 noise-dump] after gate 4
+        if (j->eCount < before) {
+            temporalRejected_.fetch_add(static_cast<size_t>(before - j->eCount),
+                                        std::memory_order_relaxed);
+            static int sTDiag = 0;
+            if (sTDiag < 5)
+                fprintf(stderr, "[fc:4gate] ④时域 %d→%d（剔 %d）\n",
+                        before, j->eCount, before - j->eCount);
+            ++sTDiag;
+        }
+    }
+    // —— ⑤ 帧内平面残差自适应门（MAD×5σ——与视差一致性同构的 3D 版）——
+    // 逐帧拟合平面 → 各点残差 → MAD 自适应阈值 → 离面离群剔除。
+    // 平静数据 MAD 小→门紧（捕捉 10-20mm 微悬浮）；复杂表面 MAD 大→门松。
+    {
+        const int n = j->eCount;
+        if (n > 200) {
+            float* eb5 = eBlocks_[static_cast<size_t>(slot)];
+            // 质心
+            double mx = 0, my = 0, mz = 0;
+            for (int q = 0; q < n; ++q) {
+                mx += eb5[q * 3]; my += eb5[q * 3 + 1]; mz += eb5[q * 3 + 2];
+            }
+            mx /= n; my /= n; mz /= n;
+            // 协方差
+            double a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
+            for (int q = 0; q < n; ++q) {
+                const double x = eb5[q * 3] - mx, y = eb5[q * 3 + 1] - my,
+                             z = eb5[q * 3 + 2] - mz;
+                a += x * x; b += x * y; c += x * z;
+                d += y * y; e += y * z; f += z * z;
+            }
+            // 幂迭代求最大特征向量 v1（板面主方向）
+            double v1[3] = {1, 0, 0};
+            for (int it = 0; it < 30; ++it) {
+                double r0 = a * v1[0] + b * v1[1] + c * v1[2];
+                double r1 = b * v1[0] + d * v1[1] + e * v1[2];
+                double r2 = c * v1[0] + e * v1[1] + f * v1[2];
+                double L = std::sqrt(r0 * r0 + r1 * r1 + r2 * r2);
+                if (L < 1e-12) break;
+                v1[0] = r0 / L; v1[1] = r1 / L; v1[2] = r2 / L;
+            }
+            // deflation 求 v2（板面次方向）
+            double v2[3] = {v1[0] + 0.37, v1[1] + 0.61, v1[2] + 0.93};
+            for (int it = 0; it < 30; ++it) {
+                double r0 = a * v2[0] + b * v2[1] + c * v2[2];
+                double r1 = b * v2[0] + d * v2[1] + e * v2[2];
+                double r2 = c * v2[0] + e * v2[1] + f * v2[2];
+                double dot = v1[0] * r0 + v1[1] * r1 + v1[2] * r2;
+                r0 -= v1[0] * dot; r1 -= v1[1] * dot; r2 -= v1[2] * dot;
+                double L = std::sqrt(r0 * r0 + r1 * r1 + r2 * r2);
+                if (L < 1e-12) break;
+                v2[0] = r0 / L; v2[1] = r1 / L; v2[2] = r2 / L;
+            }
+            // 法矢＝v1×v2（最小特征方向＝板面法向）
+            const double nx = v1[1] * v2[2] - v1[2] * v2[1];
+            const double ny = v1[2] * v2[0] - v1[0] * v2[2];
+            const double nz = v1[0] * v2[1] - v1[1] * v2[0];
+            const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl < 1e-12) goto skip5;   // 退化——跳过
+            // 残差
+            std::vector<float> resid(static_cast<size_t>(n));
+            for (int q = 0; q < n; ++q)
+                resid[static_cast<size_t>(q)] = static_cast<float>(
+                    (nx * (eb5[q * 3] - mx) + ny * (eb5[q * 3 + 1] - my)
+                     + nz * (eb5[q * 3 + 2] - mz)) / nl);
+            // MAD
+            std::vector<float> sorted(resid);
+            std::nth_element(sorted.begin(),
+                             sorted.begin() + static_cast<long>(n / 2),
+                             sorted.end());
+            const float med = sorted[static_cast<size_t>(n / 2)];
+            std::vector<float> dev(static_cast<size_t>(n));
+            for (int q = 0; q < n; ++q)
+                dev[static_cast<size_t>(q)] =
+                    std::abs(resid[static_cast<size_t>(q)] - med);
+            std::nth_element(dev.begin(), dev.begin() + static_cast<long>(n / 2),
+                             dev.end());
+            const float mad = std::max(dev[static_cast<size_t>(n / 2)], 0.3f);
+            constexpr float kSigma5 = 5.0f * 1.4826f;
+            const float gate = kSigma5 * mad;
+            // 剔除
+            int w5 = 0;
+            for (int q = 0; q < n; ++q) {
+                if (std::abs(resid[static_cast<size_t>(q)] - med) <= gate) {
+                    eb5[w5 * 3] = eb5[q * 3];
+                    eb5[w5 * 3 + 1] = eb5[q * 3 + 1];
+                    eb5[w5 * 3 + 2] = eb5[q * 3 + 2];
+                    ++w5;
+                }
+            }
+            if (w5 < n) {
+                zBandPruned_.fetch_add(static_cast<size_t>(n - w5),
+                                       std::memory_order_relaxed);
+                j->eCount = w5;
+            }
+        }
+    }
+    j->ndbg_e5 = j->eCount;   // [261120 noise-dump] after gate 5
+    skip5:;
     // —— Z-IQR 弥散门 ——
     static const int sZgate = [] {
         const char* e = getenv("JMW_FC_ZIQR");
@@ -2650,6 +2866,28 @@ void FiveChainExecutor::fuseLoop() {
             epHasC_[slot] = false;
             epHasE_[slot] = false;
             const std::string& rs = j->prod.regSource;
+            // [261120 noise-dump] JMW_FC_NOISEDUMP=<dir>: per-frame gate ledger + pose
+            static const char* sNDLedger = getenv("JMW_FC_NOISEDUMP");
+            if (sNDLedger != nullptr) {
+                char ndbuf[512];
+                std::snprintf(ndbuf, sizeof ndbuf, "%s/noise_ledger.csv", sNDLedger);
+                std::ofstream ndl(ndbuf, std::ios::app);
+                if (ndl) {
+                    static bool sNDHeader = false;
+                    if (!sNDHeader) {
+                        ndl << "idx,regSource,m0,m1,m2,e0,eZ,e3,e4,e5,eEnd,"
+                               "R00,R01,R02,R10,R11,R12,R20,R21,R22,Tx,Ty,Tz\n";
+                        sNDHeader = true;
+                    }
+                    ndl << j->idx << ',' << rs
+                        << ',' << j->ndbg_m0 << ',' << j->ndbg_m1 << ',' << j->ndbg_m2
+                        << ',' << j->ndbg_e0 << ',' << j->ndbg_eZ << ',' << j->ndbg_e3
+                        << ',' << j->ndbg_e4 << ',' << j->ndbg_e5 << ',' << j->ndbg_eEnd;
+                    for (int r = 0; r < 9; ++r) ndl << ',' << j->prod.R[r];
+                    ndl << ',' << j->prod.T[0] << ',' << j->prod.T[1] << ','
+                        << j->prod.T[2] << '\n';
+                }
+            }
             // 【查BUG 2026-10-30】JMW_FC_FRAME_DUMPS=<dir>：融合前逐帧落 E 块
             // （相机系 xyz，宿主内存直写）＋R/T＋regSource（五链离面归因；默认关）。
             if (const char* fd2 = getenv("JMW_FC_FRAME_DUMPS")) {
@@ -3016,6 +3254,227 @@ void FiveChainExecutor::writeMetricsCsv_() {
     fclose(f);
     cudaGetLastError();   // 兜底查询探测残留清账（防毒害后续消费者）
     std::cout << "[fc:metrics] fc_metrics.csv＋fc_summary.csv → " << dir << std::endl;
+}
+
+// ============================================================================
+// 261118 左右互检（实验 JMW_FC_BICHECK=1）
+// ============================================================================
+void FiveChainExecutor::buildBiCheckIndex_() {
+    if (!biCheckIdx_.empty()) return;
+    const auto* map = h_.tableOdd_->lookup(h_.cfg_.runtime.nominalTemperature);
+    if (!map || map->leftToRightMap.empty()) return;
+    const auto jn = h_.cfg_.opParams("laser_match_scan_v3");
+    const float rowStep = jn.value("epipolar_row_step", 0.67f);
+    const cv::Mat& tm = map->leftToRightMap;
+    for (int i = 0; i < tm.rows; ++i) {
+        const cv::Vec4f& e = tm.at<cv::Vec4f>(i);
+        const int row = cvRound(e[1] / rowStep);
+        const int lid = cvRound(e[3]);
+        if (lid < 1 || lid > 25 || row < 0 || row >= 8192) continue;
+        biCheckIdx_[static_cast<int64_t>(row) * 100 + lid].emplace_back(e[2], e[0]);
+    }
+    for (auto& [k, v] : biCheckIdx_) std::sort(v.begin(), v.end());
+    fprintf(stderr, "[fc:bicheck] reverse index: %zu (row,lid) keys\n",
+            biCheckIdx_.size());
+}
+
+int FiveChainExecutor::applyBidirectionalCheck_(
+    cv::Point2f* mL, cv::Point2f* mR, int* lids, int count) {
+    buildBiCheckIndex_();
+    if (biCheckIdx_.empty()) return count;
+    const auto jn = h_.cfg_.opParams("laser_match_scan_v3");
+    const float rowStep = jn.value("epipolar_row_step", 0.67f);
+    constexpr float kTol = 3.0f;   // 收紧实验
+    static int sDiagN = 0;
+    static long sHist[10] = {};   // |dx| 直方图（0-1,1-2,...,8-9,9+px）
+    int w = 0;
+    for (int i = 0; i < count; ++i) {
+        const int row = cvRound(mL[i].y / rowStep);
+        const auto it = biCheckIdx_.find(static_cast<int64_t>(row) * 100 + lids[i]);
+        if (it == biCheckIdx_.end() || it->second.empty()) {
+            mL[w] = mL[i]; mR[w] = mR[i]; lids[w] = lids[i]; ++w;
+            continue;
+        }
+        const auto& v = it->second;
+        const auto ub = std::lower_bound(
+            v.begin(), v.end(), mR[i].x,
+            [](const std::pair<float, float>& p, float val) {
+                return p.first < val;
+            });
+        float bestXL = -1, bestDist = 1e30;
+        if (ub != v.begin()) {
+            const auto prev = std::prev(ub);
+            const float d = std::abs(prev->first - mR[i].x);
+            if (d < bestDist) { bestDist = d; bestXL = prev->second; }
+        }
+        if (ub != v.end()) {
+            const float d = std::abs(ub->first - mR[i].x);
+            if (d < bestDist) { bestDist = d; bestXL = ub->second; }
+        }
+        // 首帧前 10 点诊断 + |dx| 直方图
+        if (bestXL >= 0) {
+            const float dx = std::abs(mL[i].x - bestXL);
+            ++sHist[std::min(9, static_cast<int>(dx))];
+        }
+        if (sDiagN < 10) {
+            fprintf(stderr,
+                    "[fc:bicheck:diag] pt%d: L.x=%.1f R.x=%.1f lid=%d row=%d "
+                    "→ revXL=%.1f |dx|=%.1f tol=%.0f %s\n",
+                    i, mL[i].x, mR[i].x, lids[i], row, bestXL,
+                    bestXL >= 0 ? std::abs(mL[i].x - bestXL) : -1.0f, kTol,
+                    (bestXL >= 0 && std::abs(mL[i].x - bestXL) <= kTol)
+                        ? "PASS" : "REJECT");
+            ++sDiagN;
+        }
+        if (bestXL < 0 || std::abs(mL[i].x - bestXL) <= kTol) {
+            mL[w] = mL[i]; mR[w] = mR[i]; lids[w] = lids[i]; ++w;
+        } else {
+            biCheckRejected_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (sDiagN >= 10) {   // 每万次打印直方图
+        static long sCalls = 0;
+        if (++sCalls % 100000 == 0) {
+            fprintf(stderr, "[fc:bicheck:hist] |dx| 分布: ");
+            for (int b = 0; b < 10; ++b)
+                fprintf(stderr, "%d-%d:%ld ", b, b + 1, sHist[b]);
+            fprintf(stderr, "| 拒绝=%zu\n",
+                    biCheckRejected_.load());
+        }
+    }
+    return w;
+}
+
+// ============================================================================
+// ① 局部视差一致性（自适应 MAD——普适，零硬编码像素阈值）
+// 原理：同一行同一线号(lid)的配对视差应平滑连续（物理表面连续）。
+// 交叉配对/次级反射的视差会跳变——用中位绝对偏差(MAD)×5σ 自适应门控：
+// 平静数据 MAD 小→门紧，噪声大 MAD 大→门松。k=5 是统计常数（非物理量）。
+// ============================================================================
+int FiveChainExecutor::applyDisparityConsistency_(
+    cv::Point2f* mL, cv::Point2f* mR, int* lids, int count) {
+    if (count < 20) return count;
+    const auto jn = h_.cfg_.opParams("laser_match_scan_v3");
+    const float rowStep = jn.value("epipolar_row_step", 0.67f);
+    // 按 (row, lid) 分组
+    std::map<std::pair<int, int>, std::vector<int>> groups;
+    for (int i = 0; i < count; ++i) {
+        const int row = cvRound(mL[i].y / rowStep);
+        groups[{row, lids[i]}].push_back(i);
+    }
+    std::vector<bool> reject(static_cast<size_t>(count), false);
+    constexpr float kSigma = 5.0f * 1.4826f;   // 5σ（MAD→σ 换算 1.4826）
+    constexpr float kMadFloor = 0.5f;           // MAD 下限（防过洁）
+    for (const auto& [key, idx] : groups) {
+        if (idx.size() < 5) continue;   // 样本不足——跳过（宁漏勿错）
+        // 视差（保留原始值）
+        const size_t n = idx.size();
+        std::vector<float> disp(n);
+        for (size_t q = 0; q < n; ++q)
+            disp[q] = mL[idx[q]].x - mR[idx[q]].x;
+        // 中位数
+        std::vector<float> sorted(disp);
+        std::nth_element(sorted.begin(), sorted.begin() + static_cast<long>(n / 2),
+                         sorted.end());
+        const float med = sorted[n / 2];
+        // MAD
+        std::vector<float> dev(n);
+        for (size_t q = 0; q < n; ++q)
+            dev[q] = std::abs(disp[q] - med);
+        std::nth_element(dev.begin(), dev.begin() + static_cast<long>(n / 2),
+                         dev.end());
+        const float mad = std::max(dev[n / 2], kMadFloor);
+        // 拒绝离群
+        for (size_t q = 0; q < n; ++q)
+            if (std::abs(disp[q] - med) > kSigma * mad)
+                reject[static_cast<size_t>(idx[q])] = true;
+    }
+    int w = 0;
+    for (int i = 0; i < count; ++i) {
+        if (!reject[static_cast<size_t>(i)]) {
+            mL[w] = mL[i]; mR[w] = mR[i]; lids[w] = lids[i]; ++w;
+        } else {
+            dispConsRejected_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    return w;
+}
+
+// ============================================================================
+// ④ 跨帧时域支撑：当前 E 块点须在前帧 E 块中有 ≥1 邻居。
+// 原理：扫描仪逐帧扫过表面——真表面点被连续多帧观测到（设备坐标近似，
+// 帧间运动 ~0.7mm）。噪点只出现在单帧，前帧没有对应物。
+// 自适应半径：中位最近邻距离 × 3（随扫描密度自动调整）。
+// ============================================================================
+int FiveChainExecutor::applyTemporalSupport_(int slot, int eCount) {
+    if (!prevEBlockValid_ || prevEBlock_.empty() || eCount <= 0) {
+        const float* eb0 = eBlocks_[static_cast<size_t>(slot)];
+        prevEBlock_.assign(eb0, eb0 + static_cast<size_t>(eCount) * 3);
+        prevEBlockValid_ = true;
+        return eCount;
+    }
+    float* eb = eBlocks_[static_cast<size_t>(slot)];
+    const int n = eCount;
+    const int nPrev = static_cast<int>(prevEBlock_.size() / 3);
+    // 自适应半径：前帧点间中位最近邻距离 × 3
+    // 简化：用体素网格（cell = 自适应半径）做邻居查找
+    // 先估前帧点密度 → 等效最近邻距离
+    float bbox[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+    for (int q = 0; q < nPrev; ++q) {
+        for (int d = 0; d < 3; ++d) {
+            const float v = prevEBlock_[q * 3 + d];
+            bbox[d] = std::min(bbox[d], v);
+            bbox[d + 3] = std::max(bbox[d + 3], v);
+        }
+    }
+    const float vol = std::max(1.0f, (bbox[3] - bbox[0]) * (bbox[4] - bbox[1])
+                                      * (bbox[5] - bbox[2]));
+    const float density = static_cast<float>(nPrev) / vol;   // 点/mm³
+    const float nnDist = std::pow(1.0f / std::max(density, 1e-10f), 1.0f / 3.0f);
+    const float radius = std::max(nnDist * 3.0f, 1.0f);      // ≥1mm 下限
+    // 前帧点网格哈希（整数格键——不做二次坐标变换）
+    std::unordered_map<int64_t, int> prevGrid;
+    prevGrid.reserve(static_cast<size_t>(nPrev));
+    const float inv = 1.0f / radius;
+    auto gkey = [&](int gx, int gy, int gz) -> int64_t {
+        return (static_cast<int64_t>(gx & 0x1FFFFF) << 42)
+             | (static_cast<int64_t>(gy & 0x1FFFFF) << 21)
+             | static_cast<int64_t>(gz & 0x1FFFFF);
+    };
+    for (int q = 0; q < nPrev; ++q) {
+        const int gx = static_cast<int>(std::floor(prevEBlock_[q * 3] * inv));
+        const int gy = static_cast<int>(std::floor(prevEBlock_[q * 3 + 1] * inv));
+        const int gz = static_cast<int>(std::floor(prevEBlock_[q * 3 + 2] * inv));
+        ++prevGrid[gkey(gx, gy, gz)];
+    }
+    // 检查当前帧每个点：27 邻域查前帧格
+    int w = 0;
+    for (int q = 0; q < n; ++q) {
+        const float x = eb[q * 3], y = eb[q * 3 + 1], z = eb[q * 3 + 2];
+        const int cx = static_cast<int>(std::floor(x * inv));
+        const int cy = static_cast<int>(std::floor(y * inv));
+        const int cz = static_cast<int>(std::floor(z * inv));
+        bool found = false;
+        int nbCount = 0;
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    const auto it2 = prevGrid.find(gkey(cx + dx, cy + dy, cz + dz));
+                    if (it2 != prevGrid.end()) nbCount += it2->second;
+                }
+        found = nbCount >= 2;   // ≥2 邻居（含跨格累计）——比 ≥1 更严
+        if (found || q == 0) {
+            eb[w * 3] = eb[q * 3];
+            eb[w * 3 + 1] = eb[q * 3 + 1];
+            eb[w * 3 + 2] = eb[q * 3 + 2];
+            ++w;
+        } else {
+            temporalRejected_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    // 保存当前帧（门后）供下帧
+    prevEBlock_.assign(eb, eb + static_cast<size_t>(w) * 3);
+    return w;
 }
 
 } // namespace fc
