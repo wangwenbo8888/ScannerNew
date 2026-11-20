@@ -18,5 +18,9 @@ build-so-ops/
 
 backup_config_*/
 
+# 根级沙盒集中区（261117 人工裁定：PCMP/scc 不入库；fullgpu_optimize 为 git 跟踪沙盒——豁免）
+sandbox/*
+!sandbox/fullgpu_optimize/
+
 # factory_calib 独立嵌入仓（自带 .git，261105 起脱离主仓跟踪——rm --cached 了断）
 factory_calib/

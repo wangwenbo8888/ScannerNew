@@ -1,0 +1,48 @@
+# ThrottleStop「Turbo Power Limits (TPL)」面板内容整理
+这是一张 **ThrottleStop 调节软件的 TPL（Turbo Power Limits，睿频功耗限制）设置界面**截图，用于查看/修改 Intel CPU 的功耗墙、温度墙和睿频时间等参数。以下按模块整理：
+---
+## 一、Performance（性能方案切换栏）
+顶部一排 4 个单选按钮，用于切换 ThrottleStop 的 4 组性能配置文件（Profile 1–4），可分别保存不同功耗/电压方案。截图中第 1 个处于选中状态。
+---
+## 二、MSR Power Limit Controls（MSR 寄存器功耗控制）
+| 选项 | 状态 | 数值 | 含义 |
+|---|---|---|---|
+| **Disable Controls** | ☑ 已勾选 | — | 锁定/禁用对 MSR 功耗寄存器的修改（勾选后其他设置通常不可写入） |
+| **Sync MMIO** | ☐ 未勾选 | — | 将 MSR 设置同步写入 MMIO 寄存器 |
+| **Long Power PL1** | ☑ 已勾选 | **90 W** | 长时功耗墙（持续功耗上限，相当于 TDP） |
+| **Short Power PL2** | ☑ 已勾选 | **90 W** | 短时睿频功耗墙（爆发功耗上限） |
+| **Turbo Time Limit (Tau)** | — | **28 s** | PL2 可维持的时长（超过该时间后回落到 PL1） |
+| Clamp（PL1 / PL2） | PL1 ☑ / PL2 ☐ | — | 勾选后触发功耗墙时强制压频率 |
+| Lock | ☐ 未勾选 | — | 锁定上述寄存器，重启前不可再改 |
+> ⚠️ 注意：**Disable Controls 与 Long/Short Power 的勾选同时存在**——按 ThrottleStop 作者 Unclewebb 的说明，若想真正写入 PL1/PL2 数值，需要取消勾选 Disable Controls。
+---
+## 三、Miscellaneous（其他杂项设置）
+| 选项 | 状态 | 数值 | 含义 |
+|---|---|---|---|
+| **SST Enabled** | 显示绿色文字 | Min 8 / Max 46 | Speed Shift Technology（HWP 硬件自主调频）已启用，频率范围 8×–46× |
+| **Speed Shift** | ☐ 未勾选 | 1 / 46 | 软件层 EPP 选项；未勾选时由 Windows/HW 自管 |
+| **PROCHOT Offset** | ☐ 未勾选 | 0 | 温度墙偏移；设为 0 表示使用 CPU 默认 TjMax（如 100 °C）触发降频 |
+| Lock | ☐ | — | 锁定本区设置 |
+---
+## 四、Turbo Power Limits（当前实际生效的功耗墙读数）
+| 寄存器 | PL1 | PL2 | Time (Tau) |
+|---|---|---|---|
+| **MSR**（CPU 寄存器） | 90 W | 90 W | 28 s |
+| **MMIO**（主板/EC 寄存器） | 25 W | 45 W | 28 s |
+| Lock | ☐ | — | — |
+> 解读：CPU 自身 MSR 层的墙被设置在 90 W，但 **MMIO 层（BIOS/EC 写入的）仍限制在 25 W / 45 W**——意味着实际持续功耗可能仍被主板端压在 25 W。要彻底解锁需同时修改 MMIO 并勾选 Sync MMIO。
+---
+## 五、Global Settings（全局附加限制）
+| 选项 | 状态 | 数值 | 含义 |
+|---|---|---|---|
+| **Power Limit 4 (PL4)** | — | 130 / 130 | 瞬时峰值功耗墙，防止瞬态尖峰超过此值 |
+| **TDP Level** | ☐ | Default / 0 | 切换预设 TDP 档位（部分 CPU 支持） |
+| **Power Balance** | ☐ | 9 / 13（iGPU） | CPU 与 iGPU 之间的功耗分配比例 |
+| **PP0 Power Limit** | ☐ / Clamp ☐ | 0 | 核显 (iGPU) 部分的功耗墙，0 = 未启用 |
+| **PP0 Turbo Time Limit** | — | 0.0010 s | 核显睿频时间限制 |
+---
+## 六、整体状态小结
+- **当前配置**：PL1 = PL2 = 90 W，Tau = 28 s（即长时与短时功耗墙相同，相当于持续释放 90 W 性能）。
+- **潜在问题**：MMIO 端仍是 25/45 W，且勾选了 Disable Controls，说明 **当前 MSR 数值可能并未真正生效**，实际运行仍会受主板 25 W 长时功耗墙限制。
+- **温度/频率范围**：SST 启用，频率可在 0.8–4.6 GHz 之间由硬件自行调度；PROCHOT 未偏移，即默认温度墙。
+如需让 90 W 设置生效，常见做法是：取消勾选 **Disable Controls** → 勾选 **Sync MMIO** → 设置好 PL1/PL2 → 再视情况勾选 Lock 锁定。

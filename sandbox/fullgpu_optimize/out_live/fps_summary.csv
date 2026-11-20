@@ -1,0 +1,9 @@
+pass,frames,median_fps,mean_fps,std_fps,min_fps,max_fps
+0,7,72.57,63.62,17.74,36.57,82.71
+ALL,7,72.57,63.62,17.74,36.57,82.71
+cv_pct,27.89
+p5_fps,36.57
+p95_fps,82.71
+best_pass,0
+worst_pass,0
+drift_fps,0.00

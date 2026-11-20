@@ -1,0 +1,50 @@
+{
+  "excludedFrames": [],
+  "framesKept": 10,
+  "framesObs": 10,
+  "framesSent": 10,
+  "gates": {
+    "poseGate": true,
+    "rmseGate": false,
+    "rmseHalved": false,
+    "rmseInBand": true
+  },
+  "laserFrames": 10,
+  "message": "",
+  "poseDelta": {
+    "aligned": {
+      "max_drot_deg": 0.06131016509303509,
+      "max_dt_mm": 0.31023429109102607,
+      "median_drot_deg": 0.03403187006994396,
+      "median_dt_mm": 0.22853174571473212,
+      "p95_drot_deg": 0.04327939007976167,
+      "p95_dt_mm": 0.2517349944338628,
+      "valid": true
+    },
+    "raw": {
+      "max_drot_deg": 0.06539739039849395,
+      "max_dt_mm": 0.40287597668923697,
+      "median_drot_deg": 0.048355029725319784,
+      "median_dt_mm": 0.31228583660296877,
+      "p95_drot_deg": 0.06261445193743069,
+      "p95_dt_mm": 0.39698706602745165,
+      "valid": true
+    }
+  },
+  "refuse": {
+    "executed": true,
+    "framesFused": 10,
+    "requested": true
+  },
+  "rmse": {
+    "final_mm": 0.08689492166523977,
+    "initial_mm": 0.1545993228277041,
+    "iterations": 22,
+    "loopClosureResidual": 0.0,
+    "loopDetected": false,
+    "outlierObs": 0,
+    "overfitSuspect": false,
+    "qualityFlag": "Normal"
+  },
+  "stage": "global_optim"
+}

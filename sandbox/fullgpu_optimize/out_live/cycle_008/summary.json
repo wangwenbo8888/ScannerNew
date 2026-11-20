@@ -1,0 +1,131 @@
+{
+  "R": [
+    0.9999982998282537,
+    -0.00038209827701315524,
+    -0.0018039793536170426,
+    0.0003838190136252976,
+    0.9999994716589315,
+    0.0009536062198545366,
+    0.001803614029207097,
+    -0.000954297000136297,
+    0.9999979181446678
+  ],
+  "T": [
+    4.38950502787922,
+    -0.12483396237415412,
+    0.274358282894525
+  ],
+  "conicHistogram": {
+    "Ambiguous": 0,
+    "Cheirality": 0,
+    "Coincident": 0,
+    "Degeneracy": 0,
+    "Inconsistent": 2,
+    "InputClass": 0,
+    "NegativeR": 0,
+    "NoRealRoot": 1,
+    "None": 6,
+    "NotCircle": 3,
+    "Numerical": 0,
+    "PlaneDegenerate": 0,
+    "Radius": 0,
+    "Residual": 0,
+    "VirtualPlane": 2
+  },
+  "cycle": 8,
+  "dispMedPx": 498.9486083984375,
+  "extractor": "flat_center",
+  "flowDiag": {
+    "matched": 4,
+    "message": "Frame fusion completed",
+    "rmse": 0.07480924341559035
+  },
+  "laserMatched": 29408,
+  "laserPoints3D": 29408,
+  "markersDetected": 9,
+  "markersValid": 6,
+  "regMatched": 4,
+  "regSource": "flow",
+  "rowResidMedPx": 0.0,
+  "steps": {
+    "accumulate_global_laser": {
+      "ms": 1.0435,
+      "timingSource": "external"
+    },
+    "ccl": {
+      "ms": 0.1671,
+      "success": true,
+      "timingSource": "external"
+    },
+    "conic_reconstruct": {
+      "ms": 0.7473,
+      "success": true,
+      "timingSource": "external"
+    },
+    "ellipse_fit": {
+      "ms": 2.9362,
+      "success": true,
+      "timingSource": "external"
+    },
+    "epipolar_interp_dual": {
+      "ms": 0.0012,
+      "success": true,
+      "timingSource": "external"
+    },
+    "image_merge": {
+      "ms": 0.4187,
+      "success": true,
+      "timingSource": "external"
+    },
+    "image_split": {
+      "ms": 0.1673,
+      "success": true,
+      "timingSource": "external"
+    },
+    "laser_match_scan_v3": {
+      "ms": 10.4821,
+      "success": true,
+      "timingSource": "external"
+    },
+    "laser_reconstruct": {
+      "ms": 0.6496,
+      "success": true,
+      "timingSource": "external"
+    },
+    "marker_match": {
+      "ms": 0.0255,
+      "success": true,
+      "timingSource": "external"
+    },
+    "mask_separation": {
+      "success": true
+    },
+    "optical_flow_fuse": {
+      "success": true
+    },
+    "registration": {
+      "ms": 0.1712,
+      "timingSource": "external"
+    },
+    "steger_fast": {
+      "ms": 1.0121,
+      "success": true,
+      "timingSource": "external"
+    },
+    "undistort_cpu": {
+      "ms": 0.8343,
+      "success": true,
+      "timingSource": "external"
+    },
+    "undistort_cuda": {
+      "ms": 0.0009,
+      "success": true,
+      "timingSource": "external"
+    },
+    "zernike_edge": {
+      "ms": 6.6049,
+      "success": true,
+      "timingSource": "external"
+    }
+  }
+}

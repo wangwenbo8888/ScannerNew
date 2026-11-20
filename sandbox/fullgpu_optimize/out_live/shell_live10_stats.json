@@ -1,0 +1,13 @@
+{
+  "cubesCut": 130673,
+  "droppedPoints": 2,
+  "fusedFrames": 1,
+  "integratedPoints": 144351,
+  "maxPointToMesh": 0.8382833818914889,
+  "meanPointToMesh": 0.23445365683758465,
+  "p95PointToMesh": 0.35786047574711777,
+  "skippedFrames": 0,
+  "triangleCount": 262178,
+  "vertexCount": 150313,
+  "voxelCount": 731960
+}
