@@ -196,17 +196,6 @@ struct FcJob {
     // E 载荷（锁页块句柄）
     int eSlot = -1;
     int eCount = 0;
-    // [261120 noise-dump] per-gate kill ledger for JMW_FC_NOISEDUMP forensics.
-    // -1 = gate not executed for this frame (path not taken / gate disabled).
-    int ndbg_m0 = -1;    // matched count from v3, before gate 1
-    int ndbg_m1 = -1;    // after gate 1 (disparity consistency)
-    int ndbg_m2 = -1;    // after gate 2 (bidirectional check)
-    int ndbg_e0 = -1;    // E-block points from ReconstructInto, before all gates
-    int ndbg_eZ = -1;    // after devZ band gate
-    int ndbg_e3 = -1;    // after gate 3 (spatial isolation)
-    int ndbg_e4 = -1;    // after gate 4 (temporal support)
-    int ndbg_e5 = -1;    // after gate 5 (plane residual)
-    int ndbg_eEnd = -1;  // after applyLaserQualityGates_ returns
     // 【指标】B 通道入队时间戳（链3 唤醒 P99 分子——生产者侧记录）
     long long bPushNs = 0;
     // 【probe v2】命中帧宿主快照（产出线程分线程段 D2H 填充；E 段 maybeDump
@@ -239,8 +228,6 @@ struct FcJob {
         front.cardRidx.clear();
         eSlot = -1;
         eCount = 0;
-        ndbg_m0 = ndbg_m1 = ndbg_m2 = -1;
-        ndbg_e0 = ndbg_eZ = ndbg_e3 = ndbg_e4 = ndbg_e5 = ndbg_eEnd = -1;
         bPushNs = 0;
         probeSnap.reset();   // 【probe v2】快照随槽归还释放
         prod = CycleProducts{};

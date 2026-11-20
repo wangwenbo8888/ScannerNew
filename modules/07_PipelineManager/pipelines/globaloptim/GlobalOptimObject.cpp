@@ -74,6 +74,7 @@ public:
               // （~330MB）充裕；不够会走 grow（有全检护栏）
               fp.reserveVoxelCount = 8000000;
               fp.growSlotCount = 2000000;
+              // 261120 曾试 saturationThreshold=1 → 融合算子崩溃，已回滚（保持 09 默认 5）
               return fp;
           }()) {}
     bool fuse(const std::vector<float>& xyz, const double R[9], const double T[3]) override {

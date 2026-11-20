@@ -62,7 +62,7 @@ struct FiveChainConfig {
     double voxelSizeMm = 0.5;
     double voxelLoadFactor = 0.75;
     long long voxelGrowSlots = 20000000;   // 261103 用户定档：扩容增量 2M→20M
-    int voxelSatThreshold = 3;             // 261103 用户定档：格内饱和计数门 5→3
+    int voxelSatThreshold = 3;             // 261103 用户定档 5→3；261120 曾试 1 → 融合算子崩溃，已回滚
     std::string pinRoles = "1a,1b,marker,ch2";
     bool priorityBoost = true;
     bool splitChain1 = true;

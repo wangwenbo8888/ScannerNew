@@ -2387,6 +2387,26 @@ void FiveChainAdapter::collectorLoop() {
                 prod.markersDetected, prod.mm.centerMatches.size(),
                 prod.regSource);
         }
+        // [261120 pose-trace] per-frame pose-chain CSV trace (CWD-relative,
+        // append). For offline pose-jump / gate-attribution forensics.
+        {
+            static std::ofstream tf;
+            if (!tf.is_open()) {
+                tf.open("fivechain_pose_trace.csv", std::ios::app);
+                if (tf.is_open())
+                    tf << "idx,regSrc,det,match,valid,laserPts,"
+                          "R00,R01,R02,R10,R11,R12,R20,R21,R22,Tx,Ty,Tz,fused\n";
+            }
+            if (tf.is_open()) {
+                tf << idx << ',' << prod.regSource << ','
+                   << prod.markersDetected << ',' << prod.mm.centerMatches.size()
+                   << ',' << prod.conic.statistics.validCount << ','
+                   << prod.laserPoints3D;
+                for (int r = 0; r < 9; ++r) tf << ',' << prod.R[r];
+                tf << ',' << prod.T[0] << ',' << prod.T[1] << ',' << prod.T[2]
+                   << ',' << (fuse_ ? fuse_->GetFusedPointCount() : 0) << '\n';
+            }
+        }
         {
             static std::string lastRegSrc;
             static std::chrono::steady_clock::time_point lastRegLog{};

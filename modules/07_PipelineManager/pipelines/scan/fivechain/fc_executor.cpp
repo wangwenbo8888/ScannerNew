@@ -2195,21 +2195,6 @@ void FiveChainExecutor::chain2Loop() {
                 return e != nullptr && e[0] == '1';
             }();
             int matchCount = cr.matchedCount;
-            j->ndbg_m0 = matchCount;
-            // [261120 noise-dump] JMW_FC_NOISEDUMP=<dir>: dump pre-gate 2D matches
-            static const char* sNoiseDump = getenv("JMW_FC_NOISEDUMP");
-            if (sNoiseDump != nullptr && matchCount > 0) {
-                char ndbuf[512];
-                std::snprintf(ndbuf, sizeof ndbuf, "%s/match2d_%04d.csv", sNoiseDump, j->idx);
-                std::ofstream ndf(ndbuf);
-                if (ndf) {
-                    ndf << "lx,ly,rx,ry,lid\n" << std::fixed << std::setprecision(3);
-                    const int* ndLids = cr.matched_line_ids.ptr<int>();
-                    for (int q = 0; q < matchCount; ++q)
-                        ndf << ml[q].x << ',' << ml[q].y << ',' << mr[q].x << ','
-                            << mr[q].y << ',' << ndLids[q] << '\n';
-                }
-            }
             // ① 局部视差一致性（自适应 MAD——普适）
             if (matchCount > 20) {
                 const int before1 = matchCount;
@@ -2222,7 +2207,6 @@ void FiveChainExecutor::chain2Loop() {
                             j->idx, before1, matchCount);
             }
             // ② 左右互检（反查表几何验证）
-            j->ndbg_m1 = matchCount;   // [261120 noise-dump] after gate 1
             if (sBiCheck && matchCount > 0) {
                 const int before2 = matchCount;
                 matchCount = applyBidirectionalCheck_(
@@ -2233,7 +2217,6 @@ void FiveChainExecutor::chain2Loop() {
                     fprintf(stderr, "[fc:4gate] idx=%d ②互检 %d→%d\n",
                             j->idx, before2, matchCount);
             }
-            j->ndbg_m2 = matchCount;   // [261120 noise-dump] after gate 2
             const long long ewT0 = fcdiag ? steadyNs() : 0;   // 【插桩】E 池等待
             const int s = acquireEBlock();
             if (fcdiag)
@@ -2249,24 +2232,7 @@ void FiveChainExecutor::chain2Loop() {
                     eBlocks_[static_cast<size_t>(s)], idsScratch.data(), eCapPts_);
                 if (cr.matchedCount > eCapPts_)
                     eTruncPts_.fetch_add(cr.matchedCount - eCapPts_);
-                // [261120 noise-dump] E-block snapshot BEFORE quality gates
-                j->ndbg_e0 = j->eCount;
-                if (sNoiseDump != nullptr && j->eCount > 0) {
-                    char ndbuf[512];
-                    std::snprintf(ndbuf, sizeof ndbuf, "%s/epre_%04d.ply", sNoiseDump, j->idx);
-                    std::ofstream ndf(ndbuf);
-                    if (ndf) {
-                        const float* ndb = eBlocks_[static_cast<size_t>(s)];
-                        ndf << "ply\nformat ascii 1.0\nelement vertex " << j->eCount
-                            << "\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
-                            << std::fixed << std::setprecision(3);
-                        for (int q = 0; q < j->eCount; ++q)
-                            ndf << ndb[3 * q] << ' ' << ndb[3 * q + 1] << ' '
-                                << ndb[3 * q + 2] << '\n';
-                    }
-                }
                 applyLaserQualityGates_(j, s, idsScratch.data());
-                j->ndbg_eEnd = j->eCount;   // [261120 noise-dump] final after all gates
                 j->prod.laserPoints3D = j->eCount;
                 // 【probe v2】命中帧激光 3D 快照（E 块锁页宿主直拷——门后口径；
                 // 在线 prod.recon 从不赋值，E 段唯一来源即此处快照）
@@ -2351,7 +2317,6 @@ void FiveChainExecutor::applyLaserQualityGates_(FcJob* j, int slot,
                         j->idx, devZBandMm_, j->eCount - w, j->eCount, medZ,
                         static_cast<size_t>(zBandPruned_.load()));
             j->eCount = w;
-            j->ndbg_eZ = w;   // [261120 noise-dump] after devZ band gate
             if (w <= 200) return;   // 剔残了（带内几乎无点）——后续门无意义
         }
     }
@@ -2401,13 +2366,11 @@ void FiveChainExecutor::applyLaserQualityGates_(FcJob* j, int slot,
                                    std::memory_order_relaxed);
             j->eCount = wS;
         }
-        j->ndbg_e3 = j->eCount;   // [261120 noise-dump] after gate 3
     }
     // —— ④ 跨帧时域支撑 ——
     {
         const int before = j->eCount;
         j->eCount = applyTemporalSupport_(slot, j->eCount);
-        j->ndbg_e4 = j->eCount;   // [261120 noise-dump] after gate 4
         if (j->eCount < before) {
             temporalRejected_.fetch_add(static_cast<size_t>(before - j->eCount),
                                         std::memory_order_relaxed);
@@ -2505,7 +2468,6 @@ void FiveChainExecutor::applyLaserQualityGates_(FcJob* j, int slot,
             }
         }
     }
-    j->ndbg_e5 = j->eCount;   // [261120 noise-dump] after gate 5
     skip5:;
     // —— Z-IQR 弥散门 ——
     static const int sZgate = [] {
@@ -2866,28 +2828,6 @@ void FiveChainExecutor::fuseLoop() {
             epHasC_[slot] = false;
             epHasE_[slot] = false;
             const std::string& rs = j->prod.regSource;
-            // [261120 noise-dump] JMW_FC_NOISEDUMP=<dir>: per-frame gate ledger + pose
-            static const char* sNDLedger = getenv("JMW_FC_NOISEDUMP");
-            if (sNDLedger != nullptr) {
-                char ndbuf[512];
-                std::snprintf(ndbuf, sizeof ndbuf, "%s/noise_ledger.csv", sNDLedger);
-                std::ofstream ndl(ndbuf, std::ios::app);
-                if (ndl) {
-                    static bool sNDHeader = false;
-                    if (!sNDHeader) {
-                        ndl << "idx,regSource,m0,m1,m2,e0,eZ,e3,e4,e5,eEnd,"
-                               "R00,R01,R02,R10,R11,R12,R20,R21,R22,Tx,Ty,Tz\n";
-                        sNDHeader = true;
-                    }
-                    ndl << j->idx << ',' << rs
-                        << ',' << j->ndbg_m0 << ',' << j->ndbg_m1 << ',' << j->ndbg_m2
-                        << ',' << j->ndbg_e0 << ',' << j->ndbg_eZ << ',' << j->ndbg_e3
-                        << ',' << j->ndbg_e4 << ',' << j->ndbg_e5 << ',' << j->ndbg_eEnd;
-                    for (int r = 0; r < 9; ++r) ndl << ',' << j->prod.R[r];
-                    ndl << ',' << j->prod.T[0] << ',' << j->prod.T[1] << ','
-                        << j->prod.T[2] << '\n';
-                }
-            }
             // 【查BUG 2026-10-30】JMW_FC_FRAME_DUMPS=<dir>：融合前逐帧落 E 块
             // （相机系 xyz，宿主内存直写）＋R/T＋regSource（五链离面归因；默认关）。
             if (const char* fd2 = getenv("JMW_FC_FRAME_DUMPS")) {
