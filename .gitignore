@@ -24,3 +24,6 @@ sandbox/*
 
 # factory_calib 独立嵌入仓（自带 .git，261105 起脱离主仓跟踪——rm --cached 了断）
 factory_calib/
+
+# 261120：fc 打包件不入库（1.6GB 超 GitHub 单文件限；fc 仓自带 .git 独立管理）
+factory_calib.zip
