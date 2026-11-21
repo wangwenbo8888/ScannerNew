@@ -582,7 +582,16 @@ void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points)
     if (points.empty()) return;
 
     osg::ref_ptr<osg::Geode> geode = buildCloudGeode(points, nullptr);
-    m_root->addChild(geode.get());
+    // 261121 修「导入云藏不住」：原 geode 直接挂 m_root（无成员引用——右键
+    // 三开关均管不到）；改挂 m_cloudRoot（「显示激光点」开关口径），新载换旧
+    // 防叠加，创建即随开关（与 loadPointCloudWithNormals 同口径）
+    if (!m_cloudRoot) {
+        m_cloudRoot = new osg::Group;
+        m_root->addChild(m_cloudRoot);
+        m_cloudRoot->setNodeMask(m_laserVisible ? ~0u : 0u);
+    }
+    m_cloudRoot->removeChildren(0, m_cloudRoot->getNumChildren());
+    m_cloudRoot->addChild(geode.get());
     fitCloudOptimal(points);
 }
 
@@ -592,7 +601,14 @@ void OSGWidget::loadPointCloud(const std::vector<osg::Vec3>& points,
     if (points.empty()) return;
 
     osg::ref_ptr<osg::Geode> geode = buildCloudGeode(points, &colors);
-    m_root->addChild(geode.get());
+    // 261121 同上：挂 m_cloudRoot（可被「显示激光点」开关隐藏）
+    if (!m_cloudRoot) {
+        m_cloudRoot = new osg::Group;
+        m_root->addChild(m_cloudRoot);
+        m_cloudRoot->setNodeMask(m_laserVisible ? ~0u : 0u);
+    }
+    m_cloudRoot->removeChildren(0, m_cloudRoot->getNumChildren());
+    m_cloudRoot->addChild(geode.get());
     fitCloudOptimal(points);
 }
 
@@ -1382,12 +1398,19 @@ void OSGWidget::contextMenuEvent(QContextMenuEvent *event)
     QAction* actLaser = menu.addAction(QStringLiteral("显示激光点"));
     actLaser->setCheckable(true);
     actLaser->setChecked(m_laserVisible);
+    // 261121 网格开关（后处理回显/导入网格的显隐；无网格时置灰）
+    QAction* actMesh = menu.addAction(QStringLiteral("显示mesh"));
+    actMesh->setCheckable(true);
+    actMesh->setChecked(m_meshVisible);
+    actMesh->setEnabled(m_meshGeode.valid());
 
     QAction* chosen = menu.exec(event->globalPos());
     if (chosen == actMarkers)
         setMarkerPointsVisible(actMarkers->isChecked());
     else if (chosen == actLaser)
         setLaserPointsVisible(actLaser->isChecked());
+    else if (chosen == actMesh)
+        setMeshVisible(actMesh->isChecked());
 }
 
 void OSGWidget::setMarkerPointsVisible(bool visible)
@@ -1395,6 +1418,15 @@ void OSGWidget::setMarkerPointsVisible(bool visible)
     m_markersVisible = visible;
     if (m_markerRoot.valid())
         m_markerRoot->setNodeMask(visible ? ~0u : 0u);
+    update();
+}
+
+// 261121 网格显示开关（右键菜单；NodeMask 0=隐藏）
+void OSGWidget::setMeshVisible(bool visible)
+{
+    m_meshVisible = visible;
+    if (m_meshGeode.valid())
+        m_meshGeode->setNodeMask(visible ? ~0u : 0u);
     update();
 }
 
@@ -2523,37 +2555,70 @@ bool OSGWidget::loadMesh(const QString& filepath)
         const float dR = 0.f,   dG = 87.f,  dB = 114.f;
         const float bR = 20.f,  bG = 130.f, bB = 180.f;
         const float lR = 70.f,  lG = 178.f, lB = 221.f;
-        // 261114 十四轮：杰魔风格背面＝鲜绿 (49,219,71)（1.jpg 实测 19930 像素
-        // 均值）——法线背向默认相机的面整面画绿；正面蓝渐变不变。三角汤结构
-        // 下逐面法线一致，即逐面整色，同杰魔按面显示语义。
-        // 十五轮：分类加死区（dot<-0.2 才绿）——掠射角法线噪声令 0 附近判定
-        // 椒盐翻转（用户报"正反交叉"），死区带归蓝。
-        const osg::Vec3 camDir(0.f, -0.986f, 0.164f);   // 默认相机方向（物体→相机）
-        osg::ref_ptr<osg::Vec4Array> cols = new osg::Vec4Array;
-        cols->reserve(nv);
-        for (size_t i = 0; i < nv; ++i) {
-            if (((*sm)[i] * camDir) < -0.2f) {
-                cols->push_back(osg::Vec4(49.f / 255.f, 219.f / 255.f, 71.f / 255.f, 1.0f));
-                continue;
-            }
-            const float t0 = dots[i];
-            float t;
-            if (t0 <= tMed)   t = (tMed > 1e-4f) ? 0.5f * t0 / tMed : 0.f;
-            else              t = (tHi - tMed > 1e-4f) ? 0.5f + 0.5f * (t0 - tMed) / (tHi - tMed) : 1.f;
-            if (t > 1.f) t = 1.f;
-            float r, g, b;
-            if (t <= 0.5f) {
-                float u = t * 2.f;
-                r = dR + (bR - dR) * u;  g = dG + (bG - dG) * u;  b = dB + (bB - dB) * u;
-            } else {
-                float u = (t - 0.5f) * 2.f;
-                r = bR + (lR - bR) * u;  g = bG + (lG - bG) * u;  b = bB + (lB - bB) * u;
-            }
-            cols->push_back(osg::Vec4(r / 255.f, g / 255.f, b / 255.f, 1.0f));
+        // 261121 全动态着色改造：蓝渐变与背面绿全部移入片元着色器（眼空间
+        // 光向——旋转物体明暗随视角实时变化，取代 261114 加载时烘焙的静态
+        // 顶点色）。加载期仅保留分布定标：P78/P95 锚点（261114 十二轮口径，
+        // 上方既有 tMed/tHi 声明）经 uniform uTMed/uTHi 传入，对比度标定不丢。
+        geom->setNormalArray(sm, osg::Array::BIND_PER_VERTEX);
+        {
+            osg::ref_ptr<osg::StateSet> ss = geode->getOrCreateStateSet();
+            osg::ref_ptr<osg::Uniform> uTMed = new osg::Uniform("uTMed", tMed);
+            osg::ref_ptr<osg::Uniform> uTHi  = new osg::Uniform("uTHi", tHi);
+            ss->addUniform(uTMed.get());
+            ss->addUniform(uTHi.get());
         }
-        geom->setColorArray(cols, osg::Array::BIND_PER_VERTEX);
         geom->dirtyGLObjects();
     }
+    // 261121 动态着色器：眼空间光向 L=(0.20,-0.40,0.89)（对角布光沿 261114
+    // 定标口径）；N·L → 蓝渐变（暗(0,87,114)/基(20,130,180)/亮(70,178,221)）；
+    // 背面判定 N·V < -0.2 → 鲜绿 (49,219,71)（死区沿十五轮口径）。相机在眼
+    // 空间恒为原点 → 视线方向 = normalize(-fragPos)，零 uniform 管线。
+    {
+        static const char* kMeshVertSrc =
+            "varying vec3 vN; varying vec3 vP;\n"
+            "void main() {\n"
+            "  vN = gl_NormalMatrix * gl_Normal;\n"
+            "  vec4 ep = gl_ModelViewMatrix * gl_Vertex;\n"
+            "  vP = ep.xyz;\n"
+            "  gl_Position = gl_ProjectionMatrix * ep;\n"
+            "}\n";
+        static const char* kMeshFragSrc =
+            "varying vec3 vN; varying vec3 vP;\n"
+            "uniform float uTMed; uniform float uTHi;\n"
+            "void main() {\n"
+            "  vec3 n = normalize(vN);\n"
+            "  vec3 v = normalize(-vP);\n"
+            "  if (dot(n, v) < -0.2) {\n"
+            "    gl_FragColor = vec4(49.0/255.0, 219.0/255.0, 71.0/255.0, 1.0);\n"
+            "    return;\n"
+            "  }\n"
+            "  vec3 L = normalize(vec3(0.20, -0.40, 0.89));\n"
+            "  float t0 = clamp(dot(n, L), 0.0, 1.0);\n"
+            "  float t;\n"
+            "  if (t0 <= uTMed) t = (uTMed > 1e-4) ? 0.5 * t0 / uTMed : 0.0;\n"
+            "  else t = (uTHi - uTMed > 1e-4) ? 0.5 + 0.5 * (t0 - uTMed) / (uTHi - uTMed) : 1.0;\n"
+            "  t = clamp(t, 0.0, 1.0);\n"
+            "  vec3 dark = vec3(0.0, 87.0, 114.0) / 255.0;\n"
+            "  vec3 base = vec3(20.0, 130.0, 180.0) / 255.0;\n"
+            "  vec3 lite = vec3(70.0, 178.0, 221.0) / 255.0;\n"
+            "  vec3 c = (t <= 0.5) ? mix(dark, base, t * 2.0)\n"
+            "                      : mix(base, lite, (t - 0.5) * 2.0);\n"
+            "  gl_FragColor = vec4(c, 1.0);\n"
+            "}\n";
+        osg::ref_ptr<osg::Program> prog = new osg::Program;
+        prog->addShader(new osg::Shader(osg::Shader::VERTEX, kMeshVertSrc));
+        prog->addShader(new osg::Shader(osg::Shader::FRAGMENT, kMeshFragSrc));
+        osg::ref_ptr<osg::StateSet> ss = geode->getOrCreateStateSet();
+        ss->setAttribute(prog);
+        ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+        ss->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON);
+        ss->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
+    }
+    // 261121 网格成员化：新载换旧（多次 loadMesh 不再叠加）＋按当前开关应用可见性
+    if (m_meshGeode.valid())
+        m_root->removeChild(m_meshGeode);
+    m_meshGeode = geode;
+    geode->setNodeMask(m_meshVisible ? ~0u : 0u);
     m_root->addChild(geode);
 
     // 相机定位并锁定视图

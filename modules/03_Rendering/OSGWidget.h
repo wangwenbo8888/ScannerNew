@@ -183,6 +183,9 @@ public:
     void setLaserPointsVisible(bool visible);
     bool markerPointsVisible() const { return m_markersVisible; }
     bool laserPointsVisible() const { return m_laserVisible; }
+    // 261121 网格显示开关（右键菜单第三项；作用于 m_meshGeode）
+    void setMeshVisible(bool visible);
+    bool meshVisible() const { return m_meshVisible; }
 
     /// 集合最优取景（2026-09-05）：PCA 主平面法向面视＋上向＝面内主轴，
     /// 按有效半视场（含宽高比）填充 ~92%，near/far 紧致（深度精度）——
@@ -492,6 +495,8 @@ private:
     std::chrono::steady_clock::time_point m_lastPoseViewTime{};   // 261115 最近位姿视角时刻（活跃期 maybeAutoFrame 让位）
     bool m_markersVisible = true;                   // 标志点显示开关（右键菜单；NodeMask 0=隐藏）
     bool m_laserVisible = true;                     // 激光点显示开关（右键菜单；NodeMask 0=隐藏）
+    osg::ref_ptr<osg::Geode> m_meshGeode;           // 261121 网格叶节点（loadMesh 产物；新载换旧＋右键可隐藏）
+    bool m_meshVisible = true;                      // 261121 网格显示开关（右键菜单）
     size_t m_lastMeshTriangles = 0;                 // 261017 最近导入网格三角面数（树计数用）
     size_t m_laserSoftDeleted = 0;                  // 261018 软删计数（统计栏即时扣减口径）
     QPoint m_rightPressGlobalPos;                   // 右键按下位置（拖拽阈值判定）

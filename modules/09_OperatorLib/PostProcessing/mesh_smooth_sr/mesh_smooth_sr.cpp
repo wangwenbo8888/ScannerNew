@@ -188,6 +188,25 @@ MeshSmoothSrResult MeshSmoothSr::Execute(IndexedMesh& io) {
     }
     pImpl_->stats.totalMsFlip =
         std::chrono::duration<double, std::milli>(Clock::now() - tFl0).count();
+
+    // —— 261121 绕向一致化收尾（链上增强，非金标准复刻）——
+    // 依据：金标准链以性能由跳过拓扑定向遍（--skip-topo-orient），实测残留翻转边
+    // 1989/1.64M（本移植同量级 1873）——正反面交错显示的根因。此处在 SR 出口
+    // 补一次 BFS 全局一致化：种子取向承自法线参考定向（朝外性保持），整连通
+    // 片绕向一致由构造保证；百万面级 ~1-2s。
+    char wmsg[96] = "";
+    {
+        sr::Mesh om;
+        om.numVerts = pos.size() / 3;
+        om.numTris = trisOut.size() / 3;
+        om.verts = pos;
+        om.triangles = trisOut;
+        const auto os = sr::orientMesh(om, true);
+        trisOut = std::move(om.triangles);
+        pImpl_->stats.orientFlips += (size_t)std::max(0LL, os.flipped);
+        std::snprintf(wmsg, sizeof(wmsg), " | winding-fix: faces=%lld conflicted=%lld",
+                      os.flipped, os.conflicted);
+    }
     pImpl_->stats.trisOut = trisOut.size() / 3;
 
     // —— 出口：位置/拓扑写回；法线按终态几何重算（R2 权威源保持）——
@@ -212,6 +231,7 @@ MeshSmoothSrResult MeshSmoothSr::Execute(IndexedMesh& io) {
                   (double)pImpl_->stats.maxDeltaVmm / (double)prm.toleranceMm,
                   pImpl_->stats.totalTimeMs);
     r.message = msg;
+    r.message += wmsg;   // 绕向一致化收尾遥测（261121 链上增强）
 
     // 位移防爆门（5mm；SR 抢救遍设计上无残差上限，链历史事故量级 41.5——只拦爆炸不拦常态）
     if ((double)pImpl_->stats.maxDeltaVmm > 5.0) {

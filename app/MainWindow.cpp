@@ -231,6 +231,8 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
         // 后台线程 → queued 切 UI
         m_appCtx->setPostProcessFinished([this](bool ok, const std::string& stlPath) {
             QMetaObject::invokeMethod(this, [this, ok, stlPath]() {
+                // 261121 进度对话框收口（成功/失败两路都在此关）
+                if (m_postProcDlg) { m_postProcDlg->cancel(); m_postProcDlg->deleteLater(); m_postProcDlg = nullptr; }
                 if (!ok) {
                     statusBar()->showMessage(QStringLiteral("后处理三角化失败——详见日志"), 4000);
                     return;
@@ -254,6 +256,13 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                 }
                 if (m_meshItem001)
                     m_meshItem001->setText(0, QStringLiteral("三角面 001 (%1)").arg(qulonglong(tris)));
+                // 261121 网格回显：后处理产物直接加载进 3D 视图（用户口径：点完
+                // 导出即见网格）；计数以视图实读为准（文件计数为其回退）
+                if (m_3dView && m_3dView->loadMesh(QString::fromStdString(stlPath))) {
+                    const size_t lt = m_3dView->lastMeshTriangleCount();
+                    if (m_meshItem001 && lt > 0)
+                        m_meshItem001->setText(0, QStringLiteral("三角面 001 (%1)").arg(qulonglong(lt)));
+                }
                 statusBar()->showMessage(
                     QStringLiteral("后处理完成——点云已三角化：%1 三角面（%2）")
                         .arg(qulonglong(tris))
@@ -263,6 +272,7 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
     }
     // ① 流水线→渲染：SceneFeedAdapter（queued）→ OSGWidget 标志点更新（UI 线程）
     if (m_appCtx && m_3dView) {
+
         if (auto* feed = m_appCtx->sceneFeed()) {
             connect(feed, &SceneFeedAdapter::markerCloudUpdated, this,
                     [this](const std::vector<cv::Point3f>& pts, const std::vector<cv::Vec3f>& normals) {
@@ -513,10 +523,8 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
                                 : QString::fromStdString("完成被拒: " + r.message));
                         } else if (p1 == 104) {    // 菜单④「后处理」＝STL 导出批算
                             if (!m_appCtx) return;
-                            auto r = m_appCtx->startPostProcessSession("scan_output.stl", 0);
-                            statusBar()->showMessage(r.success
-                                ? QStringLiteral("按键启动后处理——STL 导出执行中")
-                                : QString::fromStdString("后处理被拒: " + r.message));
+                            // 261121 统一 UI 路径（与菜单同：进度框＋完成回显网格）
+                            startPostProcessUi(QStringLiteral("scan_output.stl"));
                         } else if (p1 == 102) {    // 菜单②「进入就绪」（261002 新增消费：
                             // 面片就绪流程——同屏幕模式键 armScanSession 路径）
                             if (!m_appCtx) return;
@@ -637,6 +645,50 @@ MainWindow::MainWindow(AppContext* appCtx, QWidget *parent) : QMainWindow(parent
     QTimer::singleShot(100, this, [this]() {
         showVirtualKeypad();
         updateParamPanelStates();     // 261004 P3：面板建成即套用当前态（不等首发事件）
+    });
+}
+
+// ============================================================================
+// 261121 后处理统一 UI 启动（菜单/按键④共用）：点火＋进度框＋状态栏。
+// 完成收口在 setPostProcessFinished 回调（关框＋网格回显 3D 视图）。
+// 进度框暂不可取消：算子取消粒度粗（阶段边界），阻塞 join 会冻结 UI。
+// ============================================================================
+void MainWindow::startPostProcessUi(const QString& path)
+{
+    if (!m_appCtx) return;
+    auto r = m_appCtx->startPostProcessSession(path.toStdString());
+    if (!r.success) {
+        QMessageBox::warning(this, QStringLiteral("后处理"),
+            QStringLiteral("后处理无法启动：%1").arg(QString::fromStdString(r.message)));
+        return;
+    }
+    statusBar()->showMessage(
+        QStringLiteral("后处理已启动：法线重算→封装→补洞→光顺→STL 写出……"), 6000);
+    if (m_postProcDlg) { m_postProcDlg->deleteLater(); m_postProcDlg = nullptr; }
+    m_postProcDlg = new QProgressDialog(QStringLiteral("后处理中……"), QString(), 0, 100, this);
+    m_postProcDlg->setWindowModality(Qt::WindowModal);
+    m_postProcDlg->setMinimumDuration(0);
+    m_postProcDlg->setAutoClose(false);
+    m_postProcDlg->setAutoReset(false);
+    m_postProcDlg->show();
+    // 进度透传：04 postThread_ 回调 → queued 切 UI（进度框＋状态栏）
+    auto* pw = m_appCtx->postWorkflow();
+    if (pw) pw->setProgressCallback([this](const auto& p) {
+        const int pct = static_cast<int>(p.progress * 100.0f);
+        const std::string sn = p.stageName;
+        QMetaObject::invokeMethod(this, [this, pct, sn]() {
+            if (m_postProcDlg) {
+                m_postProcDlg->setValue(pct);
+                m_postProcDlg->setLabelText(
+                    QStringLiteral("后处理[%1]：%2%").arg(QString::fromStdString(sn)).arg(pct));
+            }
+            if (pct >= 100)
+                statusBar()->showMessage(QStringLiteral("后处理完成，STL 已导出。"), 6000);
+            else if (pct > 0)
+                statusBar()->showMessage(
+                    QStringLiteral("后处理中[%1]：%2%……")
+                        .arg(QString::fromStdString(sn)).arg(pct), 1500);
+        }, Qt::QueuedConnection);
     });
 }
 
@@ -2638,27 +2690,9 @@ QWidget *MainWindow::createToolBar()
                     if (path.isEmpty()) return;
                     // P1-1（260912 诚实化的兑现）：04/07-E 后处理真正点火——S2→S6
                     // 批算（法线重算→封装→补洞→光顺→边界）→ STL 写出 → 合账回 S2。
-                    // 阶段 0 法线真算；网格四族 09 待建→当前产物为法线化点云（有棱无面）
+                    // 261121 M4 起网格四族实装；启动走统一 UI 路径（进度框＋完成回显网格）
                     if (!m_appCtx) return;
-                    auto r = m_appCtx->startPostProcessSession(path.toStdString());
-                    if (!r.success) {
-                        QMessageBox::warning(this, QStringLiteral("后处理"),
-                            QStringLiteral("后处理无法启动：%1").arg(QString::fromStdString(r.message)));
-                        return;
-                    }
-                    statusBar()->showMessage(
-                        QStringLiteral("后处理已启动：法线重算→封装→补洞→光顺→边界→STL 写出……"), 6000);
-                    // 进度透传（阶段名+百分位；04 postThread_ 回调→队列内直更状态栏）
-                    auto* pw = m_appCtx->postWorkflow();
-                    if (pw) pw->setProgressCallback([this](const auto& p) {
-                        const int pct = static_cast<int>(p.progress * 100.0f);
-                        if (pct >= 100)
-                            statusBar()->showMessage(QStringLiteral("后处理完成，STL 已导出。"), 6000);
-                        else if (pct > 0)
-                            statusBar()->showMessage(
-                                QStringLiteral("后处理中[%1]：%2%……")
-                                    .arg(QString::fromStdString(p.stageName)).arg(pct), 1500);
-                    });
+                    startPostProcessUi(path);
                 });
                 menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x87\xba\xe5\xb7\xa5\xe7\xa8\x8b\xe6\x96\x87\xe4\xbb\xb6"), [this]() {
                     // 260912 诚实化：原仅状态栏假提示；工程序列化格式规划中
