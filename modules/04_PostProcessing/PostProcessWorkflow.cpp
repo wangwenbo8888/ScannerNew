@@ -131,6 +131,10 @@ pipeline_->setStlExporter(&exportStlViaFileIo);   // app 侧适配 06 file_io ex
     result_ = PostProcessResult{};
     state_ = WorkflowState::Running;
     running_ = true;
+    // 261121 崩溃修复：上会话线程已完成但未 join（仍 joinable）时，直接对
+    // postThread_ 赋新线程会 std::terminate 杀进程（第二次点后处理即崩的
+    // 根因——按键④/菜单二次触发均中招）。已完成线程 join 即时返回。
+    if (postThread_.joinable()) postThread_.join();
     postThread_ = std::thread([this, c = std::move(cloud)]() mutable {
         postProcessLoop(std::move(c));
     });
