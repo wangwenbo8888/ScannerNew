@@ -50,6 +50,13 @@ public:
     void appendSessionCloud(const std::vector<float>& xyzTailInterleaved) override;   // 261018 增量
     size_t cloudBaselineCount() const override;   // 261018 UI 实时拼值（基线＋轻计数）
 
+    // 261121 会话法线通道（后处理定向参考——NE 符号修复口径）：与会话层点云
+    // 同长（3N 交错）才有效。导入路径（file_io 六列直读）写；扫描链接法线后
+    // 同口复用。begin/push/append 重建会话点集时即清（防错位）。
+    void setSessionCloudNormals(const std::vector<float>& nrmInterleaved);
+    /// 快照会话法线（仅基线为空＝全量即会话层时有效；否则 false）
+    bool snapshotSessionNormals(std::vector<float>& out) const;
+
     // 人工按需导出（02-D5 唯一出口）：锁内拷贝后走 fileio，扩展名分派 ply/pcd/xyz
     // markers 导出 globalId 不落盘（标志点格式只有坐标），续扫基准走内存通道
     bool exportCloud(const std::string& path);
@@ -63,6 +70,7 @@ private:
     std::atomic<int>         totalPoints_{0};
     size_t cloudBaseCount_ = 0;   // 会话基线前缀长（beginCloudSession 折叠；
                                   // pushSessionCloud 覆写其后＝会话层）
+    std::vector<float> sessionNormals_;   // 261121 会话法线（可选；基线为空时有效）
 
     mutable std::shared_mutex markerRwlock_;
     std::vector<MarkerRecord> markers_;

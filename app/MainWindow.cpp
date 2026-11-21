@@ -2442,7 +2442,7 @@ QWidget *MainWindow::createToolBar()
                         statusBar()->showMessage(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe5\xa4\xb1\xe8\xb4\xa5"));
                 });
                 menu.addAction(QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe7\x82\xb9\xe4\xba\x91"), [this]() {
-                    QString path = QFileDialog::getOpenFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe7\x82\xb9\xe4\xba\x91"), "", "Point Cloud (*.ply *.pcd *.xyz *.txt);;All Files (*.*)");
+                    QString path = QFileDialog::getOpenFileName(this, QStringLiteral("\xe5\xaf\xbc\xe5\x85\xa5\xe7\x82\xb9\xe4\xba\x91"), "", "Point Cloud (*.ply *.pcd *.xyz *.txt *.asc);;All Files (*.*)");
                     if (path.isEmpty()) return;
                     QByteArray ba = path.toUtf8();
                     std::string spath(ba.constData(), ba.size());
@@ -2458,11 +2458,51 @@ QWidget *MainWindow::createToolBar()
                     QApplication::processEvents();
 
                     std::vector<cv::Point3f> rawPts;
-                    bool ok = Scanner::data::fileio::importPointCloud(spath, rawPts);
+                    std::vector<cv::Point3f> rawNrm;   // 261121 六列法线（后处理定向参考）
+                    bool ok = Scanner::data::fileio::importPointCloud(spath, rawPts, &rawNrm);
+                    // 261121 诊断插桩：法线解析计数（守卫失败时定位用——保留至
+                    // 导入法线通道稳定一个版本）
+                    {
+                        char nmsg[128];
+                        std::snprintf(nmsg, sizeof(nmsg), "import diag: ok=%d pts=%zu nrm=%zu",
+                                      (int)ok, rawPts.size(), rawNrm.size());
+                        statusBar()->showMessage(QString::fromUtf8(nmsg));
+                        FILE* df = fopen("import_normals_diag.log", "a");
+                        if (df) { fprintf(df, "%s\n", nmsg); fclose(df); }
+                    }
                     // 模拟提取 stash（「模拟数据」开关的激光数据源——2026-09-13
                     // 模拟调通；普通导入路径无副作用，仅值拷贝一份）
                     if (m_appCtx && ok && !rawPts.empty())
                         m_appCtx->setLastImportedCloud(rawPts);
+                    // 261121 导入云入扫描仓库：后处理（M4）直取 PointCloudBuffer——
+                    // 不入则菜单「后处理导出 STL」报「点云为空」。260927 旧注
+                    // 「导入云不入 pcb」仅服务显示计数口径，本路由不改变显示
+                    // 计数逻辑（m_importedCloudCount 仍由下方原路径维护）。
+                    // 法线同入（六列文件；长度吻合才入——NE 符号修复参考）。
+                    if (m_appCtx && ok && !rawPts.empty()) {
+                        auto* pcb = m_appCtx->pointCloudBuffer();
+                        if (pcb) {
+                            std::vector<float> flat;
+                            flat.reserve(rawPts.size() * 3);
+                            for (const auto& p : rawPts) {
+                                flat.push_back(p.x);
+                                flat.push_back(p.y);
+                                flat.push_back(p.z);
+                            }
+                            pcb->beginCloudSession();
+                            pcb->pushSessionCloud(flat);
+                            if (rawNrm.size() == rawPts.size()) {
+                                std::vector<float> flatN;
+                                flatN.reserve(rawNrm.size() * 3);
+                                for (const auto& n : rawNrm) {
+                                    flatN.push_back(n.x);
+                                    flatN.push_back(n.y);
+                                    flatN.push_back(n.z);
+                                }
+                                pcb->setSessionCloudNormals(flatN);
+                            }
+                        }
+                    }
                     std::vector<osg::Vec3> points;   // UI 容器仍用 osg::Vec3，就地转换
                     points.reserve(rawPts.size());
                     for (const auto& p : rawPts) points.emplace_back(p.x, p.y, p.z);

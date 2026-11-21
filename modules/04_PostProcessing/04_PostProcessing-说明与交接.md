@@ -11,13 +11,13 @@
 
 ## 2. 现状
 
-- 五阶段编排：达成｜仅 1 对文件 `PostProcessWorkflow.h/.cpp`（93/183 行，261102 实测）IWorkflow 子类编排壳；postThread_ 私有线 stop 必 join、CancelToken 检查点（主动取消按 ok=true 回报）、PostProcessResult 记账、skipStages 位掩码 bit0..bit4 逐段可跳
-- 法线阶段：达成｜07 NormalStage 经 setStageOp(0) 实注（适配 09 laser_cloud_normal_cpu）；PCA 正负等价未定向，一致朝向留消费侧
-- 封装/补洞/光顺/边界优化四族算子：未达成｜09 算子库未建，阶段 1-4 内置桩恒 degraded「operator pending」；setStageOp 注入机制已就绪（法线即样板）
-- 编排出 STL：部分达成｜makeCloudData（06 快照→float xyz MeshData）＋exportStlViaFileIo（07 MeshData→06 file_io，法线与顶点匹配才随片透传）链路就绪；现仅法线真实无网格、三角面数为 0（degraded 口径）
+- 五阶段编排：达成｜仅 1 对文件 `PostProcessWorkflow.h/.cpp`（93/183 行，261121 实测）IWorkflow 子类编排壳；postThread_ 私有线 stop 必 join、CancelToken 检查点（主动取消按 ok=true 回报）、PostProcessResult 记账、skipStages 位掩码 bit0..bit4 逐段可跳（**默认 0x10＝D3 形状一：阶段 4 显式跳过不降级**）
+- **网格四族实装接入（261121 M4，PCMP 沙盒移植）**：达成｜09 落地 `PostProcessing/{mesh_normal_est,mesh_ball_pivot,mesh_hole_fill,mesh_smooth_sr}`（金标准对拍 6/6：法线中位角 0.145°／重建 tris 0.026% 带／补洞水密 181→4／光顺拓扑保持）；07 新增 `MeshStageOps.h/.cpp` 四适配器（MeshData↔IndexedMesh 同构 move 零拷贝，CancelToken→SetCancelProbe）；本目录 start() 经 setStageOp(0..3) 注入，阶段 0 由 mesh_normal_est 承担（替代旧 NormalStage 适配，D1 口径）——**菜单「后处理导出 STL」全链真实（52 万点 ~18s）**
+- 编排出 STL：达成｜makeCloudData（06 快照→float xyz MeshData）＋exportStlViaFileIo（07 MeshData→06 file_io，法线与顶点匹配才随片透传）；阶段 1-3 真实出网格，三角面数入账
 - 按键④触发：部分达成｜app startPostProcessSession→start_postprocess 命令门禁点火＋onFinished 合账切 S2、进度透传状态栏；现 UI 入口为 MainWindow 文件菜单「导出 STL」〔待核：按键④口径〕
 - 批算在 07：达成｜五阶段批算在 07 PostProcessPipeline，04 不内置任何算法
 - 本目录只编排记账：达成｜mod_postprocessing 为 INTERFACE 占位、cpp 编入主程序 exe、无 tests/；输入现取 06 内存快照（重启即失，改 06 仓库句柄直取为 TODO）
+- **遗留**：标志点通道（MeshHoleFillStage::SetMarkers 已备，marker_cloud_fuse 输出直取待 app 侧接数据源，现空＝markerCut 自动关闭）；mesh_smooth_sr 法务门 C2 未决不入发布分支；mhf 逐洞日志门控
 
 ## 3. 问题与方法
 
@@ -26,6 +26,7 @@
 
 ## 4. 日志
 
+- 261121｜M4 网格四族实装接入：09 四算子落地＋07 MeshStageOps 适配＋本目录 setStageOp(0..3) 注入＋skipStages 默认 0x10（D3 形状一）——菜单「后处理导出 STL」全链真实；金标准对拍 6/6（沙盒 run_20261121_50Wasc 为基准）｜PCMP 沙盒移植（人工授权·AI 实施，计划见沙盒 docs/plans/2026-11-21-PCMP移植主仓09算子库-计划v0.9.md）
 - 261102｜现状改目标达成对照制（对象级细节精简，证据留真名）｜规范 §2.3
 - 261102｜转四段新制：目标待人定稿；问题段自下一步+全局挂账迁入（均〔待定〕）｜规范 §2.3
 - 261102｜现状段按存量文档颗粒度扩充（源：docs/存量档案/模块功能/04＋代码实测校准）｜—｜—

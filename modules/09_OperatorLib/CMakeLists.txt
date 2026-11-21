@@ -1,18 +1,20 @@
-# OperatorLib：全部算子（core/calibration/scanning/global_optim）一个库
+# OperatorLib：全部算子（core/calibration/scanning/global_optim/PostProcessing）一个库
 #
-# 来源：3DSCANNER 工程机械迁移（命名空间保留 calib::）
-# 范围：core/{common,vision,laser,marker} + calibration/算子 + scanning/{preprocess,laser,fusion,global_optim}
+# 来源：3DSCANNER 工程机械迁移（命名空间保留 calib::）＋ PCMP 沙盒网格四族移植（261121 M0）
+# 范围：core/{common,vision,laser,marker} + calibration/算子 + scanning/{preprocess,laser,fusion,global_optim} + PostProcessing/（后处理网格四族）
 # 不含：pipeline/（workflow 编排）、scheduler/（infra）、bench/benchmark
 
 # === 收集所有源（glob + 分类：库源 / 测试 / 排除）===
 file(GLOB_RECURSE OP_ALL_CPP
     "${CMAKE_CURRENT_SOURCE_DIR}/core/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/calibration/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scanning/*.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/scanning/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PostProcessing/*.cpp")
 file(GLOB_RECURSE OP_ALL_CU
     "${CMAKE_CURRENT_SOURCE_DIR}/core/*.cu"
     "${CMAKE_CURRENT_SOURCE_DIR}/calibration/*.cu"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scanning/*.cu")
+    "${CMAKE_CURRENT_SOURCE_DIR}/scanning/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PostProcessing/*.cu")
 
 set(OP_SOURCES "")
 set(OP_TESTS "")
@@ -35,7 +37,8 @@ endforeach()
 file(GLOB_RECURSE OP_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/core/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/calibration/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scanning/*.h")
+    "${CMAKE_CURRENT_SOURCE_DIR}/scanning/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PostProcessing/*.h")
 set(OP_INC_DIRS "")
 foreach(h ${OP_HEADERS})
     get_filename_component(d ${h} DIRECTORY)
@@ -56,6 +59,7 @@ target_include_directories(OperatorLib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/core     # #include "common/calib_types.h"（3DSCANNER 风格）
     ${CMAKE_SOURCE_DIR}                  # 工程根
     ${OP_INC_DIRS}                       # 各算子自目录（跨算子 include）
+    ${CMAKE_CURRENT_SOURCE_DIR}/PostProcessing/mesh_hole_fill/mhf/include   # hole_filler_pro/* 移植库（261121 M2）
 )
 # 261031 D1-lite 契约指纹：闭包＝自身＋base（exe→07→09 守护链的末梢）
 jmw_add_contract(OperatorLib op ${CMAKE_CURRENT_SOURCE_DIR}
@@ -141,7 +145,8 @@ if(BUILD_TESTS)
         # 【V4/V5 回迁 261115】真数据用例的数据集根＝沙盒目录（不入 git 的检出上
         # 文件缺席→用例自 GTEST_SKIP；SCR_SOURCE_DIR 原为沙盒 CMake 专属定义）
         target_compile_definitions(${tname} PRIVATE
-            SCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}/sandbox/fullgpu_optimize")
+            SCR_SOURCE_DIR="${CMAKE_SOURCE_DIR}/sandbox/fullgpu_optimize"
+            SCR_PCMP_SOURCE_DIR="${CMAKE_SOURCE_DIR}/sandbox/PointCloudMeshPostProcessing")
         # CUDA 测试开关（与 3DSCANNER 一致；无害于纯 CPU 测试）
         target_compile_definitions(${tname} PRIVATE WITH_CUDA_TESTS=$<BOOL:${BUILD_CUDA}>)
         # 261005 DLL 化补账：纯 cpp 测试直接调 cudaDeviceReset 等 cudart API

@@ -63,6 +63,7 @@ Result PointCloudBuffer::clear() {
         allPoints_.clear();
         allColors_.clear();
         cloudBaseCount_ = 0;
+        sessionNormals_.clear();   // 261121
     }
     {   // 261004 补：标志点段同清——原 clear 只清点云段，⑤重置后 markers 残留
         // （arm 时 02 续扫基准读到旧会话 3 点＝实证）
@@ -82,6 +83,7 @@ Result PointCloudBuffer::clear() {
 void PointCloudBuffer::beginCloudSession() {
     std::unique_lock lock(rwlock_);
     cloudBaseCount_ = allPoints_.size();   // 既有内容（含上一会话成果）折入基线
+    sessionNormals_.clear();               // 261121 会话法线随会话重建失效
     version_.fetch_add(1, std::memory_order_release);
 }
 
@@ -106,9 +108,27 @@ void PointCloudBuffer::pushSessionCloud(const std::vector<float>& xyzInterleaved
                                     xyzInterleaved[i * 3 + 1],
                                     xyzInterleaved[i * 3 + 2]);
         if (!allColors_.empty()) allColors_.clear();   // 会话层无色（显示侧自配色）
+        sessionNormals_.clear();                        // 261121 会话点集重建→法线须重设
     }
     version_.fetch_add(1, std::memory_order_release);
     totalPoints_.store(static_cast<int>(cloudBaseCount_ + n), std::memory_order_release);
+}
+
+void PointCloudBuffer::setSessionCloudNormals(const std::vector<float>& nrmInterleaved) {
+    {
+        std::unique_lock lock(rwlock_);
+        sessionNormals_ = nrmInterleaved;
+    }
+    version_.fetch_add(1, std::memory_order_release);
+}
+
+bool PointCloudBuffer::snapshotSessionNormals(std::vector<float>& out) const {
+    std::shared_lock lock(rwlock_);
+    const size_t sessionCount = allPoints_.size() - cloudBaseCount_;
+    if (cloudBaseCount_ != 0 || sessionNormals_.size() != sessionCount * 3)
+        return false;   // 仅「全量即会话层且长度吻合」有效（导入口径）
+    out = sessionNormals_;
+    return true;
 }
 
 void PointCloudBuffer::appendSessionCloud(const std::vector<float>& xyzTailInterleaved) {
@@ -124,6 +144,7 @@ void PointCloudBuffer::appendSessionCloud(const std::vector<float>& xyzTailInter
             allPoints_.emplace_back(xyzTailInterleaved[i * 3],
                                     xyzTailInterleaved[i * 3 + 1],
                                     xyzTailInterleaved[i * 3 + 2]);
+        sessionNormals_.clear();               // 261121 追加点无法线→旧法线错位即清
     }
     version_.fetch_add(1, std::memory_order_release);
     totalPoints_.store(static_cast<int>(allPoints_.size()), std::memory_order_release);

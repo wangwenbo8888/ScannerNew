@@ -11,6 +11,7 @@ set(JMW_PM_PIPELINE_SRCS pipelines/PipelineEventSink.cpp
     pipelines/posture/PosturePipeline.cpp
     pipelines/postprocess/PostProcessPipeline.cpp
     pipelines/postprocess/NormalStage.cpp
+    pipelines/postprocess/MeshStageOps.cpp
     pipelines/scan/FrameObsAccumulator.cpp
     pipelines/scan/ScanPipeline.cpp
     pipelines/scan/SimScanSource.cpp   # 调试件：app 级模拟源（五链模式忽略）

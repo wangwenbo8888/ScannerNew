@@ -70,7 +70,8 @@ public:
 private:
     WorkflowContext* ctx_;
     std::string outputPath_ = "output.stl";
-    uint32_t skipStages_ = 0;
+    // D3 形状一（261121 人签）：默认跳过阶段 4（边界优化留桩；显式跳过不降级）
+    uint32_t skipStages_ = 0x10;
 
     std::atomic<WorkflowState> state_{WorkflowState::Idle};
     WorkflowCallback callback_;

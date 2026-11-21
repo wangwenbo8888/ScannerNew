@@ -12,7 +12,7 @@
 #include "file_io.h"            // 06 STL 导出
 
 #include "pipelines/PipelineDeps.h"
-#include "pipelines/postprocess/NormalStage.h"
+#include "pipelines/postprocess/MeshStageOps.h"
 
 #include <spdlog/spdlog.h>
 #include "jmw_logging.h"
@@ -71,6 +71,16 @@ Result PostProcessWorkflow::makeCloudData(Scanner::pipeline::MeshData& out) cons
         out.xyz.push_back(p.y);
         out.xyz.push_back(p.z);
     }
+    // 261121 会话法线透传（NE 定向参考——无参考时 BFS 整域翻转→破面，261121
+    // 导入 50W 实证；快照仅在「全量即会话层且 3N 吻合」时有效）
+    {
+        std::vector<float> nrm;
+        if (ctx_->pointCloudBuffer()->snapshotSessionNormals(nrm) &&
+            nrm.size() == points.size() * 3) {
+            out.normals = std::move(nrm);
+            JMW_LOG_INFO("04-PostWorkflow", "[PostProcess] 会话法线 {} 组随点云透传", points.size());
+        }
+    }
     JMW_LOG_INFO("04-PostWorkflow", "[PostProcess] 读入 {} 点 (version={})", points.size(), version);
     // TODO(接入期): 输入改 06 点云仓库（app 存活件）内存句柄——02 GBA 修正
     // 点云写入仓库后此处直取修正结果（现 PointCloudBuffer 快照即其内存形态）
@@ -96,10 +106,15 @@ Result PostProcessWorkflow::start() {
     cfg.outputPath = outputPath_;
     pipeline_ = std::make_unique<Scanner::pipeline::PostProcessPipeline>(std::move(cfg));
 pipeline_->setStlExporter(&exportStlViaFileIo);   // app 侧适配 06 file_io exportSTL
-    // P1-1（兑现 h:18 约定）：阶段 0 法线实注——07 NormalStage 适配 09
-    // laser_cloud_normal_cpu；网格四族（封装/补洞/光顺/边界）09 落地后同样
-    // 经 setStageOp 注入（当前内置桩 degraded "operator pending"）
-    pipeline_->setStageOp(0, std::make_unique<Scanner::pipeline::NormalStage>());
+    // M4（261121）：网格四族实装注入——阶段 0 法线由 mesh_normal_est 承担
+    // （重算＋BFS 定向＋赶野拔钉；替代旧 NormalStage 的融合宿主适配，D1 口径）；
+    // 1 封装 / 2 补洞 / 3 光顺经同型 setStageOp 注入；阶段 4 边界优化＝D3
+    // 形状一（留桩＋skipStages bit4 默认跳过，显式跳过不降级；将来独立算子
+    // 落地后 setStageOp(4) 注入即恢复五阶段全量）
+    pipeline_->setStageOp(0, std::make_unique<Scanner::pipeline::MeshNormalEstStage>());
+    pipeline_->setStageOp(1, std::make_unique<Scanner::pipeline::MeshBallPivotStage>());
+    pipeline_->setStageOp(2, std::make_unique<Scanner::pipeline::MeshHoleFillStage>());
+    pipeline_->setStageOp(3, std::make_unique<Scanner::pipeline::MeshSmoothSrStage>());
 
     Scanner::pipeline::PipelineDeps deps;
     deps.eventBus = ctx_ ? ctx_->eventBus() : nullptr;

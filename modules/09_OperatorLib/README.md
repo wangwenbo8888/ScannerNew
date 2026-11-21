@@ -10,6 +10,7 @@
   - `core/{common,vision,laser,marker}` — 共享类型 + 双链算子
   - `calibration/{camera,laser_calib,posture,temp}` — 16 标定算子
   - `scanning/{preprocess,laser,fusion,global_optim}` — 6 扫描算子 + GBA
+  - `PostProcessing/{mesh_normal_est,mesh_ball_pivot,mesh_hole_fill,mesh_smooth_sr}` — 后处理网格四族（261121 PCMP 沙盒移植，金标准对拍 6/6；含 mhf/sr 移植库与 ctest 金标准测试）
 - **不含**：`pipeline/`（workflow 编排，归 modules/02_scanning 等）、`scheduler/`（infra）、bench/benchmark
 
 ## 依赖
