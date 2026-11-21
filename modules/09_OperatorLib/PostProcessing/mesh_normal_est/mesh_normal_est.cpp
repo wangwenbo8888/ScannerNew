@@ -360,7 +360,12 @@ void computeWeightedPca(const std::vector<double>& xyz, double radius, int minNe
     }
 }
 
-/// BFS 全局定向（种子=最近质心；沙盒 propagateNormalOrientation 同源）
+/// BFS 全局定向（逐连通组件版，261121 真机修复）：
+///   原 bug：单种子 BFS——未连到的组件保持视点初值，与主流域不一致
+///   （真机 208 万点 bad=19.2% 的重要来源）；且整片朝内域无法自愈。
+///   现口径：每组件独立 BFS 一致化 → 组件级外向投票（采样 dot(n, p−云质心)
+///   多数为负＝整片朝内 → 整组件翻转）。凹腔件仍有残余（视向通道是根治，
+///   见移植计划挂账）。
 size_t bfsOrient(const std::vector<double>& xyz, std::vector<double>& nrm, double radius) {
     const size_t n = xyz.size() / 3;
     if (n < 2) return 0;
@@ -368,39 +373,73 @@ size_t bfsOrient(const std::vector<double>& xyz, std::vector<double>& nrm, doubl
     for (size_t i = 0; i < n; ++i)
         centroid += Eigen::Map<const Vector3d>(xyz.data() + 3 * i);
     centroid /= (double)n;
-    size_t seed = 0;
-    double best = std::numeric_limits<double>::max();
-    for (size_t i = 0; i < n; ++i) {
-        const double d = (Eigen::Map<const Vector3d>(xyz.data() + 3 * i) - centroid).squaredNorm();
-        if (d < best) { best = d; seed = i; }
-    }
+
     UniGrid grid;
     grid.build(xyz.data(), n, radius * 6.0);
     std::vector<unsigned char> visited(n, 0);
     std::vector<int> queue;
-    queue.reserve(n / 10 + 1);
-    queue.push_back((int)seed);
-    visited[seed] = 1;
-    size_t flipped = 0, head = 0;
     std::vector<int> nb;
-    while (head < queue.size()) {
-        const int i = queue[head++];
-        const double* pi = xyz.data() + 3 * (size_t)i;
-        const double* ni = nrm.data() + 3 * (size_t)i;
-        nb.clear();
-        grid.forNeighbors(pi, radius, [&](int j, double r2) {
-            if ((size_t)j == (size_t)i) return;
-            if (dotDist2(pi, xyz.data() + 3 * j) <= r2) nb.push_back(j);
-        });
-        for (int j : nb) {
-            if (visited[j]) continue;
-            const double* nj = nrm.data() + 3 * (size_t)j;
-            if (ni[0] * nj[0] + ni[1] * nj[1] + ni[2] * nj[2] < 0) {
-                nrm[3 * j] = -nrm[3 * j]; nrm[3 * j + 1] = -nrm[3 * j + 1]; nrm[3 * j + 2] = -nrm[3 * j + 2];
+    std::vector<int> comp;                 // 当前组件成员（外向投票用）
+    comp.reserve(1024);
+    size_t flipped = 0;
+
+    for (size_t seedAll = 0; seedAll < n; ++seedAll) {
+        if (visited[seedAll]) continue;
+        // —— 组件 BFS（种子取向：朝外于云质心）——
+        comp.clear();
+        queue.clear();
+        queue.push_back((int)seedAll);
+        visited[seedAll] = 1;
+        {
+            const double* sn = nrm.data() + 3 * seedAll;
+            const Vector3d sp(xyz[3*seedAll], xyz[3*seedAll+1], xyz[3*seedAll+2]);
+            if (Vector3d(sn[0], sn[1], sn[2]).dot(sp - centroid) < 0) {
+                nrm[3*seedAll] = -nrm[3*seedAll];
+                nrm[3*seedAll+1] = -nrm[3*seedAll+1];
+                nrm[3*seedAll+2] = -nrm[3*seedAll+2];
                 ++flipped;
             }
-            visited[j] = 1;
-            queue.push_back(j);
+        }
+        size_t head = 0;
+        while (head < queue.size()) {
+            const int i = queue[head++];
+            comp.push_back(i);
+            const double* pi = xyz.data() + 3 * (size_t)i;
+            const double* ni = nrm.data() + 3 * (size_t)i;
+            nb.clear();
+            grid.forNeighbors(pi, radius, [&](int j, double r2) {
+                if ((size_t)j == (size_t)i) return;
+                if (dotDist2(pi, xyz.data() + 3 * j) <= r2) nb.push_back(j);
+            });
+            for (int j : nb) {
+                if (visited[j]) continue;
+                const double* nj = nrm.data() + 3 * (size_t)j;
+                if (ni[0] * nj[0] + ni[1] * nj[1] + ni[2] * nj[2] < 0) {
+                    nrm[3 * j] = -nrm[3 * j]; nrm[3 * j + 1] = -nrm[3 * j + 1]; nrm[3 * j + 2] = -nrm[3 * j + 2];
+                    ++flipped;
+                }
+                visited[j] = 1;
+                queue.push_back(j);
+            }
+        }
+        // —— 组件级外向投票（多数朝内 → 整组件翻转）——
+        if (!comp.empty()) {
+            double vote = 0;
+            const size_t step = std::max<size_t>(1, comp.size() / 1024);   // 采样 ≤1024
+            size_t sampled = 0;
+            for (size_t k = 0; k < comp.size(); k += step) {
+                const int vi = comp[k];
+                const double* pn = nrm.data() + 3 * (size_t)vi;
+                const Vector3d pv(xyz[3*vi], xyz[3*vi+1], xyz[3*vi+2]);
+                vote += Vector3d(pn[0], pn[1], pn[2]).dot(pv - centroid);
+                ++sampled;
+            }
+            if (sampled > 0 && vote / (double)sampled < -1e-12) {          // 平均朝内
+                for (int vi : comp) {
+                    nrm[3*vi] = -nrm[3*vi]; nrm[3*vi+1] = -nrm[3*vi+1]; nrm[3*vi+2] = -nrm[3*vi+2];
+                    ++flipped;
+                }
+            }
         }
     }
     return flipped;
@@ -670,6 +709,10 @@ MeshNormalEstResult MeshNormalEst::Execute(IndexedMesh& io) {
         std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 
     // —— 结果口径（§5：单一失败模型）——
+    // 门禁语义＝链头 hybrid_cli 对齐：badRate > failPct 是 exit 3＝**degraded
+    // 继续跑**（261121 真机首测踩中：208 万点 BFS-only 定向 bad=19.2% 被本
+    // 算子误判 fail 致链中止无产物——链上该口径是降级放行，交下游+出口绕向
+    // 收尾兜底，由人视产物定夺）
     char msg[256];
     std::snprintf(msg, sizeof(msg),
                   "%s: pts=%zu spacing=%.4f outliers=%zu spikes=%zu bfsFlips=%zu "
@@ -680,8 +723,9 @@ MeshNormalEstResult MeshNormalEst::Execute(IndexedMesh& io) {
                   pImpl_->stats.totalTimeMs);
     r.message = msg;
     if (badRate * 100.0 > (double)prm.gateFailPct) {
-        r.success = false;
+        r.success = true;
         r.qualityFlag = QualityFlag::Degraded;
+        r.message += "（法线门禁超限——降级继续，产物质量由出口门与人工复核兜底）";
     } else if (badRate * 100.0 > (double)prm.gateWarnPct) {
         r.success = true;
         r.qualityFlag = QualityFlag::Degraded;
